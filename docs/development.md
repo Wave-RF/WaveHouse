@@ -6,25 +6,153 @@
 - **Docker** — For running dependencies and integration tests
 - **golangci-lint v2** — `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 - **air** (optional) — For hot-reload during development: [Install air](https://github.com/air-verse/air)
+- **jwt-cli** (optional) — For generating test tokens: [Install jwt-cli](https://github.com/mike-engel/jwt-cli)
 
-## Getting Started
+## Quick Start (Standalone Mode)
+
+This is the fastest way to get a fully functional local environment:
 
 ```bash
-# Clone the repository
+# 1. Clone and install dependencies
 git clone https://github.com/Wave-RF/BeachHouse.git
 cd BeachHouse
-
-# Install Go dependencies
 go mod download
 
-# Start infrastructure dependencies (ClickHouse, NATS, Redis, ScyllaDB)
+# 2. Start ClickHouse (the only external dependency for standalone mode)
 make compose-deps
 
-# Run development server with hot-reload
+# 3. Run with hot-reload (recompiles on every .go file save)
+# The events table is auto-created at startup (standalone auto_migrate defaults to true).
 make dev
 ```
 
-BeachHouse will be available at `http://localhost:8080`. It recompiles and restarts automatically when you save a `.go` file.
+BeachHouse is now running at `http://localhost:8080` in standalone mode with:
+- **Embedded NATS** (JetStream) — no external MQ needed
+- **Embedded Pebble** — no external dedup store needed
+- **L1 cache only** (Ristretto) — no Redis needed
+
+### Generate a Test JWT
+
+The default `config.yaml` uses `jwt_secret: change-me-in-production`. Generate a token:
+
+```bash
+# Option 1: jwt-cli
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+
+# Option 2: Python
+export TOKEN=$(python3 -c "
+import jwt, time
+print(jwt.encode({'tenant_id': 'test-tenant', 'exp': int(time.time()) + 86400}, 'change-me-in-production', algorithm='HS256'))
+")
+```
+
+### Test the API
+
+```bash
+# Ingest an event
+curl -s -X POST http://localhost:8080/v1/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "evt-001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
+# → {"ok":true}
+
+# Ingest the same event again (dedup test)
+curl -s -X POST http://localhost:8080/v1/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "evt-001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
+# → {"duplicate":true}
+
+# Query events (wait a few seconds for the batch flush)
+curl -s -X POST http://localhost:8080/v1/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT * FROM events WHERE tenant_id = ? LIMIT 10"}'
+
+# Open an SSE stream (Ctrl+C to stop)
+curl -N http://localhost:8080/v1/stream/sse \
+  -H "Authorization: Bearer $TOKEN"
+
+# Open an SSE stream with gap-fill (replays events since the given timestamp, then switches to live)
+curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Replay only the last 1 minute of gap data
+# Set SINCE to 1 minute ago (macOS vs Linux use different date flags):
+export SINCE=$(date -u -v-1M '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
+curl -N "http://localhost:8080/v1/stream/sse?since=$SINCE" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Health check (no auth required)
+curl http://localhost:8080/health
+# → {"status":"ok"}
+```
+
+## Quick Start (Clustered Mode)
+
+To develop against the full clustered infrastructure locally:
+
+```bash
+# 1. Start all dependencies (ClickHouse, NATS, Redis, ScyllaDB)
+make compose-deps
+
+# 2. Create the ClickHouse events table (same as standalone)
+docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
+  clickhouse-client --query "
+    CREATE TABLE IF NOT EXISTS events (
+      tenant_id String, event_id String, timestamp DateTime64(3, 'UTC'),
+      type String, map_keys Array(String), map_values Array(String)
+    ) ENGINE = MergeTree() ORDER BY (tenant_id, timestamp, event_id)
+  "
+
+# 3. Create the ScyllaDB keyspace and dedup table
+docker compose -f deployments/compose/dependencies.yaml exec scylladb \
+  cqlsh -e "
+    CREATE KEYSPACE IF NOT EXISTS beachhouse
+      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+    CREATE TABLE IF NOT EXISTS beachhouse.dedupe (
+      tenant_id text, event_hash text, created_at timestamp,
+      PRIMARY KEY (tenant_id, event_hash)
+    );
+  "
+
+# 4. Run the API server in one terminal
+BH_MODE=clustered \
+BH_MQ_URL=nats://localhost:4222 \
+BH_CACHE_REDIS_URL=redis://localhost:6379 \
+BH_DEDUPE_SCYLLA_HOSTS=localhost:9042 \
+BH_AUTH_JWT_SECRET=change-me-in-production \
+go run ./cmd/beachhouse-api
+
+# 5. Run the worker in another terminal
+BH_MODE=clustered \
+BH_MQ_URL=nats://localhost:4222 \
+BH_CH_ADDR=localhost:9000 \
+go run ./cmd/beachhouse-worker
+```
+
+### Using an .env File
+
+For convenience, create a `.env.clustered` file in the project root:
+
+```bash
+# .env.clustered — source this before running clustered binaries
+export BH_MODE=clustered
+export BH_CH_ADDR=localhost:9000
+export BH_MQ_URL=nats://localhost:4222
+export BH_CACHE_REDIS_URL=redis://localhost:6379
+export BH_DEDUPE_SCYLLA_HOSTS=localhost:9042
+export BH_DEDUPE_SCYLLA_KEYSPACE=beachhouse
+export BH_AUTH_JWT_SECRET=change-me-in-production
+```
+
+Then:
+
+```bash
+source .env.clustered
+go run ./cmd/beachhouse-api    # terminal 1
+go run ./cmd/beachhouse-worker # terminal 2
+```
 
 ## Building
 
@@ -37,6 +165,18 @@ go build -o bin/beachhouse ./cmd/beachhouse
 go build -o bin/beachhouse-api ./cmd/beachhouse-api
 go build -o bin/beachhouse-worker ./cmd/beachhouse-worker
 ```
+
+## Running Modes at a Glance
+
+| What you want | Command |
+| ------------- | ------- |
+| Hot-reload standalone dev server | `make dev` |
+| Standalone binary (default config) | `./bin/beachhouse` |
+| Standalone via Docker Compose | `make compose-standalone` |
+| Clustered API server (local deps) | `source .env.clustered && go run ./cmd/beachhouse-api` |
+| Clustered worker (local deps) | `source .env.clustered && go run ./cmd/beachhouse-worker` |
+| Full clustered stack via Docker | `make compose-cluster` |
+| Infrastructure deps only | `make compose-deps` |
 
 ## Testing
 
@@ -102,7 +242,7 @@ BeachHouse/
 │   ├── cache/              # L1 (Ristretto) + L2 (Redis) caching
 │   ├── config/             # YAML + env var configuration
 │   ├── dedupe/             # Deduplication (Pebble or ScyllaDB)
-│   ├── ingest/             # Batch buffering + replay buffer
+│   ├── ingest/             # Batch buffering + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
 │   └── schema/             # JSON flattening to EAV
 ├── tests/                  # Integration tests

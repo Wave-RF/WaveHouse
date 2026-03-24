@@ -25,16 +25,16 @@ BeachHouse is a Go-based gateway that sits in front of ClickHouse, acting as the
 │  └────┬────┘    │ (Tiered)│   └───┬───┘                         │
 │       │         └────┬────┘       │                             │
 │       ▼              │            │                             │
-│  ┌─────────┐         │       ┌────▼──────┐                      │
-│  │   MQ    │─────────┼──────▶│  Replay   │                      │
-│  │ (NATS)  │         │       │  Buffer   │                      │
-│  └────┬────┘         │       └───────────┘                      │
+│  ┌─────────┐         │                                          │
+│  │   MQ    │         │       (NATS JetStream retains messages   │
+│  │ (NATS)  │         │        for SSE/WS gap-fill via           │
+│  └────┬────┘         │        DeliverByStartTime)               │
 │       │              │                                          │
 │  ┌────▼──────────┐   │                                          │
-│  │ Buffer        │   │                                          │
-│  │ Consumer      │   │                                          │
-│  │ (batch flush) │   │                                          │
-│  └────┬──────────┘   │                                          │
+│  │ Buffer        │   │       ┌───────────┐                      │
+│  │ Consumer      │   │       │  Active   │                      │
+│  │ (batch flush) │   │       │  Sweeper  │ (purges old msgs)    │
+│  └────┬──────────┘   │       └───────────┘                      │
 │       │              │                                          │
 └───────┼──────────────┼──────────────────────────────────────────┘
         │              │
@@ -53,7 +53,7 @@ BeachHouse ships three binaries for different deployment modes:
 | ------ | ---- | ------- |
 | `beachhouse` | Standalone | All-in-one: API + worker + embedded NATS + embedded Pebble dedup. Zero external deps beyond ClickHouse. |
 | `beachhouse-api` | Clustered | Stateless API server. Handles ingest/query/streaming. Connects to external NATS, Redis, ScyllaDB. Horizontally scalable. |
-| `beachhouse-worker` | Clustered | Background worker. Consumes from NATS, batch-flushes to ClickHouse, maintains replay buffer. |
+| `beachhouse-worker` | Clustered | Background worker. Consumes from NATS, batch-flushes to ClickHouse, runs Active Sweeper for message lifecycle. |
 
 ## Internal Packages
 
@@ -63,7 +63,7 @@ internal/
 ├── cache/      Two-tier caching (L1 Ristretto + L2 Redis)
 ├── config/     YAML + env var configuration loading
 ├── dedupe/     Exact-once deduplication (Pebble or ScyllaDB)
-├── ingest/     Batch buffering and replay buffer
+├── ingest/     Batch buffering and Active Sweeper (NATS message lifecycle)
 ├── mq/         Message queue abstraction (embedded or remote NATS)
 └── schema/     JSON flattening to EAV format
 ```
@@ -76,7 +76,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **middleware.go** — JWT Bearer token validation. Extracts `tenant_id` from the token claims and injects it into the request context. Tenant ID is **never** sourced from user input.
 - **ingest.go** — Accepts JSON events, deduplicates, flattens to EAV schema, publishes to MQ.
 - **query.go** — Executes SQL queries against ClickHouse with tenant RLS. Cache key = `sha256(tenant_id:sql)`.
-- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Supports gap-fill from the replay buffer using a `since` timestamp parameter.
+- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Supports gap-fill from NATS JetStream using `DeliverByStartTime` with a `since` timestamp parameter.
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
 - **health.go** — Liveness (`/health`) and readiness (`/ready`) probes. Readiness checks ClickHouse connectivity.
 
@@ -97,10 +97,10 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **embedded.go** — Standalone mode: uses [Pebble](https://github.com/cockroachdb/pebble) (embedded key-value store). Composite key = `tenant_id:event_id`.
 - **distributed.go** — Clustered mode: uses ScyllaDB with `INSERT IF NOT EXISTS` for atomic check-and-mark.
 
-### `ingest/` — Buffering & Replay
+### `ingest/` — Buffering & Sweeping
 
 - **buffer.go** — `BufferConsumer` subscribes to `ingest.>`, accumulates events (batch size 1000 or 5-second flush interval), and performs batch inserts to the ClickHouse `events` table.
-- **replay.go** — `ReplayBuffer` is a fixed-size ring buffer (10,000 events) used for SSE/WebSocket gap-fill. Clients can request events `since` a timestamp to catch up before transitioning to live data.
+- **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window (no longer needed for SSE/WS replay). The purge target is `MIN(ack_floor + 1, gap_window_seq)`, which guarantees that healthy state retains exactly the gap window of rolling data while ClickHouse outages freeze purging and disk fills trigger backpressure via `DiscardNew`.
 
 ### `mq/` — Message Queue
 
@@ -110,7 +110,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `schema/` — JSON Flattening
 
-- **flatten.go** — Converts arbitrary nested JSON into parallel `[]string` arrays of dot-notation keys and string values.  Handles objects (recursive), arrays (numeric indices), and primitives. Output is compatible with ClickHouse `Map(String, String)` columns.
+- **flatten.go** — Converts arbitrary nested JSON into parallel `[]string` arrays of dot-notation keys and string values. Handles objects (recursive), arrays (numeric indices), and primitives. Output is stored in ClickHouse as `map_keys Array(String)` and `map_values Array(String)` columns.
 - **flatten_test.go** — Unit tests covering simple objects, nested objects, arrays, booleans, nulls, and invalid JSON.
 
 ## Data Flows
@@ -124,6 +124,7 @@ Client POST /v1/ingest
   → Schema flattening (nested JSON → EAV)
   → Publish to NATS JetStream (ingest.events)
   → 200 OK returned immediately
+  → (If NATS stream is full: 503 + Retry-After header)
 
 BufferConsumer (async goroutine):
   ← Subscribe to ingest.>
@@ -131,10 +132,11 @@ BufferConsumer (async goroutine):
   → Batch INSERT into ClickHouse events table
   → Ack messages
 
-ReplayBuffer (async goroutine):
-  ← Subscribe to ingest.>
-  → Append to ring buffer (10K capacity)
-  → Used for SSE/WS gap-fill
+Active Sweeper (async goroutine, every 60s):
+  → Read buffer consumer's AckFloor (highest contiguous ACKed seq)
+  → Binary search for first message within the gap window
+  → Purge target = MIN(ack_floor + 1, gap_window_seq)
+  → Purge all messages below target from JetStream
 ```
 
 ### Query Path
@@ -156,8 +158,8 @@ Client POST /v1/query
 Client GET /v1/stream/sse or /v1/stream/ws
   → JWT auth middleware
   → If ?since= parameter provided:
-    → Query replay buffer for events after timestamp
-    → Send historical events first
+    → Create ephemeral NATS consumer with DeliverByStartTime
+    → Send historical events from JetStream first
   → Subscribe to Hub (in-process pub/sub)
   → Stream live events as they arrive via MQ → Hub → client
 ```
@@ -170,7 +172,7 @@ Client GET /v1/stream/sse or /v1/stream/ws
 | Message Queue | Embedded NATS (in-process) | External NATS cluster |
 | Deduplication | Pebble (embedded KV) | ScyllaDB (distributed) |
 | Cache | L1 only (Ristretto) | L1 (Ristretto) + L2 (Redis) |
-| Replay Buffer | In the single process | In the worker process(es) |
+| Gap-Fill | NATS JetStream history (in-process) | NATS JetStream history (external cluster) |
 | Scaling | Vertical only | Horizontal (add API/worker nodes) |
 | External Dependencies | ClickHouse only | ClickHouse, NATS, Redis, ScyllaDB |
 

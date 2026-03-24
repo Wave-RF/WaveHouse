@@ -50,6 +50,15 @@ func main() {
 	}
 	defer chConn.Close()
 
+	// Auto-migrate ClickHouse schema.
+	if *cfg.ClickHouse.AutoMigrate {
+		if err := ingest.EnsureSchema(context.Background(), chConn); err != nil {
+			logger.Error("clickhouse schema migration", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("clickhouse schema ensured")
+	}
+
 	// Embedded dedupe (Pebble).
 	dedup, err := dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
 	if err != nil {

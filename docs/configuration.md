@@ -37,6 +37,7 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 | `clickhouse.database` | `BH_CH_DATABASE` | `default` | Database name. |
 | `clickhouse.username` | `BH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `BH_CH_PASSWORD` | *(empty)* | Authentication password. |
+| `clickhouse.auto_migrate` | `BH_CH_AUTO_MIGRATE` | `true` (standalone) / `false` (clustered) | Auto-create the `events` table at startup using `CREATE TABLE IF NOT EXISTS`. Set to `false` if you manage your own ClickHouse schema. |
 
 ### Message Queue (NATS)
 
@@ -44,6 +45,8 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 | -------- | ------- | ------- | ----------- |
 | `mq.embedded_dir` | `BH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server (standalone mode). |
 | `mq.url` | `BH_MQ_URL` | `nats://localhost:4222` | NATS server URL (clustered mode). |
+| `mq.gap_window_minutes` | `BH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE/WS gap-fill. The Active Sweeper will not purge messages newer than this window. |
+| `mq.max_bytes_gb` | `BH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
 ### Deduplication
 
@@ -52,6 +55,7 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 | `dedupe.embedded_dir` | `BH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store (standalone mode). |
 | `dedupe.scylla_hosts` | `BH_DEDUPE_SCYLLA_HOSTS` | `localhost:9042` | ScyllaDB contact points (clustered mode). Comma-separated. |
 | `dedupe.scylla_keyspace` | `BH_DEDUPE_SCYLLA_KEYSPACE` | `beachhouse` | ScyllaDB keyspace name. |
+| `dedupe.auto_migrate` | `BH_DEDUPE_AUTO_MIGRATE` | `true` (standalone) / `false` (clustered) | Auto-create the ScyllaDB keyspace and `dedupe` table at startup using `IF NOT EXISTS`. The keyspace is created with `SimpleStrategy` / RF=1. Set to `false` if you manage your own ScyllaDB schema (e.g., to use `NetworkTopologyStrategy`). |
 
 ### Cache
 
@@ -81,16 +85,20 @@ clickhouse:
   database: default
   username: default
   password: ""
+  # auto_migrate: true  # defaults based on mode
 
 mq:
   embedded_dir: ./data/nats
   url: nats://localhost:4222
+  gap_window_minutes: 15
+  max_bytes_gb: 50
 
 dedupe:
   embedded_dir: ./data/pebble
   scylla_hosts:
     - localhost:9042
   scylla_keyspace: beachhouse
+  # auto_migrate: true  # defaults based on mode
 
 cache:
   l1_max_cost: 67108864
@@ -108,19 +116,26 @@ auth:
 Uses embedded components. Relevant settings:
 
 - `mq.embedded_dir` — Where embedded NATS stores its data.
+- `mq.gap_window_minutes` — Gap-fill window for SSE/WS replay via NATS history.
+- `mq.max_bytes_gb` — Maximum disk usage for the embedded NATS JetStream store.
 - `dedupe.embedded_dir` — Where Pebble stores deduplication state.
 - `cache.l1_max_cost` — L1 cache size (no L2 in standalone).
+- `clickhouse.auto_migrate` — Defaults to `true`. Auto-creates the `events` table.
 - ClickHouse settings are always required.
 
-Settings ignored: `mq.url`, `dedupe.scylla_*`, `cache.redis_url`.
+Settings ignored: `mq.url`, `dedupe.scylla_*`, `dedupe.auto_migrate`, `cache.redis_url`.
 
 ### Clustered Mode (`mode: clustered`)
 
 Uses distributed components. Relevant settings:
 
 - `mq.url` — External NATS cluster URL.
+- `mq.gap_window_minutes` — Gap-fill window for SSE/WS replay (used by workers).
+- `mq.max_bytes_gb` — Maximum NATS JetStream stream size (applied on stream creation).
 - `dedupe.scylla_hosts`, `dedupe.scylla_keyspace` — ScyllaDB for distributed dedup.
 - `cache.redis_url` — Redis for L2 shared cache.
+- `clickhouse.auto_migrate` — Defaults to `false`. Set to `true` to auto-create the `events` table.
+- `dedupe.auto_migrate` — Defaults to `false`. Set to `true` to auto-create the ScyllaDB keyspace and table.
 - All ClickHouse and cache L1 settings still apply.
 
 Settings ignored: `mq.embedded_dir`, `dedupe.embedded_dir`.

@@ -44,6 +44,15 @@ func main() {
 	}
 	defer chConn.Close()
 
+	// Auto-migrate ClickHouse schema.
+	if *cfg.ClickHouse.AutoMigrate {
+		if err := ingest.EnsureSchema(context.Background(), chConn); err != nil {
+			logger.Error("clickhouse schema migration", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("clickhouse schema ensured")
+	}
+
 	// Remote MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
 	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)

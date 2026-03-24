@@ -112,6 +112,7 @@ Accepts a JSON event, deduplicates it, flattens the data to EAV format, and publ
 | 403 | `{"error":"no tenant"}` | Missing tenant_id in JWT |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
+| 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
 
 **curl example:**
 
@@ -136,7 +137,7 @@ Executes a SQL query against ClickHouse with automatic row-level security (tenan
 
 ```json
 {
-  "sql": "SELECT event_type, count() FROM events WHERE tenant_id = ? GROUP BY event_type",
+  "sql": "SELECT type, count() FROM events WHERE tenant_id = ? GROUP BY type",
   "params": []
 }
 ```
@@ -150,8 +151,8 @@ Executes a SQL query against ClickHouse with automatic row-level security (tenan
 
 ```json
 [
-  {"event_type": "page_view", "count()": 1542},
-  {"event_type": "click", "count()": 873}
+  {"type": "page_view", "count()": 1542},
+  {"type": "click", "count()": 873}
 ]
 ```
 
@@ -182,21 +183,21 @@ curl -X POST http://localhost:8080/v1/query \
 
 ### `GET /v1/stream/sse` — Server-Sent Events Stream
 
-Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from the replay buffer.
+Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`.
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
 | `topic` | string | `ingest.events` | Topic to subscribe to. |
-| `since` | string | — | RFC 3339 timestamp. If provided, events after this time are sent from the replay buffer before switching to live streaming. |
+| `since` | string | — | RFC 3339 timestamp. If provided, creates an ephemeral NATS consumer starting at this time and sends historical events before switching to live streaming. The gap window is configurable via `BH_MQ_GAP_WINDOW_MINUTES`. |
 
 **Response:** SSE stream (`text/event-stream`).
 
 ```text
-data: {"tenant_id":"t1","event_id":"evt-001","timestamp":"2026-03-24T12:00:00Z","event_type":"click","map_keys":["button"],"map_values":["signup"]}
+data: {"tenant_id":"t1","event_id":"evt-001","timestamp":"2026-03-24T12:00:00Z","type":"click","map_keys":["button"],"map_values":["signup"]}
 
-data: {"tenant_id":"t1","event_id":"evt-002","timestamp":"2026-03-24T12:00:01Z","event_type":"page_view","map_keys":["url"],"map_values":["/home"]}
+data: {"tenant_id":"t1","event_id":"evt-002","timestamp":"2026-03-24T12:00:01Z","type":"page_view","map_keys":["url"],"map_values":["/home"]}
 ```
 
 **curl example:**
@@ -221,7 +222,7 @@ Opens a WebSocket connection for real-time event streaming. Same semantics as SS
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
 | `topic` | string | `ingest.events` | Topic to subscribe to. |
-| `since` | string | — | RFC 3339 timestamp for replay buffer gap-fill. |
+| `since` | string | — | RFC 3339 timestamp. Gap-fill via NATS JetStream `DeliverByStartTime` (same as SSE). |
 
 **Messages:** Each message is a JSON-encoded event (same format as SSE `data:` payloads).
 
@@ -231,7 +232,7 @@ Opens a WebSocket connection for real-time event streaming. Same semantics as SS
 const ws = new WebSocket("ws://localhost:8080/v1/stream/ws?topic=ingest.events");
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
-  console.log("Event:", data.event_id, data.event_type);
+  console.log("Event:", data.event_id, data.type);
 };
 ```
 
@@ -244,7 +245,7 @@ All events flowing through the system (MQ, SSE, WebSocket) share this format:
   "tenant_id": "tenant-abc",
   "event_id": "evt-001",
   "timestamp": "2026-03-24T12:00:00Z",
-  "event_type": "page_view",
+  "type": "page_view",
   "map_keys": ["url", "user.name", "user.plan"],
   "map_values": ["https://example.com", "Alice", "enterprise"]
 }
@@ -255,6 +256,35 @@ All events flowing through the system (MQ, SSE, WebSocket) share this format:
 | `tenant_id` | string | Tenant identifier (from JWT). |
 | `event_id` | string | Unique event identifier (from client). |
 | `timestamp` | string | RFC 3339 timestamp. |
-| `event_type` | string | Event type label. |
+| `type` | string | Event type label. |
 | `map_keys` | string[] | Flattened dot-notation keys from `data`. |
 | `map_values` | string[] | Corresponding string values. |
+
+## Generating a JWT for Testing
+
+For local development with the default config (`jwt_secret: change-me-in-production`), generate a test token:
+
+```bash
+# Using the jwt-cli tool (https://github.com/mike-engel/jwt-cli):
+jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}'
+
+# Or using Python:
+python3 -c "
+import jwt, time
+token = jwt.encode({'tenant_id': 'test-tenant', 'exp': int(time.time()) + 86400}, 'change-me-in-production', algorithm='HS256')
+print(token)
+"
+
+# Or use this pre-generated long-lived token for local dev (secret: change-me-in-production):
+# Export it for easy use with curl:
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+```
+
+Then use it with any endpoint:
+
+```bash
+curl -X POST http://localhost:8080/v1/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "test-1", "type": "click", "data": {"page": "/home"}}'
+```

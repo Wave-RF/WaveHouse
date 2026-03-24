@@ -51,6 +51,24 @@ func main() {
 	}
 	defer chConn.Close()
 
+	// Auto-migrate ClickHouse schema.
+	if *cfg.ClickHouse.AutoMigrate {
+		if err := ingest.EnsureSchema(context.Background(), chConn); err != nil {
+			logger.Error("clickhouse schema migration", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("clickhouse schema ensured")
+	}
+
+	// Auto-migrate ScyllaDB schema.
+	if *cfg.Dedupe.AutoMigrate {
+		if err := dedupe.EnsureSchema(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace); err != nil {
+			logger.Error("scylladb schema migration", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("scylladb schema ensured")
+	}
+
 	// Distributed dedupe (ScyllaDB).
 	dedup, err := dedupe.NewDistributed(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace)
 	if err != nil {

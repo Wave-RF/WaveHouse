@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -104,17 +105,16 @@ func (h *QueryHandler) executeQuery(ctx context.Context, tenantID, sql string) (
 	var results []map[string]any
 
 	for rows.Next() {
-		vals := make([]any, len(columns))
 		valPtrs := make([]any, len(columns))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
+		for i, col := range columns {
+			valPtrs[i] = reflect.New(col.ScanType()).Interface()
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
 			return nil, err
 		}
 		row := make(map[string]any)
 		for i, col := range columns {
-			row[col.Name()] = vals[i]
+			row[col.Name()] = reflect.ValueOf(valPtrs[i]).Elem().Interface()
 		}
 		results = append(results, row)
 	}

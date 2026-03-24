@@ -4,6 +4,9 @@ services:
     ports:
       - "8123:8123"
       - "9000:9000"
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_PASSWORD: ""
     volumes:
       - clickhouse-data:/var/lib/clickhouse
 
@@ -18,6 +21,7 @@ services:
       BH_CH_ADDR: clickhouse:9000
       BH_MQ_EMBEDDED_DIR: /data/nats
       BH_DEDUPE_EMBEDDED_DIR: /data/pebble
+      BH_AUTH_JWT_SECRET: change-me-in-production
     volumes:
       - beachhouse-data:/data
     depends_on:

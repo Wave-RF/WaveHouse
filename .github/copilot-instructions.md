@@ -15,5 +15,5 @@ For detailed project context, architecture, code conventions, and common tasks, 
 1. **Tenant ID comes only from JWT** — never read `tenant_id` from request body, query params, or headers.
 2. **Interface-first** — define interfaces where consumed, implement separately for standalone/clustered.
 3. **Return errors, don't panic** — wrap with `fmt.Errorf("context: %w", err)`.
-4. **Keep docs updated** — when modifying code, update the corresponding file in `docs/`.
-5. **Add changelog entries** — notable changes go in `CHANGELOG.md` under `[Unreleased]`.
+4. **MANDATORY: Keep ALL docs, configs, and examples in sync** — every code change MUST include updates to all affected documentation, config files, Docker Compose files, examples, and CHANGELOG.md. Do NOT wait for the user to ask. See the full "Documentation & Consistency Sync" section in [AGENTS.md](../AGENTS.md) for the complete checklist and cross-referencing rules. A code change without its documentation counterpart is considered incomplete.
+5. **Verify before finishing** — before completing any task, search docs for identifiers you touched (field names, env vars, endpoints, struct names) and fix any stale references.

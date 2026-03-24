@@ -18,44 +18,87 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **📥 Asynchronous Buffered Ingestion:** Never drop a packet. BeachHouse writes incoming data to a highly durable Write-Ahead Log (WAL) and returns `200 OK` instantly, batching inserts to ClickHouse in the background.
 * **👯 Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations.
 * **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
-* **🌊 Zero-Latency Real-Time Push:** When data is pushed via the BeachHouse API, it is immediately broadcast to authorized SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion for your users, with seamless gap-fill from an in-memory replay buffer for clients that connect late.
+* **🌊 Zero-Latency Real-Time Push:** When data is pushed via the BeachHouse API, it is immediately broadcast to authorized SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion for your users, with seamless gap-fill from NATS JetStream history for clients that connect late.
 * **🗂️ Dynamic Schema Normalization:** Accept arbitrary, nested JSON payloads from clients. BeachHouse flattens them into an optimized Entity-Attribute-Value (EAV) Map schema, eliminating the need for constant ClickHouse `ALTER TABLE` migrations.
 
 ## 🚀 Deployment Modes
 
 BeachHouse is designed using a clean architecture that allows it to run anywhere, from a laptop to a multi-region cloud.
 
-1. **Standalone (OSS):** A single, statically compiled Go binary with zero external dependencies. It embeds its own Message Queue and Key-Value store. Perfect for local development or single-server deployments.
-2. **Clustered (Managed/Enterprise):** Stateless API routers and independent Worker nodes backed by distributed Message Queues (NATS) and Caches (Redis). Designed for infinite horizontal scalability.
+| Mode | Binaries | External Dependencies | Use Case |
+| ---- | -------- | --------------------- | -------- |
+| **Standalone** | `beachhouse` | ClickHouse only | Local dev, single-server |
+| **Clustered** | `beachhouse-api` + `beachhouse-worker` | ClickHouse, NATS, Redis, ScyllaDB | Horizontal scaling, production |
 
-## 🛠️ Getting Started (Standalone)
+## 🛠️ Quick Start (Standalone)
 
-The easiest way to see BeachHouse in action is using Docker Compose. This spins up a local ClickHouse instance alongside the BeachHouse standalone binary.
+The easiest way to see BeachHouse in action. Requires Docker.
 
 ```bash
 # Clone the repository
-git clone [https://github.com/Wave-RF/BeachHouse.git](https://github.com/Wave-RF/BeachHouse.git)
+git clone https://github.com/Wave-RF/BeachHouse.git
 cd BeachHouse
 
 # Start ClickHouse and BeachHouse
-docker-compose -f deployments/compose/standalone.yaml up -d
+docker compose -f deployments/compose/standalone.yaml up -d
+
+# Generate a test JWT (requires jwt-cli: https://github.com/mike-engel/jwt-cli)
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+
+# Ingest an event
+curl -s -X POST http://localhost:8080/v1/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "evt-001", "type": "click", "data": {"page": "/home", "button": "signup"}}'
+# → {"ok":true}
+
+# Query events (wait ~5s for the batch flush to ClickHouse)
+curl -s -X POST http://localhost:8080/v1/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT * FROM events WHERE tenant_id = ? LIMIT 10"}'
+
+# Open a real-time SSE stream (Ctrl+C to stop)
+curl -N http://localhost:8080/v1/stream/sse \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-BeachHouse will now be accepting API requests on `http://localhost:8080`.
+BeachHouse is now accepting API requests on `http://localhost:8080`.
+
+## 🚀 Quick Start (Clustered)
+
+The full distributed stack with load balancing, NATS, Redis, and ScyllaDB:
+
+```bash
+# Start everything: Caddy LB, ClickHouse, NATS, Redis, ScyllaDB, 2x API, 2x worker
+docker compose -f deployments/compose/cluster.yaml up -d
+
+# Create ClickHouse table + ScyllaDB keyspace/table
+# (auto_migrate defaults to false in clustered mode — see docs/deployment.md for
+# manual steps, or set BH_CH_AUTO_MIGRATE=true and BH_DEDUPE_AUTO_MIGRATE=true)
+```
+
+The API is available behind Caddy at `http://localhost` (port 80).
 
 ## 💻 Local Development
 
-For building and testing BeachHouse locally, we use `air` for live-reloading.
+For building and testing BeachHouse locally with hot-reload:
 
-1. Install [air](https://github.com/air-verse/air).
-2. Start your local ClickHouse dependency: `docker-compose -f deployments/compose/dependencies.yaml up -d`
-3. Run the development server:
+```bash
+# Install dependencies
+go mod download
 
-   ```bash
-    make dev
-    ```
+# Start ClickHouse (standalone mode needs nothing else)
+docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
+
+# Run with hot-reload (requires air: https://github.com/air-verse/air)
+# The events table is auto-created at startup.
+make dev
+```
 
 BeachHouse will automatically recompile and restart whenever you save a `.go` file.
+
+For clustered local development (run API + worker against external deps), see [docs/development.md](docs/development.md).
 
 ## 🤝 Contributing
 
