@@ -1,0 +1,11 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /beachhouse-worker ./cmd/beachhouse-worker
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=builder /beachhouse-worker /beachhouse-worker
+COPY config.yaml /config.yaml
+ENTRYPOINT ["/beachhouse-worker"]

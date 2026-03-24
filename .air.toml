@@ -1,0 +1,12 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "go build -o ./tmp/beachhouse ./cmd/beachhouse"
+bin = "./tmp/beachhouse"
+include_ext = ["go"]
+exclude_dir = ["tmp", "tests", "deployments", "data", "bin"]
+delay = 1000
+
+[log]
+time = false

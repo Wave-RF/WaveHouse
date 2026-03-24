@@ -1,0 +1,11 @@
+{
+	admin off
+}
+
+:80 {
+	reverse_proxy beachhouse-api-1:8080 beachhouse-api-2:8080 {
+		lb_policy round_robin
+		health_uri /health
+		health_interval 5s
+	}
+}

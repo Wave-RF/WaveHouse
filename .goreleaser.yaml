@@ -1,0 +1,70 @@
+version: 2
+
+builds:
+  - id: beachhouse
+    main: ./cmd/beachhouse
+    binary: beachhouse
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+  - id: beachhouse-api
+    main: ./cmd/beachhouse-api
+    binary: beachhouse-api
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+  - id: beachhouse-worker
+    main: ./cmd/beachhouse-worker
+    binary: beachhouse-worker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+dockers:
+  - ids: [beachhouse]
+    image_templates:
+      - "ghcr.io/wave-rf/beachhouse:{{ .Tag }}"
+      - "ghcr.io/wave-rf/beachhouse:latest"
+    dockerfile: deployments/docker/Dockerfile.beachhouse
+    build_flag_templates:
+      - "--platform=linux/amd64"
+
+  - ids: [beachhouse-api]
+    image_templates:
+      - "ghcr.io/wave-rf/beachhouse-api:{{ .Tag }}"
+      - "ghcr.io/wave-rf/beachhouse-api:latest"
+    dockerfile: deployments/docker/Dockerfile.beachhouse-api
+    build_flag_templates:
+      - "--platform=linux/amd64"
+
+  - ids: [beachhouse-worker]
+    image_templates:
+      - "ghcr.io/wave-rf/beachhouse-worker:{{ .Tag }}"
+      - "ghcr.io/wave-rf/beachhouse-worker:latest"
+    dockerfile: deployments/docker/Dockerfile.beachhouse-worker
+    build_flag_templates:
+      - "--platform=linux/amd64"
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"

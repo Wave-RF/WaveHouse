@@ -1,0 +1,51 @@
+package dedupe
+
+import (
+	"context"
+	"encoding/binary"
+	"time"
+
+	"github.com/cockroachdb/pebble"
+)
+
+// EmbeddedDeduplicator uses Pebble for local deduplication.
+type EmbeddedDeduplicator struct {
+	db *pebble.DB
+}
+
+// NewEmbedded opens a Pebble database at the given path.
+func NewEmbedded(dir string) (*EmbeddedDeduplicator, error) {
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		return nil, err
+	}
+	return &EmbeddedDeduplicator{db: db}, nil
+}
+
+// CheckAndMark returns true if the event was already seen.
+// Key format: {tenant_id}:{event_id} — enables future tenant-scoped operations.
+func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, tenantID, eventID string) (bool, error) {
+	key := []byte(tenantID + ":" + eventID)
+
+	_, closer, err := d.db.Get(key)
+	if err == nil {
+		_ = closer.Close()
+		return true, nil
+	}
+	if err != pebble.ErrNotFound {
+		return false, err
+	}
+
+	// Store timestamp as value for future auditing.
+	val := make([]byte, 8)
+	binary.BigEndian.PutUint64(val, uint64(time.Now().UnixNano()))
+
+	if err := d.db.Set(key, val, pebble.Sync); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (d *EmbeddedDeduplicator) Close() error {
+	return d.db.Close()
+}

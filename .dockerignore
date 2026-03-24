@@ -1,0 +1,17 @@
+.git/
+.github/
+bin/
+tmp/
+data/
+dist/
+docs/
+*.md
+!README.md
+.air.toml
+.editorconfig
+.gitignore
+.golangci.yml
+.goreleaser.yaml
+Makefile
+LICENSE
+AGENTS.md
