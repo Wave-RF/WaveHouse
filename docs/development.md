@@ -37,14 +37,16 @@ The default `config.yaml` uses `jwt_secret: change-me-in-production`. Generate a
 
 ```bash
 # Option 1: jwt-cli
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550e8400-e29b-41d4-a716-446655440000", "exp": 9999999999}')
 
 # Option 2: Python
 export TOKEN=$(python3 -c "
 import jwt, time
-print(jwt.encode({'tenant_id': 'test-tenant', 'exp': int(time.time()) + 86400}, 'change-me-in-production', algorithm='HS256'))
+print(jwt.encode({'tenant_id': '550e8400-e29b-41d4-a716-446655440000', 'exp': int(time.time()) + 86400}, 'change-me-in-production', algorithm='HS256'))
 ")
 ```
+
+> **Note:** The `tenant_id` must be a valid UUID.
 
 ### Test the API
 
@@ -53,21 +55,21 @@ print(jwt.encode({'tenant_id': 'test-tenant', 'exp': int(time.time()) + 86400}, 
 curl -s -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "evt-001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
+  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
 # → {"ok":true}
 
 # Ingest the same event again (dedup test)
 curl -s -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "evt-001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
+  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
 # → {"duplicate":true}
 
 # Query events (wait a few seconds for the batch flush)
 curl -s -X POST http://localhost:8080/v1/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM events WHERE tenant_id = ? LIMIT 10"}'
+  -d '{"sql": "SELECT * FROM events LIMIT 10"}'
 
 # Open an SSE stream (Ctrl+C to stop)
 curl -N http://localhost:8080/v1/stream/sse \
@@ -100,9 +102,17 @@ make compose-deps
 docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
   clickhouse-client --query "
     CREATE TABLE IF NOT EXISTS events (
-      tenant_id String, event_id String, timestamp DateTime64(3, 'UTC'),
-      type String, map_keys Array(String), map_values Array(String)
-    ) ENGINE = MergeTree() ORDER BY (tenant_id, timestamp, event_id)
+      tenant_id UUID, event_id UUID,
+      received_timestamp DateTime64(3, 'UTC'),
+      ingested_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+      timestamp DateTime64(3, 'UTC'),
+      type String,
+      str_data Map(String, String),
+      num_data Map(String, Float64),
+      bool_data Map(String, Bool)
+    ) ENGINE = ReplacingMergeTree(ingested_timestamp)
+    PARTITION BY toYYYYMM(timestamp)
+    ORDER BY (tenant_id, type, toDate(timestamp), event_id)
   "
 
 # 3. Create the ScyllaDB keyspace and dedup table
@@ -244,7 +254,7 @@ BeachHouse/
 │   ├── dedupe/             # Deduplication (Pebble or ScyllaDB)
 │   ├── ingest/             # Batch buffering + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
-│   └── schema/             # JSON flattening to EAV
+│   └── schema/             # JSON flattening to typed Maps
 ├── tests/                  # Integration tests
 ├── deployments/
 │   ├── compose/            # Docker Compose files

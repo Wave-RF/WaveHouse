@@ -22,13 +22,13 @@ Seven internal packages under `internal/`:
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) + `Distributed` (ScyllaDB)
 - **`ingest/`** — `BufferConsumer` (batch flush to ClickHouse) + `Sweeper` (Active Sweeper for NATS message lifecycle)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
-- **`schema/`** — JSON flattening to dot-notation EAV (`Flatten` function)
+- **`schema/`** — JSON flattening to typed Maps + unflattening (`Flatten` and `Unflatten` functions)
 
 ## Key Design Decisions
 
 1. **Interface-first**: Core behaviors are defined as Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`). Standalone and clustered modes use different implementations.
-2. **Tenant isolation**: `tenant_id` is **always** sourced from JWT claims via middleware — never from request bodies, query params, or headers. Do not introduce any code path that reads tenant_id from user input.
-3. **EAV schema**: Arbitrary JSON is flattened to parallel `Array(String)` columns (`map_keys`/`map_values`) for ClickHouse. No ALTER TABLE migrations needed.
+2. **Tenant isolation**: `tenant_id` is **always** sourced from JWT claims via middleware — never from request bodies, query params, or headers. The middleware validates that `tenant_id` is a valid UUID. Queries are auto-scoped to the tenant via CTE injection — users never write `WHERE tenant_id = ?`. Do not introduce any code path that reads tenant_id from user input.
+3. **Typed Map schema**: Arbitrary JSON is flattened to three typed `Map` columns (`str_data Map(String, String)`, `num_data Map(String, Float64)`, `bool_data Map(String, Bool)`) for ClickHouse. No ALTER TABLE migrations needed. The `Unflatten` function reconstructs nested JSON from the three maps.
 4. **Async ingestion**: Ingest returns 200 immediately after dedup + MQ publish. ClickHouse writes happen asynchronously via BufferConsumer. If NATS stream is full, returns 503 + Retry-After.
 5. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.
 6. **Active Sweeper**: NATS messages are retained for SSE/WS gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
@@ -79,8 +79,8 @@ These representations of the same data MUST always agree:
 | Source of truth | Must match in |
 | --------------- | ------------- |
 | Go struct tags in `config.go` (field name, env var, default) | `docs/configuration.md` tables, `config.yaml`, compose env blocks |
-| `EventMessage` struct JSON tags in `ingest/buffer.go` | `docs/api.md` event format, SSE/WS examples, ClickHouse `INSERT` columns |
-| ClickHouse `INSERT` column list in `buffer.go` | `docs/deployment.md` CREATE TABLE schema |
+| `EventMessage` struct JSON tags in `buffer.go` | `docs/api.md` event format, SSE/WS examples, ClickHouse `INSERT` columns |
+| ClickHouse `INSERT` column list in `buffer.go` | `docs/deployment.md` CREATE TABLE schema, `internal/ingest/schema.go` DDL |
 | Route registrations in `router.go` | `docs/api.md` endpoint list |
 | Handler error responses in `ingest.go`, `query.go`, etc. | `docs/api.md` error tables |
 | Compose env vars in `deployments/compose/*.yaml` | `docs/configuration.md`, `docs/deployment.md` |
@@ -135,7 +135,7 @@ internal/config/        → Configuration structs + loader
 internal/dedupe/        → Deduplication (interface + embedded/distributed)
 internal/ingest/        → Batch buffer + Active Sweeper (NATS message lifecycle)
 internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
-internal/schema/        → JSON flattening to EAV
+internal/schema/        → JSON flattening to typed Maps
 tests/                  → Integration tests (build tag: integration)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles

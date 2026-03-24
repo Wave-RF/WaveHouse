@@ -43,7 +43,11 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if since := r.URL.Query().Get("since"); since != "" {
 		if ts, err := time.Parse(time.RFC3339, since); err == nil && h.JS != nil {
 			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-				return conn.Write(r.Context(), websocket.MessageText, data) == nil
+				out, err := transformForClient(data)
+				if err != nil {
+					return true // skip this message
+				}
+				return conn.Write(r.Context(), websocket.MessageText, out) == nil
 			})
 		}
 	}
@@ -53,7 +57,11 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case data := <-ch:
-			if err := conn.Write(r.Context(), websocket.MessageText, data); err != nil {
+			out, err := transformForClient(data)
+			if err != nil {
+				continue
+			}
+			if err := conn.Write(r.Context(), websocket.MessageText, out); err != nil {
 				return
 			}
 		}

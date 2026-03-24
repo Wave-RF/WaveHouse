@@ -3,12 +3,14 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/BeachHouse/internal/mq"
+	"github.com/google/uuid"
 )
 
 // BufferConsumerName is the durable consumer name used by BufferConsumer.
@@ -17,12 +19,14 @@ const BufferConsumerName = "buffer-consumer"
 
 // EventMessage is the wire format published to the MQ.
 type EventMessage struct {
-	TenantID  string   `json:"tenant_id"`
-	EventID   string   `json:"event_id"`
-	Timestamp string   `json:"timestamp"`
-	EventType string   `json:"type"`
-	MapKeys   []string `json:"map_keys"`
-	MapValues []string `json:"map_values"`
+	TenantID          string             `json:"tenant_id"`
+	EventID           string             `json:"event_id"`
+	ReceivedTimestamp string             `json:"received_timestamp"`
+	Timestamp         string             `json:"timestamp"`
+	EventType         string             `json:"type"`
+	StrData           map[string]string  `json:"str_data"`
+	NumData           map[string]float64 `json:"num_data"`
+	BoolData          map[string]bool    `json:"bool_data"`
 }
 
 // BufferConsumer subscribes to the ingest stream and batch-inserts into ClickHouse.
@@ -111,13 +115,22 @@ func (b *BufferConsumer) Start(ctx context.Context) error {
 }
 
 func (b *BufferConsumer) insertBatch(ctx context.Context, events []EventMessage) error {
-	chBatch, err := b.conn.PrepareBatch(ctx, `INSERT INTO events (tenant_id, event_id, timestamp, type, map_keys, map_values)`)
+	chBatch, err := b.conn.PrepareBatch(ctx, `INSERT INTO events (tenant_id, event_id, received_timestamp, timestamp, type, str_data, num_data, bool_data)`)
 	if err != nil {
 		return err
 	}
 	for _, evt := range events {
-		ts, _ := time.Parse(time.RFC3339, evt.Timestamp)
-		if err := chBatch.Append(evt.TenantID, evt.EventID, ts, evt.EventType, evt.MapKeys, evt.MapValues); err != nil {
+		tenantUUID, err := uuid.Parse(evt.TenantID)
+		if err != nil {
+			return fmt.Errorf("parse tenant_id UUID: %w", err)
+		}
+		eventUUID, err := uuid.Parse(evt.EventID)
+		if err != nil {
+			return fmt.Errorf("parse event_id UUID: %w", err)
+		}
+		receivedTS, _ := time.Parse(time.RFC3339Nano, evt.ReceivedTimestamp)
+		ts, _ := time.Parse(time.RFC3339Nano, evt.Timestamp)
+		if err := chBatch.Append(tenantUUID, eventUUID, receivedTS, ts, evt.EventType, evt.StrData, evt.NumData, evt.BoolData); err != nil {
 			return err
 		}
 	}

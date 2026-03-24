@@ -12,14 +12,18 @@ import (
 func EnsureSchema(ctx context.Context, conn driver.Conn) error {
 	const ddl = `
 		CREATE TABLE IF NOT EXISTS events (
-			tenant_id   String,
-			event_id    String,
-			timestamp   DateTime64(3, 'UTC'),
-			type        String,
-			map_keys    Array(String),
-			map_values  Array(String)
-		) ENGINE = MergeTree()
-		ORDER BY (tenant_id, timestamp, event_id)`
+			tenant_id          UUID,
+			event_id           UUID,
+			received_timestamp DateTime64(3, 'UTC'),
+			ingested_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+			timestamp          DateTime64(3, 'UTC'),
+			type               String,
+			str_data           Map(String, String),
+			num_data           Map(String, Float64),
+			bool_data          Map(String, Bool)
+		) ENGINE = ReplacingMergeTree(ingested_timestamp)
+		PARTITION BY toYYYYMM(timestamp)
+		ORDER BY (tenant_id, type, toDate(timestamp), event_id)`
 	if err := conn.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure clickhouse schema: %w", err)
 	}

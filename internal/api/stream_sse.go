@@ -45,7 +45,11 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if since := r.URL.Query().Get("since"); since != "" {
 		if ts, err := time.Parse(time.RFC3339, since); err == nil && h.JS != nil {
 			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				out, err := transformForClient(data)
+				if err != nil {
+					return true // skip this message
+				}
+				fmt.Fprintf(w, "data: %s\n\n", out)
 				flusher.Flush()
 				return true
 			})
@@ -57,7 +61,11 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case data := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			out, err := transformForClient(data)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", out)
 			flusher.Flush()
 		}
 	}

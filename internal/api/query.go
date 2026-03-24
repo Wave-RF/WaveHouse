@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"regexp"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/BeachHouse/internal/cache"
+	"github.com/Wave-RF/BeachHouse/internal/schema"
+	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -95,7 +98,13 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, tenantID, sql string) ([]map[string]any, error) {
-	rows, err := h.CHConn.Query(ctx, sql, tenantID)
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tenant UUID: %w", err)
+	}
+
+	wrapped := injectTenantFilter(sql)
+	rows, err := h.CHConn.Query(ctx, wrapped, tenantUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -116,9 +125,62 @@ func (h *QueryHandler) executeQuery(ctx context.Context, tenantID, sql string) (
 		for i, col := range columns {
 			row[col.Name()] = reflect.ValueOf(valPtrs[i]).Elem().Interface()
 		}
-		results = append(results, row)
+		results = append(results, transformRow(row))
 	}
 	return results, nil
+}
+
+// eventsTableRe matches "FROM events" or "JOIN events" (case-insensitive).
+var eventsTableRe = regexp.MustCompile(`(?i)\b(FROM|JOIN)\s+events\b`)
+
+// injectTenantFilter wraps the user query in a CTE that pre-filters by tenant_id.
+// The user never needs to (and should not) include a tenant_id WHERE clause.
+func injectTenantFilter(sql string) string {
+	rewritten := eventsTableRe.ReplaceAllString(sql, "${1} __tenant_events")
+	return "WITH __tenant_events AS (SELECT * FROM events WHERE tenant_id = toUUID(?)) " + rewritten
+}
+
+// transformRow converts ClickHouse-specific types to JSON-friendly values,
+// unflattens typed map columns into a nested "data" object, and strips
+// internal columns (tenant_id) that clients should not see.
+func transformRow(row map[string]any) map[string]any {
+	// Convert ClickHouse types to JSON-friendly values.
+	for k, v := range row {
+		switch val := v.(type) {
+		case uuid.UUID:
+			row[k] = val.String()
+		case [16]byte:
+			row[k] = uuid.UUID(val).String()
+		case time.Time:
+			row[k] = val.UTC().Format(time.RFC3339Nano)
+		}
+	}
+
+	// Unflatten typed map columns into nested "data" object.
+	strData, hasStr := row["str_data"].(map[string]string)
+	numData, hasNum := row["num_data"].(map[string]float64)
+	boolData, hasBool := row["bool_data"].(map[string]bool)
+
+	if hasStr || hasNum || hasBool {
+		if !hasStr {
+			strData = nil
+		}
+		if !hasNum {
+			numData = nil
+		}
+		if !hasBool {
+			boolData = nil
+		}
+		row["data"] = schema.Unflatten(strData, numData, boolData)
+		delete(row, "str_data")
+		delete(row, "num_data")
+		delete(row, "bool_data")
+	}
+
+	// Strip internal columns.
+	delete(row, "tenant_id")
+
+	return row
 }
 
 func queryCacheKey(tenantID, sql string) string {

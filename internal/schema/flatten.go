@@ -6,52 +6,53 @@ import (
 	"strconv"
 )
 
-// Flatten takes raw JSON and produces dot-notation keys and string values
-// suitable for ClickHouse Map(String, String) columns.
-func Flatten(raw json.RawMessage) (keys []string, values []string, err error) {
+// Flatten takes raw JSON and produces three typed maps using dot-notation keys:
+//   - strData: string values
+//   - numData: numeric values (JSON numbers → float64)
+//   - boolData: boolean values
+//
+// Null values are skipped (not stored in any map).
+// Nested objects use dot-notation (e.g., "user.name").
+// Arrays use index-based keys (e.g., "tags.0", "tags.1").
+func Flatten(raw json.RawMessage) (strData map[string]string, numData map[string]float64, boolData map[string]bool, err error) {
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal: %w", err)
+		return nil, nil, nil, fmt.Errorf("unmarshal: %w", err)
 	}
-	keys = make([]string, 0)
-	values = make([]string, 0)
-	flattenMap("", obj, &keys, &values)
-	return keys, values, nil
+	strData = make(map[string]string)
+	numData = make(map[string]float64)
+	boolData = make(map[string]bool)
+	flattenMap("", obj, strData, numData, boolData)
+	return strData, numData, boolData, nil
 }
 
-func flattenMap(prefix string, m map[string]any, keys *[]string, values *[]string) {
+func flattenMap(prefix string, m map[string]any, strData map[string]string, numData map[string]float64, boolData map[string]bool) {
 	for k, v := range m {
 		fullKey := k
 		if prefix != "" {
 			fullKey = prefix + "." + k
 		}
-		flattenValue(fullKey, v, keys, values)
+		flattenValue(fullKey, v, strData, numData, boolData)
 	}
 }
 
-func flattenValue(key string, v any, keys *[]string, values *[]string) {
+func flattenValue(key string, v any, strData map[string]string, numData map[string]float64, boolData map[string]bool) {
 	switch val := v.(type) {
 	case map[string]any:
-		flattenMap(key, val, keys, values)
+		flattenMap(key, val, strData, numData, boolData)
 	case []any:
 		for i, elem := range val {
-			flattenValue(key+"."+strconv.Itoa(i), elem, keys, values)
+			flattenValue(key+"."+strconv.Itoa(i), elem, strData, numData, boolData)
 		}
 	case nil:
-		*keys = append(*keys, key)
-		*values = append(*values, "")
+		// Skip nulls — not stored in any map.
 	case bool:
-		*keys = append(*keys, key)
-		*values = append(*values, strconv.FormatBool(val))
+		boolData[key] = val
 	case float64:
-		*keys = append(*keys, key)
-		if val == float64(int64(val)) {
-			*values = append(*values, strconv.FormatInt(int64(val), 10))
-		} else {
-			*values = append(*values, strconv.FormatFloat(val, 'f', -1, 64))
-		}
+		numData[key] = val
+	case string:
+		strData[key] = val
 	default:
-		*keys = append(*keys, key)
-		*values = append(*values, fmt.Sprintf("%v", val))
+		strData[key] = fmt.Sprintf("%v", val)
 	}
 }

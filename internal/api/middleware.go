@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 type contextKey string
@@ -54,6 +55,11 @@ func JWTAuthMiddleware(secret string) func(http.Handler) http.Handler {
 			tenantID, ok := claims["tenant_id"].(string)
 			if !ok || tenantID == "" {
 				http.Error(w, `{"error":"missing tenant_id claim"}`, http.StatusForbidden)
+				return
+			}
+
+			if _, err := uuid.Parse(tenantID); err != nil {
+				http.Error(w, `{"error":"tenant_id must be a valid UUID"}`, http.StatusForbidden)
 				return
 			}
 

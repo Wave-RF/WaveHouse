@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/BeachHouse/internal/ingest"
 	"github.com/Wave-RF/BeachHouse/internal/mq"
 	"github.com/Wave-RF/BeachHouse/internal/schema"
+	"github.com/google/uuid"
 )
 
 // IngestHandler handles POST /v1/ingest.
@@ -35,6 +36,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"no tenant"}`, http.StatusForbidden)
 		return
 	}
+	if _, err := uuid.Parse(tenantID); err != nil {
+		http.Error(w, `{"error":"tenant_id must be a valid UUID"}`, http.StatusForbidden)
+		return
+	}
 
 	var req ingestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -43,6 +48,18 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ID == "" {
 		http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+		return
+	}
+	if _, err := uuid.Parse(req.ID); err != nil {
+		http.Error(w, `{"error":"id must be a valid UUID"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Type == "" {
+		http.Error(w, `{"error":"missing type"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Data == nil {
+		http.Error(w, `{"error":"missing data"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -58,30 +75,32 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Flatten data to EAV. User-supplied fields (including any "tenant_id" in the
+	// Flatten data to typed maps. User-supplied fields (including any "tenant_id" in the
 	// payload) are flattened as normal data — they never affect the system tenant_id.
-	var mapKeys, mapValues []string
-	if req.Data != nil {
-		mapKeys, mapValues, err = schema.Flatten(req.Data)
-		if err != nil {
-			http.Error(w, `{"error":"flatten failed"}`, http.StatusBadRequest)
-			return
-		}
+	strData, numData, boolData, err := schema.Flatten(req.Data)
+	if err != nil {
+		http.Error(w, `{"error":"flatten failed"}`, http.StatusBadRequest)
+		return
 	}
+
+	now := time.Now().UTC()
+	receivedTS := now.Format(time.RFC3339Nano)
 
 	ts := req.Timestamp
 	if ts == "" {
-		ts = time.Now().UTC().Format(time.RFC3339)
+		ts = receivedTS
 	}
 
 	// Build MQ message with system tenant_id from JWT.
 	evt := ingest.EventMessage{
-		TenantID:  tenantID,
-		EventID:   req.ID,
-		Timestamp: ts,
-		EventType: req.Type,
-		MapKeys:   mapKeys,
-		MapValues: mapValues,
+		TenantID:          tenantID,
+		EventID:           req.ID,
+		ReceivedTimestamp: receivedTS,
+		Timestamp:         ts,
+		EventType:         req.Type,
+		StrData:           strData,
+		NumData:           numData,
+		BoolData:          boolData,
 	}
 	data, err := json.Marshal(evt)
 	if err != nil {

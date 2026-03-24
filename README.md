@@ -19,7 +19,7 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **👯 Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations.
 * **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
 * **🌊 Zero-Latency Real-Time Push:** When data is pushed via the BeachHouse API, it is immediately broadcast to authorized SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion for your users, with seamless gap-fill from NATS JetStream history for clients that connect late.
-* **🗂️ Dynamic Schema Normalization:** Accept arbitrary, nested JSON payloads from clients. BeachHouse flattens them into an optimized Entity-Attribute-Value (EAV) Map schema, eliminating the need for constant ClickHouse `ALTER TABLE` migrations.
+* **🗂️ Dynamic Schema Normalization:** Accept arbitrary, nested JSON payloads from clients. BeachHouse flattens them into optimized typed Map columns (`str_data`, `num_data`, `bool_data`) in ClickHouse, eliminating the need for constant `ALTER TABLE` migrations.
 
 ## 🚀 Deployment Modes
 
@@ -43,20 +43,20 @@ cd BeachHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Generate a test JWT (requires jwt-cli: https://github.com/mike-engel/jwt-cli)
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550e8400-e29b-41d4-a716-446655440000", "exp": 9999999999}')
 
 # Ingest an event
 curl -s -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "evt-001", "type": "click", "data": {"page": "/home", "button": "signup"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home", "button": "signup"}}'
 # → {"ok":true}
 
 # Query events (wait ~5s for the batch flush to ClickHouse)
 curl -s -X POST http://localhost:8080/v1/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM events WHERE tenant_id = ? LIMIT 10"}'
+  -d '{"sql": "SELECT * FROM events LIMIT 10"}'
 
 # Open a real-time SSE stream (Ctrl+C to stop)
 curl -N http://localhost:8080/v1/stream/sse \

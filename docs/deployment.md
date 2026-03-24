@@ -11,11 +11,11 @@ The standalone mode runs everything in a single process with embedded NATS and P
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Test it (the events table is auto-created at startup)
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550e8400-e29b-41d4-a716-446655440000", "exp": 9999999999}')
 curl -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "evt-001", "type": "click", "data": {"page": "/home"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home"}}'
 ```
 
 > **Note:** In standalone mode, `clickhouse.auto_migrate` defaults to `true`, so the `events` table is created automatically. Set `BH_CH_AUTO_MIGRATE=false` to manage the schema yourself.
@@ -73,9 +73,18 @@ docker compose -f deployments/compose/cluster.yaml up -d
 docker compose -f deployments/compose/cluster.yaml exec clickhouse \
   clickhouse-client --query "
     CREATE TABLE IF NOT EXISTS events (
-      tenant_id String, event_id String, timestamp DateTime64(3, 'UTC'),
-      type String, map_keys Array(String), map_values Array(String)
-    ) ENGINE = MergeTree() ORDER BY (tenant_id, timestamp, event_id)
+      tenant_id UUID,
+      event_id UUID,
+      received_timestamp DateTime64(3, 'UTC'),
+      ingested_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+      timestamp DateTime64(3, 'UTC'),
+      type String,
+      str_data Map(String, String),
+      num_data Map(String, Float64),
+      bool_data Map(String, Bool)
+    ) ENGINE = ReplacingMergeTree(ingested_timestamp)
+    PARTITION BY toYYYYMM(timestamp)
+    ORDER BY (tenant_id, type, toDate(timestamp), event_id)
   "
 
 # Create the ScyllaDB keyspace and table
@@ -90,11 +99,11 @@ docker compose -f deployments/compose/cluster.yaml exec scylladb \
   "
 
 # BeachHouse API is available via Caddy on port 80
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "test-tenant", "exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550e8400-e29b-41d4-a716-446655440000", "exp": 9999999999}')
 curl -X POST http://localhost/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "evt-001", "type": "click", "data": {"page": "/home"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home"}}'
 ```
 
 This starts:
@@ -208,17 +217,21 @@ BeachHouse expects an `events` table in ClickHouse. In standalone mode, the tabl
 
 ```sql
 CREATE TABLE IF NOT EXISTS events (
-    tenant_id   String,
-    event_id    String,
-    timestamp   DateTime64(3, 'UTC'),
-    type        String,
-    map_keys    Array(String),
-    map_values  Array(String)
-) ENGINE = MergeTree()
-ORDER BY (tenant_id, timestamp, event_id);
+    tenant_id            UUID,
+    event_id             UUID,
+    received_timestamp   DateTime64(3, 'UTC'),
+    ingested_timestamp   DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+    timestamp            DateTime64(3, 'UTC'),
+    type                 String,
+    str_data             Map(String, String),
+    num_data             Map(String, Float64),
+    bool_data            Map(String, Bool)
+) ENGINE = ReplacingMergeTree(ingested_timestamp)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (tenant_id, type, toDate(timestamp), event_id);
 ```
 
-> **Note:** The column is named `type` (not `event_type`), and the flattened data is stored as parallel `map_keys`/`map_values` arrays (not a `Map(String, String)` column). These match the `INSERT` statement in `internal/ingest/buffer.go`.
+> **Note:** The table uses `ReplacingMergeTree(ingested_timestamp)` for deduplication at the storage level. The `type` field is included in the ORDER BY as a pseudo-table concept. Data is stored in three typed Map columns: `str_data`, `num_data`, and `bool_data` — not parallel arrays. Both `tenant_id` and `event_id` are UUID type. `ingested_timestamp` is auto-populated by ClickHouse via `DEFAULT now64(3, 'UTC')`.
 
 ## ScyllaDB Schema (Clustered Mode)
 
@@ -235,4 +248,63 @@ CREATE TABLE IF NOT EXISTS beachhouse.dedupe (
     created_at timestamp,
     PRIMARY KEY (tenant_id, event_hash)
 );
+```
+
+## Resetting ClickHouse in Development
+
+When you change the ClickHouse schema (e.g., adding columns or changing the table engine), you need to drop and recreate the `events` table. ClickHouse doesn't support some `ALTER TABLE` operations on column types or engine changes.
+
+### Option 1: Drop and Recreate (Fastest)
+
+```bash
+# Connect to ClickHouse and drop the table
+docker compose -f deployments/compose/standalone.yaml exec clickhouse \
+  clickhouse-client --query "DROP TABLE IF EXISTS events"
+
+# Restart BeachHouse — auto_migrate will recreate it with the new schema
+docker compose -f deployments/compose/standalone.yaml restart beachhouse
+```
+
+### Option 2: Full Reset (Clean Slate)
+
+This deletes all data (ClickHouse, NATS, Pebble) and starts fresh:
+
+```bash
+# Stop everything and remove volumes
+docker compose -f deployments/compose/standalone.yaml down -v
+
+# Start fresh
+docker compose -f deployments/compose/standalone.yaml up -d
+```
+
+### Option 3: Reset for Local Binary Development
+
+If you're running BeachHouse as a local binary (not Docker), you also need to clear local data directories:
+
+```bash
+# Stop any running BeachHouse process, then:
+rm -rf data/         # Removes embedded NATS + Pebble data
+make clean           # Removes bin/, tmp/, data/
+
+# Drop the ClickHouse table
+docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
+  clickhouse-client --query "DROP TABLE IF EXISTS events"
+
+# Rebuild and run — auto_migrate recreates the table
+make build && ./bin/beachhouse
+```
+
+### Clustered Mode Reset
+
+```bash
+# Drop ClickHouse table
+docker compose -f deployments/compose/cluster.yaml exec clickhouse \
+  clickhouse-client --query "DROP TABLE IF EXISTS events"
+
+# Optionally clear ScyllaDB dedup data
+docker compose -f deployments/compose/cluster.yaml exec scylladb \
+  cqlsh -e "TRUNCATE beachhouse.dedupe;"
+
+# Restart services (or recreate the table manually — see ClickHouse Schema section above)
+docker compose -f deployments/compose/cluster.yaml restart
 ```
