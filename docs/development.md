@@ -55,14 +55,14 @@ print(jwt.encode({'tenant_id': '550e8400-e29b-41d4-a716-446655440000', 'exp': in
 curl -s -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
+  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "table_name": "page_view", "data": {"url": "/home", "user": "alice"}}'
 # → {"ok":true}
 
 # Ingest the same event again (dedup test)
 curl -s -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "type": "page_view", "data": {"url": "/home", "user": "alice"}}'
+  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "table_name": "page_view", "data": {"url": "/home", "user": "alice"}}'
 # → {"duplicate":true}
 
 # Query events (wait a few seconds for the batch flush)
@@ -106,13 +106,13 @@ docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
       received_timestamp DateTime64(3, 'UTC'),
       ingested_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
       timestamp DateTime64(3, 'UTC'),
-      type String,
+      table_name String,
       str_data Map(String, String),
       num_data Map(String, Float64),
       bool_data Map(String, Bool)
     ) ENGINE = ReplacingMergeTree(ingested_timestamp)
     PARTITION BY toYYYYMM(timestamp)
-    ORDER BY (tenant_id, type, toDate(timestamp), event_id)
+    ORDER BY (tenant_id, table_name, toDate(timestamp), event_id)
   "
 
 # 3. Create the ScyllaDB keyspace and dedup table

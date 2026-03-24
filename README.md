@@ -49,7 +49,7 @@ export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550
 curl -s -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home", "button": "signup"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "table_name": "click", "data": {"page": "/home", "button": "signup"}}'
 # → {"ok":true}
 
 # Query events (wait ~5s for the batch flush to ClickHouse)

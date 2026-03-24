@@ -36,6 +36,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// SECURITY: Hard stop if JWT secret is missing or warn but continue if using default
+	switch cfg.Auth.JWTSecret {
+	case "":
+		logger.Error("FATAL: BH_AUTH_JWT_SECRET is missing")
+		os.Exit(1)
+	case "change-me-in-production":
+		logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+	}
+
 	// ClickHouse.
 	chConn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.ClickHouse.Addr},
@@ -107,6 +116,7 @@ func main() {
 
 	// Hub bridge: MQ → broadcast to connected clients.
 	consumerName := "hub-bridge-" + uuid.New().String()
+	// TODO: ^ may want to create using hostname or PID or something for easier debugging and monitoring, but needs to be unique to avoid collisions in clustered mode
 	_ = remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {

@@ -26,7 +26,7 @@ func NewIngestHandler(d dedupe.Deduplicator, pub mq.Publisher) *IngestHandler {
 type ingestRequest struct {
 	ID        string          `json:"id"`
 	Timestamp string          `json:"timestamp"`
-	Type      string          `json:"type"`
+	TableName string          `json:"table_name"`
 	Data      json.RawMessage `json:"data"`
 }
 
@@ -54,8 +54,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"id must be a valid UUID"}`, http.StatusBadRequest)
 		return
 	}
-	if req.Type == "" {
-		http.Error(w, `{"error":"missing type"}`, http.StatusBadRequest)
+	if req.TableName == "" {
+		http.Error(w, `{"error":"missing table_name"}`, http.StatusBadRequest)
 		return
 	}
 	if req.Data == nil {
@@ -97,7 +97,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		EventID:           req.ID,
 		ReceivedTimestamp: receivedTS,
 		Timestamp:         ts,
-		EventType:         req.Type,
+		TableName:         req.TableName,
 		StrData:           strData,
 		NumData:           numData,
 		BoolData:          boolData,

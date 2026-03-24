@@ -15,7 +15,7 @@ export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550
 curl -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "table_name": "click", "data": {"page": "/home"}}'
 ```
 
 > **Note:** In standalone mode, `clickhouse.auto_migrate` defaults to `true`, so the `events` table is created automatically. Set `BH_CH_AUTO_MIGRATE=false` to manage the schema yourself.
@@ -78,13 +78,13 @@ docker compose -f deployments/compose/cluster.yaml exec clickhouse \
       received_timestamp DateTime64(3, 'UTC'),
       ingested_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
       timestamp DateTime64(3, 'UTC'),
-      type String,
+      table_name String,
       str_data Map(String, String),
       num_data Map(String, Float64),
       bool_data Map(String, Bool)
     ) ENGINE = ReplacingMergeTree(ingested_timestamp)
     PARTITION BY toYYYYMM(timestamp)
-    ORDER BY (tenant_id, type, toDate(timestamp), event_id)
+    ORDER BY (tenant_id, table_name, toDate(timestamp), event_id)
   "
 
 # Create the ScyllaDB keyspace and table
@@ -103,7 +103,7 @@ export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550
 curl -X POST http://localhost/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "table_name": "click", "data": {"page": "/home"}}'
 ```
 
 This starts:
@@ -222,16 +222,16 @@ CREATE TABLE IF NOT EXISTS events (
     received_timestamp   DateTime64(3, 'UTC'),
     ingested_timestamp   DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
     timestamp            DateTime64(3, 'UTC'),
-    type                 String,
+    table_name           String,
     str_data             Map(String, String),
     num_data             Map(String, Float64),
     bool_data            Map(String, Bool)
 ) ENGINE = ReplacingMergeTree(ingested_timestamp)
 PARTITION BY toYYYYMM(timestamp)
-ORDER BY (tenant_id, type, toDate(timestamp), event_id);
+ORDER BY (tenant_id, table_name, toDate(timestamp), event_id);
 ```
 
-> **Note:** The table uses `ReplacingMergeTree(ingested_timestamp)` for deduplication at the storage level. The `type` field is included in the ORDER BY as a pseudo-table concept. Data is stored in three typed Map columns: `str_data`, `num_data`, and `bool_data` — not parallel arrays. Both `tenant_id` and `event_id` are UUID type. `ingested_timestamp` is auto-populated by ClickHouse via `DEFAULT now64(3, 'UTC')`.
+> **Note:** The table uses `ReplacingMergeTree(ingested_timestamp)` for deduplication at the storage level. The `table_name` field is included in the ORDER BY as a pseudo-table concept. Data is stored in three typed Map columns: `str_data`, `num_data`, and `bool_data` — not parallel arrays. Both `tenant_id` and `event_id` are UUID type. `ingested_timestamp` is auto-populated by ClickHouse via `DEFAULT now64(3, 'UTC')`.
 
 ## ScyllaDB Schema (Clustered Mode)
 

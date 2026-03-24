@@ -15,6 +15,7 @@ import (
 
 // BufferConsumerName is the durable consumer name used by BufferConsumer.
 // The Active Sweeper references this to read the AckFloor.
+// TODO: on cluster mode this will need to be unique per instance or use a shared durable consumer with explicit Ack management.
 const BufferConsumerName = "buffer-consumer"
 
 // EventMessage is the wire format published to the MQ.
@@ -23,7 +24,7 @@ type EventMessage struct {
 	EventID           string             `json:"event_id"`
 	ReceivedTimestamp string             `json:"received_timestamp"`
 	Timestamp         string             `json:"timestamp"`
-	EventType         string             `json:"type"`
+	TableName         string             `json:"table_name"`
 	StrData           map[string]string  `json:"str_data"`
 	NumData           map[string]float64 `json:"num_data"`
 	BoolData          map[string]bool    `json:"bool_data"`
@@ -115,7 +116,7 @@ func (b *BufferConsumer) Start(ctx context.Context) error {
 }
 
 func (b *BufferConsumer) insertBatch(ctx context.Context, events []EventMessage) error {
-	chBatch, err := b.conn.PrepareBatch(ctx, `INSERT INTO events (tenant_id, event_id, received_timestamp, timestamp, type, str_data, num_data, bool_data)`)
+	chBatch, err := b.conn.PrepareBatch(ctx, `INSERT INTO events (tenant_id, event_id, received_timestamp, timestamp, table_name, str_data, num_data, bool_data)`)
 	if err != nil {
 		return err
 	}
@@ -130,7 +131,7 @@ func (b *BufferConsumer) insertBatch(ctx context.Context, events []EventMessage)
 		}
 		receivedTS, _ := time.Parse(time.RFC3339Nano, evt.ReceivedTimestamp)
 		ts, _ := time.Parse(time.RFC3339Nano, evt.Timestamp)
-		if err := chBatch.Append(tenantUUID, eventUUID, receivedTS, ts, evt.EventType, evt.StrData, evt.NumData, evt.BoolData); err != nil {
+		if err := chBatch.Append(tenantUUID, eventUUID, receivedTS, ts, evt.TableName, evt.StrData, evt.NumData, evt.BoolData); err != nil {
 			return err
 		}
 	}

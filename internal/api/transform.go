@@ -20,7 +20,7 @@ func transformForClient(raw []byte) ([]byte, error) {
 		"event_id":           evt.EventID,
 		"timestamp":          evt.Timestamp,
 		"received_timestamp": evt.ReceivedTimestamp,
-		"type":               evt.EventType,
+		"table_name":         evt.TableName,
 		"data":               schema.Unflatten(evt.StrData, evt.NumData, evt.BoolData),
 	}
 

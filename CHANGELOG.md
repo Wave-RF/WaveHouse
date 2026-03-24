@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING:** ClickHouse schema now uses `UUID` type for `tenant_id` and `event_id` columns (previously `String`)
 - **BREAKING:** ClickHouse schema now uses three typed Map columns (`str_data Map(String, String)`, `num_data Map(String, Float64)`, `bool_data Map(String, Bool)`) replacing `map_keys Array(String)` / `map_values Array(String)`
-- **BREAKING:** ClickHouse table engine changed from `MergeTree()` to `ReplacingMergeTree(ingested_timestamp)` with `PARTITION BY toYYYYMM(timestamp)` and `ORDER BY (tenant_id, type, toDate(timestamp), event_id)`
-- **BREAKING:** Ingest endpoint now requires `type` and `data` fields (previously optional)
+- **BREAKING:** ClickHouse table engine changed from `MergeTree()` to `ReplacingMergeTree(ingested_timestamp)` with `PARTITION BY toYYYYMM(timestamp)` and `ORDER BY (tenant_id, table_name, toDate(timestamp), event_id)`
+- **BREAKING:** Ingest endpoint now requires `table_name` and `data` fields (previously optional)
+- **BREAKING:** The `type` column/field has been renamed to `table_name` throughout (ClickHouse DDL, API request/response, wire format, SSE/WS output)
 - **BREAKING:** Ingest `id` field must be a valid UUID (previously any string)
 - **BREAKING:** JWT `tenant_id` claim must be a valid UUID — non-UUID values are rejected with 403
 - **BREAKING:** Query endpoint no longer requires `WHERE tenant_id = ?` — tenant filtering is automatically injected via CTE
@@ -23,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `received_timestamp` column in ClickHouse — records when BeachHouse received the event
 - `ingested_timestamp` column in ClickHouse — auto-populated by ClickHouse via `DEFAULT now64(3, 'UTC')`, used as the `ReplacingMergeTree` version column
-- `type` as a pseudo-table concept in ORDER BY for efficient partitioning by event type
+- `table_name` as a pseudo-table concept in ORDER BY for efficient partitioning by event type
 - `Unflatten()` function in `schema` package — reconstructs nested JSON from three typed maps
 - `transformForClient()` shared function for SSE/WS event transformation
 - Automatic CTE-based tenant isolation in query handler (`injectTenantFilter`)

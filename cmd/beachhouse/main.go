@@ -35,6 +35,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// SECURITY: Hard stop if JWT secret is missing or warn but continue if using default
+	switch cfg.Auth.JWTSecret {
+	case "":
+		logger.Error("FATAL: BH_AUTH_JWT_SECRET is missing")
+		os.Exit(1)
+	case "change-me-in-production":
+		logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+	}
+
 	// ClickHouse connection.
 	chConn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.ClickHouse.Addr},

@@ -31,5 +31,9 @@ compose-cluster:
 compose-deps:
 	docker compose -f deployments/compose/dependencies.yaml up -d
 
+deps-wipe:
+	docker compose -f deployments/compose/dependencies.yaml down -v --remove-orphans
+	docker compose -f deployments/compose/dependencies.yaml up -d --force-recreate
+
 clean:
 	rm -rf bin/ tmp/ data/

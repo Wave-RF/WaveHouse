@@ -122,7 +122,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 ```text
 Client POST /v1/ingest
   → JWT auth middleware (extract tenant_id, validate UUID)
-  → Validate id (UUID), type (required), data (required)
+  → Validate id (UUID), table_name (required), data (required)
   → Deduplication check (tenant_id:event_id)
   → Schema flattening (nested JSON → three typed maps)
   → Publish to NATS JetStream (ingest.events)

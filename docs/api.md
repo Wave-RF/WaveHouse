@@ -61,7 +61,7 @@ Accepts a JSON event, deduplicates it, flattens the data into typed maps, and pu
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "timestamp": "2026-03-24T12:00:00Z",
-  "type": "page_view",
+  "table_name": "page_view",
   "data": {
     "url": "https://example.com/dashboard",
     "user": {
@@ -77,7 +77,7 @@ Accepts a JSON event, deduplicates it, flattens the data into typed maps, and pu
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
 | `id` | string (UUID) | Yes | Unique event ID (must be a valid UUID). Used for deduplication (scoped to tenant). |
-| `type` | string | Yes | Event type label. Acts as a pseudo-table in ClickHouse for partitioning and ordering. |
+| `table_name` | string | Yes | Logical table name. Acts as a pseudo-table in ClickHouse for partitioning and ordering. |
 | `data` | object | Yes | Arbitrary nested JSON payload. Flattened into three typed maps (strings, numbers, booleans). |
 | `timestamp` | string | No | RFC 3339 timestamp. Defaults to server receive time if omitted. |
 
@@ -125,7 +125,7 @@ Accepts a JSON event, deduplicates it, flattens the data into typed maps, and pu
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing id"}` | Missing `id` field |
 | 400 | `{"error":"id must be a valid UUID"}` | `id` is not a valid UUID |
-| 400 | `{"error":"missing type"}` | Missing `type` field |
+| 400 | `{"error":"missing table_name"}` | Missing `table_name` field |
 | 400 | `{"error":"missing data"}` | Missing `data` field |
 | 400 | `{"error":"flatten failed"}` | Invalid data structure |
 | 403 | `{"error":"no tenant"}` | Missing tenant_id in JWT |
@@ -142,7 +142,7 @@ curl -X POST http://localhost:8080/v1/ingest \
   -H "Content-Type: application/json" \
   -d '{
     "id": "550e8400-e29b-41d4-a716-446655440000",
-    "type": "click",
+    "table_name": "click",
     "data": {"button": "signup", "page": "/home"}
   }'
 ```
@@ -163,7 +163,7 @@ The response automatically:
 
 ```json
 {
-  "sql": "SELECT event_id, type, timestamp, str_data, num_data, bool_data FROM events LIMIT 10",
+  "sql": "SELECT event_id, table_name, timestamp, str_data, num_data, bool_data FROM events LIMIT 10",
   "params": []
 }
 ```
@@ -179,7 +179,7 @@ The response automatically:
 [
   {
     "event_id": "550e8400-e29b-41d4-a716-446655440000",
-    "type": "page_view",
+    "table_name": "page_view",
     "timestamp": "2026-03-24T12:00:00Z",
     "data": {
       "url": "https://example.com/dashboard",
@@ -239,9 +239,9 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 Events are automatically transformed to a client-friendly format: typed map columns are unflattened into a nested `data` object, and internal fields (`tenant_id`) are stripped.
 
 ```text
-data: {"event_id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"2026-03-24T12:00:00Z","received_timestamp":"2026-03-24T12:00:00.123Z","type":"click","data":{"button":"signup"}}
+data: {"event_id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"2026-03-24T12:00:00Z","received_timestamp":"2026-03-24T12:00:00.123Z","table_name":"click","data":{"button":"signup"}}
 
-data: {"event_id":"660e8400-e29b-41d4-a716-446655440001","timestamp":"2026-03-24T12:00:01Z","received_timestamp":"2026-03-24T12:00:01.456Z","type":"page_view","data":{"url":"/home"}}
+data: {"event_id":"660e8400-e29b-41d4-a716-446655440001","timestamp":"2026-03-24T12:00:01Z","received_timestamp":"2026-03-24T12:00:01.456Z","table_name":"page_view","data":{"url":"/home"}}
 ```
 
 **curl example:**
@@ -292,7 +292,7 @@ The internal message format used on NATS JetStream between ingest and buffer con
   "event_id": "660e8400-e29b-41d4-a716-446655440001",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "timestamp": "2026-03-24T12:00:00Z",
-  "type": "page_view",
+  "table_name": "page_view",
   "str_data": {"url": "https://example.com", "user.name": "Alice"},
   "num_data": {"score": 42.5},
   "bool_data": {"user.verified": true}
@@ -305,7 +305,7 @@ The internal message format used on NATS JetStream between ingest and buffer con
 | `event_id` | string (UUID) | Unique event identifier (from client). |
 | `received_timestamp` | string | RFC 3339 nano timestamp when BeachHouse received the event. |
 | `timestamp` | string | RFC 3339 timestamp (client-supplied, or defaults to received time). |
-| `type` | string | Event type label (acts as pseudo-table). |
+| `table_name` | string | Logical table name (acts as pseudo-table). |
 | `str_data` | object | Flattened string values from `data`. |
 | `num_data` | object | Flattened numeric values from `data`. |
 | `bool_data` | object | Flattened boolean values from `data`. |
@@ -319,7 +319,7 @@ Events sent to SSE and WebSocket clients are transformed: typed maps are unflatt
   "event_id": "660e8400-e29b-41d4-a716-446655440001",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "timestamp": "2026-03-24T12:00:00Z",
-  "type": "page_view",
+  "table_name": "page_view",
   "data": {
     "url": "https://example.com",
     "user": {"name": "Alice", "verified": true},
@@ -355,5 +355,5 @@ Then use it with any endpoint:
 curl -X POST http://localhost:8080/v1/ingest \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "type": "click", "data": {"page": "/home"}}'
+  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "table_name": "click", "data": {"page": "/home"}}'
 ```
