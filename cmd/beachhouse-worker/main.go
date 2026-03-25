@@ -78,8 +78,14 @@ func main() {
 	go registry.StartAutoRefresh(ctx)
 
 	// Batch consumer → ClickHouse.
-	nc := remoteMQ.NatsConn()
-	ingest.StartIngestWorker(nc, cfg.ClickHouse.Addr, "8123", cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database)
+	ingest.StartIngestWorker(
+        remoteMQ.NatsConn(), 
+        cfg.ClickHouse.Addr, 
+        cfg.ClickHouse.HTTPPort, // Uses 8123 by default
+        cfg.ClickHouse.Username, 
+        cfg.ClickHouse.Password, 
+        cfg.ClickHouse.Database,
+    )
 
 	// Active sweeper — purges processed + expired messages every minute.
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute

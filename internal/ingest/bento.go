@@ -69,7 +69,7 @@ input:
 output:
   fallback:
     - http_client:
-        url: 'http://%s:%s/?database=%s&query=INSERT+INTO+${! json("table_name") }+FORMAT+JSONEachRow'
+        url: 'http://%s:%s/?database=%s&query=INSERT+INTO+${! json("table_name") }+FORMAT+JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort'
         verb: POST
         headers:
           Content-Type: application/json
@@ -81,6 +81,10 @@ output:
           processors:
             - group_by_value:
                 value: '${! json("table_name") }'
+            - mapping: |
+                root = this.data | {}
+                root.received_timestamp = this.received_timestamp
+                root.table_name = this.table_name
             - archive:
                 format: lines
     - file:

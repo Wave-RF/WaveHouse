@@ -6,6 +6,7 @@ server:
 
 clickhouse:
   addr: localhost:9000
+  http_port: 8123
   database: default
   username: default
   password: ""

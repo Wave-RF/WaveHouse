@@ -122,9 +122,14 @@ func main() {
 	go registry.StartAutoRefresh(ctx)
 
 	// Start batch consumer → ClickHouse.
-	nc := embeddedMQ.NatsConn()
-	ingest.StartIngestWorker(nc, cfg.ClickHouse.Addr, "8123", cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database)
-
+	ingest.StartIngestWorker(
+		embeddedMQ.NatsConn(), 
+		cfg.ClickHouse.Addr, 
+		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
+		cfg.ClickHouse.Username, 
+		cfg.ClickHouse.Password, 
+		cfg.ClickHouse.Database,
+		)
 	// Start active sweeper.
 	go sweeper.Start(ctx)
 

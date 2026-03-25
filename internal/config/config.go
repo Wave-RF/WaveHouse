@@ -35,6 +35,7 @@ type Server struct {
 
 type ClickHouse struct {
 	Addr     string `yaml:"addr" env:"BH_CH_ADDR" env-default:"localhost:9000"`
+	HTTPPort string `yaml:"http_port" env:"BH_CH_HTTP_PORT" env-default:"8123"`
 	Database string `yaml:"database" env:"BH_CH_DATABASE" env-default:"default"`
 	Username string `yaml:"username" env:"BH_CH_USERNAME" env-default:"default"`
 	Password string `yaml:"password" env:"BH_CH_PASSWORD"`
