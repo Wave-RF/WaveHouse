@@ -49,9 +49,12 @@ services:
       BH_CH_ADDR: clickhouse:9000
       BH_MQ_URL: nats://nats:4222
       BH_CACHE_REDIS_URL: redis://redis:6379
+      BH_AUTH_ENABLED: "false"
+      BH_DEDUPE_ENABLED: "false"
       BH_DEDUPE_SCYLLA_HOSTS: scylladb:9042
       BH_DEDUPE_SCYLLA_KEYSPACE: beachhouse
-      BH_AUTH_JWT_SECRET: change-me-in-production
+      BH_SCHEMA_REFRESH_INTERVAL: "60"
+      BH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats
@@ -67,9 +70,12 @@ services:
       BH_CH_ADDR: clickhouse:9000
       BH_MQ_URL: nats://nats:4222
       BH_CACHE_REDIS_URL: redis://redis:6379
+      BH_AUTH_ENABLED: "false"
+      BH_DEDUPE_ENABLED: "false"
       BH_DEDUPE_SCYLLA_HOSTS: scylladb:9042
       BH_DEDUPE_SCYLLA_KEYSPACE: beachhouse
-      BH_AUTH_JWT_SECRET: change-me-in-production
+      BH_SCHEMA_REFRESH_INTERVAL: "60"
+      BH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats
@@ -84,6 +90,8 @@ services:
       BH_MODE: clustered
       BH_CH_ADDR: clickhouse:9000
       BH_MQ_URL: nats://nats:4222
+      BH_SCHEMA_REFRESH_INTERVAL: "60"
+      BH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats
@@ -96,6 +104,8 @@ services:
       BH_MODE: clustered
       BH_CH_ADDR: clickhouse:9000
       BH_MQ_URL: nats://nats:4222
+      BH_SCHEMA_REFRESH_INTERVAL: "60"
+      BH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats

@@ -34,10 +34,15 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `clickhouse.addr` | `BH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
-| `clickhouse.database` | `BH_CH_DATABASE` | `default` | Database name. |
+| `clickhouse.database` | `BH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `BH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `BH_CH_PASSWORD` | *(empty)* | Authentication password. |
-| `clickhouse.auto_migrate` | `BH_CH_AUTO_MIGRATE` | `true` (standalone) / `false` (clustered) | Auto-create the `events` table at startup using `CREATE TABLE IF NOT EXISTS`. Set to `false` if you manage your own ClickHouse schema. |
+
+### Schema Discovery
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `schema.refresh_interval` | `BH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh`. |
 
 ### Message Queue (NATS)
 
@@ -52,10 +57,11 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
+| `dedupe.enabled` | `BH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
+| `dedupe.id_field` | `BH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
 | `dedupe.embedded_dir` | `BH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store (standalone mode). |
 | `dedupe.scylla_hosts` | `BH_DEDUPE_SCYLLA_HOSTS` | `localhost:9042` | ScyllaDB contact points (clustered mode). Comma-separated. |
 | `dedupe.scylla_keyspace` | `BH_DEDUPE_SCYLLA_KEYSPACE` | `beachhouse` | ScyllaDB keyspace name. |
-| `dedupe.auto_migrate` | `BH_DEDUPE_AUTO_MIGRATE` | `true` (standalone) / `false` (clustered) | Auto-create the ScyllaDB keyspace and `dedupe` table at startup using `IF NOT EXISTS`. The keyspace is created with `SimpleStrategy` / RF=1. Set to `false` if you manage your own ScyllaDB schema (e.g., to use `NetworkTopologyStrategy`). |
 
 ### Cache
 
@@ -69,7 +75,14 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `auth.jwt_secret` | `BH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set in production.** |
+| `auth.enabled` | `BH_AUTH_ENABLED` | `false` | Enable JWT authentication on `/v1/*` routes. When disabled, all endpoints are open. |
+| `auth.jwt_secret` | `BH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set when auth is enabled.** |
+
+### Dead Letter Queue (DLQ)
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `dlq.enabled` | `BH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. Failed batch inserts are published to the `BEACHHOUSE_DLQ` NATS stream instead of blocking retries. |
 
 ## Example Config File
 
@@ -85,7 +98,6 @@ clickhouse:
   database: default
   username: default
   password: ""
-  # auto_migrate: true  # defaults based on mode
 
 mq:
   embedded_dir: ./data/nats
@@ -94,11 +106,12 @@ mq:
   max_bytes_gb: 50
 
 dedupe:
+  enabled: false
+  id_field: event_id
   embedded_dir: ./data/pebble
   scylla_hosts:
     - localhost:9042
   scylla_keyspace: beachhouse
-  # auto_migrate: true  # defaults based on mode
 
 cache:
   l1_max_cost: 67108864
@@ -106,7 +119,14 @@ cache:
   default_ttl: 300
 
 auth:
+  enabled: false
   jwt_secret: change-me-in-production
+
+schema:
+  refresh_interval: 60
+
+dlq:
+  enabled: true
 ```
 
 ## Mode-Specific Settings
@@ -118,24 +138,23 @@ Uses embedded components. Relevant settings:
 - `mq.embedded_dir` — Where embedded NATS stores its data.
 - `mq.gap_window_minutes` — Gap-fill window for SSE/WS replay via NATS history.
 - `mq.max_bytes_gb` — Maximum disk usage for the embedded NATS JetStream store.
-- `dedupe.embedded_dir` — Where Pebble stores deduplication state.
+- `schema.refresh_interval` — How often to re-discover ClickHouse schemas.
+- `dedupe.enabled` / `dedupe.id_field` / `dedupe.embedded_dir` — Optional dedup with Pebble.
 - `cache.l1_max_cost` — L1 cache size (no L2 in standalone).
-- `clickhouse.auto_migrate` — Defaults to `true`. Auto-creates the `events` table.
+- `dlq.enabled` — DLQ for failed inserts.
 - ClickHouse settings are always required.
 
-Settings ignored: `mq.url`, `dedupe.scylla_*`, `dedupe.auto_migrate`, `cache.redis_url`.
+Settings ignored: `mq.url`, `dedupe.scylla_*`, `cache.redis_url`.
 
 ### Clustered Mode (`mode: clustered`)
 
 Uses distributed components. Relevant settings:
 
 - `mq.url` — External NATS cluster URL.
-- `mq.gap_window_minutes` — Gap-fill window for SSE/WS replay (used by workers).
-- `mq.max_bytes_gb` — Maximum NATS JetStream stream size (applied on stream creation).
-- `dedupe.scylla_hosts`, `dedupe.scylla_keyspace` — ScyllaDB for distributed dedup.
+- `schema.refresh_interval` — How often to re-discover ClickHouse schemas.
+- `dedupe.enabled` / `dedupe.id_field` / `dedupe.scylla_*` — Optional dedup with ScyllaDB.
 - `cache.redis_url` — Redis for L2 shared cache.
-- `clickhouse.auto_migrate` — Defaults to `false`. Set to `true` to auto-create the `events` table.
-- `dedupe.auto_migrate` — Defaults to `false`. Set to `true` to auto-create the ScyllaDB keyspace and table.
+- `dlq.enabled` — DLQ for failed inserts.
 - All ClickHouse and cache L1 settings still apply.
 
 Settings ignored: `mq.embedded_dir`, `dedupe.embedded_dir`.

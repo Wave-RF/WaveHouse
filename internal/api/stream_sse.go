@@ -29,7 +29,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	topic := r.URL.Query().Get("topic")
 	if topic == "" {
-		topic = "ingest.events"
+		topic = "ingest.>"
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

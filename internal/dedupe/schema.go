@@ -31,10 +31,9 @@ func EnsureSchema(hosts []string, keyspace string) error {
 
 	createTable := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s.dedupe (
-			tenant_id  text,
 			event_hash text,
 			created_at timestamp,
-			PRIMARY KEY (tenant_id, event_hash)
+			PRIMARY KEY (event_hash)
 		)`, keyspace)
 	if err := session.Query(createTable).Exec(); err != nil {
 		return fmt.Errorf("ensure scylla schema: create table: %w", err)

@@ -6,7 +6,6 @@
 - **Docker** — For running dependencies and integration tests
 - **golangci-lint v2** — `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 - **air** (optional) — For hot-reload during development: [Install air](https://github.com/air-verse/air)
-- **jwt-cli** (optional) — For generating test tokens: [Install jwt-cli](https://github.com/mike-engel/jwt-cli)
 
 ## Quick Start (Standalone Mode)
 
@@ -21,73 +20,105 @@ go mod download
 # 2. Start ClickHouse (the only external dependency for standalone mode)
 make compose-deps
 
-# 3. Run with hot-reload (recompiles on every .go file save)
-# The events table is auto-created at startup (standalone auto_migrate defaults to true).
+# 3. Create a table in ClickHouse
+docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
+  clickhouse-client --query "
+    CREATE TABLE IF NOT EXISTS clicks (
+      page String,
+      button String,
+      score Float64,
+      received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
+    ) ENGINE = MergeTree()
+    ORDER BY (page)
+  "
+
+# 4. Run with hot-reload (recompiles on every .go file save)
 make dev
 ```
 
 BeachHouse is now running at `http://localhost:8080` in standalone mode with:
+
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **Embedded Pebble** — no external dedup store needed
 - **L1 cache only** (Ristretto) — no Redis needed
-
-### Generate a Test JWT
-
-The default `config.yaml` uses `jwt_secret: change-me-in-production`. Generate a token:
-
-```bash
-# Option 1: jwt-cli
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550e8400-e29b-41d4-a716-446655440000", "exp": 9999999999}')
-
-# Option 2: Python
-export TOKEN=$(python3 -c "
-import jwt, time
-print(jwt.encode({'tenant_id': '550e8400-e29b-41d4-a716-446655440000', 'exp': int(time.time()) + 86400}, 'change-me-in-production', algorithm='HS256'))
-")
-```
-
-> **Note:** The `tenant_id` must be a valid UUID.
+- **Auth disabled** by default — no JWT needed
+- **Dedup disabled** by default — no Pebble needed
+- **Schema discovery** — automatically finds your ClickHouse tables
 
 ### Test the API
 
 ```bash
-# Ingest an event
-curl -s -X POST http://localhost:8080/v1/ingest \
-  -H "Authorization: Bearer $TOKEN" \
+# Ingest data (no auth required by default)
+curl -s -X POST http://localhost:8080/v1/ingest/clicks \
   -H "Content-Type: application/json" \
-  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "table_name": "page_view", "data": {"url": "/home", "user": "alice"}}'
+  -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
-# Ingest the same event again (dedup test)
-curl -s -X POST http://localhost:8080/v1/ingest \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"id": "550e8400-e29b-41d4-a716-446655440001", "table_name": "page_view", "data": {"url": "/home", "user": "alice"}}'
-# → {"duplicate":true}
+# Check discovered schemas
+curl -s http://localhost:8080/v1/schema | jq
 
 # Query events (wait a few seconds for the batch flush)
 curl -s -X POST http://localhost:8080/v1/query \
-  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM events LIMIT 10"}'
+  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
-# Open an SSE stream (Ctrl+C to stop)
-curl -N http://localhost:8080/v1/stream/sse \
-  -H "Authorization: Bearer $TOKEN"
+# Open an SSE stream for all tables (Ctrl+C to stop)
+curl -N http://localhost:8080/v1/stream/sse
 
-# Open an SSE stream with gap-fill (replays events since the given timestamp, then switches to live)
-curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z" \
-  -H "Authorization: Bearer $TOKEN"
+# Open an SSE stream for a specific table
+curl -N "http://localhost:8080/v1/stream/sse?topic=ingest.clicks"
 
-# Replay only the last 1 minute of gap data
-# Set SINCE to 1 minute ago (macOS vs Linux use different date flags):
-export SINCE=$(date -u -v-1M '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
-curl -N "http://localhost:8080/v1/stream/sse?since=$SINCE" \
-  -H "Authorization: Bearer $TOKEN"
+# With gap-fill (replays events since the given timestamp, then switches to live)
+curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
 
 # Health check (no auth required)
 curl http://localhost:8080/health
 # → {"status":"ok"}
+
+# DLQ stats
+curl http://localhost:8080/v1/dlq/stats
+```
+
+### Enable Auth (Optional)
+
+Set `BH_AUTH_ENABLED=true` and `BH_AUTH_JWT_SECRET=my-secret` to require JWT tokens:
+
+```bash
+BH_AUTH_ENABLED=true BH_AUTH_JWT_SECRET=my-secret make dev
+```
+
+Then generate a test token:
+
+```bash
+# Using jwt-cli (https://github.com/mike-engel/jwt-cli)
+export TOKEN=$(jwt encode --secret "my-secret" '{"exp": 9999999999}')
+
+curl -X POST http://localhost:8080/v1/ingest/clicks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"page": "/home", "button": "signup"}'
+```
+
+### Enable Dedup (Optional)
+
+Set `BH_DEDUPE_ENABLED=true` and `BH_DEDUPE_ID_FIELD=event_id`:
+
+```bash
+BH_DEDUPE_ENABLED=true BH_DEDUPE_ID_FIELD=event_id make dev
+```
+
+Then include the dedup field in your ingest body:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+  -H "Content-Type: application/json" \
+  -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
+# → {"ok":true}
+
+# Same event_id again → deduplicated
+curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+  -H "Content-Type: application/json" \
+  -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
+# → {"duplicate":true}
 ```
 
 ## Quick Start (Clustered Mode)
@@ -98,43 +129,22 @@ To develop against the full clustered infrastructure locally:
 # 1. Start all dependencies (ClickHouse, NATS, Redis, ScyllaDB)
 make compose-deps
 
-# 2. Create the ClickHouse events table (same as standalone)
+# 2. Create your tables in ClickHouse
 docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
   clickhouse-client --query "
-    CREATE TABLE IF NOT EXISTS events (
-      tenant_id UUID, event_id UUID,
-      received_timestamp DateTime64(3, 'UTC'),
-      ingested_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
-      timestamp DateTime64(3, 'UTC'),
-      table_name String,
-      str_data Map(String, String),
-      num_data Map(String, Float64),
-      bool_data Map(String, Bool)
-    ) ENGINE = ReplacingMergeTree(ingested_timestamp)
-    PARTITION BY toYYYYMM(timestamp)
-    ORDER BY (tenant_id, table_name, toDate(timestamp), event_id)
+    CREATE TABLE IF NOT EXISTS clicks (
+      page String, button String, score Float64,
+      received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
+    ) ENGINE = MergeTree() ORDER BY (page)
   "
 
-# 3. Create the ScyllaDB keyspace and dedup table
-docker compose -f deployments/compose/dependencies.yaml exec scylladb \
-  cqlsh -e "
-    CREATE KEYSPACE IF NOT EXISTS beachhouse
-      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
-    CREATE TABLE IF NOT EXISTS beachhouse.dedupe (
-      tenant_id text, event_hash text, created_at timestamp,
-      PRIMARY KEY (tenant_id, event_hash)
-    );
-  "
-
-# 4. Run the API server in one terminal
+# 3. Run the API server in one terminal
 BH_MODE=clustered \
 BH_MQ_URL=nats://localhost:4222 \
 BH_CACHE_REDIS_URL=redis://localhost:6379 \
-BH_DEDUPE_SCYLLA_HOSTS=localhost:9042 \
-BH_AUTH_JWT_SECRET=change-me-in-production \
 go run ./cmd/beachhouse-api
 
-# 5. Run the worker in another terminal
+# 4. Run the worker in another terminal
 BH_MODE=clustered \
 BH_MQ_URL=nats://localhost:4222 \
 BH_CH_ADDR=localhost:9000 \
@@ -143,17 +153,12 @@ go run ./cmd/beachhouse-worker
 
 ### Using an .env File
 
-For convenience, create a `.env.clustered` file in the project root:
-
 ```bash
-# .env.clustered — source this before running clustered binaries
+# .env.clustered
 export BH_MODE=clustered
 export BH_CH_ADDR=localhost:9000
 export BH_MQ_URL=nats://localhost:4222
 export BH_CACHE_REDIS_URL=redis://localhost:6379
-export BH_DEDUPE_SCYLLA_HOSTS=localhost:9042
-export BH_DEDUPE_SCYLLA_KEYSPACE=beachhouse
-export BH_AUTH_JWT_SECRET=change-me-in-production
 ```
 
 Then:
@@ -198,7 +203,7 @@ make test
 go test ./internal/...
 ```
 
-Unit tests live alongside the code they test (e.g., `internal/schema/flatten_test.go`).
+Unit tests live alongside the code they test (e.g., `internal/discovery/discovery_test.go`).
 
 ### Integration Tests
 
@@ -251,10 +256,10 @@ BeachHouse/
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── cache/              # L1 (Ristretto) + L2 (Redis) caching
 │   ├── config/             # YAML + env var configuration
-│   ├── dedupe/             # Deduplication (Pebble or ScyllaDB)
-│   ├── ingest/             # Batch buffering + Active Sweeper
-│   ├── mq/                 # NATS message queue abstraction
-│   └── schema/             # JSON flattening to typed Maps
+│   ├── dedupe/             # Optional deduplication (Pebble or ScyllaDB)
+│   ├── discovery/          # ClickHouse schema introspection + validation
+│   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
+│   └── mq/                 # NATS message queue abstraction
 ├── tests/                  # Integration tests
 ├── deployments/
 │   ├── compose/            # Docker Compose files
@@ -273,7 +278,7 @@ BeachHouse/
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and clustered modes.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging.
-- **Tenant isolation**: `tenant_id` is always sourced from JWT claims, never from user input.
+- **Schema-driven**: ClickHouse is the schema source of truth. BeachHouse discovers and validates against real table schemas.
 
 ## Makefile Targets
 

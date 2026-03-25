@@ -24,6 +24,8 @@ type Config struct {
 	Dedupe     Dedupe     `yaml:"dedupe"`
 	Cache      Cache      `yaml:"cache"`
 	Auth       Auth       `yaml:"auth"`
+	Schema     Schema     `yaml:"schema"`
+	DLQ        DLQ        `yaml:"dlq"`
 }
 
 type Server struct {
@@ -32,11 +34,10 @@ type Server struct {
 }
 
 type ClickHouse struct {
-	Addr        string `yaml:"addr" env:"BH_CH_ADDR" env-default:"localhost:9000"`
-	Database    string `yaml:"database" env:"BH_CH_DATABASE" env-default:"default"`
-	Username    string `yaml:"username" env:"BH_CH_USERNAME" env-default:"default"`
-	Password    string `yaml:"password" env:"BH_CH_PASSWORD"`
-	AutoMigrate *bool  `yaml:"auto_migrate"` // env: BH_CH_AUTO_MIGRATE — resolved in applyModeDefaults
+	Addr     string `yaml:"addr" env:"BH_CH_ADDR" env-default:"localhost:9000"`
+	Database string `yaml:"database" env:"BH_CH_DATABASE" env-default:"default"`
+	Username string `yaml:"username" env:"BH_CH_USERNAME" env-default:"default"`
+	Password string `yaml:"password" env:"BH_CH_PASSWORD"`
 }
 
 type MQ struct {
@@ -47,10 +48,11 @@ type MQ struct {
 }
 
 type Dedupe struct {
+	Enabled        bool     `yaml:"enabled" env:"BH_DEDUPE_ENABLED" env-default:"false"`
+	IDField        string   `yaml:"id_field" env:"BH_DEDUPE_ID_FIELD" env-default:"event_id"`
 	EmbeddedDir    string   `yaml:"embedded_dir" env:"BH_DEDUPE_EMBEDDED_DIR" env-default:"./data/pebble"`
 	ScyllaHosts    []string `yaml:"scylla_hosts" env:"BH_DEDUPE_SCYLLA_HOSTS" env-default:"localhost:9042"`
 	ScyllaKeyspace string   `yaml:"scylla_keyspace" env:"BH_DEDUPE_SCYLLA_KEYSPACE" env-default:"beachhouse"`
-	AutoMigrate    *bool    `yaml:"auto_migrate"` // env: BH_DEDUPE_AUTO_MIGRATE — resolved in applyModeDefaults
 }
 
 type Cache struct {
@@ -60,7 +62,18 @@ type Cache struct {
 }
 
 type Auth struct {
+	Enabled   bool   `yaml:"enabled" env:"BH_AUTH_ENABLED" env-default:"false"`
 	JWTSecret string `yaml:"jwt_secret" env:"BH_AUTH_JWT_SECRET"`
+}
+
+// Schema configures ClickHouse schema discovery.
+type Schema struct {
+	RefreshInterval int `yaml:"refresh_interval" env:"BH_SCHEMA_REFRESH_INTERVAL" env-default:"60"` // seconds
+}
+
+// DLQ configures the Dead Letter Queue for failed batch inserts.
+type DLQ struct {
+	Enabled bool `yaml:"enabled" env:"BH_DLQ_ENABLED" env-default:"true"`
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
@@ -75,30 +88,5 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("read env: %w", err)
 		}
 	}
-	cfg.applyModeDefaults()
 	return &cfg, nil
-}
-
-// applyModeDefaults sets AutoMigrate flags based on deployment mode when not
-// explicitly configured via YAML or environment variables. Standalone mode
-// defaults to true (zero-setup), clustered defaults to false (operator-managed).
-// Env vars are checked here (not via cleanenv struct tags) because cleanenv
-// does not reliably handle *bool pointer fields.
-func (c *Config) applyModeDefaults() {
-	isStandalone := c.Mode == ModeStandalone
-	c.ClickHouse.AutoMigrate = resolveAutoMigrate(c.ClickHouse.AutoMigrate, "BH_CH_AUTO_MIGRATE", isStandalone)
-	c.Dedupe.AutoMigrate = resolveAutoMigrate(c.Dedupe.AutoMigrate, "BH_DEDUPE_AUTO_MIGRATE", isStandalone)
-}
-
-// resolveAutoMigrate determines the final auto-migrate value.
-// Priority: env var > YAML value > mode default.
-func resolveAutoMigrate(yamlValue *bool, envKey string, modeDefault bool) *bool {
-	if v, ok := os.LookupEnv(envKey); ok {
-		b := v == "true" || v == "1" || v == "yes"
-		return &b
-	}
-	if yamlValue != nil {
-		return yamlValue
-	}
-	return &modeDefault
 }

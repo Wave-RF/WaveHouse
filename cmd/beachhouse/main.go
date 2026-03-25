@@ -16,6 +16,7 @@ import (
 	"github.com/Wave-RF/BeachHouse/internal/cache"
 	"github.com/Wave-RF/BeachHouse/internal/config"
 	"github.com/Wave-RF/BeachHouse/internal/dedupe"
+	"github.com/Wave-RF/BeachHouse/internal/discovery"
 	"github.com/Wave-RF/BeachHouse/internal/ingest"
 	"github.com/Wave-RF/BeachHouse/internal/mq"
 )
@@ -35,13 +36,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// SECURITY: Hard stop if JWT secret is missing or warn but continue if using default
-	switch cfg.Auth.JWTSecret {
-	case "":
-		logger.Error("FATAL: BH_AUTH_JWT_SECRET is missing")
-		os.Exit(1)
-	case "change-me-in-production":
-		logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+	// Validate auth config.
+	if cfg.Auth.Enabled {
+		switch cfg.Auth.JWTSecret {
+		case "":
+			logger.Error("FATAL: BH_AUTH_JWT_SECRET is required when auth is enabled")
+			os.Exit(1)
+		case "change-me-in-production":
+			logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+		}
 	}
 
 	// ClickHouse connection.
@@ -59,22 +62,24 @@ func main() {
 	}
 	defer chConn.Close()
 
-	// Auto-migrate ClickHouse schema.
-	if *cfg.ClickHouse.AutoMigrate {
-		if err := ingest.EnsureSchema(context.Background(), chConn); err != nil {
-			logger.Error("clickhouse schema migration", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("clickhouse schema ensured")
-	}
-
-	// Embedded dedupe (Pebble).
-	dedup, err := dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
-	if err != nil {
-		logger.Error("dedupe init", "error", err)
+	// Schema discovery — discover ClickHouse table schemas on boot.
+	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
+	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
+	if err := registry.Refresh(context.Background()); err != nil {
+		logger.Error("schema discovery failed on boot", "error", err)
 		os.Exit(1)
 	}
-	defer dedup.Close()
+
+	// Optional embedded dedupe (Pebble).
+	var dedup dedupe.Deduplicator
+	if cfg.Dedupe.Enabled {
+		dedup, err = dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
+		if err != nil {
+			logger.Error("dedupe init", "error", err)
+			os.Exit(1)
+		}
+		defer dedup.Close()
+	}
 
 	// Embedded MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
@@ -84,6 +89,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer embeddedMQ.Close()
+
+	// DLQ stream.
+	if cfg.DLQ.Enabled {
+		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
+			logger.Error("dlq stream init", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	// L1 cache only in standalone mode.
 	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
@@ -105,8 +118,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start schema auto-refresh.
+	go registry.StartAutoRefresh(ctx)
+
 	// Start batch consumer → ClickHouse.
-	bufferConsumer := ingest.NewBufferConsumer(embeddedMQ, chConn, 1000, 5*time.Second, logger)
+	bufferConsumer := ingest.NewBufferConsumer(embeddedMQ, chConn, registry, 1000, 5*time.Second, logger)
+	if cfg.DLQ.Enabled {
+		bufferConsumer.SetDLQ(embeddedMQ)
+	}
 	if err := bufferConsumer.Start(ctx); err != nil {
 		logger.Error("buffer consumer start", "error", err)
 		os.Exit(1)
@@ -122,7 +141,7 @@ func main() {
 			msg.Ack()
 			return nil
 		}
-		hub.Broadcast("ingest.events", evt)
+		hub.Broadcast(msg.Subject, evt)
 		msg.Ack()
 		return nil
 	}); err != nil {
@@ -130,15 +149,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build router with all dependencies.
+	// Build handlers.
 	js := embeddedMQ.JetStream()
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
+	if dedup != nil {
+		ingestHandler.Dedup = dedup
+		ingestHandler.IDField = cfg.Dedupe.IDField
+	}
+
+	var dlqHandler *api.DLQHandler
+	if cfg.DLQ.Enabled {
+		dlqHandler = api.NewDLQHandler(js, logger)
+	}
+
 	deps := api.Dependencies{
-		Ingest: api.NewIngestHandler(dedup, embeddedMQ),
+		Ingest: ingestHandler,
 		Query:  api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
 		SSE:    api.NewSSEHandler(hub, js),
 		WS:     api.NewWSHandler(hub, js),
 		Health: api.NewHealthHandler(chConn),
-		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret),
+		Schema: api.NewSchemaHandler(registry),
+		DLQ:    dlqHandler,
+		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret, cfg.Auth.Enabled),
 		JS:     js,
 	}
 	router := api.NewRouter(deps)

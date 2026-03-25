@@ -17,6 +17,8 @@ mq:
   max_bytes_gb: 50
 
 dedupe:
+  enabled: false
+  id_field: event_id
   embedded_dir: ./data/pebble
   scylla_hosts:
     - localhost:9042
@@ -28,4 +30,11 @@ cache:
   default_ttl: 300
 
 auth:
+  enabled: false
   jwt_secret: change-me-in-production
+
+schema:
+  refresh_interval: 60
+
+dlq:
+  enabled: true

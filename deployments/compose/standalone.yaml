@@ -20,8 +20,11 @@ services:
       BH_MODE: standalone
       BH_CH_ADDR: clickhouse:9000
       BH_MQ_EMBEDDED_DIR: /data/nats
+      BH_AUTH_ENABLED: "false"
+      BH_DEDUPE_ENABLED: "false"
       BH_DEDUPE_EMBEDDED_DIR: /data/pebble
-      BH_AUTH_JWT_SECRET: change-me-in-production
+      BH_SCHEMA_REFRESH_INTERVAL: "60"
+      BH_DLQ_ENABLED: "true"
     volumes:
       - beachhouse-data:/data
     depends_on:

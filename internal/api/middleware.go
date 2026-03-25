@@ -1,30 +1,19 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 )
 
-type contextKey string
-
-const tenantIDKey contextKey = "tenant_id"
-
-// TenantIDFromContext extracts the tenant_id set by the auth middleware.
-// SECURITY: tenant_id is ONLY sourced from the JWT — never from request body,
-// query params, or headers.
-func TenantIDFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(tenantIDKey).(string); ok {
-		return v
+// JWTAuthMiddleware validates Bearer tokens.
+// When auth is disabled, returns a no-op passthrough middleware.
+func JWTAuthMiddleware(secret string, enabled bool) func(http.Handler) http.Handler {
+	if !enabled {
+		return func(next http.Handler) http.Handler { return next }
 	}
-	return ""
-}
 
-// JWTAuthMiddleware validates Bearer tokens and injects tenant_id into context.
-func JWTAuthMiddleware(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
@@ -46,25 +35,13 @@ func JWTAuthMiddleware(secret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			claims, ok := token.Claims.(jwt.MapClaims)
+			_, ok := token.Claims.(jwt.MapClaims)
 			if !ok {
 				http.Error(w, `{"error":"invalid claims"}`, http.StatusUnauthorized)
 				return
 			}
 
-			tenantID, ok := claims["tenant_id"].(string)
-			if !ok || tenantID == "" {
-				http.Error(w, `{"error":"missing tenant_id claim"}`, http.StatusForbidden)
-				return
-			}
-
-			if _, err := uuid.Parse(tenantID); err != nil {
-				http.Error(w, `{"error":"tenant_id must be a valid UUID"}`, http.StatusForbidden)
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), tenantIDKey, tenantID)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r)
 		})
 	}
 }

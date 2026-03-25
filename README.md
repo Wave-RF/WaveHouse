@@ -14,12 +14,12 @@ If you are building user-facing analytics, **BeachHouse acts like Supabase for C
 
 ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend applications comes with sharp edges. You typically have to build custom APIs, manage Kafka queues to prevent "too many parts" errors during insertion, and write complex replacing logic for deduplication. BeachHouse abstracts all of this away into a single, deployable binary so you stop interacting with ClickHouse directly.
 
-* **🛡️ Multi-Tenant Access Control:** Enforces strict Row-Level Security (RLS) via JWTs, ensuring tenants only ever read and write their own data.
+* **� Schema-Aware Validation:** BeachHouse discovers your ClickHouse table schemas automatically via `system.columns` and validates every ingest payload against the real schema — unknown fields are rejected, types are checked, and nullable constraints are enforced. Bring Your Own Schema: you define tables in ClickHouse, BeachHouse enforces them.
 * **📥 Asynchronous Buffered Ingestion:** Never drop a packet. BeachHouse writes incoming data to a highly durable Write-Ahead Log (WAL) and returns `200 OK` instantly, batching inserts to ClickHouse in the background.
-* **👯 Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations.
+* **👯 Optional Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations. Enable it when you need it, skip it when you don't.
 * **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
-* **🌊 Zero-Latency Real-Time Push:** When data is pushed via the BeachHouse API, it is immediately broadcast to authorized SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion for your users, with seamless gap-fill from NATS JetStream history for clients that connect late.
-* **🗂️ Dynamic Schema Normalization:** Accept arbitrary, nested JSON payloads from clients. BeachHouse flattens them into optimized typed Map columns (`str_data`, `num_data`, `bool_data`) in ClickHouse, eliminating the need for constant `ALTER TABLE` migrations.
+* **🌊 Zero-Latency Real-Time Push:** When data is pushed via the BeachHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
+* **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
 
 ## 🚀 Deployment Modes
 
@@ -42,25 +42,34 @@ cd BeachHouse
 # Start ClickHouse and BeachHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
-# Generate a test JWT (requires jwt-cli: https://github.com/mike-engel/jwt-cli)
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"tenant_id": "550e8400-e29b-41d4-a716-446655440000", "exp": 9999999999}')
+# Create a table in ClickHouse (Bring Your Own Schema)
+docker compose -f deployments/compose/standalone.yaml exec clickhouse \
+  clickhouse-client --query "
+    CREATE TABLE IF NOT EXISTS clicks (
+      page String,
+      button String,
+      score Float64,
+      received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
+    ) ENGINE = MergeTree()
+    ORDER BY (page)
+  "
 
-# Ingest an event
-curl -s -X POST http://localhost:8080/v1/ingest \
-  -H "Authorization: Bearer $TOKEN" \
+# Ingest data (no auth required by default)
+curl -s -X POST http://localhost:8080/v1/ingest/clicks \
   -H "Content-Type: application/json" \
-  -d '{"id": "660e8400-e29b-41d4-a716-446655440001", "table_name": "click", "data": {"page": "/home", "button": "signup"}}'
+  -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
-# Query events (wait ~5s for the batch flush to ClickHouse)
+# Check discovered schemas
+curl -s http://localhost:8080/v1/schema | jq
+
+# Query data (wait ~5s for the batch flush to ClickHouse)
 curl -s -X POST http://localhost:8080/v1/query \
-  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM events LIMIT 10"}'
+  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
 # Open a real-time SSE stream (Ctrl+C to stop)
-curl -N http://localhost:8080/v1/stream/sse \
-  -H "Authorization: Bearer $TOKEN"
+curl -N http://localhost:8080/v1/stream/sse
 ```
 
 BeachHouse is now accepting API requests on `http://localhost:8080`.
@@ -73,9 +82,8 @@ The full distributed stack with load balancing, NATS, Redis, and ScyllaDB:
 # Start everything: Caddy LB, ClickHouse, NATS, Redis, ScyllaDB, 2x API, 2x worker
 docker compose -f deployments/compose/cluster.yaml up -d
 
-# Create ClickHouse table + ScyllaDB keyspace/table
-# (auto_migrate defaults to false in clustered mode — see docs/deployment.md for
-# manual steps, or set BH_CH_AUTO_MIGRATE=true and BH_DEDUPE_AUTO_MIGRATE=true)
+# Create your tables in ClickHouse, then BeachHouse discovers them automatically.
+# See docs/deployment.md for full setup instructions.
 ```
 
 The API is available behind Caddy at `http://localhost` (port 80).
@@ -91,8 +99,7 @@ go mod download
 # Start ClickHouse (standalone mode needs nothing else)
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 
-# Run with hot-reload (requires air: https://github.com/air-verse/air)
-# The events table is auto-created at startup.
+# Create your tables in ClickHouse, then:
 make dev
 ```
 

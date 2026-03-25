@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/Wave-RF/BeachHouse/internal/api"
 	"github.com/Wave-RF/BeachHouse/internal/config"
+	"github.com/Wave-RF/BeachHouse/internal/discovery"
 	"github.com/Wave-RF/BeachHouse/internal/ingest"
 	"github.com/Wave-RF/BeachHouse/internal/mq"
 )
@@ -44,13 +46,12 @@ func main() {
 	}
 	defer chConn.Close()
 
-	// Auto-migrate ClickHouse schema.
-	if *cfg.ClickHouse.AutoMigrate {
-		if err := ingest.EnsureSchema(context.Background(), chConn); err != nil {
-			logger.Error("clickhouse schema migration", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("clickhouse schema ensured")
+	// Schema discovery.
+	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
+	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
+	if err := registry.Refresh(context.Background()); err != nil {
+		logger.Error("schema discovery failed on boot", "error", err)
+		os.Exit(1)
 	}
 
 	// Remote MQ (NATS).
@@ -62,11 +63,25 @@ func main() {
 	}
 	defer remoteMQ.Close()
 
+	// DLQ stream.
+	if cfg.DLQ.Enabled {
+		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
+			logger.Error("dlq stream init", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start schema auto-refresh.
+	go registry.StartAutoRefresh(ctx)
+
 	// Batch consumer → ClickHouse.
-	bufferConsumer := ingest.NewBufferConsumer(remoteMQ, chConn, 1000, 5*time.Second, logger)
+	bufferConsumer := ingest.NewBufferConsumer(remoteMQ, chConn, registry, 1000, 5*time.Second, logger)
+	if cfg.DLQ.Enabled {
+		bufferConsumer.SetDLQ(remoteMQ)
+	}
 	if err := bufferConsumer.Start(ctx); err != nil {
 		logger.Error("buffer consumer start", "error", err)
 		os.Exit(1)

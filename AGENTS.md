@@ -4,35 +4,38 @@ This file provides context for AI coding agents (Copilot, Cursor, Cody, Aider, e
 
 ## Project Overview
 
-BeachHouse is a **real-time API gateway and sidecar for ClickHouse**, written in Go. It handles multi-tenant ingestion, deduplication, caching, real-time streaming, and query proxying. It sits entirely in front of ClickHouse as the exclusive data entry/exit point.
+BeachHouse is a **schema-aware real-time API gateway for ClickHouse**, written in Go. It handles ingestion with schema validation, optional deduplication, caching, real-time streaming, query proxying, and a Dead Letter Queue. It sits entirely in front of ClickHouse as the exclusive data entry/exit point.
 
 ## Architecture (Quick Reference)
 
 Three binaries:
 
-- **`cmd/beachhouse/`** — Standalone mode (all-in-one with embedded NATS + Pebble)
+- **`cmd/beachhouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 - **`cmd/beachhouse-api/`** — Clustered API server (stateless, horizontally scalable)
 - **`cmd/beachhouse-worker/`** — Clustered background worker (batch consumer + sweeper)
 
 Seven internal packages under `internal/`:
 
-- **`api/`** — Chi HTTP router, JWT middleware, ingest/query/SSE/WS handlers, Hub
+- **`api/`** — Chi HTTP router, optional JWT middleware, ingest/query/SSE/WS/schema/DLQ handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (Redis) + `TieredCache` (singleflight)
 - **`config/`** — YAML + env var config loading (cleanenv)
-- **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) + `Distributed` (ScyllaDB)
-- **`ingest/`** — `BufferConsumer` (batch flush to ClickHouse) + `Sweeper` (Active Sweeper for NATS message lifecycle)
+- **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) + `Distributed` (ScyllaDB) — optional, controlled by `dedupe.enabled`
+- **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
+- **`ingest/`** — `BufferConsumer` (per-table batch flush to ClickHouse with DLQ) + `Sweeper` (Active Sweeper for NATS message lifecycle)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
-- **`schema/`** — JSON flattening to typed Maps + unflattening (`Flatten` and `Unflatten` functions)
 
 ## Key Design Decisions
 
 1. **Interface-first**: Core behaviors are defined as Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`). Standalone and clustered modes use different implementations.
-2. **Tenant isolation**: `tenant_id` is **always** sourced from JWT claims via middleware — never from request bodies, query params, or headers. The middleware validates that `tenant_id` is a valid UUID. Queries are auto-scoped to the tenant via CTE injection — users never write `WHERE tenant_id = ?`. Do not introduce any code path that reads tenant_id from user input.
-3. **Typed Map schema**: Arbitrary JSON is flattened to three typed `Map` columns (`str_data Map(String, String)`, `num_data Map(String, Float64)`, `bool_data Map(String, Bool)`) for ClickHouse. No ALTER TABLE migrations needed. The `Unflatten` function reconstructs nested JSON from the three maps.
-4. **Async ingestion**: Ingest returns 200 immediately after dedup + MQ publish. ClickHouse writes happen asynchronously via BufferConsumer. If NATS stream is full, returns 503 + Retry-After.
-5. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.
-6. **Active Sweeper**: NATS messages are retained for SSE/WS gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
-7. **Auto-migrate**: ClickHouse and ScyllaDB schemas can be auto-created at startup using `CREATE ... IF NOT EXISTS`. Controlled by `clickhouse.auto_migrate` / `dedupe.auto_migrate` config flags. Defaults to `true` in standalone mode (zero-setup) and `false` in clustered mode (operator-managed). Env var overrides: `BH_CH_AUTO_MIGRATE`, `BH_DEDUPE_AUTO_MIGRATE`.
+2. **Bring Your Own Schema (BYOS)**: Users create tables in ClickHouse directly. BeachHouse discovers schemas by querying `system.columns` and validates ingest payloads against real column definitions. No auto-migration, no fixed table schema.
+3. **Schema-driven ingest**: `POST /v1/ingest/{table}` accepts a flat JSON body. The table name comes from the URL. The body is validated against the discovered schema (unknown fields rejected, types checked, nullable constraints enforced). No envelope — just data.
+4. **Async ingestion**: Ingest returns 200 immediately after optional dedup + MQ publish. ClickHouse writes happen asynchronously via BufferConsumer. If NATS stream is full, returns 503 + Retry-After.
+5. **Per-table batching**: BufferConsumer groups events by table name and performs dynamic INSERTs using the schema's column order. Each table's batch is independent.
+6. **Dead Letter Queue**: Failed batch inserts are published to a separate NATS stream (`BEACHHOUSE_DLQ`) with subjects `dlq.<table>`. This prevents silent data loss. Controlled by `dlq.enabled`.
+7. **Optional auth**: JWT authentication is opt-in via `auth.enabled`. When disabled (default), all `/v1/*` routes are open. When enabled, tokens are validated but no tenant scoping is applied.
+8. **Optional dedup**: Deduplication is opt-in via `dedupe.enabled`. When enabled, the `dedupe.id_field` config specifies which JSON field to use as the dedup key.
+9. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.
+10. **Active Sweeper**: NATS messages are retained for SSE/WS gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
 
 ## Code Conventions
 
@@ -80,7 +83,6 @@ These representations of the same data MUST always agree:
 | --------------- | ------------- |
 | Go struct tags in `config.go` (field name, env var, default) | `docs/configuration.md` tables, `config.yaml`, compose env blocks |
 | `EventMessage` struct JSON tags in `buffer.go` | `docs/api.md` event format, SSE/WS examples, ClickHouse `INSERT` columns |
-| ClickHouse `INSERT` column list in `buffer.go` | `docs/deployment.md` CREATE TABLE schema, `internal/ingest/schema.go` DDL |
 | Route registrations in `router.go` | `docs/api.md` endpoint list |
 | Handler error responses in `ingest.go`, `query.go`, etc. | `docs/api.md` error tables |
 | Compose env vars in `deployments/compose/*.yaml` | `docs/configuration.md`, `docs/deployment.md` |
@@ -129,13 +131,13 @@ Before finishing any task, do a quick search across docs for the identifiers you
 
 ```text
 cmd/                    → Binary entry points (thin — just wiring)
-internal/api/           → HTTP layer (handlers, router, middleware, Hub)
+internal/api/           → HTTP layer (handlers, router, middleware, Hub, schema/DLQ endpoints)
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)
 internal/config/        → Configuration structs + loader
-internal/dedupe/        → Deduplication (interface + embedded/distributed)
-internal/ingest/        → Batch buffer + Active Sweeper (NATS message lifecycle)
+internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
+internal/discovery/     → ClickHouse schema introspection + ingest validation
+internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
-internal/schema/        → JSON flattening to typed Maps
 tests/                  → Integration tests (build tag: integration)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles
@@ -144,8 +146,7 @@ docs/                   → Project documentation
 
 ## Security Considerations
 
-- Never trust user input for tenant identification
-- JWT secret must be cryptographically strong in production
-- All `/v1/*` routes are behind JWT auth middleware
-- ClickHouse queries bind tenant_id as a parameter (not string interpolation)
-- Input JSON is validated before processing
+- JWT secret must be cryptographically strong when auth is enabled in production
+- All `/v1/*` routes are behind optional JWT auth middleware
+- Input JSON is validated against ClickHouse schemas before processing
+- ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself

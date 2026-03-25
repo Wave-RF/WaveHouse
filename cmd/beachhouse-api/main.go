@@ -16,6 +16,7 @@ import (
 	"github.com/Wave-RF/BeachHouse/internal/cache"
 	"github.com/Wave-RF/BeachHouse/internal/config"
 	"github.com/Wave-RF/BeachHouse/internal/dedupe"
+	"github.com/Wave-RF/BeachHouse/internal/discovery"
 	"github.com/Wave-RF/BeachHouse/internal/ingest"
 	"github.com/Wave-RF/BeachHouse/internal/mq"
 	"github.com/google/uuid"
@@ -36,13 +37,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// SECURITY: Hard stop if JWT secret is missing or warn but continue if using default
-	switch cfg.Auth.JWTSecret {
-	case "":
-		logger.Error("FATAL: BH_AUTH_JWT_SECRET is missing")
-		os.Exit(1)
-	case "change-me-in-production":
-		logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+	// Validate auth config.
+	if cfg.Auth.Enabled {
+		switch cfg.Auth.JWTSecret {
+		case "":
+			logger.Error("FATAL: BH_AUTH_JWT_SECRET is required when auth is enabled")
+			os.Exit(1)
+		case "change-me-in-production":
+			logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+		}
 	}
 
 	// ClickHouse.
@@ -60,31 +63,24 @@ func main() {
 	}
 	defer chConn.Close()
 
-	// Auto-migrate ClickHouse schema.
-	if *cfg.ClickHouse.AutoMigrate {
-		if err := ingest.EnsureSchema(context.Background(), chConn); err != nil {
-			logger.Error("clickhouse schema migration", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("clickhouse schema ensured")
-	}
-
-	// Auto-migrate ScyllaDB schema.
-	if *cfg.Dedupe.AutoMigrate {
-		if err := dedupe.EnsureSchema(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace); err != nil {
-			logger.Error("scylladb schema migration", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("scylladb schema ensured")
-	}
-
-	// Distributed dedupe (ScyllaDB).
-	dedup, err := dedupe.NewDistributed(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace)
-	if err != nil {
-		logger.Error("dedupe init", "error", err)
+	// Schema discovery.
+	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
+	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
+	if err := registry.Refresh(context.Background()); err != nil {
+		logger.Error("schema discovery failed on boot", "error", err)
 		os.Exit(1)
 	}
-	defer dedup.Close()
+
+	// Optional distributed dedupe (ScyllaDB).
+	var dedup dedupe.Deduplicator
+	if cfg.Dedupe.Enabled {
+		dedup, err = dedupe.NewDistributed(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace)
+		if err != nil {
+			logger.Error("dedupe init", "error", err)
+			os.Exit(1)
+		}
+		defer dedup.Close()
+	}
 
 	// Remote MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
@@ -94,6 +90,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer remoteMQ.Close()
+
+	// DLQ stream.
+	if cfg.DLQ.Enabled {
+		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
+			logger.Error("dlq stream init", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	// Tiered cache (L1 + L2 Redis).
 	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
@@ -114,27 +118,44 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start schema auto-refresh.
+	go registry.StartAutoRefresh(ctx)
+
 	// Hub bridge: MQ → broadcast to connected clients.
 	consumerName := "hub-bridge-" + uuid.New().String()
-	// TODO: ^ may want to create using hostname or PID or something for easier debugging and monitoring, but needs to be unique to avoid collisions in clustered mode
 	_ = remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
 			msg.Ack()
 			return nil
 		}
-		hub.Broadcast("ingest.events", evt)
+		hub.Broadcast(msg.Subject, evt)
 		msg.Ack()
 		return nil
 	})
 
+	// Build handlers.
+	js := remoteMQ.JetStream()
+	ingestHandler := api.NewIngestHandler(registry, remoteMQ)
+	if dedup != nil {
+		ingestHandler.Dedup = dedup
+		ingestHandler.IDField = cfg.Dedupe.IDField
+	}
+
+	var dlqHandler *api.DLQHandler
+	if cfg.DLQ.Enabled {
+		dlqHandler = api.NewDLQHandler(js, logger)
+	}
+
 	deps := api.Dependencies{
-		Ingest: api.NewIngestHandler(dedup, remoteMQ),
+		Ingest: ingestHandler,
 		Query:  api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
 		SSE:    api.NewSSEHandler(hub, remoteMQ.JetStream()),
 		WS:     api.NewWSHandler(hub, remoteMQ.JetStream()),
 		Health: api.NewHealthHandler(chConn),
-		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret),
+		Schema: api.NewSchemaHandler(registry),
+		DLQ:    dlqHandler,
+		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret, cfg.Auth.Enabled),
 		JS:     remoteMQ.JetStream(),
 	}
 	router := api.NewRouter(deps)

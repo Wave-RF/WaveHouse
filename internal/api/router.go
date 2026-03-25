@@ -15,6 +15,8 @@ type Dependencies struct {
 	SSE    *SSEHandler
 	WS     *WSHandler
 	Health *HealthHandler
+	Schema *SchemaHandler
+	DLQ    *DLQHandler
 	AuthMW func(http.Handler) http.Handler
 	JS     jetstream.JetStream // for SSE/WS gap-fill
 }
@@ -31,13 +33,23 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)
 
-	// Authenticated API v1 endpoints.
+	// API v1 endpoints (auth middleware may be no-op if disabled).
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(deps.AuthMW)
-		r.Post("/ingest", deps.Ingest.Handle)
+		r.Post("/ingest/{table}", deps.Ingest.Handle)
 		r.Post("/query", deps.Query.Handle)
 		r.Get("/stream/sse", deps.SSE.Handle)
 		r.Get("/stream/ws", deps.WS.Handle)
+
+		// Schema discovery.
+		r.Get("/schema", deps.Schema.List)
+		r.Get("/schema/{table}", deps.Schema.Get)
+		r.Post("/schema/refresh", deps.Schema.Refresh)
+
+		// DLQ stats.
+		if deps.DLQ != nil {
+			r.Get("/dlq/stats", deps.DLQ.Stats)
+		}
 	})
 
 	return r

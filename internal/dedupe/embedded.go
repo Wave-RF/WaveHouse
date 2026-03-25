@@ -23,9 +23,8 @@ func NewEmbedded(dir string) (*EmbeddedDeduplicator, error) {
 }
 
 // CheckAndMark returns true if the event was already seen.
-// Key format: {tenant_id}:{event_id} — enables future tenant-scoped operations.
-func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, tenantID, eventID string) (bool, error) {
-	key := []byte(tenantID + ":" + eventID)
+func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool, error) {
+	key := []byte(eventID)
 
 	_, closer, err := d.db.Get(key)
 	if err == nil {
