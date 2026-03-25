@@ -78,14 +78,8 @@ func main() {
 	go registry.StartAutoRefresh(ctx)
 
 	// Batch consumer → ClickHouse.
-	bufferConsumer := ingest.NewBufferConsumer(remoteMQ, chConn, registry, 1000, 5*time.Second, logger)
-	if cfg.DLQ.Enabled {
-		bufferConsumer.SetDLQ(remoteMQ)
-	}
-	if err := bufferConsumer.Start(ctx); err != nil {
-		logger.Error("buffer consumer start", "error", err)
-		os.Exit(1)
-	}
+	nc := remoteMQ.NatsConn()
+	ingest.StartIngestWorker(nc, cfg.ClickHouse.Addr, "8123", cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database)
 
 	// Active sweeper — purges processed + expired messages every minute.
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute

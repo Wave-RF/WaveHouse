@@ -122,14 +122,8 @@ func main() {
 	go registry.StartAutoRefresh(ctx)
 
 	// Start batch consumer → ClickHouse.
-	bufferConsumer := ingest.NewBufferConsumer(embeddedMQ, chConn, registry, 1000, 5*time.Second, logger)
-	if cfg.DLQ.Enabled {
-		bufferConsumer.SetDLQ(embeddedMQ)
-	}
-	if err := bufferConsumer.Start(ctx); err != nil {
-		logger.Error("buffer consumer start", "error", err)
-		os.Exit(1)
-	}
+	nc := embeddedMQ.NatsConn()
+	ingest.StartIngestWorker(nc, cfg.ClickHouse.Addr, "8123", cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database)
 
 	// Start active sweeper.
 	go sweeper.Start(ctx)

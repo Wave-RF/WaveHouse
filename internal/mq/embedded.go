@@ -32,6 +32,7 @@ func NewEmbedded(storeDir string, maxBytes int64) (*EmbeddedNATS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new nats server: %w", err)
 	}
+	ns.ConfigureLogger()
 	ns.Start()
 
 	if !ns.ReadyForConnections(5 * time.Second) {
@@ -107,6 +108,10 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 // JetStream returns the underlying JetStream handle for direct access (e.g. gap-fill).
 func (e *EmbeddedNATS) JetStream() jetstream.JetStream {
 	return e.js
+}
+
+func (e *EmbeddedNATS) NatsConn() *nats.Conn {
+    return e.conn
 }
 
 func (e *EmbeddedNATS) Close() error {
