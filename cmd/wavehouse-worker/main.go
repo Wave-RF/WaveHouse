@@ -80,6 +80,7 @@ func main() {
 	// Batch consumer → ClickHouse.
 	ingest.StartIngestWorker(
 		remoteMQ.NatsConn(),
+		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.Username,

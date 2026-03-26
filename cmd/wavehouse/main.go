@@ -124,6 +124,7 @@ func main() {
 	// Start batch consumer → ClickHouse.
 	ingest.StartIngestWorker(
 		embeddedMQ.NatsConn(),
+		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.Username,

@@ -2,22 +2,26 @@ package ingest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"sync/atomic"
+	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	_ "github.com/warpstreamlabs/bento/public/components/all"
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
-// jsInput is a custom Bento input that pulls directly from a JetStream consumer.
-// The consumer is captured via closure at registration time — no package-level state.
 type jsInput struct {
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
+	chConn   driver.Conn
+	inFlight atomic.Int32
 }
 
 func (j *jsInput) Connect(ctx context.Context) error {
@@ -30,22 +34,60 @@ func (j *jsInput) Connect(ctx context.Context) error {
 }
 
 func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, error) {
-	m, err := j.iter.Next()
-	if err != nil {
-		return nil, nil, service.ErrNotConnected
-	}
-
-	msg := service.NewMessage(m.Data())
-
-	// Bento calls this AFTER the output (HTTP request to ClickHouse) finishes.
-	ackFn := func(ctx context.Context, err error) error {
+	for {
+		m, err := j.iter.Next()
 		if err != nil {
-			return m.Nak()
+			return nil, nil, service.ErrNotConnected
 		}
-		return m.Ack()
-	}
 
-	return msg, ackFn, nil
+		var raw struct {
+			Action    string `json:"action"`
+			TableName string `json:"table_name"`
+			ID        string `json:"id"`
+		}
+		_ = json.Unmarshal(m.Data(), &raw)
+
+		// Delete case
+		if raw.Action == "delete" {
+			slog.Info("DELETE DETECTED: Pausing ingestion to flush buffer...", "table", raw.TableName, "id", raw.ID)
+
+			ticker := time.NewTicker(10 * time.Millisecond)
+			for j.inFlight.Load() > 0 {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					m.Nak() 
+					return nil, nil, ctx.Err()
+				case <-ticker.C:
+				}
+			}
+			ticker.Stop()
+
+			delQuery := fmt.Sprintf("DELETE FROM %s WHERE id = '%s'", raw.TableName, raw.ID)
+			if err := j.chConn.Exec(context.Background(), delQuery); err != nil {
+				slog.Error("Failed lightweight delete", "error", err)
+				m.Nak()
+			} else {
+				m.Ack()
+			}
+			continue
+		}
+
+		// Insert case
+		msg := service.NewMessage(m.Data())
+		
+		j.inFlight.Add(1)
+
+		ackFn := func(ctx context.Context, err error) error {
+			j.inFlight.Add(-1)
+			if err != nil {
+				return m.Nak()
+			}
+			return m.Ack()
+		}
+
+		return msg, ackFn, nil
+	}
 }
 
 func (j *jsInput) Close(ctx context.Context) error {
@@ -55,24 +97,48 @@ func (j *jsInput) Close(ctx context.Context) error {
 	return nil
 }
 
-func StartIngestWorker(nc *nats.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) {
+type dlqOutput struct {
+	js     jetstream.JetStream
+	logger *slog.Logger
+}
+
+func (d *dlqOutput) Connect(ctx context.Context) error { return nil }
+func (d *dlqOutput) Wait(ctx context.Context) error    { return nil }
+func (d *dlqOutput) Close(ctx context.Context) error   { return nil }
+func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
+	for _, m := range batch {
+		data, _ := m.AsBytes()
+		var raw struct {
+			TableName string `json:"table_name"`
+		}
+		_ = json.Unmarshal(data, &raw)
+
+		subject := "dlq.unknown"
+		if raw.TableName != "" {
+			subject = "dlq." + raw.TableName
+		}
+		
+		_, _ = d.js.Publish(ctx, subject, data)
+		d.logger.Warn("Sent failed message to DLQ", "subject", subject)
+	}
+	return nil
+}
+
+
+func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
-		host = chHost // If there was no port to begin with, just use the original
+		host = chHost
 	}
 
 	logger := slog.Default().With("component", "bento")
 
-	// Initialize modern JetStream context.
 	js, err := jetstream.New(nc)
 	if err != nil {
 		logger.Error("failed to initialize JetStream", "error", err)
 		os.Exit(1)
 	}
 
-	// Create or bind to the Durable Pull Consumer.
-	// The Sweeper relies on "buffer-consumer" to read the AckFloor.
-	// TODO: support multiple consumers for horizontal scaling
 	cons, err := js.CreateOrUpdateConsumer(context.Background(), "WAVEHOUSE", jetstream.ConsumerConfig{
 		Durable:       "buffer-consumer",
 		FilterSubject: "ingest.>",
@@ -83,25 +149,33 @@ func StartIngestWorker(nc *nats.Conn, chHost, chHTTPPort, chUser, chPassword, ch
 		os.Exit(1)
 	}
 
-	// Register a custom Bento input that pulls directly from JetStream.
-	// The consumer is captured in the closure — no package-level state needed.
-	// RegisterInput is just a registry map write; it only needs to happen
-	// before builder.Build().
-	if err := service.RegisterInput(
-		"nats_bridge",
-		service.NewConfigSpec(),
+	if err := service.RegisterInput("nats_bridge", service.NewConfigSpec(),
 		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
-			return &jsInput{consumer: cons}, nil
+			return &jsInput{
+				consumer: cons,
+				chConn:   chConn,
+			}, nil
 		},
 	); err != nil {
 		logger.Error("failed to register Bento input", "error", err)
 		os.Exit(1)
 	}
 
+	if err := service.RegisterBatchOutput("nats_dlq_bridge", service.NewConfigSpec(),
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
+			return &dlqOutput{
+				js:     js,
+				logger: logger,
+			}, service.BatchPolicy{}, 1, nil
+		},
+	); err != nil {
+		logger.Error("failed to register Bento DLQ output", "error", err)
+		os.Exit(1)
+	}
+
 	yamlConfig := fmt.Sprintf(`
 input:
   nats_bridge: {}
-
 output:
   fallback:
     - http_client:
@@ -123,9 +197,7 @@ output:
                 root.received_timestamp = this.received_timestamp
             - archive:
                 format: lines
-    - file:
-        path: /tmp/bento_failed_ingest.jsonl
-        codec: lines
+    - nats_dlq_bridge: {}
 `, host, chHTTPPort, chDB, chUser, chPassword)
 
 	builder := service.NewStreamBuilder()
