@@ -9,25 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: Project renamed from BeachHouse to WaveHouse** — All binaries (`beachhouse` → `wavehouse`, `beachhouse-api` → `wavehouse-api`, `beachhouse-worker` → `wavehouse-worker`), Go module path (`github.com/Wave-RF/WaveHouse`), environment variable prefix (`BH_` → `WH_`), NATS stream names (`BEACHHOUSE` → `WAVEHOUSE`, `BEACHHOUSE_DLQ` → `WAVEHOUSE_DLQ`), Docker images (`ghcr.io/wave-rf/wavehouse`), ScyllaDB default keyspace (`wavehouse`), and all documentation updated.
 - **Bento ingest worker**: Replaced Go channel bridge (`dataChan`) with direct JetStream pull via `consumer.Messages()`. Eliminates the 1000-message buffer, ensures NATS acks happen immediately after ClickHouse writes, and removes all package-level mutable state. The custom Bento input plugin is now registered at runtime with the JetStream consumer captured via closure instead of using `init()` and globals.
 
 ### Added
 
-- **Schema discovery**: New `internal/discovery/` package introspects ClickHouse `system.columns` to build a live schema registry. Schemas are cached and auto-refreshed on a configurable interval (`schema.refresh_interval` / `BH_SCHEMA_REFRESH_INTERVAL`).
+- **Schema discovery**: New `internal/discovery/` package introspects ClickHouse `system.columns` to build a live schema registry. Schemas are cached and auto-refreshed on a configurable interval (`schema.refresh_interval` / `WH_SCHEMA_REFRESH_INTERVAL`).
 - **Schema validation**: Ingest payloads are validated against discovered ClickHouse schemas — unknown fields, type mismatches, and non-nullable violations are rejected with descriptive 400 errors.
 - **Schema API endpoints**: `GET /v1/schema` (list all tables), `GET /v1/schema/{table}` (single table), `POST /v1/schema/refresh` (force refresh).
-- **Dead Letter Queue (DLQ)**: Failed batch inserts are published to a separate NATS stream (`BEACHHOUSE_DLQ`) instead of being silently lost. Controlled by `dlq.enabled` / `BH_DLQ_ENABLED`.
+- **Dead Letter Queue (DLQ)**: Failed batch inserts are published to a separate NATS stream (`WAVEHOUSE_DLQ`) instead of being silently lost. Controlled by `dlq.enabled` / `WH_DLQ_ENABLED`.
 - **DLQ stats endpoint**: `GET /v1/dlq/stats` returns pending message count and consumer info.
-- **Optional authentication**: JWT auth is now opt-in via `auth.enabled` / `BH_AUTH_ENABLED` (defaults to `false`). When disabled, all `/v1/*` routes are open.
-- **Optional deduplication**: Dedup is now opt-in via `dedupe.enabled` / `BH_DEDUPE_ENABLED` (defaults to `false`). When enabled, specify the dedup key field with `dedupe.id_field` / `BH_DEDUPE_ID_FIELD`.
+- **Optional authentication**: JWT auth is now opt-in via `auth.enabled` / `WH_AUTH_ENABLED` (defaults to `false`). When disabled, all `/v1/*` routes are open.
+- **Optional deduplication**: Dedup is now opt-in via `dedupe.enabled` / `WH_DEDUPE_ENABLED` (defaults to `false`). When enabled, specify the dedup key field with `dedupe.id_field` / `WH_DEDUPE_ID_FIELD`.
 - **Table-based ingest routing**: Ingest endpoint is now `POST /v1/ingest/{table}` — the table name comes from the URL path.
 
 ### Changed
 
-- **BREAKING: Dropped multi-tenancy** — Removed `tenant_id` from JWT claims, middleware, ClickHouse schema, dedup keys, query filtering (CTE injection), and all API request/response formats. BeachHouse is now a single-tenant gateway.
-- **BREAKING: Dropped schemaless typed maps** — Removed the `str_data`/`num_data`/`bool_data` Map columns, `Flatten()`/`Unflatten()` functions, and the fixed `events` table. BeachHouse now writes to user-defined ClickHouse tables with real columns.
+- **BREAKING: Dropped multi-tenancy** — Removed `tenant_id` from JWT claims, middleware, ClickHouse schema, dedup keys, query filtering (CTE injection), and all API request/response formats. WaveHouse is now a single-tenant gateway.
+- **BREAKING: Dropped schemaless typed maps** — Removed the `str_data`/`num_data`/`bool_data` Map columns, `Flatten()`/`Unflatten()` functions, and the fixed `events` table. WaveHouse now writes to user-defined ClickHouse tables with real columns.
 - **BREAKING: New ingest format** — Body is now a flat JSON object (e.g., `{"page": "/home", "score": 42}`) posted to `POST /v1/ingest/{table}`. The old `{"id", "table_name", "data"}` envelope is removed.
-- **BREAKING: Bring Your Own Schema** — BeachHouse no longer auto-creates ClickHouse tables. Users must create tables before ingesting. Removed `clickhouse.auto_migrate` / `BH_CH_AUTO_MIGRATE` and `dedupe.auto_migrate` / `BH_DEDUPE_AUTO_MIGRATE` config options.
+- **BREAKING: Bring Your Own Schema** — WaveHouse no longer auto-creates ClickHouse tables. Users must create tables before ingesting. Removed `clickhouse.auto_migrate` / `WH_CH_AUTO_MIGRATE` and `dedupe.auto_migrate` / `WH_DEDUPE_AUTO_MIGRATE` config options.
 - **BREAKING: Query endpoint is direct passthrough** — SQL is forwarded to ClickHouse as-is. No CTE injection, no tenant scoping.
 - **BREAKING: Auth disabled by default** — Previously JWT was always required. Now it's opt-in.
 - **BREAKING: Dedup disabled by default** — Previously dedup was always on. Now it's opt-in with configurable ID field.

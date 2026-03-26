@@ -12,14 +12,13 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/Wave-RF/BeachHouse/internal/api"
-	"github.com/Wave-RF/BeachHouse/internal/cache"
-	"github.com/Wave-RF/BeachHouse/internal/config"
-	"github.com/Wave-RF/BeachHouse/internal/dedupe"
-	"github.com/Wave-RF/BeachHouse/internal/discovery"
-	"github.com/Wave-RF/BeachHouse/internal/ingest"
-	"github.com/Wave-RF/BeachHouse/internal/mq"
-	"github.com/google/uuid"
+	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
 func main() {
@@ -27,7 +26,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfgPath := "config.yaml"
-	if p := os.Getenv("BH_CONFIG"); p != "" {
+	if p := os.Getenv("WH_CONFIG"); p != "" {
 		cfgPath = p
 	}
 
@@ -41,14 +40,14 @@ func main() {
 	if cfg.Auth.Enabled {
 		switch cfg.Auth.JWTSecret {
 		case "":
-			logger.Error("FATAL: BH_AUTH_JWT_SECRET is required when auth is enabled")
+			logger.Error("FATAL: WH_AUTH_JWT_SECRET is required when auth is enabled")
 			os.Exit(1)
 		case "change-me-in-production":
-			logger.Warn("BH_AUTH_JWT_SECRET is using default insecure value")
+			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
 		}
 	}
 
-	// ClickHouse.
+	// ClickHouse connection.
 	chConn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.ClickHouse.Addr},
 		Auth: clickhouse.Auth{
@@ -63,7 +62,7 @@ func main() {
 	}
 	defer chConn.Close()
 
-	// Schema discovery.
+	// Schema discovery — discover ClickHouse table schemas on boot.
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
 	if err := registry.Refresh(context.Background()); err != nil {
@@ -71,10 +70,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Optional distributed dedupe (ScyllaDB).
+	// Optional embedded dedupe (Pebble).
 	var dedup dedupe.Deduplicator
 	if cfg.Dedupe.Enabled {
-		dedup, err = dedupe.NewDistributed(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace)
+		dedup, err = dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
 		if err != nil {
 			logger.Error("dedupe init", "error", err)
 			os.Exit(1)
@@ -82,37 +81,38 @@ func main() {
 		defer dedup.Close()
 	}
 
-	// Remote MQ (NATS).
+	// Embedded MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)
+	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
 		os.Exit(1)
 	}
-	defer remoteMQ.Close()
+	defer embeddedMQ.Close()
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
 			os.Exit(1)
 		}
 	}
 
-	// Tiered cache (L1 + L2 Redis).
+	// L1 cache only in standalone mode.
 	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
 	if err != nil {
-		logger.Error("l1 cache init", "error", err)
+		logger.Error("cache init", "error", err)
 		os.Exit(1)
 	}
-	l2, err := cache.NewShared(cfg.Cache.RedisURL)
-	if err != nil {
-		logger.Error("l2 cache init", "error", err)
-		os.Exit(1)
-	}
-	tiered := cache.NewTiered(l1, l2)
+	tiered := cache.NewTiered(l1, nil)
 	defer tiered.Close()
 
+	// Active sweeper — purges messages that are both written to CH and
+	// older than the SSE gap window. Runs every minute.
+	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute
+	sweeper := ingest.NewSweeper(embeddedMQ.JetStream(), gapWindow, logger)
+
+	// Hub for streaming fan-out.
 	hub := api.NewHub()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,9 +121,20 @@ func main() {
 	// Start schema auto-refresh.
 	go registry.StartAutoRefresh(ctx)
 
-	// Hub bridge: MQ → broadcast to connected clients.
-	consumerName := "hub-bridge-" + uuid.New().String()
-	_ = remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
+	// Start batch consumer → ClickHouse.
+	ingest.StartIngestWorker(
+		embeddedMQ.NatsConn(),
+		cfg.ClickHouse.Addr,
+		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
+		cfg.ClickHouse.Username,
+		cfg.ClickHouse.Password,
+		cfg.ClickHouse.Database,
+	)
+	// Start active sweeper.
+	go sweeper.Start(ctx)
+
+	// Hub bridge: MQ → broadcast to connected SSE/WS clients.
+	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
 			msg.Ack()
@@ -132,11 +143,14 @@ func main() {
 		hub.Broadcast(msg.Subject, evt)
 		msg.Ack()
 		return nil
-	})
+	}); err != nil {
+		logger.Error("hub bridge start", "error", err)
+		os.Exit(1)
+	}
 
 	// Build handlers.
-	js := remoteMQ.JetStream()
-	ingestHandler := api.NewIngestHandler(registry, remoteMQ)
+	js := embeddedMQ.JetStream()
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
@@ -150,13 +164,13 @@ func main() {
 	deps := api.Dependencies{
 		Ingest: ingestHandler,
 		Query:  api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
-		SSE:    api.NewSSEHandler(hub, remoteMQ.JetStream()),
-		WS:     api.NewWSHandler(hub, remoteMQ.JetStream()),
+		SSE:    api.NewSSEHandler(hub, js),
+		WS:     api.NewWSHandler(hub, js),
 		Health: api.NewHealthHandler(chConn),
 		Schema: api.NewSchemaHandler(registry),
 		DLQ:    dlqHandler,
 		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret, cfg.Auth.Enabled),
-		JS:     remoteMQ.JetStream(),
+		JS:     js,
 	}
 	router := api.NewRouter(deps)
 
@@ -165,6 +179,7 @@ func main() {
 		Handler: router,
 	}
 
+	// Graceful shutdown.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -176,7 +191,7 @@ func main() {
 		srv.Shutdown(shutCtx)
 	}()
 
-	logger.Info("starting api server", "port", cfg.Server.Port, "mode", "clustered")
+	logger.Info("starting server", "port", cfg.Server.Port, "mode", "standalone")
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		logger.Error("server error", "error", err)
 		os.Exit(1)

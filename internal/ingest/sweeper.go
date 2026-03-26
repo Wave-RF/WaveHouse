@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/Wave-RF/BeachHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -26,6 +26,7 @@ type Sweeper struct {
 }
 
 // NewSweeper creates an Active Sweeper.
+// TODO: need leader election or shared lock to only run one instance of the sweeper in clustered mode
 func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Logger) *Sweeper {
 	return &Sweeper{
 		js:        js,

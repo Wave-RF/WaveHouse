@@ -1,4 +1,4 @@
-module github.com/Wave-RF/BeachHouse
+module github.com/Wave-RF/WaveHouse
 
 go 1.25.0
 

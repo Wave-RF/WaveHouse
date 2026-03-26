@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Wave-RF/BeachHouse/internal/dedupe"
-	"github.com/Wave-RF/BeachHouse/internal/discovery"
-	"github.com/Wave-RF/BeachHouse/internal/ingest"
-	"github.com/Wave-RF/BeachHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/dedupe"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/go-chi/chi/v5"
 )
 

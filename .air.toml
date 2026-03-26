@@ -2,8 +2,8 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-cmd = "go build -o ./tmp/beachhouse ./cmd/beachhouse"
-bin = "./tmp/beachhouse"
+cmd = "go build -o ./tmp/wavehouse ./cmd/wavehouse"
+bin = "./tmp/wavehouse"
 include_ext = ["go"]
 exclude_dir = ["tmp", "tests", "deployments", "data", "bin"]
 delay = 1000

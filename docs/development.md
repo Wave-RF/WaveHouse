@@ -13,8 +13,8 @@ This is the fastest way to get a fully functional local environment:
 
 ```bash
 # 1. Clone and install dependencies
-git clone https://github.com/Wave-RF/BeachHouse.git
-cd BeachHouse
+git clone https://github.com/Wave-RF/WaveHouse.git
+cd WaveHouse
 go mod download
 
 # 2. Start ClickHouse (the only external dependency for standalone mode)
@@ -36,7 +36,7 @@ docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
 make dev
 ```
 
-BeachHouse is now running at `http://localhost:8080` in standalone mode with:
+WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no Redis needed
@@ -80,10 +80,10 @@ curl http://localhost:8080/v1/dlq/stats
 
 ### Enable Auth (Optional)
 
-Set `BH_AUTH_ENABLED=true` and `BH_AUTH_JWT_SECRET=my-secret` to require JWT tokens:
+Set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=my-secret` to require JWT tokens:
 
 ```bash
-BH_AUTH_ENABLED=true BH_AUTH_JWT_SECRET=my-secret make dev
+WH_AUTH_ENABLED=true WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
 Then generate a test token:
@@ -100,10 +100,10 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ### Enable Dedup (Optional)
 
-Set `BH_DEDUPE_ENABLED=true` and `BH_DEDUPE_ID_FIELD=event_id`:
+Set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id`:
 
 ```bash
-BH_DEDUPE_ENABLED=true BH_DEDUPE_ID_FIELD=event_id make dev
+WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
 ```
 
 Then include the dedup field in your ingest body:
@@ -139,34 +139,34 @@ docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
   "
 
 # 3. Run the API server in one terminal
-BH_MODE=clustered \
-BH_MQ_URL=nats://localhost:4222 \
-BH_CACHE_REDIS_URL=redis://localhost:6379 \
-go run ./cmd/beachhouse-api
+WH_MODE=clustered \
+WH_MQ_URL=nats://localhost:4222 \
+WH_CACHE_REDIS_URL=redis://localhost:6379 \
+go run ./cmd/wavehouse-api
 
 # 4. Run the worker in another terminal
-BH_MODE=clustered \
-BH_MQ_URL=nats://localhost:4222 \
-BH_CH_ADDR=localhost:9000 \
-go run ./cmd/beachhouse-worker
+WH_MODE=clustered \
+WH_MQ_URL=nats://localhost:4222 \
+WH_CH_ADDR=localhost:9000 \
+go run ./cmd/wavehouse-worker
 ```
 
 ### Using an .env File
 
 ```bash
 # .env.clustered
-export BH_MODE=clustered
-export BH_CH_ADDR=localhost:9000
-export BH_MQ_URL=nats://localhost:4222
-export BH_CACHE_REDIS_URL=redis://localhost:6379
+export WH_MODE=clustered
+export WH_CH_ADDR=localhost:9000
+export WH_MQ_URL=nats://localhost:4222
+export WH_CACHE_REDIS_URL=redis://localhost:6379
 ```
 
 Then:
 
 ```bash
 source .env.clustered
-go run ./cmd/beachhouse-api    # terminal 1
-go run ./cmd/beachhouse-worker # terminal 2
+go run ./cmd/wavehouse-api    # terminal 1
+go run ./cmd/wavehouse-worker # terminal 2
 ```
 
 ## Building
@@ -176,9 +176,9 @@ go run ./cmd/beachhouse-worker # terminal 2
 make build
 
 # Build individual binaries
-go build -o bin/beachhouse ./cmd/beachhouse
-go build -o bin/beachhouse-api ./cmd/beachhouse-api
-go build -o bin/beachhouse-worker ./cmd/beachhouse-worker
+go build -o bin/wavehouse ./cmd/wavehouse
+go build -o bin/wavehouse-api ./cmd/wavehouse-api
+go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 ```
 
 ## Running Modes at a Glance
@@ -186,10 +186,10 @@ go build -o bin/beachhouse-worker ./cmd/beachhouse-worker
 | What you want | Command |
 | ------------- | ------- |
 | Hot-reload standalone dev server | `make dev` |
-| Standalone binary (default config) | `./bin/beachhouse` |
+| Standalone binary (default config) | `./bin/wavehouse` |
 | Standalone via Docker Compose | `make compose-standalone` |
-| Clustered API server (local deps) | `source .env.clustered && go run ./cmd/beachhouse-api` |
-| Clustered worker (local deps) | `source .env.clustered && go run ./cmd/beachhouse-worker` |
+| Clustered API server (local deps) | `source .env.clustered && go run ./cmd/wavehouse-api` |
+| Clustered worker (local deps) | `source .env.clustered && go run ./cmd/wavehouse-worker` |
 | Full clustered stack via Docker | `make compose-cluster` |
 | Infrastructure deps only | `make compose-deps` |
 
@@ -247,11 +247,11 @@ The linter configuration is in `.golangci.yml`. Enabled linters:
 ## Project Structure
 
 ```text
-BeachHouse/
+WaveHouse/
 ├── cmd/                    # Binary entry points
-│   ├── beachhouse/         # Standalone all-in-one binary
-│   ├── beachhouse-api/     # Clustered API server
-│   └── beachhouse-worker/  # Clustered background worker
+│   ├── wavehouse/          # Standalone all-in-one binary
+│   ├── wavehouse-api/      # Clustered API server
+│   └── wavehouse-worker/   # Clustered background worker
 ├── internal/               # Private application packages
 │   ├── api/                # HTTP handlers, router, middleware
 │   ├── cache/              # L1 (Ristretto) + L2 (Redis) caching
@@ -278,7 +278,7 @@ BeachHouse/
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and clustered modes.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging.
-- **Schema-driven**: ClickHouse is the schema source of truth. BeachHouse discovers and validates against real table schemas.
+- **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
 
 ## Makefile Targets
 

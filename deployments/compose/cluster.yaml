@@ -6,8 +6,8 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
     depends_on:
-      - beachhouse-api-1
-      - beachhouse-api-2
+      - wavehouse-api-1
+      - wavehouse-api-2
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -40,72 +40,72 @@ services:
     volumes:
       - scylla-data:/var/lib/scylla
 
-  beachhouse-api-1:
+  wavehouse-api-1:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.beachhouse-api
+      dockerfile: deployments/docker/Dockerfile.wavehouse-api
     environment:
-      BH_MODE: clustered
-      BH_CH_ADDR: clickhouse:9000
-      BH_MQ_URL: nats://nats:4222
-      BH_CACHE_REDIS_URL: redis://redis:6379
-      BH_AUTH_ENABLED: "false"
-      BH_DEDUPE_ENABLED: "false"
-      BH_DEDUPE_SCYLLA_HOSTS: scylladb:9042
-      BH_DEDUPE_SCYLLA_KEYSPACE: beachhouse
-      BH_SCHEMA_REFRESH_INTERVAL: "60"
-      BH_DLQ_ENABLED: "true"
+      WH_MODE: clustered
+      WH_CH_ADDR: clickhouse:9000
+      WH_MQ_URL: nats://nats:4222
+      WH_CACHE_REDIS_URL: redis://redis:6379
+      WH_AUTH_ENABLED: "false"
+      WH_DEDUPE_ENABLED: "false"
+      WH_DEDUPE_SCYLLA_HOSTS: scylladb:9042
+      WH_DEDUPE_SCYLLA_KEYSPACE: wavehouse
+      WH_SCHEMA_REFRESH_INTERVAL: "60"
+      WH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats
       - redis
       - scylladb
 
-  beachhouse-api-2:
+  wavehouse-api-2:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.beachhouse-api
+      dockerfile: deployments/docker/Dockerfile.wavehouse-api
     environment:
-      BH_MODE: clustered
-      BH_CH_ADDR: clickhouse:9000
-      BH_MQ_URL: nats://nats:4222
-      BH_CACHE_REDIS_URL: redis://redis:6379
-      BH_AUTH_ENABLED: "false"
-      BH_DEDUPE_ENABLED: "false"
-      BH_DEDUPE_SCYLLA_HOSTS: scylladb:9042
-      BH_DEDUPE_SCYLLA_KEYSPACE: beachhouse
-      BH_SCHEMA_REFRESH_INTERVAL: "60"
-      BH_DLQ_ENABLED: "true"
+      WH_MODE: clustered
+      WH_CH_ADDR: clickhouse:9000
+      WH_MQ_URL: nats://nats:4222
+      WH_CACHE_REDIS_URL: redis://redis:6379
+      WH_AUTH_ENABLED: "false"
+      WH_DEDUPE_ENABLED: "false"
+      WH_DEDUPE_SCYLLA_HOSTS: scylladb:9042
+      WH_DEDUPE_SCYLLA_KEYSPACE: wavehouse
+      WH_SCHEMA_REFRESH_INTERVAL: "60"
+      WH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats
       - redis
       - scylladb
 
-  beachhouse-worker-1:
+  wavehouse-worker-1:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.beachhouse-worker
+      dockerfile: deployments/docker/Dockerfile.wavehouse-worker
     environment:
-      BH_MODE: clustered
-      BH_CH_ADDR: clickhouse:9000
-      BH_MQ_URL: nats://nats:4222
-      BH_SCHEMA_REFRESH_INTERVAL: "60"
-      BH_DLQ_ENABLED: "true"
+      WH_MODE: clustered
+      WH_CH_ADDR: clickhouse:9000
+      WH_MQ_URL: nats://nats:4222
+      WH_SCHEMA_REFRESH_INTERVAL: "60"
+      WH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats
 
-  beachhouse-worker-2:
+  wavehouse-worker-2:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.beachhouse-worker
+      dockerfile: deployments/docker/Dockerfile.wavehouse-worker
     environment:
-      BH_MODE: clustered
-      BH_CH_ADDR: clickhouse:9000
-      BH_MQ_URL: nats://nats:4222
-      BH_SCHEMA_REFRESH_INTERVAL: "60"
-      BH_DLQ_ENABLED: "true"
+      WH_MODE: clustered
+      WH_CH_ADDR: clickhouse:9000
+      WH_MQ_URL: nats://nats:4222
+      WH_SCHEMA_REFRESH_INTERVAL: "60"
+      WH_DLQ_ENABLED: "true"
     depends_on:
       - clickhouse
       - nats

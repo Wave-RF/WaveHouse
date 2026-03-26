@@ -22,12 +22,11 @@ We will acknowledge receipt within 48 hours and aim to provide an initial assess
 
 ## Security Considerations
 
-BeachHouse handles multi-tenant data and enforces strict isolation:
+WaveHouse handles data and enforces strict isolation:
 
-- **Tenant isolation**: `tenant_id` is exclusively sourced from JWT claims, never from user-supplied request data.
-- **JWT validation**: All `/v1/*` endpoints require valid HMAC-signed JWTs.
-- **Query scoping**: ClickHouse queries are automatically scoped to the authenticated tenant.
-- **Input validation**: JSON payloads are validated before processing. The schema flattener rejects malformed input.
+- **JWT validation**: When auth is enabled, all `/v1/*` endpoints require valid HMAC-signed JWTs.
+- **Input validation**: JSON payloads are validated against ClickHouse schemas before processing.
+- **Query passthrough**: ClickHouse queries are forwarded directly — use appropriate access controls on ClickHouse itself.
 
 ## Disclosure Policy
 

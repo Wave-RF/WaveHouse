@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/Wave-RF/BeachHouse/internal/discovery"
-	"github.com/Wave-RF/BeachHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
 // BufferConsumerName is the durable consumer name used by BufferConsumer.

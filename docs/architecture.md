@@ -1,10 +1,10 @@
 # Architecture
 
-This document describes the internal architecture of BeachHouse, a schema-aware ClickHouse proxy.
+This document describes the internal architecture of WaveHouse, a schema-aware ClickHouse proxy.
 
 ## Overview
 
-BeachHouse is a Go-based gateway that sits in front of ClickHouse, acting as the entry and exit point for data. It discovers your real ClickHouse table schemas, validates data at ingest time, batches inserts asynchronously, and provides real-time streaming and query caching.
+WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the entry and exit point for data. It discovers your real ClickHouse table schemas, validates data at ingest time, batches inserts asynchronously, and provides real-time streaming and query caching.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@ BeachHouse is a Go-based gateway that sits in front of ClickHouse, acting as the
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    BeachHouse API Layer                         │
+│                    WaveHouse API Layer                         │
 │  ┌──────────┐   ┌──────────┐ ┌──────────┐  ┌──────────────┐     │
 │  │  Ingest  │   │  Query   │ │   SSE    │  │  WebSocket   │     │
 │  │  Handler │   │  Handler │ │  Handler │  │   Handler    │     │
@@ -43,7 +43,7 @@ BeachHouse is a Go-based gateway that sits in front of ClickHouse, acting as the
 │  └────┬──────────┘   │       └───────────┘                      │
 │       │              │                                          │
 │  ┌────▼──────┐       │                                          │
-│  │   DLQ     │       │       (failed inserts → BEACHHOUSE_DLQ)  │
+│  │   DLQ     │       │       (failed inserts → WAVEHOUSE_DLQ)  │
 │  └───────────┘       │                                          │
 │                      │                                          │
 └───────┼──────────────┼──────────────────────────────────────────┘
@@ -57,13 +57,13 @@ BeachHouse is a Go-based gateway that sits in front of ClickHouse, acting as the
 
 ## Binaries
 
-BeachHouse ships three binaries for different deployment modes:
+WaveHouse ships three binaries for different deployment modes:
 
 | Binary | Mode | Purpose |
 | ------ | ---- | ------- |
-| `beachhouse` | Standalone | All-in-one: API + worker + embedded NATS + optional embedded Pebble dedup. Zero external deps beyond ClickHouse. |
-| `beachhouse-api` | Clustered | Stateless API server. Handles ingest/query/streaming. Connects to external NATS, Redis, optional ScyllaDB. Horizontally scalable. |
-| `beachhouse-worker` | Clustered | Background worker. Consumes from NATS, batch-flushes to ClickHouse, runs Active Sweeper for message lifecycle. |
+| `wavehouse` | Standalone | All-in-one: API + worker + embedded NATS + optional embedded Pebble dedup. Zero external deps beyond ClickHouse. |
+| `wavehouse-api` | Clustered | Stateless API server. Handles ingest/query/streaming. Connects to external NATS, Redis, optional ScyllaDB. Horizontally scalable. |
+| `wavehouse-worker` | Clustered | Background worker. Consumes from NATS, batch-flushes to ClickHouse, runs Active Sweeper for message lifecycle. |
 
 ## Internal Packages
 
@@ -89,7 +89,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Default topic is `ingest.>` (all tables). Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
-- **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `BEACHHOUSE_DLQ` NATS stream.
+- **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
 - **health.go** — Liveness (`/health`) and readiness (`/ready`) probes.
 
@@ -102,7 +102,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `config/` — Configuration
 
-- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `BH_` prefixed env vars. See [Configuration Reference](configuration.md).
+- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](configuration.md).
 
 ### `dedupe/` — Deduplication (Optional)
 
@@ -125,7 +125,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 ### `mq/` — Message Queue
 
 - **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `Ack()`/`Nak()`.
-- **embedded.go** — Standalone mode: in-process NATS server with JetStream. Creates stream `BEACHHOUSE` with subjects `ingest.>`.
+- **embedded.go** — Standalone mode: in-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
 - **remote.go** — Clustered mode: connects to an external NATS cluster with the same stream/subject configuration.
 
 ## Data Flows
@@ -187,12 +187,12 @@ Client GET /v1/stream/sse or /v1/stream/ws
 
 | Aspect | Standalone | Clustered |
 | ------ | ---------- | --------- |
-| Binaries | Single `beachhouse` binary | `beachhouse-api` + `beachhouse-worker` |
+| Binaries | Single `wavehouse` binary | `wavehouse-api` + `wavehouse-worker` |
 | Message Queue | Embedded NATS (in-process) | External NATS cluster |
 | Deduplication | Optional — Pebble (embedded KV) | Optional — ScyllaDB (distributed) |
 | Cache | L1 only (Ristretto) | L1 (Ristretto) + L2 (Redis) |
 | Schema Discovery | On boot + periodic refresh | On boot + periodic refresh |
-| DLQ | NATS stream `BEACHHOUSE_DLQ` | NATS stream `BEACHHOUSE_DLQ` |
+| DLQ | NATS stream `WAVEHOUSE_DLQ` | NATS stream `WAVEHOUSE_DLQ` |
 | Scaling | Vertical only | Horizontal (add API/worker nodes) |
 | External Dependencies | ClickHouse only | ClickHouse, NATS, Redis, (ScyllaDB if dedup enabled) |
 

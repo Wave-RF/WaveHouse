@@ -7,10 +7,10 @@ The standalone mode runs everything in a single process with embedded NATS and o
 ### Quick Start with Docker Compose
 
 ```bash
-# Start ClickHouse + BeachHouse
+# Start ClickHouse + WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
-# Create your tables in ClickHouse (BeachHouse discovers schemas automatically)
+# Create your tables in ClickHouse (WaveHouse discovers schemas automatically)
 docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   clickhouse-client --query "
     CREATE TABLE IF NOT EXISTS clicks (
@@ -31,7 +31,7 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 This starts:
 
 - **ClickHouse** on ports 8123 (HTTP) and 9000 (native)
-- **BeachHouse** on port 8080
+- **WaveHouse** on port 8080
 
 ### Binary
 
@@ -40,15 +40,15 @@ This starts:
 make build
 
 # Run standalone (uses config.yaml in current directory by default)
-./bin/beachhouse
+./bin/wavehouse
 ```
 
 Or override any config with environment variables:
 
 ```bash
-BH_CH_ADDR=clickhouse.example.com:9000 \
-BH_SCHEMA_REFRESH_INTERVAL=30 \
-./bin/beachhouse
+WH_CH_ADDR=clickhouse.example.com:9000 \
+WH_SCHEMA_REFRESH_INTERVAL=30 \
+./bin/wavehouse
 ```
 
 ## Clustered (Distributed)
@@ -59,8 +59,8 @@ Clustered mode separates the API servers from the workers and uses external infr
 
 | Component | Purpose | Scaling |
 | --------- | ------- | ------- |
-| `beachhouse-api` | HTTP API (ingest, query, stream, schema) | Horizontal — add more instances behind a load balancer |
-| `beachhouse-worker` | Batch consumer + Active Sweeper + DLQ | Horizontal — NATS consumer groups distribute work |
+| `wavehouse-api` | HTTP API (ingest, query, stream, schema) | Horizontal — add more instances behind a load balancer |
+| `wavehouse-worker` | Batch consumer + Active Sweeper + DLQ | Horizontal — NATS consumer groups distribute work |
 | ClickHouse | Analytics storage + schema source of truth | Per ClickHouse docs |
 | NATS | Durable event streaming (JetStream) | NATS cluster |
 | Redis | L2 shared query cache | Redis cluster/sentinel |
@@ -84,7 +84,7 @@ docker compose -f deployments/compose/cluster.yaml exec clickhouse \
     ORDER BY (page)
   "
 
-# BeachHouse API is available via Caddy on port 80
+# WaveHouse API is available via Caddy on port 80
 curl -X POST http://localhost/v1/ingest/clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
@@ -97,8 +97,8 @@ This starts:
 - **NATS** with JetStream on port 4222
 - **Redis** on port 6379
 - **ScyllaDB** on port 9042 (for optional deduplication)
-- **2x beachhouse-api** instances
-- **2x beachhouse-worker** instances
+- **2x wavehouse-api** instances
+- **2x wavehouse-worker** instances
 
 ### Infrastructure Only
 
@@ -108,7 +108,7 @@ For local development against clustered infrastructure:
 docker compose -f deployments/compose/dependencies.yaml up -d
 ```
 
-This starts ClickHouse, NATS, Redis, and ScyllaDB without any BeachHouse processes.
+This starts ClickHouse, NATS, Redis, and ScyllaDB without any WaveHouse processes.
 
 ## Docker Images
 
@@ -120,9 +120,9 @@ make docker
 
 This builds three images:
 
-- `beachhouse:latest`
-- `beachhouse-api:latest`
-- `beachhouse-worker:latest`
+- `wavehouse:latest`
+- `wavehouse-api:latest`
+- `wavehouse-worker:latest`
 
 All images use multi-stage builds (Go Alpine builder → distroless runtime) for minimal attack surface.
 
@@ -131,9 +131,9 @@ All images use multi-stage builds (Go Alpine builder → distroless runtime) for
 Production images are published to GitHub Container Registry via GoReleaser:
 
 ```text
-ghcr.io/wave-rf/beachhouse:<tag>
-ghcr.io/wave-rf/beachhouse-api:<tag>
-ghcr.io/wave-rf/beachhouse-worker:<tag>
+ghcr.io/wave-rf/wavehouse:<tag>
+ghcr.io/wave-rf/wavehouse-api:<tag>
+ghcr.io/wave-rf/wavehouse-worker:<tag>
 ```
 
 ## Releases
@@ -165,32 +165,32 @@ Key variables for production:
 
 ```bash
 # Required
-BH_CH_ADDR=clickhouse:9000
+WH_CH_ADDR=clickhouse:9000
 
 # Schema discovery
-BH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
+WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 
 # Optional auth
-BH_AUTH_ENABLED=true
-BH_AUTH_JWT_SECRET=<strong-random-secret>
+WH_AUTH_ENABLED=true
+WH_AUTH_JWT_SECRET=<strong-random-secret>
 
 # Optional dedup
-BH_DEDUPE_ENABLED=true
-BH_DEDUPE_ID_FIELD=event_id
+WH_DEDUPE_ENABLED=true
+WH_DEDUPE_ID_FIELD=event_id
 
 # Standalone tuning
-BH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE/WS gap-fill
-BH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers backpressure)
+WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE/WS gap-fill
+WH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers backpressure)
 
 # DLQ
-BH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
+WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 # Clustered mode
-BH_MODE=clustered
-BH_MQ_URL=nats://nats:4222
-BH_CACHE_REDIS_URL=redis://redis:6379
-BH_DEDUPE_SCYLLA_HOSTS=scylla-1:9042,scylla-2:9042
-BH_DEDUPE_SCYLLA_KEYSPACE=beachhouse
+WH_MODE=clustered
+WH_MQ_URL=nats://nats:4222
+WH_CACHE_REDIS_URL=redis://redis:6379
+WH_DEDUPE_SCYLLA_HOSTS=scylla-1:9042,scylla-2:9042
+WH_DEDUPE_SCYLLA_KEYSPACE=wavehouse
 ```
 
 ## Health Checks
@@ -204,7 +204,7 @@ Configure your load balancer or orchestrator to use these endpoints.
 
 ## ClickHouse Schema
 
-BeachHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. BeachHouse discovers the schemas automatically via `system.columns` and validates ingest data against them.
+WaveHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. WaveHouse discovers the schemas automatically via `system.columns` and validates ingest data against them.
 
 Example table:
 
@@ -218,17 +218,17 @@ CREATE TABLE IF NOT EXISTS clicks (
 ORDER BY (page);
 ```
 
-BeachHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/schema/refresh`.
+WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/schema/refresh`.
 
 ## ScyllaDB Schema (Clustered Mode, Dedup Enabled)
 
 When deduplication is enabled in clustered mode, ScyllaDB stores the dedup state:
 
 ```sql
-CREATE KEYSPACE IF NOT EXISTS beachhouse
+CREATE KEYSPACE IF NOT EXISTS wavehouse
   WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 3};
 
-CREATE TABLE IF NOT EXISTS beachhouse.dedupe (
+CREATE TABLE IF NOT EXISTS wavehouse.dedupe (
     event_hash text,
     created_at timestamp,
     PRIMARY KEY (event_hash)
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS beachhouse.dedupe (
 
 ## Dead Letter Queue (DLQ)
 
-When `dlq.enabled` is `true` (default), failed batch inserts are published to the `BEACHHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
+When `dlq.enabled` is `true` (default), failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
 
 ## Resetting Data in Development
 
@@ -247,8 +247,8 @@ When `dlq.enabled` is `true` (default), failed batch inserts are published to th
 docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   clickhouse-client --query "DROP TABLE IF EXISTS clicks"
 
-# Recreate the table, then restart BeachHouse to re-discover schemas
-docker compose -f deployments/compose/standalone.yaml restart beachhouse
+# Recreate the table, then restart WaveHouse to re-discover schemas
+docker compose -f deployments/compose/standalone.yaml restart wavehouse
 ```
 
 ### Option 2: Full Reset (Clean Slate)
@@ -263,5 +263,5 @@ docker compose -f deployments/compose/standalone.yaml up -d
 ```bash
 rm -rf data/         # Removes embedded NATS + Pebble data
 make clean           # Removes bin/, tmp/, data/
-make build && ./bin/beachhouse
+make build && ./bin/wavehouse
 ```

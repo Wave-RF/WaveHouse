@@ -1,9 +1,9 @@
 version: 2
 
 builds:
-  - id: beachhouse
-    main: ./cmd/beachhouse
-    binary: beachhouse
+  - id: wavehouse
+    main: ./cmd/wavehouse
+    binary: wavehouse
     env:
       - CGO_ENABLED=0
     goos:
@@ -14,9 +14,9 @@ builds:
       - amd64
       - arm64
 
-  - id: beachhouse-api
-    main: ./cmd/beachhouse-api
-    binary: beachhouse-api
+  - id: wavehouse-api
+    main: ./cmd/wavehouse-api
+    binary: wavehouse-api
     env:
       - CGO_ENABLED=0
     goos:
@@ -27,9 +27,9 @@ builds:
       - amd64
       - arm64
 
-  - id: beachhouse-worker
-    main: ./cmd/beachhouse-worker
-    binary: beachhouse-worker
+  - id: wavehouse-worker
+    main: ./cmd/wavehouse-worker
+    binary: wavehouse-worker
     env:
       - CGO_ENABLED=0
     goos:
@@ -41,27 +41,27 @@ builds:
       - arm64
 
 dockers:
-  - ids: [beachhouse]
+  - ids: [wavehouse]
     image_templates:
-      - "ghcr.io/wave-rf/beachhouse:{{ .Tag }}"
-      - "ghcr.io/wave-rf/beachhouse:latest"
-    dockerfile: deployments/docker/Dockerfile.beachhouse
+      - "ghcr.io/wave-rf/wavehouse:{{ .Tag }}"
+      - "ghcr.io/wave-rf/wavehouse:latest"
+    dockerfile: deployments/docker/Dockerfile.wavehouse
     build_flag_templates:
       - "--platform=linux/amd64"
 
-  - ids: [beachhouse-api]
+  - ids: [wavehouse-api]
     image_templates:
-      - "ghcr.io/wave-rf/beachhouse-api:{{ .Tag }}"
-      - "ghcr.io/wave-rf/beachhouse-api:latest"
-    dockerfile: deployments/docker/Dockerfile.beachhouse-api
+      - "ghcr.io/wave-rf/wavehouse-api:{{ .Tag }}"
+      - "ghcr.io/wave-rf/wavehouse-api:latest"
+    dockerfile: deployments/docker/Dockerfile.wavehouse-api
     build_flag_templates:
       - "--platform=linux/amd64"
 
-  - ids: [beachhouse-worker]
+  - ids: [wavehouse-worker]
     image_templates:
-      - "ghcr.io/wave-rf/beachhouse-worker:{{ .Tag }}"
-      - "ghcr.io/wave-rf/beachhouse-worker:latest"
-    dockerfile: deployments/docker/Dockerfile.beachhouse-worker
+      - "ghcr.io/wave-rf/wavehouse-worker:{{ .Tag }}"
+      - "ghcr.io/wave-rf/wavehouse-worker:latest"
+    dockerfile: deployments/docker/Dockerfile.wavehouse-worker
     build_flag_templates:
       - "--platform=linux/amd64"
 

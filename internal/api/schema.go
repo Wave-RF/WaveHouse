@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/Wave-RF/BeachHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/go-chi/chi/v5"
 )
 

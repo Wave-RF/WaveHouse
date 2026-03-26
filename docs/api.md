@@ -2,7 +2,7 @@
 
 ## Authentication
 
-Authentication is **optional** and controlled by `auth.enabled` (env: `BH_AUTH_ENABLED`). When disabled (default), all `/v1/*` endpoints are open. When enabled, every request to `/v1/*` must include a valid JWT Bearer token:
+Authentication is **optional** and controlled by `auth.enabled` (env: `WH_AUTH_ENABLED`). When disabled (default), all `/v1/*` endpoints are open. When enabled, every request to `/v1/*` must include a valid JWT Bearer token:
 
 ```text
 Authorization: Bearer <token>
@@ -48,7 +48,7 @@ Status code: `503 Service Unavailable`
 
 Accepts a flat JSON object, validates it against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
 
-The `{table}` URL parameter must match a table that exists in ClickHouse. BeachHouse discovers table schemas on startup and refreshes them periodically.
+The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
 **Request:**
 
@@ -307,7 +307,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
-| `received_timestamp` | string | RFC 3339 nano timestamp when BeachHouse received the event. |
+| `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `data` | object | The original flat JSON body. |
 
 ### Client-Facing Format (SSE/WebSocket)
@@ -328,7 +328,7 @@ Same as the wire format — events are passed through directly:
 
 ## Dead Letter Queue (DLQ)
 
-When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`BEACHHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection.
+When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection.
 
 Use `GET /v1/dlq/stats` to monitor DLQ depth.
 

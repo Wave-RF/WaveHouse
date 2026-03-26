@@ -3,9 +3,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /beachhouse-api ./cmd/beachhouse-api
+RUN CGO_ENABLED=0 go build -o /wavehouse-api ./cmd/wavehouse-api
 
 FROM gcr.io/distroless/static-debian12
-COPY --from=builder /beachhouse-api /beachhouse-api
+COPY --from=builder /wavehouse-api /wavehouse-api
 COPY config.yaml /config.yaml
-ENTRYPOINT ["/beachhouse-api"]
+ENTRYPOINT ["/wavehouse-api"]

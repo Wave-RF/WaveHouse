@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Wave-RF/BeachHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

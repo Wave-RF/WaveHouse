@@ -1,9 +1,9 @@
 .PHONY: build dev test test-integration lint docker compose-standalone compose-cluster compose-deps clean
 
 build:
-	go build -o bin/beachhouse ./cmd/beachhouse
-	go build -o bin/beachhouse-api ./cmd/beachhouse-api
-	go build -o bin/beachhouse-worker ./cmd/beachhouse-worker
+	go build -o bin/wavehouse ./cmd/wavehouse
+	go build -o bin/wavehouse-api ./cmd/wavehouse-api
+	go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 
 dev:
 	air -c .air.toml
@@ -18,9 +18,9 @@ lint:
 	golangci-lint run ./...
 
 docker:
-	docker build -f deployments/docker/Dockerfile.beachhouse -t beachhouse:latest .
-	docker build -f deployments/docker/Dockerfile.beachhouse-api -t beachhouse-api:latest .
-	docker build -f deployments/docker/Dockerfile.beachhouse-worker -t beachhouse-worker:latest .
+	docker build -f deployments/docker/Dockerfile.wavehouse -t wavehouse:latest .
+	docker build -f deployments/docker/Dockerfile.wavehouse-api -t wavehouse-api:latest .
+	docker build -f deployments/docker/Dockerfile.wavehouse-worker -t wavehouse-worker:latest .
 
 compose-standalone:
 	docker compose -f deployments/compose/standalone.yaml up -d

@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug to help us improve BeachHouse
+about: Report a bug to help us improve WaveHouse
 title: "bug: "
 labels: bug
 assignees: ""
@@ -26,7 +26,7 @@ What actually happened.
 
 ## Environment
 
-- **BeachHouse version**: (e.g., v0.1.0 or commit SHA)
+- **WaveHouse version**: (e.g., v0.1.0 or commit SHA)
 - **Deployment mode**: standalone / clustered
 - **OS**: (e.g., Linux, macOS)
 - **Go version** (if building from source):

@@ -1,18 +1,18 @@
-# AGENTS.md — AI Agent Instructions for BeachHouse
+# AGENTS.md — AI Agent Instructions for WaveHouse
 
 This file provides context for AI coding agents (Copilot, Cursor, Cody, Aider, etc.) working on this codebase.
 
 ## Project Overview
 
-BeachHouse is a **schema-aware real-time API gateway for ClickHouse**, written in Go. It handles ingestion with schema validation, optional deduplication, caching, real-time streaming, query proxying, and a Dead Letter Queue. It sits entirely in front of ClickHouse as the exclusive data entry/exit point.
+WaveHouse is a **schema-aware real-time API gateway for ClickHouse**, written in Go. It handles ingestion with schema validation, optional deduplication, caching, real-time streaming, query proxying, and a Dead Letter Queue. It sits entirely in front of ClickHouse as the exclusive data entry/exit point.
 
 ## Architecture (Quick Reference)
 
 Three binaries:
 
-- **`cmd/beachhouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
-- **`cmd/beachhouse-api/`** — Clustered API server (stateless, horizontally scalable)
-- **`cmd/beachhouse-worker/`** — Clustered background worker (batch consumer + sweeper)
+- **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
+- **`cmd/wavehouse-api/`** — Clustered API server (stateless, horizontally scalable)
+- **`cmd/wavehouse-worker/`** — Clustered background worker (batch consumer + sweeper)
 
 Seven internal packages under `internal/`:
 
@@ -27,11 +27,11 @@ Seven internal packages under `internal/`:
 ## Key Design Decisions
 
 1. **Interface-first**: Core behaviors are defined as Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`). Standalone and clustered modes use different implementations.
-2. **Bring Your Own Schema (BYOS)**: Users create tables in ClickHouse directly. BeachHouse discovers schemas by querying `system.columns` and validates ingest payloads against real column definitions. No auto-migration, no fixed table schema.
+2. **Bring Your Own Schema (BYOS)**: Users create tables in ClickHouse directly. WaveHouse discovers schemas by querying `system.columns` and validates ingest payloads against real column definitions. No auto-migration, no fixed table schema.
 3. **Schema-driven ingest**: `POST /v1/ingest/{table}` accepts a flat JSON body. The table name comes from the URL. The body is validated against the discovered schema (unknown fields rejected, types checked, nullable constraints enforced). No envelope — just data.
 4. **Async ingestion**: Ingest returns 200 immediately after optional dedup + MQ publish. ClickHouse writes happen asynchronously via BufferConsumer. If NATS stream is full, returns 503 + Retry-After.
 5. **Per-table batching**: BufferConsumer groups events by table name and performs dynamic INSERTs using the schema's column order. Each table's batch is independent.
-6. **Dead Letter Queue**: Failed batch inserts are published to a separate NATS stream (`BEACHHOUSE_DLQ`) with subjects `dlq.<table>`. This prevents silent data loss. Controlled by `dlq.enabled`.
+6. **Dead Letter Queue**: Failed batch inserts are published to a separate NATS stream (`WAVEHOUSE_DLQ`) with subjects `dlq.<table>`. This prevents silent data loss. Controlled by `dlq.enabled`.
 7. **Optional auth**: JWT authentication is opt-in via `auth.enabled`. When disabled (default), all `/v1/*` routes are open. When enabled, tokens are validated but no tenant scoping is applied.
 8. **Optional dedup**: Deduplication is opt-in via `dedupe.enabled`. When enabled, the `dedupe.id_field` config specifies which JSON field to use as the dedup key.
 9. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.

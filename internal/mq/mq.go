@@ -47,5 +47,5 @@ type Subscriber interface {
 
 // StreamName returns the JetStream stream name used by all MQ implementations.
 func StreamName() string {
-	return "BEACHHOUSE"
+	return "WAVEHOUSE"
 }

@@ -1,10 +1,10 @@
-# Contributing to BeachHouse
+# Contributing to WaveHouse
 
-Thank you for your interest in contributing to BeachHouse! This guide will help you get started.
+Thank you for your interest in contributing to WaveHouse! This guide will help you get started.
 
 ## Getting Started
 
-1. [Fork the repository](https://github.com/Wave-RF/BeachHouse/fork) and clone your fork.
+1. [Fork the repository](https://github.com/Wave-RF/WaveHouse/fork) and clone your fork.
 2. Follow the [Development Guide](docs/development.md) to set up your local environment.
 3. Create a feature branch: `git checkout -b feat/my-feature`
 
@@ -12,16 +12,16 @@ Thank you for your interest in contributing to BeachHouse! This guide will help 
 
 ### Reporting Bugs
 
-Open a [bug report issue](https://github.com/Wave-RF/BeachHouse/issues/new?template=bug_report.md) with:
+Open a [bug report issue](https://github.com/Wave-RF/WaveHouse/issues/new?template=bug_report.md) with:
 
-- BeachHouse version and deployment mode (standalone/clustered)
+- WaveHouse version and deployment mode (standalone/clustered)
 - Steps to reproduce
 - Expected vs. actual behavior
 - Relevant logs or error messages
 
 ### Requesting Features
 
-Open a [feature request issue](https://github.com/Wave-RF/BeachHouse/issues/new?template=feature_request.md) describing:
+Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?template=feature_request.md) describing:
 
 - The problem you're trying to solve
 - Your proposed solution

@@ -3,7 +3,7 @@ package api
 import (
 	"encoding/json"
 
-	"github.com/Wave-RF/BeachHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 )
 
 // transformForClient converts a raw EventMessage JSON (from MQ) into a

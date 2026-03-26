@@ -1,6 +1,6 @@
 # Configuration Reference
 
-BeachHouse is configured via a YAML file with environment variable overrides. All environment variables use the `BH_` prefix.
+WaveHouse is configured via a YAML file with environment variable overrides. All environment variables use the `WH_` prefix.
 
 ## Loading Order
 
@@ -8,10 +8,10 @@ BeachHouse is configured via a YAML file with environment variable overrides. Al
 2. Environment variables override any values from the YAML file.
 3. If no config file exists, all values are read from environment variables (with defaults).
 
-Set `BH_CONFIG` to change the config file path:
+Set `WH_CONFIG` to change the config file path:
 
 ```bash
-export BH_CONFIG=/etc/beachhouse/config.yaml
+export WH_CONFIG=/etc/wavehouse/config.yaml
 ```
 
 ## Full Reference
@@ -20,69 +20,69 @@ export BH_CONFIG=/etc/beachhouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `mode` | `BH_MODE` | `standalone` | Deployment mode: `standalone` or `clustered`. |
+| `mode` | `WH_MODE` | `standalone` | Deployment mode: `standalone` or `clustered`. |
 
 ### Server
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `server.port` | `BH_SERVER_PORT` | `8080` | HTTP server listen port. |
-| `server.shutdown_timeout` | `BH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Graceful shutdown timeout in seconds. |
+| `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
+| `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Graceful shutdown timeout in seconds. |
 
 ### ClickHouse
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `clickhouse.addr` | `BH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
-| `clickhouse.database` | `BH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
-| `clickhouse.username` | `BH_CH_USERNAME` | `default` | Authentication username. |
-| `clickhouse.password` | `BH_CH_PASSWORD` | *(empty)* | Authentication password. |
+| `clickhouse.addr` | `WH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
+| `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
+| `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
+| `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
 
 ### Schema Discovery
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `schema.refresh_interval` | `BH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh`. |
+| `schema.refresh_interval` | `WH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh`. |
 
 ### Message Queue (NATS)
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `mq.embedded_dir` | `BH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server (standalone mode). |
-| `mq.url` | `BH_MQ_URL` | `nats://localhost:4222` | NATS server URL (clustered mode). |
-| `mq.gap_window_minutes` | `BH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE/WS gap-fill. The Active Sweeper will not purge messages newer than this window. |
-| `mq.max_bytes_gb` | `BH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
+| `mq.embedded_dir` | `WH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server (standalone mode). |
+| `mq.url` | `WH_MQ_URL` | `nats://localhost:4222` | NATS server URL (clustered mode). |
+| `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE/WS gap-fill. The Active Sweeper will not purge messages newer than this window. |
+| `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
 ### Deduplication
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `dedupe.enabled` | `BH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
-| `dedupe.id_field` | `BH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
-| `dedupe.embedded_dir` | `BH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store (standalone mode). |
-| `dedupe.scylla_hosts` | `BH_DEDUPE_SCYLLA_HOSTS` | `localhost:9042` | ScyllaDB contact points (clustered mode). Comma-separated. |
-| `dedupe.scylla_keyspace` | `BH_DEDUPE_SCYLLA_KEYSPACE` | `beachhouse` | ScyllaDB keyspace name. |
+| `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
+| `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
+| `dedupe.embedded_dir` | `WH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store (standalone mode). |
+| `dedupe.scylla_hosts` | `WH_DEDUPE_SCYLLA_HOSTS` | `localhost:9042` | ScyllaDB contact points (clustered mode). Comma-separated. |
+| `dedupe.scylla_keyspace` | `WH_DEDUPE_SCYLLA_KEYSPACE` | `wavehouse` | ScyllaDB keyspace name. |
 
 ### Cache
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `cache.l1_max_cost` | `BH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). |
-| `cache.redis_url` | `BH_CACHE_REDIS_URL` | `redis://localhost:6379` | Redis URL for L2 cache (clustered mode). |
-| `cache.default_ttl` | `BH_CACHE_DEFAULT_TTL` | `300` | Default cache TTL in seconds (5 minutes). |
+| `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). |
+| `cache.redis_url` | `WH_CACHE_REDIS_URL` | `redis://localhost:6379` | Redis URL for L2 cache (clustered mode). |
+| `cache.default_ttl` | `WH_CACHE_DEFAULT_TTL` | `300` | Default cache TTL in seconds (5 minutes). |
 
 ### Authentication
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `auth.enabled` | `BH_AUTH_ENABLED` | `false` | Enable JWT authentication on `/v1/*` routes. When disabled, all endpoints are open. |
-| `auth.jwt_secret` | `BH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set when auth is enabled.** |
+| `auth.enabled` | `WH_AUTH_ENABLED` | `false` | Enable JWT authentication on `/v1/*` routes. When disabled, all endpoints are open. |
+| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set when auth is enabled.** |
 
 ### Dead Letter Queue (DLQ)
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `dlq.enabled` | `BH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. Failed batch inserts are published to the `BEACHHOUSE_DLQ` NATS stream instead of blocking retries. |
+| `dlq.enabled` | `WH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. Failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream instead of blocking retries. |
 
 ## Example Config File
 
@@ -111,7 +111,7 @@ dedupe:
   embedded_dir: ./data/pebble
   scylla_hosts:
     - localhost:9042
-  scylla_keyspace: beachhouse
+  scylla_keyspace: wavehouse
 
 cache:
   l1_max_cost: 67108864

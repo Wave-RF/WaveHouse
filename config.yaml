@@ -23,7 +23,7 @@ dedupe:
   embedded_dir: ./data/pebble
   scylla_hosts:
     - localhost:9042
-  scylla_keyspace: beachhouse
+  scylla_keyspace: wavehouse
 
 cache:
   l1_max_cost: 67108864

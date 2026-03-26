@@ -20,7 +20,7 @@ func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
 }
 
 // DLQStreamName is the NATS JetStream stream used for dead-lettered events.
-const DLQStreamName = "BEACHHOUSE_DLQ"
+const DLQStreamName = "WAVEHOUSE_DLQ"
 
 // Stats returns per-table message counts in the DLQ stream.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {

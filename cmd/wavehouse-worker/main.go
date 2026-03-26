@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/Wave-RF/BeachHouse/internal/api"
-	"github.com/Wave-RF/BeachHouse/internal/config"
-	"github.com/Wave-RF/BeachHouse/internal/discovery"
-	"github.com/Wave-RF/BeachHouse/internal/ingest"
-	"github.com/Wave-RF/BeachHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfgPath := "config.yaml"
-	if p := os.Getenv("BH_CONFIG"); p != "" {
+	if p := os.Getenv("WH_CONFIG"); p != "" {
 		cfgPath = p
 	}
 
@@ -79,13 +79,13 @@ func main() {
 
 	// Batch consumer → ClickHouse.
 	ingest.StartIngestWorker(
-        remoteMQ.NatsConn(), 
-        cfg.ClickHouse.Addr, 
-        cfg.ClickHouse.HTTPPort, // Uses 8123 by default
-        cfg.ClickHouse.Username, 
-        cfg.ClickHouse.Password, 
-        cfg.ClickHouse.Database,
-    )
+		remoteMQ.NatsConn(),
+		cfg.ClickHouse.Addr,
+		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
+		cfg.ClickHouse.Username,
+		cfg.ClickHouse.Password,
+		cfg.ClickHouse.Database,
+	)
 
 	// Active sweeper — purges processed + expired messages every minute.
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute

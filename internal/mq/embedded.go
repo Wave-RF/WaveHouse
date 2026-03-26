@@ -33,7 +33,7 @@ func (s *slogNATSLogger) Tracef(format string, v ...any) {
 	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-const streamName = "BEACHHOUSE"
+const streamName = "WAVEHOUSE"
 
 // EmbeddedNATS runs an in-process NATS server with JetStream.
 type EmbeddedNATS struct {

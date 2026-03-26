@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/Wave-RF/BeachHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 )
 
 // Hub manages broadcast fan-out from a single MQ subscription to N clients.

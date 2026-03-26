@@ -10,26 +10,26 @@ services:
     volumes:
       - clickhouse-data:/var/lib/clickhouse
 
-  beachhouse:
+  wavehouse:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.beachhouse
+      dockerfile: deployments/docker/Dockerfile.wavehouse
     ports:
       - "8080:8080"
     environment:
-      BH_MODE: standalone
-      BH_CH_ADDR: clickhouse:9000
-      BH_MQ_EMBEDDED_DIR: /data/nats
-      BH_AUTH_ENABLED: "false"
-      BH_DEDUPE_ENABLED: "false"
-      BH_DEDUPE_EMBEDDED_DIR: /data/pebble
-      BH_SCHEMA_REFRESH_INTERVAL: "60"
-      BH_DLQ_ENABLED: "true"
+      WH_MODE: standalone
+      WH_CH_ADDR: clickhouse:9000
+      WH_MQ_EMBEDDED_DIR: /data/nats
+      WH_AUTH_ENABLED: "false"
+      WH_DEDUPE_ENABLED: "false"
+      WH_DEDUPE_EMBEDDED_DIR: /data/pebble
+      WH_SCHEMA_REFRESH_INTERVAL: "60"
+      WH_DLQ_ENABLED: "true"
     volumes:
-      - beachhouse-data:/data
+      - wavehouse-data:/data
     depends_on:
       - clickhouse
 
 volumes:
   clickhouse-data:
-  beachhouse-data:
+  wavehouse-data:

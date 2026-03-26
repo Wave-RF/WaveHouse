@@ -73,7 +73,7 @@ func StartIngestWorker(nc *nats.Conn, chHost, chHTTPPort, chUser, chPassword, ch
 	// Create or bind to the Durable Pull Consumer.
 	// The Sweeper relies on "buffer-consumer" to read the AckFloor.
 	// TODO: support multiple consumers for horizontal scaling
-	cons, err := js.CreateOrUpdateConsumer(context.Background(), "BEACHHOUSE", jetstream.ConsumerConfig{
+	cons, err := js.CreateOrUpdateConsumer(context.Background(), "WAVEHOUSE", jetstream.ConsumerConfig{
 		Durable:       "buffer-consumer",
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
