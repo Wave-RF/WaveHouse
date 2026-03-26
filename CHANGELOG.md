@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING: Project renamed from BeachHouse to WaveHouse** — All binaries (`beachhouse` → `wavehouse`, `beachhouse-api` → `wavehouse-api`, `beachhouse-worker` → `wavehouse-worker`), Go module path (`github.com/Wave-RF/WaveHouse`), environment variable prefix (`BH_` → `WH_`), NATS stream names (`BEACHHOUSE` → `WAVEHOUSE`, `BEACHHOUSE_DLQ` → `WAVEHOUSE_DLQ`), Docker images (`ghcr.io/wave-rf/wavehouse`), ScyllaDB default keyspace (`wavehouse`), and all documentation updated.
 - **Bento ingest worker**: Replaced Go channel bridge (`dataChan`) with direct JetStream pull via `consumer.Messages()`. Eliminates the 1000-message buffer, ensures NATS acks happen immediately after ClickHouse writes, and removes all package-level mutable state. The custom Bento input plugin is now registered at runtime with the JetStream consumer captured via closure instead of using `init()` and globals.
 
 ### Added

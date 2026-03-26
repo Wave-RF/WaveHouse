@@ -1,0 +1,34 @@
+
+- [ ] Observability:
+  - [ ] Metrics:
+    - [ ] Configure WaveHouse to be the single source of truth for metrics.
+    - [ ] Write lightweight adapter code in WaveHouse that periodically reads stats from the embedded NATS server (`server.Varz()`), Pebble (`db.Metrics()`), and Bento, and registers them into your central OpenTelemetry `MeterProvider` or Prometheus registry.
+    - [ ] Expose a single `/metrics` endpoint on port `8080` (or push via a single OTLP pipeline).
+    - [ ] Prefix the metrics cleanly so users know what they are looking at: `wavehouse_nats_connections`, `wavehouse_pebble_wal_size`, `wavehouse_bento_events_processed`.
+    - [ ] Potentially do this via otel (`go.opentelemetry.io/otel/metric`) and support exporting via push to otel collector, or via a Prometheus scrape endpoint. TBD on whether we want `prometheus/client_golang` for `promhttp` or if we can just use `otel` with a Prometheus exporter.
+    - [ ] Export go runtime metrics (e.g. GC pause times, goroutine count) as well for additional insight into system health.
+    - [ ] Work out exactly what custom metrics we want to emit from each component (API, worker, Bento) that would be useful for monitoring and alerting, and ensure those are included in the WaveHouse metrics adapter.cd
+  - [ ] Traces:
+    - [ ] Instrument the main API and worker code paths with OpenTelemetry spans.
+    - [ ] Add spans around key operations like schema discovery, batch flushes, and NATS message processing.
+    - [ ] Ensure trace context is propagated across API and worker boundaries via NATS messages.
+    - [ ] Ensure Bento uses the same trace context when processing events and writing to ClickHouse, with a child span under the original API trace.
+    - [ ] Pass context to `clickhouse-go/v2` so that ClickHouse queries are also traced and show up in the same trace.
+  - [ ] Logs:
+    - [ ] Use a structured logging library (slog) to emit JSON logs with consistent fields.
+    - [ ] Include key context in logs (e.g. request ID, trace ID, batch ID) to correlate with metrics and traces.
+    - [ ] Include log levels (INFO, WARN, ERROR) and ensure that errors are logged with stack traces for easier debugging.
+    - [ ] Include component fields in logs (e.g. "api", "worker", "bento") to differentiate log sources. Potentially include a "source" field for more granularity (e.g. "api/ingest_handler", "worker/batch_processor") and maybe even specific function names, file names, or line numbers if it doesn't add too much overhead.
+    - [ ] Potentially support log sampling or log levels that can be configured at runtime to avoid overwhelming log storage in high-throughput scenarios, while still ensuring that critical errors are always logged.
+    - [ ] Consider adding support to push logs to a collector through OTLP or a similar protocol, in addition to or instead of writing to stdout, for better integration with centralized logging systems. Could potentially use `slogotel` for this or `slog-multi` to fan out logs to multiple destinations in different more readable (non-JSON) formats for local development.
+  - [ ] Profiling:
+    - [ ] Setup `pprof` (expose standard `net/http/pprof` endpoints on admin/internal http port)
+  - [ ] Health Checks:
+    - [ ] Implement `/healthz` and `/readyz` endpoints on the API and worker for Kubernetes health checks vs normal `/health` and `/ready` for general health monitoring.
+    - [ ] Ensure that the health checks verify connectivity to dependencies (e.g. ClickHouse, NATS) and return appropriate status codes.
+    - [ ] Consider adding more detailed health check endpoints that can provide insights into the status of internal components (e.g. `/healthz/nats`, `/healthz/clickhouse`) for easier debugging in production.
+    - [ ] Ensure that the health check endpoints are lightweight and do not add significant overhead to the system, especially under high load.
+  - [ ] Setup dashboard/viewing to see this data locally during development, potentially via a docker container like `grafana/otel-lgtm` or maybe even Signoz for full ClickHouse usage and native OTLP, or `jaegertracing/all-in-one` for tracing or something – likely need more research or to try a couple options here.
+  - [ ] Build dashboards for given monitoring system for development
+  - [ ] Document how to run and use all of this
+  - [ ] Build configuration options for users to customize what ports metrics and health checks are exposed on, whether to push metrics via OTLP or expose a Prometheus endpoint, log levels, etc.
