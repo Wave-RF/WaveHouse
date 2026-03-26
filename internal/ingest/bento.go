@@ -63,11 +63,13 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			}
 			ticker.Stop()
 
-			delQuery := fmt.Sprintf("DELETE FROM %s WHERE id = '%s'", raw.TableName, raw.ID)
-			if err := j.chConn.Exec(context.Background(), delQuery); err != nil {
-				slog.Error("Failed lightweight delete", "error", err)
+			delQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ?", raw.TableName)
+
+			if err := j.chConn.Exec(ctx, delQuery, raw.ID); err != nil {
+				slog.Error("Failed lightweight delete", "table", raw.TableName, "id", raw.ID, "error", err)
 				m.Nak()
 			} else {
+				slog.Info("Successfully deleted record", "table", raw.TableName, "id", raw.ID)
 				m.Ack()
 			}
 			continue
@@ -108,14 +110,12 @@ func (d *dlqOutput) Close(ctx context.Context) error   { return nil }
 func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	for _, m := range batch {
 		data, _ := m.AsBytes()
-		var raw struct {
-			TableName string `json:"table_name"`
-		}
-		_ = json.Unmarshal(data, &raw)
-
+		
+		tableName, exists := m.MetaGet("table_name")
+		
 		subject := "dlq.unknown"
-		if raw.TableName != "" {
-			subject = "dlq." + raw.TableName
+		if exists && tableName != "" {
+			subject = "dlq." + tableName
 		}
 		
 		_, _ = d.js.Publish(ctx, subject, data)
