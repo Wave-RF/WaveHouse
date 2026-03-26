@@ -123,13 +123,13 @@ func main() {
 
 	// Start batch consumer → ClickHouse.
 	ingest.StartIngestWorker(
-		embeddedMQ.NatsConn(), 
-		cfg.ClickHouse.Addr, 
+		embeddedMQ.NatsConn(),
+		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
-		cfg.ClickHouse.Username, 
-		cfg.ClickHouse.Password, 
+		cfg.ClickHouse.Username,
+		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,
-		)
+	)
 	// Start active sweeper.
 	go sweeper.Start(ctx)
 

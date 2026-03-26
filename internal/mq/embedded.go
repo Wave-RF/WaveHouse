@@ -3,12 +3,35 @@ package mq
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+// slogNATSLogger adapts slog to the natsserver.Logger interface.
+type slogNATSLogger struct{ l *slog.Logger }
+
+func (s *slogNATSLogger) Noticef(format string, v ...any) {
+	s.l.Info(fmt.Sprintf(format, v...), "component", "nats")
+}
+func (s *slogNATSLogger) Warnf(format string, v ...any) {
+	s.l.Warn(fmt.Sprintf(format, v...), "component", "nats")
+}
+func (s *slogNATSLogger) Fatalf(format string, v ...any) {
+	s.l.Error(fmt.Sprintf(format, v...), "component", "nats")
+}
+func (s *slogNATSLogger) Errorf(format string, v ...any) {
+	s.l.Error(fmt.Sprintf(format, v...), "component", "nats")
+}
+func (s *slogNATSLogger) Debugf(format string, v ...any) {
+	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
+}
+func (s *slogNATSLogger) Tracef(format string, v ...any) {
+	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
+}
 
 const streamName = "BEACHHOUSE"
 
@@ -32,7 +55,7 @@ func NewEmbedded(storeDir string, maxBytes int64) (*EmbeddedNATS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new nats server: %w", err)
 	}
-	ns.ConfigureLogger()
+	ns.SetLogger(&slogNATSLogger{l: slog.Default()}, false, false)
 	ns.Start()
 
 	if !ns.ReadyForConnections(5 * time.Second) {
@@ -111,7 +134,7 @@ func (e *EmbeddedNATS) JetStream() jetstream.JetStream {
 }
 
 func (e *EmbeddedNATS) NatsConn() *nats.Conn {
-    return e.conn
+	return e.conn
 }
 
 func (e *EmbeddedNATS) Close() error {

@@ -3,64 +3,100 @@ package ingest
 import (
 	"context"
 	"fmt"
-	"log"
-    "net"
+	"log/slog"
+	"net"
+	"os"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/warpstreamlabs/bento/public/service"
 	_ "github.com/warpstreamlabs/bento/public/components/all"
+	"github.com/warpstreamlabs/bento/public/service"
 )
 
-type wrappedMessage struct {
-	BentoMsg *service.Message
-	NatsMsg  jetstream.Msg 
+// jsInput is a custom Bento input that pulls directly from a JetStream consumer.
+// The consumer is captured via closure at registration time — no package-level state.
+type jsInput struct {
+	consumer jetstream.Consumer
+	iter     jetstream.MessagesContext
 }
 
-var dataChan = make(chan wrappedMessage, 1000)
-
-func init() {
-	err := service.RegisterInput(
-		"nats_bridge",
-		service.NewConfigSpec(),
-		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
-			return &chanInput{}, nil
-		},
-	)
+func (j *jsInput) Connect(ctx context.Context) error {
+	iter, err := j.consumer.Messages()
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("create jetstream iterator: %w", err)
 	}
+	j.iter = iter
+	return nil
 }
 
-type chanInput struct{}
-
-func (c *chanInput) Connect(ctx context.Context) error { return nil }
-
-func (c *chanInput) Read(ctx context.Context) (*service.Message, service.AckFunc, error) {
-	wrapped, ok := <-dataChan
-	if !ok {
+func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, error) {
+	m, err := j.iter.Next()
+	if err != nil {
 		return nil, nil, service.ErrNotConnected
 	}
 
-	// This is the function Bento will call AFTER the HTTP request finishes
+	msg := service.NewMessage(m.Data())
+
+	// Bento calls this AFTER the output (HTTP request to ClickHouse) finishes.
 	ackFn := func(ctx context.Context, err error) error {
 		if err != nil {
-			// Bento failed completely. NAK tells NATS to try again later.
-			return wrapped.NatsMsg.Nak()
+			return m.Nak()
 		}
-		return wrapped.NatsMsg.Ack()
+		return m.Ack()
 	}
 
-	return wrapped.BentoMsg, ackFn, nil
+	return msg, ackFn, nil
 }
 
-func (c *chanInput) Close(ctx context.Context) error { return nil }
+func (j *jsInput) Close(ctx context.Context) error {
+	if j.iter != nil {
+		j.iter.Stop()
+	}
+	return nil
+}
 
 func StartIngestWorker(nc *nats.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) {
-    host, _, err := net.SplitHostPort(chHost)
-    if err != nil {
-        host = chHost // If there was no port to begin with, just use the original
-    }
+	host, _, err := net.SplitHostPort(chHost)
+	if err != nil {
+		host = chHost // If there was no port to begin with, just use the original
+	}
+
+	logger := slog.Default().With("component", "bento")
+
+	// Initialize modern JetStream context.
+	js, err := jetstream.New(nc)
+	if err != nil {
+		logger.Error("failed to initialize JetStream", "error", err)
+		os.Exit(1)
+	}
+
+	// Create or bind to the Durable Pull Consumer.
+	// The Sweeper relies on "buffer-consumer" to read the AckFloor.
+	// TODO: support multiple consumers for horizontal scaling
+	cons, err := js.CreateOrUpdateConsumer(context.Background(), "BEACHHOUSE", jetstream.ConsumerConfig{
+		Durable:       "buffer-consumer",
+		FilterSubject: "ingest.>",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		logger.Error("failed to create durable pull consumer", "error", err)
+		os.Exit(1)
+	}
+
+	// Register a custom Bento input that pulls directly from JetStream.
+	// The consumer is captured in the closure — no package-level state needed.
+	// RegisterInput is just a registry map write; it only needs to happen
+	// before builder.Build().
+	if err := service.RegisterInput(
+		"nats_bridge",
+		service.NewConfigSpec(),
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
+			return &jsInput{consumer: cons}, nil
+		},
+	); err != nil {
+		logger.Error("failed to register Bento input", "error", err)
+		os.Exit(1)
+	}
 
 	yamlConfig := fmt.Sprintf(`
 input:
@@ -69,7 +105,7 @@ input:
 output:
   fallback:
     - http_client:
-        url: 'http://%s:%s/?database=%s&query=INSERT+INTO+${! json("table_name") }+FORMAT+JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort'
+        url: 'http://%s:%s/?database=%s&query=INSERT+INTO+${! meta("table_name") }+FORMAT+JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort'
         verb: POST
         headers:
           Content-Type: application/json
@@ -82,9 +118,9 @@ output:
             - group_by_value:
                 value: '${! json("table_name") }'
             - mapping: |
+                meta table_name = this.table_name
                 root = this.data | {}
                 root.received_timestamp = this.received_timestamp
-                root.table_name = this.table_name
             - archive:
                 format: lines
     - file:
@@ -93,55 +129,23 @@ output:
 `, host, chHTTPPort, chDB, chUser, chPassword)
 
 	builder := service.NewStreamBuilder()
+	builder.SetLogger(logger)
 
 	if err := builder.SetYAML(yamlConfig); err != nil {
-		log.Fatalf("Bento config error: %v", err)
+		logger.Error("Bento config error", "error", err)
+		os.Exit(1)
 	}
 
 	stream, err := builder.Build()
 	if err != nil {
-		log.Fatalf("Bento build error: %v", err)
+		logger.Error("Bento build error", "error", err)
+		os.Exit(1)
 	}
 
-
-	// Initialize modern JetStream context
-	js, err := jetstream.New(nc)
-	if err != nil {
-		log.Fatalf("Failed to initialize JetStream: %v", err)
-	}
-
-    // _ = js.DeleteConsumer(context.Background(), "BEACHHOUSE", "buffer-consumer")
-
-	// Create or bind to the Durable Pull Consumer
-	// This makes sure the Sweeper can find "buffer-consumer" and read its AckFloor!
-	cons, err := js.CreateOrUpdateConsumer(context.Background(), "BEACHHOUSE", jetstream.ConsumerConfig{
-		Durable:       "buffer-consumer",
-		FilterSubject: "ingest.>",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create durable pull consumer: %v", err)
-	}
-
-	// This safely pulls data in the background and hands it to our function.
-	_, err = cons.Consume(func(m jetstream.Msg) {
-		wrapped := wrappedMessage{
-			BentoMsg: service.NewMessage(m.Data()),
-			NatsMsg:  m,
-		}
-
-		dataChan <- wrapped
-
-		// We trust Bento's AckFunc to handle m.Ack() and m.Nak()
-	})
-	if err != nil {
-		log.Fatalf("Failed to consume from NATS: %v", err)
-	}
-	
 	go func() {
-		fmt.Println("***** Bento Zero-Port Worker Running *****")
+		logger.Info("ingest worker started")
 		if err := stream.Run(context.Background()); err != nil {
-			log.Printf("Bento worker stopped: %v", err)
+			logger.Error("ingest worker stopped", "error", err)
 		}
 	}()
 }
