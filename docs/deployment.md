@@ -173,6 +173,16 @@ WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 # Optional auth
 WH_AUTH_ENABLED=true
 WH_AUTH_JWT_SECRET=<strong-random-secret>
+WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
+WH_AUTH_ROLE_CLAIM=app_metadata.role
+# WH_AUTH_DEV_MODE=true            # Dev only — skips JWT validation
+
+# Access control & pipes
+WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
+WH_PIPES_DIRECTORY=/etc/wavehouse/pipes
+
+# Cache tuning
+WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 
 # Optional dedup
 WH_DEDUPE_ENABLED=true

@@ -29,13 +29,23 @@ cache:
   l1_max_cost: 67108864
   redis_url: redis://localhost:6379
   default_ttl: 300
+  timestamp_bucket_seconds: 60
 
 auth:
   enabled: false
   jwt_secret: change-me-in-production
+  jwks_url: ""
+  role_claim: role
+  dev_mode: false
 
 schema:
   refresh_interval: 60
 
 dlq:
   enabled: true
+
+policy:
+  file_path: ""
+
+pipes:
+  directory: ""

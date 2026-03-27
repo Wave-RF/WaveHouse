@@ -56,7 +56,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				select {
 				case <-ctx.Done():
 					ticker.Stop()
-					m.Nak() 
+					m.Nak()
 					return nil, nil, ctx.Err()
 				case <-ticker.C:
 				}
@@ -75,7 +75,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Insert case
 		msg := service.NewMessage(m.Data())
-		
+
 		j.inFlight.Add(1)
 
 		ackFn := func(ctx context.Context, err error) error {
@@ -117,13 +117,12 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 		if raw.TableName != "" {
 			subject = "dlq." + raw.TableName
 		}
-		
+
 		_, _ = d.js.Publish(ctx, subject, data)
 		d.logger.Warn("Sent failed message to DLQ", "subject", subject)
 	}
 	return nil
 }
-
 
 func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) {
 	host, _, err := net.SplitHostPort(chHost)

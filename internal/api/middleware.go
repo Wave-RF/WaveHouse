@@ -1,17 +1,78 @@
 package api
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 )
 
+type contextKey string
+
+const (
+	// ContextKeyClaims holds jwt.MapClaims in the request context.
+	ContextKeyClaims contextKey = "jwt_claims"
+	// ContextKeyRole holds the resolved role string.
+	ContextKeyRole contextKey = "jwt_role"
+)
+
+// ClaimsFromContext extracts JWT claims from the request context.
+func ClaimsFromContext(ctx context.Context) (jwt.MapClaims, bool) {
+	c, ok := ctx.Value(ContextKeyClaims).(jwt.MapClaims)
+	return c, ok
+}
+
+// RoleFromContext extracts the role string from the request context.
+func RoleFromContext(ctx context.Context) string {
+	r, _ := ctx.Value(ContextKeyRole).(string)
+	return r
+}
+
+// AuthConfig holds configuration for the JWT auth middleware.
+type AuthConfig struct {
+	Enabled   bool
+	JWTSecret string
+	JWKSURL   string
+	RoleClaim string // dot-separated claim path, e.g. "role" or "app_metadata.role"
+	DevMode   bool
+}
+
 // JWTAuthMiddleware validates Bearer tokens.
-// When auth is disabled, returns a no-op passthrough middleware.
-func JWTAuthMiddleware(secret string, enabled bool) func(http.Handler) http.Handler {
-	if !enabled {
-		return func(next http.Handler) http.Handler { return next }
+// When auth is disabled or dev mode is enabled, returns a no-op passthrough middleware.
+// Supports HMAC signing (via JWTSecret) and/or JWKS endpoint (via JWKSURL).
+func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
+	if !cfg.Enabled || cfg.DevMode {
+		if cfg.DevMode {
+			slog.Warn("auth dev mode enabled — all requests treated as admin, no JWT validation")
+		}
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if cfg.DevMode {
+					ctx := context.WithValue(r.Context(), ContextKeyRole, "admin")
+					ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+					r = r.WithContext(ctx)
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+
+	roleClaim := cfg.RoleClaim
+	if roleClaim == "" {
+		roleClaim = "role"
+	}
+
+	// Build keyfunc for JWKS if configured.
+	var jwks keyfunc.Keyfunc
+	if cfg.JWKSURL != "" {
+		var err error
+		jwks, err = keyfunc.NewDefault([]string{cfg.JWKSURL})
+		if err != nil {
+			slog.Error("failed to initialize JWKS keyfunc", "url", cfg.JWKSURL, "error", err)
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -24,24 +85,53 @@ func JWTAuthMiddleware(secret string, enabled bool) func(http.Handler) http.Hand
 
 			tokenStr := strings.TrimPrefix(auth, "Bearer ")
 
-			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+			keyFunc := func(t *jwt.Token) (interface{}, error) {
+				// Try JWKS first if configured.
+				if jwks != nil {
+					return jwks.Keyfunc(t)
+				}
+				// Fall back to HMAC shared secret.
 				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 					return nil, jwt.ErrSignatureInvalid
 				}
-				return []byte(secret), nil
-			})
+				return []byte(cfg.JWTSecret), nil
+			}
+
+			token, err := jwt.Parse(tokenStr, keyFunc)
 			if err != nil || !token.Valid {
 				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
 				return
 			}
 
-			_, ok := token.Claims.(jwt.MapClaims)
+			claims, ok := token.Claims.(jwt.MapClaims)
 			if !ok {
 				http.Error(w, `{"error":"invalid claims"}`, http.StatusUnauthorized)
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			// Extract role from claims using dot-separated path.
+			role := extractClaim(claims, roleClaim)
+
+			ctx := context.WithValue(r.Context(), ContextKeyClaims, claims)
+			ctx = context.WithValue(ctx, ContextKeyRole, role)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// extractClaim navigates a dot-separated claim path in JWT claims.
+func extractClaim(claims jwt.MapClaims, path string) string {
+	parts := strings.Split(path, ".")
+	var current any = map[string]any(claims)
+	for _, part := range parts {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = m[part]
+	}
+	if s, ok := current.(string); ok {
+		return s
+	}
+	return ""
 }

@@ -12,16 +12,18 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
 
 // QueryHandler handles POST /v1/query.
 type QueryHandler struct {
-	CHConn     driver.Conn
-	Cache      *cache.TieredCache
-	DefaultTTL time.Duration
-	sf         singleflight.Group
+	CHConn      driver.Conn
+	Cache       *cache.TieredCache
+	DefaultTTL  time.Duration
+	PolicyStore *policy.Store
+	sf          singleflight.Group
 }
 
 func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
@@ -34,6 +36,30 @@ type queryRequest struct {
 }
 
 func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	// Raw SQL is restricted when a policy store is configured.
+	if h.PolicyStore != nil {
+		role := RoleFromContext(r.Context())
+		if role != "" && role != "admin" && role != "service" {
+			// Check if the role has raw_sql permission on any table.
+			p := h.PolicyStore.Get()
+			if p != nil {
+				claims, _ := ClaimsFromContext(r.Context())
+				allowed := false
+				for table := range p.Tables {
+					perms := policy.Evaluate(p, role, table, "select", claims)
+					if perms.RawSQL {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					http.Error(w, `{"error":"raw SQL queries require admin role"}`, http.StatusForbidden)
+					return
+				}
+			}
+		}
+	}
+
 	var req queryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)

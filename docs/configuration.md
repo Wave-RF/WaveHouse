@@ -70,19 +70,35 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). |
 | `cache.redis_url` | `WH_CACHE_REDIS_URL` | `redis://localhost:6379` | Redis URL for L2 cache (clustered mode). |
 | `cache.default_ttl` | `WH_CACHE_DEFAULT_TTL` | `300` | Default cache TTL in seconds (5 minutes). |
+| `cache.timestamp_bucket_seconds` | `WH_CACHE_TIMESTAMP_BUCKET_SECONDS` | `60` | Bucket size (seconds) for time-range truncation in structured queries. Improves cache hit rate by normalizing timestamps. |
 
 ### Authentication
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `auth.enabled` | `WH_AUTH_ENABLED` | `false` | Enable JWT authentication on `/v1/*` routes. When disabled, all endpoints are open. |
-| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set when auth is enabled.** |
+| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set when auth is enabled** (unless using JWKS). |
+| `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is tried first, falling back to HMAC secret. |
+| `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
+| `auth.dev_mode` | `WH_AUTH_DEV_MODE` | `false` | When `true`, skips JWT validation and treats all requests as admin. **For development only.** |
 
 ### Dead Letter Queue (DLQ)
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `dlq.enabled` | `WH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. Failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream instead of blocking retries. |
+
+### Access Control Policy
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `policy.file_path` | `WH_POLICY_FILE_PATH` | *(empty)* | Path to a YAML/JSON policy file. Used to bootstrap the policy store on first startup if no policy exists in NATS KV. |
+
+### Named Pipes
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `pipes.directory` | `WH_PIPES_DIRECTORY` | *(empty)* | Directory containing `.sql` files for named query pipes. Files are loaded on startup to bootstrap the NATS KV pipe store. |
 
 ## Example Config File
 
@@ -117,16 +133,26 @@ cache:
   l1_max_cost: 67108864
   redis_url: redis://localhost:6379
   default_ttl: 300
+  timestamp_bucket_seconds: 60
 
 auth:
   enabled: false
   jwt_secret: change-me-in-production
+  jwks_url: ""
+  role_claim: role
+  dev_mode: false
 
 schema:
   refresh_interval: 60
 
 dlq:
   enabled: true
+
+policy:
+  file_path: ""
+
+pipes:
+  directory: ""
 ```
 
 ## Mode-Specific Settings

@@ -5,7 +5,7 @@ tmp_dir = "tmp"
 cmd = "go build -o ./tmp/wavehouse ./cmd/wavehouse"
 bin = "./tmp/wavehouse"
 include_ext = ["go"]
-exclude_dir = ["tmp", "tests", "deployments", "data", "bin"]
+exclude_dir = ["tmp", "tests", "deployments", "data", "bin", "docs", "examples", "scripts", ".git", ".github", "node_modules", "clients"]
 delay = 1000
 
 [log]

@@ -2,18 +2,22 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // WSHandler handles GET /v1/stream/ws.
 type WSHandler struct {
-	Hub *Hub
-	JS  jetstream.JetStream
+	Hub         *Hub
+	JS          jetstream.JetStream
+	PolicyStore *policy.Store
 }
 
 func NewWSHandler(hub *Hub, js jetstream.JetStream) *WSHandler {
@@ -34,6 +38,10 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		topic = "ingest.>"
 	}
 
+	// Resolve stream permissions for this request.
+	role := RoleFromContext(r.Context())
+	claims, _ := ClaimsFromContext(r.Context())
+
 	// Subscribe for live events.
 	ch := make(chan []byte, 64)
 	h.Hub.Subscribe(topic, ch)
@@ -43,8 +51,8 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if since := r.URL.Query().Get("since"); since != "" {
 		if ts, err := time.Parse(time.RFC3339, since); err == nil && h.JS != nil {
 			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-				out, err := transformForClient(data)
-				if err != nil {
+				out := h.applyStreamPolicy(data, role, claims)
+				if out == nil {
 					return true // skip this message
 				}
 				return conn.Write(r.Context(), websocket.MessageText, out) == nil
@@ -57,8 +65,8 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case data := <-ch:
-			out, err := transformForClient(data)
-			if err != nil {
+			out := h.applyStreamPolicy(data, role, claims)
+			if out == nil {
 				continue
 			}
 			if err := conn.Write(r.Context(), websocket.MessageText, out); err != nil {
@@ -66,6 +74,39 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// applyStreamPolicy transforms raw event data for the client, filtering columns
+// based on the caller's policy permissions. Returns nil if the event should be skipped.
+func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
+	var evt ingest.EventMessage
+	if err := json.Unmarshal(raw, &evt); err != nil {
+		out, err := transformForClient(raw)
+		if err != nil {
+			return nil
+		}
+		return out
+	}
+
+	if h.PolicyStore != nil {
+		p := h.PolicyStore.Get()
+		perms := policy.Evaluate(p, role, evt.TableName, "select", claims)
+		if !perms.Allowed {
+			return nil
+		}
+		filterEventColumns(evt.Data, perms)
+	}
+
+	out := map[string]any{
+		"table_name":         evt.TableName,
+		"received_timestamp": evt.ReceivedTimestamp,
+		"data":               evt.Data,
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time.

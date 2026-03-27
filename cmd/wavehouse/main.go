@@ -19,6 +19,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
 func main() {
@@ -107,6 +109,20 @@ func main() {
 	tiered := cache.NewTiered(l1, nil)
 	defer tiered.Close()
 
+	// Policy store (NATS KV + optional file bootstrap).
+	policyStore, err := policy.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
+	if err != nil {
+		logger.Error("policy store init", "error", err)
+		os.Exit(1)
+	}
+
+	// Pipes store (NATS KV + optional SQL file directory).
+	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Directory, logger)
+	if err != nil {
+		logger.Error("pipes store init", "error", err)
+		os.Exit(1)
+	}
+
 	// Active sweeper — purges messages that are both written to CH and
 	// older than the SSE gap window. Runs every minute.
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute
@@ -120,6 +136,9 @@ func main() {
 
 	// Start schema auto-refresh.
 	go registry.StartAutoRefresh(ctx)
+
+	// Start policy watch for cluster-wide updates.
+	go policyStore.Watch(ctx)
 
 	// Start batch consumer → ClickHouse.
 	ingest.StartIngestWorker(
@@ -152,6 +171,7 @@ func main() {
 	// Build handlers.
 	js := embeddedMQ.JetStream()
 	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
+	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
@@ -162,16 +182,34 @@ func main() {
 		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
+	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
+	queryHandler.PolicyStore = policyStore
+
+	sseHandler := api.NewSSEHandler(hub, js)
+	sseHandler.PolicyStore = policyStore
+
+	wsHandler := api.NewWSHandler(hub, js)
+	wsHandler.PolicyStore = policyStore
+
 	deps := api.Dependencies{
-		Ingest: ingestHandler,
-		Query:  api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
-		SSE:    api.NewSSEHandler(hub, js),
-		WS:     api.NewWSHandler(hub, js),
-		Health: api.NewHealthHandler(chConn),
-		Schema: api.NewSchemaHandler(registry),
-		DLQ:    dlqHandler,
-		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret, cfg.Auth.Enabled),
-		JS:     js,
+		Ingest:          ingestHandler,
+		Query:           queryHandler,
+		SSE:             sseHandler,
+		WS:              wsHandler,
+		Health:          api.NewHealthHandler(chConn),
+		Schema:          api.NewSchemaHandler(registry),
+		DLQ:             dlqHandler,
+		Policy:          api.NewPolicyHandler(policyStore),
+		Pipes:           api.NewPipesHandler(pipesStore, chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second, registry, policyStore, cfg.Cache.TimestampBucketSeconds),
+		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
+			Enabled:   cfg.Auth.Enabled,
+			JWTSecret: cfg.Auth.JWTSecret,
+			JWKSURL:   cfg.Auth.JWKSURL,
+			RoleClaim: cfg.Auth.RoleClaim,
+			DevMode:   cfg.Auth.DevMode,
+		}),
+		JS: js,
 	}
 	router := api.NewRouter(deps)
 

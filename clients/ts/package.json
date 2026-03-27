@@ -1,0 +1,50 @@
+{
+  "name": "@wavehouse/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for WaveHouse — schema-aware real-time API gateway for ClickHouse",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "wavehouse": "./dist/bin/wavehouse.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "codegen": "tsx src/codegen.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "playground": "cd playground && npm run dev"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "peerDependencies": {},
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Wave-RF/WaveHouse",
+    "directory": "clients/ts"
+  },
+  "keywords": [
+    "wavehouse",
+    "clickhouse",
+    "real-time",
+    "sse",
+    "query-builder",
+    "typescript"
+  ]
+}

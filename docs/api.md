@@ -8,7 +8,18 @@ Authentication is **optional** and controlled by `auth.enabled` (env: `WH_AUTH_E
 Authorization: Bearer <token>
 ```
 
-The JWT must use HMAC signing (HS256/HS384/HS512).
+The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url`).
+
+When `auth.dev_mode` is enabled, all requests are treated as admin with no JWT validation — useful for development.
+
+### Roles & Access Control
+
+WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim`, default: `role`). Built-in role handling:
+
+- **`admin`** / **`service`** — Full access to all tables, raw SQL, and admin endpoints.
+- **Other roles** — Access determined by the access control policy (see Admin endpoints below).
+
+Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
 ## Endpoints
 
@@ -159,6 +170,89 @@ curl -X POST http://localhost:8080/v1/query \
 
 ---
 
+### `POST /v1/tables/{table}/query` — Structured Query
+
+Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
+
+**Request:**
+
+```json
+{
+  "columns": ["page", "button"],
+  "aggregations": [
+    {"fn": "count", "column": "*", "alias": "total"}
+  ],
+  "filters": [
+    {"column": "score", "op": "gt", "value": 10}
+  ],
+  "group_by": ["page"],
+  "order_by": [{"column": "total", "dir": "desc"}],
+  "limit": 100,
+  "time_range": {
+    "column": "received_timestamp",
+    "since": "1h",
+    "until": ""
+  },
+  "cache_ttl": 60
+}
+```
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `columns` | string[] | No | Columns to SELECT. |
+| `aggregations` | object[] | No | Aggregation functions (`fn`, `column`, `alias`). |
+| `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
+| `group_by` | string[] | No | GROUP BY columns. |
+| `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
+| `limit` | int | No | Max rows. |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
+| `cache_ttl` | int | No | Override default cache TTL (seconds). |
+
+**Response:**
+
+Same format as `/v1/query` with `X-Cache` header.
+
+**Error responses:**
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation) |
+| 403 | `{"error":"forbidden"}` | Role lacks select permission on table |
+| 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
+| 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
+| 404 | `{"error":"unknown table: x"}` | Table not found |
+
+---
+
+### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
+
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached.
+
+**Query Parameters:** Any key matching a pipe parameter name.
+
+**POST Body (optional):**
+
+```json
+{
+  "start_date": "2024-01-01",
+  "limit": 100
+}
+```
+
+**Response:**
+
+Same format as `/v1/query` with `X-Cache` header.
+
+**Error responses:**
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 404 | `{"error":"pipe not found"}` | Pipe name not registered |
+| 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` |
+| 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
+
+---
+
 ### `GET /v1/stream/sse` — Server-Sent Events Stream
 
 Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`.
@@ -177,6 +271,8 @@ data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","da
 
 data: {"table_name":"page_views","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"url":"/dashboard"}}
 ```
+
+**Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
 **curl example:**
 
@@ -285,6 +381,80 @@ Returns per-table message counts in the Dead Letter Queue.
   }
 }
 ```
+
+---
+
+### Admin Endpoints
+
+Admin endpoints require the `admin` or `service` role when auth is enabled.
+
+#### `GET /v1/admin/policy` — Get Access Control Policy
+
+Returns the current access control policy.
+
+#### `PUT /v1/admin/policy` — Update Access Control Policy
+
+Replaces the entire access control policy. Validated before saving.
+
+**Request:**
+
+```json
+{
+  "default_role": "viewer",
+  "tables": {
+    "clicks": {
+      "select": {
+        "viewer": {
+          "allow_columns": ["page", "button", "timestamp"],
+          "filter": {
+            "tenant_id": {"_eq": "{{ jwt.app_metadata.tenant_id }}"}
+          }
+        },
+        "admin": {
+          "allow_columns": ["*"]
+        }
+      },
+      "insert": {
+        "viewer": {
+          "allow_columns": ["page", "button", "user_id", "tenant_id"],
+          "check": {
+            "user_id": {"_eq": "{{ jwt.sub }}"},
+            "tenant_id": {"_eq": "{{ jwt.app_metadata.tenant_id }}"}
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+#### `POST /v1/admin/policy/validate` — Validate Policy (Dry Run)
+
+Validates a policy without saving it. Returns `{"valid": true}` or an error.
+
+#### `GET /v1/admin/pipes` — List Named Pipes
+
+Returns all registered named query pipes.
+
+#### `GET /v1/admin/pipes/{name}` — Get Named Pipe
+
+Returns a specific named pipe definition.
+
+#### `PUT /v1/admin/pipes/{name}` — Create/Update Named Pipe
+
+```json
+{
+  "sql": "SELECT page, count() as views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page LIMIT {{limit}}",
+  "parameters": [
+    {"name": "start_date", "type": "string", "required": true},
+    {"name": "limit", "type": "number", "required": false, "default": 100}
+  ],
+  "description": "Top pages by view count",
+  "allowed_roles": ["viewer", "admin"]
+}
+```
+
+#### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 
 ## Event Message Format
 

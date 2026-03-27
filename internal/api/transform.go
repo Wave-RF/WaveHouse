@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
 // transformForClient converts a raw EventMessage JSON (from MQ) into a
@@ -21,4 +22,16 @@ func transformForClient(raw []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+// filterEventColumns removes columns from event data that the role is not allowed to see.
+func filterEventColumns(data map[string]any, perms *policy.ResolvedPermissions) {
+	if perms == nil || data == nil {
+		return
+	}
+	for col := range data {
+		if !perms.IsColumnAllowed(col) {
+			delete(data, col)
+		}
+	}
 }

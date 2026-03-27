@@ -75,15 +75,21 @@ internal/
 ├── dedupe/      Optional deduplication (Pebble or ScyllaDB)
 ├── discovery/   ClickHouse schema introspection and validation
 ├── ingest/      Batch buffering, DLQ, and Active Sweeper
-└── mq/          Message queue abstraction (embedded or remote NATS)
+├── mq/          Message queue abstraction (embedded or remote NATS)
+├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
+├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
+└── query/       Structured query AST, SQL builder, and timestamp bucketing
 ```
 
 ### `api/` — HTTP Layer
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
 
-- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected (optionally via JWT): `/v1/ingest/{table}`, `/v1/query`, `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema`, `/v1/schema/{table}`, `/v1/schema/refresh`, `/v1/dlq/stats`.
-- **middleware.go** — Optional JWT Bearer token validation. Controlled by `auth.enabled`. When disabled, no-op passthrough.
+- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest/{table}`, `/v1/query`, `/v1/tables/{table}/query` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema/*`, `/v1/dlq/stats`. Admin: `/v1/admin/policy`, `/v1/admin/pipes/*`.
+- **middleware.go** — JWT auth middleware supporting HMAC and JWKS validation, role extraction from configurable claim path, and dev mode bypass. Controlled by `auth.enabled`.
+- **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
+- **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
+- **structured_query.go** — Handler for `POST /v1/tables/{table}/query`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest/{table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`.
 - **query.go** — Executes SQL queries directly against ClickHouse. Results are cached. UUID/DateTime columns are converted to strings.
 - **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Default topic is `ingest.>` (all tables). Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
@@ -127,6 +133,20 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `Ack()`/`Nak()`.
 - **embedded.go** — Standalone mode: in-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
 - **remote.go** — Clustered mode: connects to an external NATS cluster with the same stream/subject configuration.
+
+### `policy/` — Access Control (New)
+
+- **policy.go** — Hasura-style policy types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`), `Evaluate()` function that resolves permissions against JWT claims (including `{{ jwt.claim.path }}` template resolution), `IsColumnAllowed()`, `IsAggregationAllowed()`, `Validate()`.
+- **store.go** — `Store` backed by NATS KV bucket `WAVEHOUSE_POLICY`. Supports file-based bootstrap (YAML/JSON), cluster-wide sync via KV Watch, local caching.
+
+### `pipes/` — Named Query Pipes (New)
+
+- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` replaces `{{param}}` placeholders with positional parameters.
+
+### `query/` — Structured Query Engine (New)
+
+- **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
+- **builder.go** — `Build()` converts AST to parameterized SQL. Validates all identifiers against schema (SQL injection prevention). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
 
 ## Data Flows
 
@@ -202,7 +222,7 @@ Client GET /v1/stream/sse or /v1/stream/ws
 | --------- | ---------- | ------- |
 | Language | Go 1.25 | Core runtime |
 | HTTP Router | Chi v5 | Request routing and middleware |
-| Authentication | golang-jwt v5 | Optional JWT parsing and validation |
+| Authentication | golang-jwt v5 + keyfunc v3 | JWT (HMAC + JWKS) parsing and validation |
 | Analytics DB | ClickHouse | Primary data store + schema source of truth |
 | Message Queue | NATS + JetStream | Durable event streaming |
 | L1 Cache | Ristretto v2 | In-process memory cache |

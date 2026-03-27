@@ -26,6 +26,8 @@ type Config struct {
 	Auth       Auth       `yaml:"auth"`
 	Schema     Schema     `yaml:"schema"`
 	DLQ        DLQ        `yaml:"dlq"`
+	Policy     Policy     `yaml:"policy"`
+	Pipes      Pipes      `yaml:"pipes"`
 }
 
 type Server struct {
@@ -57,14 +59,28 @@ type Dedupe struct {
 }
 
 type Cache struct {
-	L1MaxCost  int64  `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-	RedisURL   string `yaml:"redis_url" env:"WH_CACHE_REDIS_URL" env-default:"redis://localhost:6379"`
-	DefaultTTL int    `yaml:"default_ttl" env:"WH_CACHE_DEFAULT_TTL" env-default:"300"`
+	L1MaxCost              int64  `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
+	RedisURL               string `yaml:"redis_url" env:"WH_CACHE_REDIS_URL" env-default:"redis://localhost:6379"`
+	DefaultTTL             int    `yaml:"default_ttl" env:"WH_CACHE_DEFAULT_TTL" env-default:"300"`
+	TimestampBucketSeconds int    `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
 }
 
 type Auth struct {
 	Enabled   bool   `yaml:"enabled" env:"WH_AUTH_ENABLED" env-default:"false"`
 	JWTSecret string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
+	JWKSURL   string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
+	RoleClaim string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
+	DevMode   bool   `yaml:"dev_mode" env:"WH_AUTH_DEV_MODE" env-default:"false"`
+}
+
+// Policy configures the access control policy engine.
+type Policy struct {
+	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH" env-default:"policy.yaml"`
+}
+
+// Pipes configures named query pipes.
+type Pipes struct {
+	Directory string `yaml:"directory" env:"WH_PIPES_DIRECTORY" env-default:"./pipes"`
 }
 
 // Schema configures ClickHouse schema discovery.

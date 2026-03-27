@@ -20,6 +20,10 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
 * **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
 * **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
+* **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
+* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/tables/{table}/query`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
+* **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
+* **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
 
 ## 🚀 Deployment Modes
 
@@ -118,6 +122,7 @@ We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md]
 * [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
 * [Deployment](docs/deployment.md) — Standalone, clustered, Docker, and release guide
 * [Development](docs/development.md) — Building, testing, linting, and project structure
+* [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
 
 ## 📜 License
 

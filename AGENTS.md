@@ -14,15 +14,18 @@ Three binaries:
 - **`cmd/wavehouse-api/`** — Clustered API server (stateless, horizontally scalable)
 - **`cmd/wavehouse-worker/`** — Clustered background worker (batch consumer + sweeper)
 
-Seven internal packages under `internal/`:
+Ten internal packages under `internal/`:
 
-- **`api/`** — Chi HTTP router, optional JWT middleware, ingest/query/SSE/WS/schema/DLQ handlers, Hub
+- **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/WS/schema/DLQ/policy/pipes handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (Redis) + `TieredCache` (singleflight)
 - **`config/`** — YAML + env var config loading (cleanenv)
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) + `Distributed` (ScyllaDB) — optional, controlled by `dedupe.enabled`
 - **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
 - **`ingest/`** — `BufferConsumer` (per-table batch flush to ClickHouse with DLQ) + `Sweeper` (Active Sweeper for NATS message lifecycle)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
+- **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
+- **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
+- **`query/`** — Structured query AST types + SQL builder with schema validation, permission injection, timestamp bucketing
 
 ## Key Design Decisions
 
@@ -32,10 +35,14 @@ Seven internal packages under `internal/`:
 4. **Async ingestion**: Ingest returns 200 immediately after optional dedup + MQ publish. ClickHouse writes happen asynchronously via BufferConsumer. If NATS stream is full, returns 503 + Retry-After.
 5. **Per-table batching**: BufferConsumer groups events by table name and performs dynamic INSERTs using the schema's column order. Each table's batch is independent.
 6. **Dead Letter Queue**: Failed batch inserts are published to a separate NATS stream (`WAVEHOUSE_DLQ`) with subjects `dlq.<table>`. This prevents silent data loss. Controlled by `dlq.enabled`.
-7. **Optional auth**: JWT authentication is opt-in via `auth.enabled`. When disabled (default), all `/v1/*` routes are open. When enabled, tokens are validated but no tenant scoping is applied.
+7. **Optional auth with JWKS**: JWT authentication is opt-in via `auth.enabled`. Supports HMAC shared secret and/or JWKS endpoint (`auth.jwks_url`). Roles are extracted from a configurable claim path (`auth.role_claim`). Dev mode (`auth.dev_mode`) bypasses validation for development.
 8. **Optional dedup**: Deduplication is opt-in via `dedupe.enabled`. When enabled, the `dedupe.id_field` config specifies which JSON field to use as the dedup key.
 9. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.
 10. **Active Sweeper**: NATS messages are retained for SSE/WS gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
+11. **Hasura-style access control**: Per-table, per-role column-level and row-level permissions with JWT claim templating (`{{ jwt.path }}`). Policies stored in NATS KV with file-based bootstrap and cluster-wide sync via KV Watch.
+12. **Structured queries**: Type-safe query AST endpoint (`POST /v1/tables/{table}/query`) validated against schema, with permission enforcement and timestamp bucketing for cache optimization.
+13. **Named query pipes**: Pre-defined SQL templates (inspired by Tinybird) with parameter binding, role restrictions, and caching. Stored in NATS KV with `.sql` file directory bootstrap.
+14. **TypeScript SDK**: `@wavehouse/sdk` — zero-dependency client with typed query builder, real-time SSE, live queries with smart aggregation classification (incrementable/decomposable/poll), and codegen CLI.
 
 ## Code Conventions
 
@@ -131,13 +138,16 @@ Before finishing any task, do a quick search across docs for the identifiers you
 
 ```text
 cmd/                    → Binary entry points (thin — just wiring)
-internal/api/           → HTTP layer (handlers, router, middleware, Hub, schema/DLQ endpoints)
+internal/api/           → HTTP layer (handlers, router, middleware, Hub, schema/DLQ/policy/pipes endpoints)
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)
 internal/config/        → Configuration structs + loader
 internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
+internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstrap)
+internal/policy/        → Access control policies (types, evaluation, NATS KV store)
+internal/query/         → Structured query AST + SQL builder
 tests/                  → Integration tests (build tag: integration)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles

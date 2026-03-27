@@ -19,6 +19,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/google/uuid"
 )
 
@@ -113,6 +115,20 @@ func main() {
 	tiered := cache.NewTiered(l1, l2)
 	defer tiered.Close()
 
+	// Policy store (NATS KV + optional file bootstrap).
+	policyStore, err := policy.NewStore(context.Background(), remoteMQ.JetStream(), cfg.Policy.FilePath, logger)
+	if err != nil {
+		logger.Error("policy store init", "error", err)
+		os.Exit(1)
+	}
+
+	// Pipes store (NATS KV + optional SQL file directory).
+	pipesStore, err := pipes.NewStore(context.Background(), remoteMQ.JetStream(), cfg.Pipes.Directory, logger)
+	if err != nil {
+		logger.Error("pipes store init", "error", err)
+		os.Exit(1)
+	}
+
 	hub := api.NewHub()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -120,6 +136,9 @@ func main() {
 
 	// Start schema auto-refresh.
 	go registry.StartAutoRefresh(ctx)
+
+	// Start policy watch for cluster-wide updates.
+	go policyStore.Watch(ctx)
 
 	// Hub bridge: MQ → broadcast to connected clients.
 	consumerName := "hub-bridge-" + uuid.New().String()
@@ -137,6 +156,7 @@ func main() {
 	// Build handlers.
 	js := remoteMQ.JetStream()
 	ingestHandler := api.NewIngestHandler(registry, remoteMQ)
+	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
@@ -147,16 +167,34 @@ func main() {
 		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
+	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
+	queryHandler.PolicyStore = policyStore
+
+	sseHandler := api.NewSSEHandler(hub, remoteMQ.JetStream())
+	sseHandler.PolicyStore = policyStore
+
+	wsHandler := api.NewWSHandler(hub, remoteMQ.JetStream())
+	wsHandler.PolicyStore = policyStore
+
 	deps := api.Dependencies{
-		Ingest: ingestHandler,
-		Query:  api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
-		SSE:    api.NewSSEHandler(hub, remoteMQ.JetStream()),
-		WS:     api.NewWSHandler(hub, remoteMQ.JetStream()),
-		Health: api.NewHealthHandler(chConn),
-		Schema: api.NewSchemaHandler(registry),
-		DLQ:    dlqHandler,
-		AuthMW: api.JWTAuthMiddleware(cfg.Auth.JWTSecret, cfg.Auth.Enabled),
-		JS:     remoteMQ.JetStream(),
+		Ingest:          ingestHandler,
+		Query:           queryHandler,
+		SSE:             sseHandler,
+		WS:              wsHandler,
+		Health:          api.NewHealthHandler(chConn),
+		Schema:          api.NewSchemaHandler(registry),
+		DLQ:             dlqHandler,
+		Policy:          api.NewPolicyHandler(policyStore),
+		Pipes:           api.NewPipesHandler(pipesStore, chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second, registry, policyStore, cfg.Cache.TimestampBucketSeconds),
+		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
+			Enabled:   cfg.Auth.Enabled,
+			JWTSecret: cfg.Auth.JWTSecret,
+			JWKSURL:   cfg.Auth.JWKSURL,
+			RoleClaim: cfg.Auth.RoleClaim,
+			DevMode:   cfg.Auth.DevMode,
+		}),
+		JS: remoteMQ.JetStream(),
 	}
 	router := api.NewRouter(deps)
 
