@@ -3,18 +3,21 @@ GOTESTSUM := go run gotest.tools/gotestsum
 GOFUMPT   := go run mvdan.cc/gofumpt
 GOIMPORTS := go run golang.org/x/tools/cmd/goimports
 
+# ── External tool versions (for `make tools`) ─────────────────────
+GOLANGCI_LINT_VERSION := v2.1.6
+
 # Build tags (e.g., TAGS="scylla dynamodb")
 TAGS ?=
 
+# Analysis output row limit (e.g., LIMIT=50 make dep-cut)
+LIMIT ?= 30
+
 # ── Build Configuration ───────────────────────────────────────────
-# Force CGO disabled for all local builds to match GoReleaser exactly
+# Force CGO disabled for all local builds to match GoReleaser exactly.
 export CGO_ENABLED=0
-# Default: Strip debugging symbols to reduce binary size by 30%
+# Strip debugging symbols to reduce binary size (~30%).
+# Use `make build-debug` for delve/profiling builds with full symbols.
 LDFLAGS := -s -w
-# If DEBUG=1 is passed, remove the stripping flags so debuggers work
-ifdef DEBUG
-	LDFLAGS :=
-endif
 
 # Define the targets
 BINARIES := wavehouse wavehouse-api wavehouse-worker
@@ -33,9 +36,14 @@ CYAN   := \033[36m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help setup build dev fmt lint lint-fix fix test test-integration \
-        test-all ci coverage smoke-test docker compose-standalone \
-        compose-clustered compose-deps deps-wipe clean release-test
+.PHONY: help setup tools check-tools build build-debug dev \
+        fmt fmt-check lint lint-fix fix \
+        test test-integration test-all ci coverage coverage-enforce \
+        smoke-test mod-tidy-check \
+        docker compose-standalone compose-clustered compose-deps deps-wipe \
+        clean release-test \
+        vulncheck security deadcode audit-cgo \
+        size-report size-tree size-treemap dep-graph dep-why dep-cut binary-analysis
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -46,6 +54,40 @@ setup: ## Download Go modules and cache tools
 	@echo "$(GREEN)==> Downloading modules...$(RESET)"
 	@go mod download
 	@echo "$(GREEN)==> Done$(RESET)"
+
+tools: ## Install external dev tools (golangci-lint, air, goreleaser)
+	@echo "$(GREEN)==> Installing external tools...$(RESET)"
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		echo "$(CYAN)  Installing golangci-lint $(GOLANGCI_LINT_VERSION)...$(RESET)"; \
+		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+	else \
+		echo "$(CYAN)  golangci-lint already installed: $$(golangci-lint version --short 2>/dev/null || echo 'unknown')$(RESET)"; \
+	fi
+	@if ! command -v air >/dev/null 2>&1; then \
+		echo "$(CYAN)  Installing air (hot-reload)...$(RESET)"; \
+		go install github.com/air-verse/air@latest; \
+	else \
+		echo "$(CYAN)  air already installed$(RESET)"; \
+	fi
+	@if ! command -v goreleaser >/dev/null 2>&1; then \
+		echo "$(CYAN)  Installing goreleaser...$(RESET)"; \
+		go install github.com/goreleaser/goreleaser/v2@latest; \
+	else \
+		echo "$(CYAN)  goreleaser already installed$(RESET)"; \
+	fi
+	@echo "$(GREEN)==> All tools installed$(RESET)"
+
+check-tools: ## Verify all required tools are installed
+	@echo "$(CYAN)Go tools (pinned in go.mod — no install needed):$(RESET)"
+	@echo "  gotestsum:  $$($(GOTESTSUM) --version 2>/dev/null || echo 'available via go run')"
+	@echo "  gofumpt:    $$($(GOFUMPT) -version 2>/dev/null || echo 'available via go run')"
+	@echo "  goimports:  available via go run"
+	@echo ""
+	@echo "$(CYAN)External tools:$(RESET)"
+	@printf "  golangci-lint: "; command -v golangci-lint >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET) $$(golangci-lint version --short 2>/dev/null)" || echo "$(RED)✗ not installed (run 'make tools')$(RESET)"
+	@printf "  air:           "; command -v air >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET)" || echo "$(YELLOW)✗ optional — needed for 'make dev'$(RESET)"
+	@printf "  goreleaser:    "; command -v goreleaser >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET)" || echo "$(YELLOW)✗ optional — needed for 'make release-test'$(RESET)"
+	@printf "  docker:        "; command -v docker >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET)" || echo "$(YELLOW)✗ optional — needed for integration tests & Docker builds$(RESET)"
 
 # ── Build ─────────────────────────────────────────────────────────
 build: $(BINARIES) ## Compile all binaries (run `make -j3 build` for parallel)
@@ -58,6 +100,9 @@ $(BINARIES):
 	END=$$(date +%s); \
 	SIZE=$$(ls -lh bin/$@ | awk '{print $$5}'); \
 	printf "$(GREEN)✔$(RESET) $(CYAN)%-25s$(RESET) built in %ss (Size: $(YELLOW)%s$(RESET))\n" "$@" "$$((END - START))" "$$SIZE"
+
+build-debug: LDFLAGS= ## Compile all binaries with debug symbols (for delve/profiling)
+build-debug: build
 
 # ── Development ───────────────────────────────────────────────────
 dev: ## Hot-reload dev server (requires air)
@@ -75,6 +120,16 @@ fmt: ## Format code (gofumpt + goimports)
 	@echo "$(GREEN)==> Formatting...$(RESET)"
 	@$(GOFUMPT) -w .
 	@$(GOIMPORTS) -w .
+
+fmt-check: ## Verify code formatting (no changes, exits non-zero if unformatted)
+	@OUTPUT=$$($(GOFUMPT) -l .); \
+	if [ -n "$$OUTPUT" ]; then \
+		echo "$(RED)==> Files not formatted:$(RESET)"; \
+		echo "$$OUTPUT"; \
+		echo "Run '$(CYAN)make fmt$(RESET)' and commit."; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)==> Formatting OK$(RESET)"
 
 # ── Linting ───────────────────────────────────────────────────────
 lint: ## Run golangci-lint
@@ -122,22 +177,54 @@ coverage: ## Unit test coverage → coverage.html and summary
 	@go tool cover -func=coverage.txt | tail -n 1 | awk '{print "  Total Coverage: $(CYAN)" $$3 "$(RESET)"}'
 	@echo "$(YELLOW)==> Open coverage.html in your browser for line-by-line details$(RESET)"
 
+COVERAGE_THRESHOLD := 70
+coverage-enforce: coverage ## Fail if unit test coverage is below threshold (default: 70%)
+	@TOTAL=$$(go tool cover -func=coverage.txt | tail -n 1 | awk '{gsub(/%/,""); print $$3}'); \
+	THRESHOLD=$(COVERAGE_THRESHOLD); \
+	if [ $$(echo "$$TOTAL < $$THRESHOLD" | bc -l) -eq 1 ]; then \
+		echo "$(RED)==> FAIL: Coverage $$TOTAL%% is below $$THRESHOLD%% threshold$(RESET)"; \
+		exit 1; \
+	else \
+		echo "$(GREEN)==> PASS: Coverage $$TOTAL%% meets $$THRESHOLD%% threshold$(RESET)"; \
+	fi
+
 smoke-test: ## Manual Bento insert+delete (requires running WaveHouse)
 	@go run ./tests/cmd/bento_pub
 
+mod-tidy-check: ## Verify go.mod and go.sum are tidy
+	@echo "$(GREEN)==> Checking module tidiness...$(RESET)"
+	@go mod tidy
+	@git diff --exit-code go.mod go.sum || { echo "$(RED)==> go.mod/go.sum is not tidy. Run 'go mod tidy' and commit.$(RESET)"; exit 1; }
+	@echo "$(GREEN)==> Modules OK$(RESET)"
+
 # ── CI ────────────────────────────────────────────────────────────
-ci: ## Full CI check: fmt + lint + tests (run before pushing)
+ci: ## Full CI check: tidy + fmt + lint + vulncheck + build + tests
 	@echo "$(YELLOW)==> Running full CI check...$(RESET)"
-	@echo "$(GREEN)==> Checking formatting...$(RESET)"
+	@echo ""
+	@echo "$(GREEN)── Step 1/7: Module tidiness ──$(RESET)"
+	@go mod tidy
+	@git diff --exit-code go.mod go.sum || { echo "$(RED)==> go.mod/go.sum is not tidy.$(RESET)"; exit 1; }
+	@echo ""
+	@echo "$(GREEN)── Step 2/7: Formatting ──$(RESET)"
 	@OUTPUT=$$($(GOFUMPT) -l .); test -z "$$OUTPUT" || { echo "$(YELLOW)Files not formatted:$(RESET)"; echo "$$OUTPUT"; echo "Run 'make fmt' and commit."; exit 1; }
-	@echo "$(GREEN)==> Linting...$(RESET)"
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)==> golangci-lint not found. See 'make lint' for install instructions.$(RESET)"; exit 1; }
+	@echo ""
+	@echo "$(GREEN)── Step 3/7: Linting ──$(RESET)"
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)==> golangci-lint not found. Run 'make tools' first.$(RESET)"; exit 1; }
 	@golangci-lint run ./...
-	@echo "$(GREEN)==> Unit tests...$(RESET)"
+	@echo ""
+	@echo "$(GREEN)── Step 4/7: Vulnerability check ──$(RESET)"
+	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	@echo ""
+	@echo "$(GREEN)── Step 5/7: Build ──$(RESET)"
+	@$(MAKE) build
+	@echo ""
+	@echo "$(GREEN)── Step 6/7: Unit tests ──$(RESET)"
 	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race
-	@echo "$(GREEN)==> Integration tests...$(RESET)"
+	@echo ""
+	@echo "$(GREEN)── Step 7/7: Integration tests ──$(RESET)"
 	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="integration $(TAGS)" -timeout 120s ./tests/... -race -count=1
-	@echo "$(GREEN)==> All checks passed!$(RESET)"
+	@echo ""
+	@echo "$(GREEN)==> All CI checks passed! ✔$(RESET)"
 
 # ── Docker ────────────────────────────────────────────────────────
 docker: ## Build Docker image for your local machine's architecture
@@ -156,53 +243,119 @@ deps-wipe: ## Destroy and recreate dependencies
 	docker compose -f deployments/compose/dependencies.yaml down -v --remove-orphans
 	docker compose -f deployments/compose/dependencies.yaml up -d --force-recreate
 
-clean: ## Remove bin/, tmp/, data/, coverage
-	@rm -rf bin/ tmp/ data/ coverage.txt coverage.html
+clean: ## Remove bin/, tmp/, data/, coverage, analysis artifacts
+	@rm -rf bin/ tmp/ data/ coverage.txt coverage.html graph.dot graph.svg size-map.svg size-map.html
 
 # ── Releases ──────────────────────────────────────────────────────
 release-test: ## Test cross-compiling all binaries via GoReleaser (doesn't publish)
-	@command -v goreleaser >/dev/null 2>&1 || { echo "$(RED)==> goreleaser not found. Run 'brew install goreleaser'.$(RESET)"; exit 1; }
+	@command -v goreleaser >/dev/null 2>&1 || { echo "$(RED)==> goreleaser not found. Run 'make tools' to install.$(RESET)"; exit 1; }
 	@echo "$(GREEN)==> Running GoReleaser in snapshot mode...$(RESET)"
-	@# Limit parallelism so it doesn't freeze my laptop during testing...
 	@goreleaser build --snapshot --clean --parallelism 2
 
-
-# TODO: need to work on all the things below this point more
-# https://www.datadoghq.com/blog/engineering/agent-go-binaries
-# TODO: these need to re-build with LDFLAGS allowing debug symbols when running
-
-# ── Advanced Tooling & Security ───────────────────────────────────
+# ── Security & Analysis ───────────────────────────────────────────
 vulncheck: ## Run Go vulnerability check
 	@echo "$(GREEN)==> Running govulncheck...$(RESET)"
 	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-size-tree: ## Analyze binary size dependencies (requires building first)
-	@echo "$(GREEN)==> Analyzing bin/wavehouse...$(RESET)"
-	@go run github.com/loov/goda@latest weight -h ./...
-
-# ── Advanced Tooling & Profiling ──────────────────────────────────
-# These targets use `go run ...@latest` so they don't pollute the project's go.mod.
+security: vulncheck ## Combined security scan (vulncheck + gosec via linter)
+	@echo "$(GREEN)==> Running gosec via golangci-lint...$(RESET)"
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)==> golangci-lint not found. Run 'make tools'.$(RESET)"; exit 1; }
+	@golangci-lint run --enable gosec --out-format colored-line-number ./...
+	@echo "$(GREEN)==> Security scan complete$(RESET)"
 
 deadcode: ## Find unreachable functions and unused code
 	@echo "$(GREEN)==> Searching for dead code...$(RESET)"
 	@go run golang.org/x/tools/cmd/deadcode@latest -test ./...
 
-size-treemap: build ## Generate an interactive SVG map of binary size
-	@echo "$(GREEN)==> Generating SVG treemap for bin/wavehouse...$(RESET)"
-	@command -v qs >/dev/null 2>&1 || { echo "Downloading go-size-analyzer..."; go install github.com/Zxilly/go-size-analyzer/cmd/gsa@latest; }
-	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest --format svg --output size-map.svg bin/wavehouse
-	@echo "$(YELLOW)==> Open size-map.svg in your web browser$(RESET)"
+audit-cgo: ## Audit which dependencies contain C code (informational)
+	@echo "$(GREEN)==> Scanning dependency tree for packages with C files...$(RESET)"
+	@echo "  $(CYAN)Note:$(RESET) WaveHouse builds with CGO_ENABLED=0. Packages listed below"
+	@echo "  have pure-Go fallbacks and their C code is $(YELLOW)never compiled$(RESET)."
+	@echo "  This audit exists to catch new CGO deps before they cause build issues."
+	@echo ""
+	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/... 2>/dev/null || true
+	@echo ""
+	@echo "$(GREEN)==> CGO audit complete$(RESET)"
+	@echo "  To verify pure-Go build: $(CYAN)CGO_ENABLED=0 go build ./...$(RESET)"
 
-goda-aws: ## Trace exactly how the AWS SDK is getting imported TODO: doesn't work
-	@echo "$(GREEN)==> Tracing path to AWS SDK...$(RESET)"
-	@go run github.com/loov/goda@latest tree "reach(./..., github.com/aws/aws-sdk-go-v2...)"
+# ── Binary Size Analysis ─────────────────────────────────────────
 
-goda-graph: ## Generate a Graphviz dot file of your internal dependencies
+size-report: build ## Show binary sizes for all targets
+	@echo "$(GREEN)==> Binary sizes:$(RESET)"
+	@for b in $(BINARIES); do \
+		SIZE=$$(ls -lh bin/$$b | awk '{print $$5}'); \
+		SIZE_BYTES=$$(ls -l bin/$$b | awk '{print $$5}'); \
+		printf "  $(CYAN)%-25s$(RESET) %s (%s bytes)\n" "$$b" "$$SIZE" "$$SIZE_BYTES"; \
+	done
+
+size-tree: build-debug ## Top packages by size in the binary
+	@echo "$(GREEN)==> Binary size by package (debug build for DWARF accuracy):$(RESET)"
+	@echo ""
+	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+		--format text --hide-sections bin/wavehouse 2>/dev/null
+
+size-treemap: build-debug ## Full binary size analysis → text + SVG + interactive HTML
+	@echo "$(GREEN)==> Analyzing bin/wavehouse (debug build for DWARF accuracy)...$(RESET)"
+	@echo "  Note: debug builds add ~30%% DWARF metadata but package proportions match production."
+	@echo ""
+	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+		--format text --hide-sections bin/wavehouse 2>/dev/null
+	@echo ""
+	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+		--format svg --output size-map.svg --hide-sections bin/wavehouse 2>/dev/null
+	@echo "  $(CYAN)SVG  → size-map.svg$(RESET)"
+	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+		--format html --output size-map.html --hide-sections bin/wavehouse 2>/dev/null
+	@echo "  $(CYAN)HTML → size-map.html (interactive treemap)$(RESET)"
+	@if [ -z "$$CI" ]; then \
+		if command -v open >/dev/null 2>&1; then open size-map.html; \
+		elif command -v xdg-open >/dev/null 2>&1; then xdg-open size-map.html; \
+		fi; \
+	fi
+
+dep-graph: ## Dependency graph → graph.svg (requires graphviz `dot`)
 	@echo "$(GREEN)==> Generating dependency graph...$(RESET)"
-	@go run github.com/loov/goda@latest graph "github.com/Wave-RF/WaveHouse/..." > graph.dot
-	@echo "$(YELLOW)==> graph.dot generated. Render it using: dot -Tsvg graph.dot -o graph.svg$(RESET)"
-	@echo "If you don't have Graphviz installed, paste the contents of graph.dot into https://dreampuf.github.io/GraphvizOnline/"
+	@go run github.com/loov/goda@latest graph -cluster -short "github.com/Wave-RF/WaveHouse/...:all" > graph.dot
+	@if command -v dot >/dev/null 2>&1; then \
+		dot -Tsvg graph.dot -o graph.svg 2>/dev/null; \
+		echo "$(GREEN)==> graph.svg generated$(RESET)"; \
+		if [ -z "$$CI" ]; then \
+			if command -v open >/dev/null 2>&1; then open graph.svg; \
+			elif command -v xdg-open >/dev/null 2>&1; then xdg-open graph.svg; \
+			fi; \
+		fi; \
+	else \
+		echo "$(YELLOW)==> graph.dot generated (install graphviz for SVG rendering)$(RESET)"; \
+		echo "  $(CYAN)brew install graphviz$(RESET)  then re-run this target"; \
+		echo "  or paste graph.dot into $(CYAN)https://dreampuf.github.io/GraphvizOnline/$(RESET)"; \
+	fi
 
-audit-cgo: ## Check all dependencies for hidden C code
-	@echo "$(GREEN)==> Scanning all dependencies for C files...$(RESET)"
-	@go list -deps -f '{{if .CgoFiles}}{{.ImportPath}} uses CGO: {{.CgoFiles}}{{end}}' ./...
+dep-why: ## Show why a module is included (usage: make dep-why MOD=github.com/aws/aws-sdk-go-v2)
+	@if [ -z "$(MOD)" ]; then \
+		echo "$(RED)==> Usage: make dep-why MOD=github.com/aws/aws-sdk-go-v2$(RESET)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)==> Why $(MOD) is required:$(RESET)"
+	@go mod why -m $(MOD) 2>&1 || true
+	@echo ""
+	@echo "$(GREEN)==> Import chain:$(RESET)"
+	@go mod graph | grep "$(MOD)" | head -20 || true
+
+dep-cut: ## Top cuttable dependencies by transitive impact
+	@echo "$(GREEN)==> Dependency cut analysis (top $(LIMIT), InDegree ≤ 3):$(RESET)"
+	@echo "  Packages with few dependents that pull in the most transitive weight."
+	@echo ""
+	@go run github.com/loov/goda@latest cut ./...:all 2>/dev/null | \
+		awk 'NR==1 { printf "  %-58s %4s %5s %10s\n", "Package", "Deps", "Pkgs", "Size"; next } \
+		     $$2+0 <= 3 { name=$$1; gsub(/github\.com\//, "", name); printf "  %-58s %4s %5s %10s\n", name, $$2, $$3, $$4 }' | \
+		head -n $$(($(LIMIT) + 1))
+	@echo ""
+	@echo "  $(CYAN)Full output: go run github.com/loov/goda@latest cut ./...:all$(RESET)"
+
+binary-analysis: size-report deadcode audit-cgo ## Combined binary analysis (sizes + dead code + CGO audit)
+	@echo ""
+	@echo "$(GREEN)==> Binary analysis complete$(RESET)"
+	@echo "  For interactive size explorer: $(CYAN)make size-treemap$(RESET)"
+	@echo "  For package weight breakdown:  $(CYAN)make size-tree$(RESET)"
+	@echo "  For dependency graph:          $(CYAN)make dep-graph$(RESET)"
+	@echo "  For dependency cut analysis:   $(CYAN)make dep-cut$(RESET)"

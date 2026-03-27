@@ -152,7 +152,7 @@ func main() {
 
 	// Hub bridge: MQ → broadcast to connected clients.
 	consumerName := "hub-bridge-" + uuid.New().String()
-	_ = remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
+	if err := remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
 			msg.Ack()
@@ -161,7 +161,10 @@ func main() {
 		hub.Broadcast(msg.Subject, evt)
 		msg.Ack()
 		return nil
-	})
+	}); err != nil {
+		logger.Error("hub bridge subscription failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Build handlers.
 	js := remoteMQ.JetStream()

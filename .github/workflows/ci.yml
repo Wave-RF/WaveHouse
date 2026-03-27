@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+# All jobs use Makefile targets as the single source of truth.
+# Run `make ci` locally to replicate the full pipeline.
+
 jobs:
   check:
     name: Check
@@ -21,23 +24,13 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Check module tidiness
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum || (echo "::error::go.mod/go.sum is not tidy. Run 'go mod tidy' and commit." && exit 1)
+        run: make mod-tidy-check
 
       - name: Check formatting
-        run: |
-          OUTPUT=$(go run mvdan.cc/gofumpt -l .)
-          if [ -n "$OUTPUT" ]; then
-            echo "::error::Code is not formatted. Run 'make fmt' and commit."
-            echo "$OUTPUT"
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: Vulnerability check
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+        run: make vulncheck
 
   lint:
     name: Lint
@@ -53,7 +46,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.1.6
 
   test:
     name: Test
@@ -65,17 +58,15 @@ jobs:
         with:
           go-version-file: "go.mod"
 
-      - name: Run unit tests
-        run: go run gotest.tools/gotestsum --format testdox -- ./internal/... -race -coverprofile=coverage.txt -covermode=atomic
+      - name: Run unit tests with coverage
+        run: make coverage
 
-      - name: Enforce Test Coverage & Generate Badge
+      - name: Enforce coverage threshold & generate badge
         uses: vladopajic/go-test-coverage@v2
         with:
           profile: coverage.txt
           local-prefix: github.com/Wave-RF/WaveHouse
-          # Fail the build if total coverage is below 70%
           threshold-total: 70
-          # Automatically generate a badge and push it to the 'badges' branch (only on main)
           git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
           git-branch: badges
 
@@ -111,4 +102,4 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Run integration tests
-        run: go run gotest.tools/gotestsum --format testdox -- -tags=integration -timeout 120s ./tests/... -race -count=1
+        run: make test-integration

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Test infrastructure**: Expanded `internal/testutil/` with shared mocks (`MockPublisher`, `MockCache`, `MockDeduplicator`, `MockSubscriber` in `mocks.go`), JWT helpers (`MakeJWT`, `MakeExpiredJWT` in `jwt.go`), schema helpers (`NewTestSchemaRegistry`), and response assertions (`AssertJSONResponse`, `AssertJSONContains`).
+- **Policy test helper**: `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
+- **Schema test helper**: `discovery.NewSchemaRegistryFromMap(tables)` factory for schema-aware tests without ClickHouse.
+- **Unit tests — critical path**: `middleware_test.go` (12 scenarios: auth disabled, dev mode, JWT validation, role extraction, claim extraction), `policy_test.go` (Evaluate, IsColumnAllowed, IsAggregationAllowed, navigateClaims, resolveTemplate), `config_test.go` (defaults, YAML loading, env overrides, invalid YAML), `ingest_test.go` (valid payload, missing/unknown table, invalid JSON, schema validation, dedup, publish errors, policy enforcement).
+- **Unit tests — core features**: `hub_test.go`, `health_test.go`, `schema_test.go`, `transform_test.go`, `router_test.go`, `builder_test.go`, `tiered_test.go`, `pipes_test.go`.
+- **Makefile targets**: `tools`, `check-tools`, `build-debug`, `fmt-check`, `lint-fix`, `fix`, `coverage-enforce` (70% threshold), `mod-tidy-check`, `vulncheck`, `security`, `deadcode`, `audit-cgo`, `size-report`, `size-tree`, `size-treemap`, `dep-graph`, `dep-why`, `dep-cut`, `binary-analysis`, `release-test`.
+- **Linters**: Added `bodyclose`, `noctx`, `errorlint`, `tparallel` to `.golangci.yml`.
+- **Agent instructions**: Testing conventions section in `AGENTS.md`, testing rules (6, 7) in `copilot-instructions.md`.
 - **Dependabot**: `.github/dependabot.yml` with weekly grouped PRs for Go modules and GitHub Actions.
 - **Vulnerability scanning**: `govulncheck ./...` runs in CI (`check` job) on every push and PR.
 - **Air install check**: `make dev` now checks for `air` in `$PATH` and prints install instructions if missing (same pattern as `make lint` for golangci-lint).
@@ -23,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI workflow**: Refactored `.github/workflows/ci.yml` to use Makefile targets (`make mod-tidy-check`, `make fmt-check`, `make vulncheck`, `make coverage`, `make test-integration`). Pinned golangci-lint to v2.1.6.
+- **`filterEventColumns()`**: Returns filtered copy instead of mutating shared event data (prevents cross-client data corruption during SSE/WS broadcast).
+- **Hub bridge subscription**: `cmd/wavehouse-api/main.go` now fails startup on Subscribe error instead of suppressing it.
+- **`make ci`**: Expanded to 7 steps: tidy + fmt + lint + vulncheck + build + unit tests + integration tests.
 - **Pinned dev tools**: `gotestsum`, `gofumpt`, and `goimports` are tracked in `go.mod` via native `tool` directives (Go 1.24+). The Makefile uses `go run` — no manual tool installation needed. Eliminates `@latest` non-determinism.
 - **Race detector enabled by default**: All test targets (`make test`, `make test-integration`, `make test-all`, `make ci`) now run with `-race`. Critical for catching data races in WaveHouse's concurrent NATS/cache/streaming code.
 - **Integration tests bypass cache**: `-count=1` added to `make test-integration` to ensure tests always run against fresh Docker containers.
@@ -33,9 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Code formatting**: Switched from `gofmt` to `gofumpt` (strict superset). Added `gofumpt` to `.golangci.yml` linters.
 - **Embedded NATS logger**: `mq.NewEmbedded()` now accepts an optional `*slog.Logger` parameter to control server log output.
 - **Test structure standardized**: Moved `bento_pub` smoke test to `tests/cmd/bento_pub/`. Consolidated Makefile test targets with `ARGS` pass-through.
+- **Analysis Make targets rewritten**: `size-tree` uses `gsa --format text --hide-sections` for a clean package-size table (was broken `goda weight`). `size-treemap` outputs text + SVG + interactive HTML treemap, auto-opens HTML outside CI. `dep-graph` suppresses graphviz cluster warnings, CI-aware auto-open. `dep-cut` filters to InDegree ≤ 3, strips `github.com/` prefix, respects `LIMIT` var (default 30). `audit-cgo` adds informational context about CGO_ENABLED=0. New `LIMIT` variable for analysis row limits. Analysis artifacts added to `make clean` and `.gitignore`.
 
 ### Fixed
 
+- **Docs — configuration**: Added missing `clickhouse.http_port` field, fixed `policy.file_path` default to `policy.yaml`, fixed `pipes.directory` default to `./pipes`.
+- **Docs — deployment**: Fixed `cluster.yaml` → `clustered.yaml` Docker Compose file references.
+- **Docs — development**: Updated Makefile targets table (removed nonexistent `build-all`/`compose-cluster`, added all new targets), added missing linters to list, added missing packages to project structure, updated vulnerability scanning to use `make vulncheck`.
+- **`config.yaml`**: Fixed `policy.file_path` and `pipes.directory` defaults to match `config.go` struct tags.
 - **DLQ stats per-subject counts**: `GET /v1/dlq/stats` now passes `WithSubjectFilter(">")` to NATS `Stream.Info()`, fixing empty per-table breakdown in the response.
 - **Bento DLQ subject routing**: Bento ingest worker now sets `table_name` metadata on messages so the DLQ output routes to `dlq.<table>` instead of `dlq.unknown`.
 - **JWKS authentication**: New `auth.jwks_url` config for public key validation via JWKS endpoint. JWKS is tried first, falling back to HMAC secret. Powered by `keyfunc/v3`.
@@ -61,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Optional deduplication**: Dedup is now opt-in via `dedupe.enabled` / `WH_DEDUPE_ENABLED` (defaults to `false`). When enabled, specify the dedup key field with `dedupe.id_field` / `WH_DEDUPE_ID_FIELD`.
 - **Table-based ingest routing**: Ingest endpoint is now `POST /v1/ingest/{table}` — the table name comes from the URL path.
 
-### Changed
+### Changed (breaking)
 
 - **BREAKING: JWT middleware signature**: `JWTAuthMiddleware` now takes `AuthConfig` struct instead of `(secret, enabled)` pair to support JWKS, role claims, and dev mode.
 - **Raw SQL restriction**: Non-admin/service roles must have `raw_sql: true` in their policy to use `POST /v1/query`.

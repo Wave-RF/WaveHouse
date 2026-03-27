@@ -94,7 +94,7 @@ func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string
 		if !perms.Allowed {
 			return nil
 		}
-		filterEventColumns(evt.Data, perms)
+		evt.Data = filterEventColumns(evt.Data, perms)
 	}
 
 	out := map[string]any{

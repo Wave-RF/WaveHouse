@@ -19,7 +19,9 @@ data/
 coverage.txt
 coverage.html
 graph.dot
+graph.svg
 size-map.svg
+size-map.html
 
 # Dependency directories
 vendor/

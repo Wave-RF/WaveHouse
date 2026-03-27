@@ -24,14 +24,17 @@ func transformForClient(raw []byte) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// filterEventColumns removes columns from event data that the role is not allowed to see.
-func filterEventColumns(data map[string]any, perms *policy.ResolvedPermissions) {
+// filterEventColumns returns a copy of data containing only columns the role is allowed to see.
+// Returns the original map unchanged if perms is nil.
+func filterEventColumns(data map[string]any, perms *policy.ResolvedPermissions) map[string]any {
 	if perms == nil || data == nil {
-		return
+		return data
 	}
-	for col := range data {
-		if !perms.IsColumnAllowed(col) {
-			delete(data, col)
+	filtered := make(map[string]any, len(data))
+	for col, val := range data {
+		if perms.IsColumnAllowed(col) {
+			filtered[col] = val
 		}
 	}
+	return filtered
 }

@@ -12,6 +12,10 @@ linters:
     - revive
     - ineffassign
     - misspell
+    - bodyclose
+    - noctx
+    - errorlint
+    - tparallel
 
 formatters:
   enable:

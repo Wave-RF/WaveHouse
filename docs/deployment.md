@@ -70,10 +70,10 @@ Clustered mode separates the API servers from the workers and uses external infr
 
 ```bash
 # Start all infrastructure + 2 API servers + 2 workers + Caddy LB
-docker compose -f deployments/compose/cluster.yaml up -d
+docker compose -f deployments/compose/clustered.yaml up -d
 
 # Create your tables in ClickHouse
-docker compose -f deployments/compose/cluster.yaml exec clickhouse \
+docker compose -f deployments/compose/clustered.yaml exec clickhouse \
   clickhouse-client --query "
     CREATE TABLE IF NOT EXISTS clicks (
       page String,

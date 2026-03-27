@@ -58,24 +58,53 @@ Ten internal packages under `internal/`:
 ```bash
 make help              # Show all targets with descriptions
 make setup             # Download Go modules and cache tools
+make tools             # Install external dev tools (golangci-lint, air, goreleaser)
+make check-tools       # Verify all required tools are installed
 make build             # Compile all 3 binaries to bin/
-make build-all         # Cross-compile for linux/amd64 + arm64
+make build-debug       # Compile with debug symbols (for delve/profiling)
 make fmt               # Format code (gofumpt + goimports)
+make fmt-check         # Verify formatting (non-zero exit if unformatted)
 make lint              # golangci-lint run ./...
+make lint-fix          # golangci-lint run --fix ./...
+make fix               # Auto-format + auto-fix linters
 make test              # Unit tests with race detector
 make test-integration  # Integration tests (needs Docker)
 make test-all          # Unit + integration tests
-make ci                # Full CI check: fmt + lint + all tests
+make ci                # Full CI check: tidy + fmt + lint + vulncheck + build + tests
 make coverage          # Unit test coverage → coverage.html
+make coverage-enforce  # Fail if coverage is below 70% threshold
+make mod-tidy-check    # Verify go.mod/go.sum are tidy
+make vulncheck         # Run govulncheck vulnerability scanner
+make security          # Combined scan: vulncheck + gosec via linter
+make deadcode          # Find unreachable functions
+make audit-cgo         # Audit deps for C code (informational — builds use CGO_ENABLED=0)
+make size-report       # Show binary sizes
+make size-tree         # Top packages by size in the binary (text table)
+make size-treemap      # Full binary analysis → text + SVG + interactive HTML
+make dep-graph         # Dependency graph → graph.svg (requires graphviz)
+make dep-why MOD=...   # Show why a module is included
+make dep-cut           # Top cuttable deps by transitive impact (LIMIT=N)
+make binary-analysis   # Combined: sizes + dead code + CGO audit
 make smoke-test        # Manual Bento insert+delete (needs running WaveHouse)
 make dev               # Hot-reload dev server (air)
-make docker            # Build Docker images
-make clean             # Remove bin/, tmp/, data/
+make docker            # Build Docker image
+make clean             # Remove bin/, tmp/, data/, coverage
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
 
 Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via native `tool` directives and invoked with `go run` — no manual installation needed. `golangci-lint` is installed separately (binary install recommended).
+
+## Testing Conventions
+
+- **Table-driven tests**: Use `tests := []struct{ name string; ... }` with `t.Run(tt.name, ...)` for test cases.
+- **Shared mocks in `internal/testutil/`**: Use `MockPublisher`, `MockCache`, `MockDeduplicator`, `MockSubscriber` instead of creating ad-hoc mocks. See `testutil/mocks.go`.
+- **JWT helpers**: Use `testutil.MakeJWT(t, claims)` and `testutil.MakeExpiredJWT(t, claims)` for auth tests. See `testutil/jwt.go`.
+- **Schema helpers**: Use `testutil.NewTestSchemaRegistry(tables)` or `discovery.NewSchemaRegistryFromMap(tables)` for schema-aware tests.
+- **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
+- **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
+- **Coverage target**: 70% minimum (CI enforced). Aim for 80%+.
+- **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 
 ## Documentation & Consistency Sync (MANDATORY)
 
@@ -145,6 +174,16 @@ Before finishing any task, do a quick search across docs for the identifiers you
 2. Define an interface if there will be multiple implementations.
 3. Wire it into the appropriate `cmd/*/main.go`.
 4. Document in `docs/architecture.md`.
+
+### Writing tests
+
+1. Create `*_test.go` files in the same package as the code under test.
+2. Use table-driven tests with `t.Run(tt.name, ...)` for multiple scenarios.
+3. Use shared mocks from `internal/testutil/` (MockPublisher, MockCache, MockDeduplicator, MockSubscriber).
+4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests.
+5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
+6. Run `make test` to verify. Run `make coverage` to check coverage.
+7. Aim for 80%+ coverage on new code. 70% is the CI-enforced minimum.
 
 ## File Structure
 

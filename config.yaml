@@ -45,7 +45,7 @@ dlq:
   enabled: true
 
 policy:
-  file_path: ""
+  file_path: policy.yaml
 
 pipes:
-  directory: ""
+  directory: ./pipes

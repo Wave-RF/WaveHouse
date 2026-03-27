@@ -194,7 +194,7 @@ go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 | Standalone via Docker Compose | `make compose-standalone` |
 | Clustered API server (local deps) | `source .env.clustered && go run ./cmd/wavehouse-api` |
 | Clustered worker (local deps) | `source .env.clustered && go run ./cmd/wavehouse-worker` |
-| Full clustered stack via Docker | `make compose-cluster` |
+| Full clustered stack via Docker | `make compose-clustered` |
 | Infrastructure deps only | `make compose-deps` |
 
 ## Testing
@@ -273,6 +273,10 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **misspell** — Spelling errors in comments/strings
 - **gofumpt** — Strict formatting (superset of gofmt)
 - **goimports** — Import ordering and grouping
+- **bodyclose** — Unclosed HTTP response bodies
+- **noctx** — HTTP requests without context
+- **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
+- **tparallel** — Missing `t.Parallel()` in test subtests
 
 ## Project Structure
 
@@ -289,7 +293,11 @@ WaveHouse/
 │   ├── dedupe/             # Optional deduplication (Pebble or ScyllaDB)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
-│   └── mq/                 # NATS message queue abstraction
+│   ├── mq/                 # NATS message queue abstraction
+│   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
+│   ├── policy/             # Access control policies (evaluation + NATS KV store)
+│   ├── query/              # Structured query AST + SQL builder
+│   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration tests
 ├── deployments/
 │   ├── compose/            # Docker Compose files
@@ -316,24 +324,44 @@ Run `make help` to see all targets. Key ones:
 
 | Target | Description |
 | ------ | ----------- |
-| `make build` | Compile all three binaries to `bin/` |
-| `make build-all` | Cross-compile for linux/amd64 and linux/arm64 |
-| `make dev` | Hot-reload development server (requires air) |
+| `make help` | Show all targets with descriptions |
 | `make setup` | Download Go modules and cache tools |
+| `make tools` | Install external dev tools (golangci-lint, air, goreleaser) |
+| `make check-tools` | Verify all required tools are installed |
+| `make build` | Compile all three binaries to `bin/` |
+| `make build-debug` | Compile with debug symbols (for delve/profiling) |
+| `make dev` | Hot-reload development server (requires air) |
 | `make fmt` | Format code (`gofumpt` + `goimports`) |
+| `make fmt-check` | Verify formatting (non-zero exit if unformatted) |
 | `make lint` | Run golangci-lint |
+| `make lint-fix` | Run golangci-lint with `--fix` |
+| `make fix` | Auto-format + auto-fix linters |
 | `make test` | Unit tests with race detector |
 | `make test-integration` | Integration tests (requires Docker) |
 | `make test-all` | Unit + integration tests |
-| `make ci` | Full CI check: fmt + lint + all tests |
+| `make ci` | Full CI check: tidy + fmt + lint + vulncheck + build + tests |
 | `make coverage` | Unit test coverage → `coverage.html` |
+| `make coverage-enforce` | Fail if coverage is below 70% threshold |
+| `make mod-tidy-check` | Verify `go.mod`/`go.sum` are tidy |
 | `make smoke-test` | Manual Bento insert+delete (requires running WaveHouse) |
-| `make docker` | Build all Docker images |
+| `make vulncheck` | Run `govulncheck` vulnerability scanner |
+| `make security` | Combined scan: vulncheck + gosec via linter |
+| `make deadcode` | Find unreachable functions and unused code |
+| `make audit-cgo` | Audit dependencies for C code (informational) |
+| `make size-report` | Show binary sizes |
+| `make size-tree` | Top packages by size in the binary (text table) |
+| `make size-treemap` | Full binary analysis → text + SVG + interactive HTML |
+| `make dep-graph` | Dependency graph → `graph.svg` (requires graphviz) |
+| `make dep-why MOD=...` | Show why a module is included |
+| `make dep-cut` | Top cuttable deps by transitive impact (`LIMIT=N`) |
+| `make binary-analysis` | Combined: sizes + dead code + CGO audit |
+| `make docker` | Build Docker image |
 | `make compose-standalone` | Start standalone mode via Docker Compose |
-| `make compose-cluster` | Start clustered mode via Docker Compose |
+| `make compose-clustered` | Start clustered mode via Docker Compose |
 | `make compose-deps` | Start infrastructure dependencies only |
 | `make deps-wipe` | Destroy and recreate dependency containers |
-| `make clean` | Remove `bin/`, `tmp/`, and `data/` directories |
+| `make release-test` | Test cross-compilation via GoReleaser |
+| `make clean` | Remove `bin/`, `tmp/`, `data/`, and coverage files |
 
 All test targets accept `ARGS="..."` for pass-through flags. Build targets accept `TAGS="..."` for build tags (e.g., `make build TAGS="scylla"`).
 
@@ -351,8 +379,13 @@ go mod tidy            # Remove unused, add missing
 `govulncheck` analyzes your actual call graph — not just the module graph — so it only reports vulnerabilities in code paths you use.
 
 ```bash
-go install golang.org/x/vuln/cmd/govulncheck@latest
-govulncheck ./...
+make vulncheck
+```
+
+For a combined security scan (vulncheck + gosec):
+
+```bash
+make security
 ```
 
 This also runs automatically in CI on every push and pull request.

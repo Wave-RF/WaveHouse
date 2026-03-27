@@ -99,7 +99,7 @@ func (h *SSEHandler) applyStreamPolicy(raw []byte, role string, claims map[strin
 		if !perms.Allowed {
 			return nil // role has no access to this table
 		}
-		filterEventColumns(evt.Data, perms)
+		evt.Data = filterEventColumns(evt.Data, perms)
 	}
 
 	out := map[string]any{

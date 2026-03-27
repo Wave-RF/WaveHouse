@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -144,6 +145,15 @@ func (s *Store) load(ctx context.Context) (*Policy, error) {
 		return nil, fmt.Errorf("unmarshal policy: %w", err)
 	}
 	return &p, nil
+}
+
+// NewMemoryStore creates an in-memory policy store pre-loaded with the given
+// policy. Intended for testing — no NATS connection required.
+func NewMemoryStore(p *Policy) *Store {
+	return &Store{
+		cached: p,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 }
 
 // loadPolicyFile reads a policy from a YAML or JSON file.

@@ -34,6 +34,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `clickhouse.addr` | `WH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
+| `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by schema discovery to query `system.columns`. |
 | `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
@@ -92,13 +93,13 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `policy.file_path` | `WH_POLICY_FILE_PATH` | *(empty)* | Path to a YAML/JSON policy file. Used to bootstrap the policy store on first startup if no policy exists in NATS KV. |
+| `policy.file_path` | `WH_POLICY_FILE_PATH` | `policy.yaml` | Path to a YAML/JSON policy file. Used to bootstrap the policy store on first startup if no policy exists in NATS KV. |
 
 ### Named Pipes
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `pipes.directory` | `WH_PIPES_DIRECTORY` | *(empty)* | Directory containing `.sql` files for named query pipes. Files are loaded on startup to bootstrap the NATS KV pipe store. |
+| `pipes.directory` | `WH_PIPES_DIRECTORY` | `./pipes` | Directory containing `.sql` files for named query pipes. Files are loaded on startup to bootstrap the NATS KV pipe store. |
 
 ## Example Config File
 
@@ -111,6 +112,7 @@ server:
 
 clickhouse:
   addr: localhost:9000
+  http_port: 8123
   database: default
   username: default
   password: ""
@@ -149,10 +151,10 @@ dlq:
   enabled: true
 
 policy:
-  file_path: ""
+  file_path: policy.yaml
 
 pipes:
-  directory: ""
+  directory: ./pipes
 ```
 
 ## Mode-Specific Settings

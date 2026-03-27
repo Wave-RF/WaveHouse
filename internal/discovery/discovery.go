@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -126,4 +127,17 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 // isNullable checks if a ClickHouse type string is Nullable.
 func isNullable(chType string) bool {
 	return len(chType) > 9 && chType[:9] == "Nullable("
+}
+
+// NewSchemaRegistryFromMap creates a SchemaRegistry pre-loaded with the given
+// table schemas. Intended for testing — no ClickHouse connection is required.
+func NewSchemaRegistryFromMap(tables []*TableSchema) *SchemaRegistry {
+	m := make(map[string]*TableSchema, len(tables))
+	for _, t := range tables {
+		m[t.Name] = t
+	}
+	return &SchemaRegistry{
+		tables: m,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 }
