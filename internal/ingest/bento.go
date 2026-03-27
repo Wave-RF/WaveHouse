@@ -13,7 +13,19 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	_ "github.com/warpstreamlabs/bento/public/components/all"
+
+	// Import the core framework (pure data processors, basic routing)
+	_ "github.com/warpstreamlabs/bento/public/components/pure"
+
+	// Import ONLY the ClickHouse SQL driver
+	_ "github.com/ClickHouse/clickhouse-go/v2" // Ensure the CH driver is registered
+	_ "github.com/warpstreamlabs/bento/public/components/sql/base"
+
+	// Import ONLY the NATS components
+	_ "github.com/warpstreamlabs/bento/public/components/nats"
+
+	// Optional: basic I/O if you use stdin/stdout for debugging
+	_ "github.com/warpstreamlabs/bento/public/components/io"
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
@@ -77,6 +89,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Insert case
 		msg := service.NewMessage(m.Data())
+		msg.MetaSet("table_name", raw.TableName)
 
 		j.inFlight.Add(1)
 
@@ -110,9 +123,9 @@ func (d *dlqOutput) Close(ctx context.Context) error   { return nil }
 func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	for _, m := range batch {
 		data, _ := m.AsBytes()
-		
+
 		tableName, exists := m.MetaGet("table_name")
-		
+
 		subject := "dlq.unknown"
 		if exists && tableName != "" {
 			subject = "dlq." + tableName

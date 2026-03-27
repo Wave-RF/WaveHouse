@@ -18,7 +18,6 @@ func main() {
 		log.Fatal("NATS Connect Error: ", err)
 	}
 	defer nc.Close()
-
 	js, _ := jetstream.New(nc)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -53,7 +52,6 @@ func main() {
         table_name String
     ) ENGINE = MergeTree()
     ORDER BY id`
-
 	err = chConn.Exec(context.Background(), createTable)
 	if err != nil {
 		log.Fatal("Failed to create table: ", err)
@@ -71,9 +69,9 @@ func main() {
 	}
 	log.Println("Published Insert to ingest.users")
 
-	// We wait 100ms just to ensure NATS sequence order is preserved 
-	time.Sleep(100 * time.Millisecond) 
-	
+	// We wait 100ms just to ensure NATS sequence order is preserved
+	time.Sleep(100 * time.Millisecond)
+
 	deleteData, _ := json.Marshal(map[string]interface{}{
 		"action":     "delete",
 		"table_name": "users",
@@ -95,7 +93,6 @@ func main() {
 		log.Printf("Verification Query Failed: %v", err)
 		return
 	}
-
 	if count == 0 {
 		fmt.Println("SUCCESS: The record was inserted and then deleted correctly!")
 	} else {

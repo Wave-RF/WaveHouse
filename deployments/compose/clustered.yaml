@@ -43,7 +43,8 @@ services:
   wavehouse-api-1:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.wavehouse-api
+      dockerfile: deployments/Dockerfile
+    entrypoint: ["/usr/local/bin/wavehouse-api"]
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
@@ -64,7 +65,8 @@ services:
   wavehouse-api-2:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.wavehouse-api
+      dockerfile: deployments/Dockerfile
+    entrypoint: ["/usr/local/bin/wavehouse-api"]
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
@@ -85,7 +87,8 @@ services:
   wavehouse-worker-1:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.wavehouse-worker
+      dockerfile: deployments/Dockerfile
+    entrypoint: ["/usr/local/bin/wavehouse-worker"]
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
@@ -99,7 +102,8 @@ services:
   wavehouse-worker-2:
     build:
       context: ../..
-      dockerfile: deployments/docker/Dockerfile.wavehouse-worker
+      dockerfile: deployments/Dockerfile
+    entrypoint: ["/usr/local/bin/wavehouse-worker"]
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000

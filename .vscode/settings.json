@@ -1,0 +1,41 @@
+{
+  // ── Go / gopls ──────────────────────────────────────────────────
+  "go.lintTool": "golangci-lint",
+  "go.lintFlags": ["--fast"],
+  "go.lintOnSave": "package",
+  "gopls": {
+    "build.buildFlags": ["-tags=integration"],
+    "formatting.gofumpt": true
+  },
+
+  // ── Formatting ─────────────────────────────────────────────────
+  "[go]": {
+    "editor.defaultFormatter": "golang.go",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "[yaml]": {
+    "editor.tabSize": 2
+  },
+  "[toml]": {
+    "editor.tabSize": 2
+  },
+  "[markdown]": {
+    "editor.tabSize": 2
+  },
+
+  // ── Search exclusions ──────────────────────────────────────────
+  "search.exclude": {
+    "data/": true,
+    "tmp/": true,
+    "bin/": true,
+    "node_modules/": true
+  },
+  "files.watcherExclude": {
+    "data/**": true,
+    "tmp/**": true,
+    "bin/**": true
+  }
+}

@@ -13,8 +13,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const kvBucket = "WAVEHOUSE_POLICY"
-const kvKey = "current"
+const (
+	kvBucket = "WAVEHOUSE_POLICY"
+	kvKey    = "current"
+)
 
 // Store manages policy persistence via NATS KV with optional file bootstrap.
 type Store struct {

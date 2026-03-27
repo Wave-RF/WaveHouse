@@ -32,7 +32,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := stream.Info(r.Context())
+	info, err := stream.Info(r.Context(), jetstream.WithSubjectFilter(">"))
 	if err != nil {
 		http.Error(w, `{"error":"stream info failed"}`, http.StatusInternalServerError)
 		return

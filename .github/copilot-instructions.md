@@ -4,7 +4,7 @@ For detailed project context, architecture, code conventions, and common tasks, 
 
 ## Quick Reference
 
-- **Language**: Go 1.25, standard formatting (`gofmt`)
+- **Language**: Go 1.25, strict formatting (`gofumpt`)
 - **Router**: Chi v5 (`github.com/go-chi/chi/v5`)
 - **Logging**: `log/slog` with JSON handler
 - **Testing**: `testing` + `testify` for assertions

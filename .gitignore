@@ -18,6 +18,8 @@ data/
 *.out
 coverage.txt
 coverage.html
+graph.dot
+size-map.svg
 
 # Dependency directories
 vendor/
@@ -25,7 +27,6 @@ node_modules/
 
 # IDE / Editor
 .idea/
-.vscode/
 *.swp
 *.swo
 *~

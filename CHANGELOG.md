@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dependabot**: `.github/dependabot.yml` with weekly grouped PRs for Go modules and GitHub Actions.
+- **Vulnerability scanning**: `govulncheck ./...` runs in CI (`check` job) on every push and PR.
+- **Air install check**: `make dev` now checks for `air` in `$PATH` and prints install instructions if missing (same pattern as `make lint` for golangci-lint).
+- **`.air.toml` modernized**: Added `#:schema` header, replaced deprecated `bin` with `entrypoint`, added `exclude_regex`, `exclude_unchanged`, `stop_on_error`, `send_interrupt`, `[color]`, and `[misc]` sections.
+- **Build tags support**: `TAGS` variable in Makefile for conditional compilation (e.g., `make build TAGS="scylla dynamodb"`).
+- **VS Code workspace config**: `.vscode/settings.json` with gopls build flags (`tools`, `integration` tags), schema overrides, and search exclusions. `.vscode/extensions.json` with recommended extensions.
+- **`.markdownlint.json`**: Disables `MD024` (duplicate headings) and `MD060` (table column style) for CHANGELOG and doc compatibility.
+- **DLQ unit tests**: `internal/ingest/buffer_test.go` — tests for `sendToDLQ` publish routing, `flushBatch` DLQ failover on insert failure, DLQ-disabled ack behavior, and mixed-table batching.
+- **DLQ handler unit tests**: `internal/api/dlq_test.go` — tests for `Stats` endpoint (empty stream, populated counts, single table) and `EnsureDLQStream` idempotency, using embedded NATS.
+- **DLQ integration tests**: `tests/integration_test.go` — end-to-end tests with ClickHouse testcontainer + embedded NATS: DLQ stats empty on fresh start, DLQ populated when Bento insert fails on non-existent table, successful ingest produces no DLQ entries.
+- **Shared test utilities**: `internal/testutil/` package with `NopLogger()` for silencing embedded NATS output in tests.
+
+### Changed
+
+- **Pinned dev tools**: `gotestsum`, `gofumpt`, and `goimports` are tracked in `go.mod` via native `tool` directives (Go 1.24+). The Makefile uses `go run` — no manual tool installation needed. Eliminates `@latest` non-determinism.
+- **Race detector enabled by default**: All test targets (`make test`, `make test-integration`, `make test-all`, `make ci`) now run with `-race`. Critical for catching data races in WaveHouse's concurrent NATS/cache/streaming code.
+- **Integration tests bypass cache**: `-count=1` added to `make test-integration` to ensure tests always run against fresh Docker containers.
+- **Makefile overhaul**: Added `make setup`, `make fmt` (gofumpt + goimports), `make ci` (full check: fmt + lint + tests). Replaced `make check` with `make ci`. Verbose output via `V=1 make test`. Colored output with `@`-prefixed commands.
+- **CI workflow hardened**: Added formatting check (`gofumpt -l`) and module tidiness check (`go mod tidy` + `git diff --exit-code`). Integration tests now run with `-race -count=1`. All test steps use gotestsum. Go version read from `go.mod` (no hardcoded version). Replaced Codecov with native `go tool cover` + GitHub step summary.
+- **`.golangci.yml` v2 format**: Uses `version: "2"` with `default: none` for explicit linter control. Added `goimports` linter.
+- **Lint binary check**: `make lint` and `make ci` now check for `golangci-lint` in `$PATH` and print install instructions if missing.
+- **Code formatting**: Switched from `gofmt` to `gofumpt` (strict superset). Added `gofumpt` to `.golangci.yml` linters.
+- **Embedded NATS logger**: `mq.NewEmbedded()` now accepts an optional `*slog.Logger` parameter to control server log output.
+- **Test structure standardized**: Moved `bento_pub` smoke test to `tests/cmd/bento_pub/`. Consolidated Makefile test targets with `ARGS` pass-through.
+
+### Fixed
+
+- **DLQ stats per-subject counts**: `GET /v1/dlq/stats` now passes `WithSubjectFilter(">")` to NATS `Stream.Info()`, fixing empty per-table breakdown in the response.
+- **Bento DLQ subject routing**: Bento ingest worker now sets `table_name` metadata on messages so the DLQ output routes to `dlq.<table>` instead of `dlq.unknown`.
 - **JWKS authentication**: New `auth.jwks_url` config for public key validation via JWKS endpoint. JWKS is tried first, falling back to HMAC secret. Powered by `keyfunc/v3`.
 - **Role-based access control**: JWT role extraction from configurable claim path (`auth.role_claim`). Built-in `admin`/`service` roles with full access; other roles governed by policies.
 - **Hasura-style access control policies**: Per-table, per-role column and row-level permissions with JWT claim templating (`{{ jwt.path }}`). Stored in NATS KV (`WAVEHOUSE_POLICY`) with file-based YAML/JSON bootstrap and cluster-wide sync via KV Watch.

@@ -46,7 +46,7 @@ Ten internal packages under `internal/`:
 
 ## Code Conventions
 
-- **Go 1.25**, standard formatting (`gofmt`)
+- **Go 1.25**, strict formatting (`gofumpt`, enforced by CI)
 - **Structured logging** with `log/slog` (JSON handler)
 - **Chi v5** for HTTP routing
 - **Error handling**: Return errors, don't panic. Wrap with `fmt.Errorf("context: %w", err)`.
@@ -56,14 +56,26 @@ Ten internal packages under `internal/`:
 ## Build & Test Commands
 
 ```bash
+make help              # Show all targets with descriptions
+make setup             # Download Go modules and cache tools
 make build             # Compile all 3 binaries to bin/
-make test              # Unit tests: go test ./internal/...
-make test-integration  # Integration tests (needs Docker): go test ./tests/... -tags=integration
+make build-all         # Cross-compile for linux/amd64 + arm64
+make fmt               # Format code (gofumpt + goimports)
 make lint              # golangci-lint run ./...
+make test              # Unit tests with race detector
+make test-integration  # Integration tests (needs Docker)
+make test-all          # Unit + integration tests
+make ci                # Full CI check: fmt + lint + all tests
+make coverage          # Unit test coverage → coverage.html
+make smoke-test        # Manual Bento insert+delete (needs running WaveHouse)
 make dev               # Hot-reload dev server (air)
 make docker            # Build Docker images
 make clean             # Remove bin/, tmp/, data/
 ```
+
+Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
+
+Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via native `tool` directives and invoked with `go run` — no manual installation needed. `golangci-lint` is installed separately (binary install recommended).
 
 ## Documentation & Consistency Sync (MANDATORY)
 
@@ -148,10 +160,13 @@ internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
 internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstrap)
 internal/policy/        → Access control policies (types, evaluation, NATS KV store)
 internal/query/         → Structured query AST + SQL builder
+internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration tests (build tag: integration)
+tests/cmd/bento_pub/    → Manual smoke-test tool (insert+delete via NATS)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles
 docs/                   → Project documentation
+.vscode/                → Workspace settings (gopls build flags, recommended extensions)
 ```
 
 ## Security Considerations
@@ -160,3 +175,4 @@ docs/                   → Project documentation
 - All `/v1/*` routes are behind optional JWT auth middleware
 - Input JSON is validated against ClickHouse schemas before processing
 - ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself
+- **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.

@@ -93,6 +93,9 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := RoleFromContext(r.Context())
 			// Allow if no role is set (auth disabled).
+			// TODO: Make this behavior configurable (e.g., default to denying
+			// 	access, make auth disabled a specific config) in order to
+			//	prevent role extraction error from granting unintended access.
 			if role == "" {
 				next.ServeHTTP(w, r)
 				return

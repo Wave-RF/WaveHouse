@@ -4,8 +4,12 @@
 
 - **Go 1.25+** — [Install Go](https://go.dev/dl/)
 - **Docker** — For running dependencies and integration tests
-- **golangci-lint v2** — `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
-- **air** (optional) — For hot-reload during development: [Install air](https://github.com/air-verse/air)
+- **golangci-lint v2** — [Install golangci-lint](https://golangci-lint.run/welcome/install/) (binary install recommended; not in `go.mod` due to dependency tree size)
+- **air** — For hot-reload during development: [Install air](https://github.com/air-verse/air) (`brew install air` on macOS)
+
+Other dev tools (`gotestsum`, `gofumpt`, `goimports`) are **pinned in `go.mod`** via native `tool` directives (Go 1.24+) and run automatically through the Makefile — no manual installation needed.
+
+> **Note**: Both `golangci-lint` and `air` are installed as external binaries (not in `go.mod`) because their large dependency trees cause conflicts. If missing, `make lint` and `make dev` print install instructions.
 
 ## Quick Start (Standalone Mode)
 
@@ -195,44 +199,68 @@ go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 
 ## Testing
 
-### Unit Tests
+### How It Works
+
+All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed.
+
+All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE/WS hubs) — the race detector catches data races that would panic in production.
+
+### Quick Reference
 
 ```bash
-make test
-# or
-go test ./internal/...
+make test                              # Unit tests (compact output)
+V=1 make test                          # Unit tests (verbose output)
+make test ARGS="-run TestValidate"     # Run specific test(s)
+V=1 make test ARGS="-run TestValidate" # Specific test, verbose
+make test-integration                  # Integration tests (requires Docker)
+V=1 make test-integration              # Integration tests, verbose
+make test-all                          # Unit + integration
+make ci                                # Full CI check: fmt + lint + all tests
+make coverage                          # Unit test coverage → coverage.html
+make smoke-test                        # Manual Bento insert+delete (needs running WaveHouse)
 ```
 
-Unit tests live alongside the code they test (e.g., `internal/discovery/discovery_test.go`).
+**Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag).
 
-### Integration Tests
+**Extra flags**: All test targets accept `ARGS="..."` for additional `go test` flags (e.g., `-run`, `-count`, `-timeout`).
 
-Integration tests use [testcontainers-go](https://github.com/testcontainers/testcontainers-go) to spin up real ClickHouse and NATS containers. They require Docker.
+**Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
-```bash
-make test-integration
-# or
-go test ./tests/... -tags=integration -v -timeout 120s
-```
+### Test Structure
 
-Integration tests use the `//go:build integration` build tag and are located in the `tests/` directory.
+| Category | Location | Docker? | Command |
+|----------|----------|---------|---------|
+| Unit tests | `internal/*/_test.go` | No | `make test` |
+| Integration tests | `tests/integration_test.go` | Yes | `make test-integration` |
+| Smoke test (manual) | `tests/cmd/bento_pub/main.go` | External | `make smoke-test` |
 
-### Test Coverage
+- **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
+- **Integration tests** use the `//go:build integration` build tag. The `setupTestEnv` helper starts a ClickHouse testcontainer, embedded NATS, Bento ingest worker, and a full API router via `httptest.Server`. Subtests run sequentially because Bento's global registrations are one-time-per-process. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second Bento batch window.
+- **Smoke test** (`make smoke-test`) is a standalone binary that publishes insert + delete events to a running NATS (`localhost:4222`) and verifies ClickHouse (`localhost:9000`) processing. Requires a running WaveHouse instance — it is **not** part of `go test` and does not run with `make test-all`.
 
-```bash
-go test -coverprofile=coverage.txt -covermode=atomic ./internal/...
-go tool cover -html=coverage.txt -o coverage.html
-```
+Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()` for silencing embedded NATS output).
+
+### Adding New Tests
+
+- **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
+- **Integration test needing Docker** → add a subtest inside `tests/integration_test.go` or create a new `tests/*_test.go` file with `//go:build integration`.
+- **Test helpers** → add to `internal/testutil/`.
 
 ## Linting
 
 ```bash
 make lint
-# or
-golangci-lint run ./...
 ```
 
-The linter configuration is in `.golangci.yml`. Enabled linters:
+`golangci-lint` is installed separately (not in `go.mod` — its massive dependency tree causes conflicts). If not found, `make lint` prints install instructions.
+
+Install options:
+
+- **macOS**: `brew install golangci-lint`
+- **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
+- **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
+
+The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control). Enabled linters:
 
 - **errcheck** — Unchecked error returns
 - **govet** — Suspicious constructs
@@ -243,6 +271,8 @@ The linter configuration is in `.golangci.yml`. Enabled linters:
 - **revive** — Extensible linter (replaces golint)
 - **ineffassign** — Ineffective assignments
 - **misspell** — Spelling errors in comments/strings
+- **gofumpt** — Strict formatting (superset of gofmt)
+- **goimports** — Import ordering and grouping
 
 ## Project Structure
 
@@ -274,7 +304,7 @@ WaveHouse/
 
 ## Code Conventions
 
-- **Standard Go formatting**: Use `gofmt` (enforced by CI).
+- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
 - **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and clustered modes.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging.
@@ -282,15 +312,56 @@ WaveHouse/
 
 ## Makefile Targets
 
+Run `make help` to see all targets. Key ones:
+
 | Target | Description |
 | ------ | ----------- |
 | `make build` | Compile all three binaries to `bin/` |
+| `make build-all` | Cross-compile for linux/amd64 and linux/arm64 |
 | `make dev` | Hot-reload development server (requires air) |
-| `make test` | Run unit tests |
-| `make test-integration` | Run integration tests (requires Docker) |
+| `make setup` | Download Go modules and cache tools |
+| `make fmt` | Format code (`gofumpt` + `goimports`) |
 | `make lint` | Run golangci-lint |
+| `make test` | Unit tests with race detector |
+| `make test-integration` | Integration tests (requires Docker) |
+| `make test-all` | Unit + integration tests |
+| `make ci` | Full CI check: fmt + lint + all tests |
+| `make coverage` | Unit test coverage → `coverage.html` |
+| `make smoke-test` | Manual Bento insert+delete (requires running WaveHouse) |
 | `make docker` | Build all Docker images |
 | `make compose-standalone` | Start standalone mode via Docker Compose |
 | `make compose-cluster` | Start clustered mode via Docker Compose |
 | `make compose-deps` | Start infrastructure dependencies only |
+| `make deps-wipe` | Destroy and recreate dependency containers |
 | `make clean` | Remove `bin/`, `tmp/`, and `data/` directories |
+
+All test targets accept `ARGS="..."` for pass-through flags. Build targets accept `TAGS="..."` for build tags (e.g., `make build TAGS="scylla"`).
+
+## Dependency Management
+
+### Updating Dependencies
+
+```bash
+go get -u ./...        # Update all direct deps to latest minor/patch
+go mod tidy            # Remove unused, add missing
+```
+
+### Vulnerability Scanning
+
+`govulncheck` analyzes your actual call graph — not just the module graph — so it only reports vulnerabilities in code paths you use.
+
+```bash
+go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./...
+```
+
+This also runs automatically in CI on every push and pull request.
+
+### Dependabot
+
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for:
+
+- **Go modules** — outdated or vulnerable dependencies
+- **GitHub Actions** — outdated action versions
+
+PRs are grouped by ecosystem to reduce noise. Review and merge them regularly.

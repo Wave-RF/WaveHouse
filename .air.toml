@@ -1,12 +1,33 @@
+#:schema https://json.schemastore.org/any.json
+
+# Config file for Air (https://github.com/air-verse/air)
+
 root = "."
 tmp_dir = "tmp"
 
 [build]
 cmd = "go build -o ./tmp/wavehouse ./cmd/wavehouse"
-bin = "./tmp/wavehouse"
-include_ext = ["go"]
-exclude_dir = ["tmp", "tests", "deployments", "data", "bin", "docs", "examples", "scripts", ".git", ".github", "node_modules", "clients"]
+# entrypoint replaces the deprecated `bin` field
+entrypoint = ["./tmp/wavehouse"]
+include_ext = ["go", "yaml"]
+exclude_dir = ["tmp", "tests", "deployments", "data", "bin", "docs", "clients", ".git", ".github", "node_modules"]
+exclude_regex = ["_test\\.go"]
+exclude_unchanged = true
+# Debounce rapid saves (ms)
 delay = 1000
+stop_on_error = true
+send_interrupt = true
+kill_delay = 500
 
 [log]
 time = false
+main_only = false
+
+[color]
+main = "magenta"
+watcher = "cyan"
+build = "yellow"
+runner = "green"
+
+[misc]
+clean_on_exit = true

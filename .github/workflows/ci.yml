@@ -10,15 +10,45 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint
+  check:
+    name: Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: "go.mod"
+
+      - name: Check module tidiness
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || (echo "::error::go.mod/go.sum is not tidy. Run 'go mod tidy' and commit." && exit 1)
+
+      - name: Check formatting
+        run: |
+          OUTPUT=$(go run mvdan.cc/gofumpt -l .)
+          if [ -n "$OUTPUT" ]; then
+            echo "::error::Code is not formatted. Run 'make fmt' and commit."
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
@@ -33,16 +63,28 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: "go.mod"
 
       - name: Run unit tests
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./internal/...
+        run: go run gotest.tools/gotestsum --format testdox -- ./internal/... -race -coverprofile=coverage.txt -covermode=atomic
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
+      - name: Enforce Test Coverage & Generate Badge
+        uses: vladopajic/go-test-coverage@v2
         with:
-          files: coverage.txt
-        if: github.event_name == 'push'
+          profile: coverage.txt
+          local-prefix: github.com/Wave-RF/WaveHouse
+          # Fail the build if total coverage is below 70%
+          threshold-total: 70
+          # Automatically generate a badge and push it to the 'badges' branch (only on main)
+          git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
+          git-branch: badges
+
+      - name: Coverage summary
+        run: |
+          echo '## Test Coverage' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
   build:
     name: Build
@@ -52,7 +94,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: "go.mod"
 
       - name: Build all binaries
         run: make build
@@ -66,7 +108,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: "go.mod"
 
       - name: Run integration tests
-        run: make test-integration
+        run: go run gotest.tools/gotestsum --format testdox -- -tags=integration -timeout 120s ./tests/... -race -count=1

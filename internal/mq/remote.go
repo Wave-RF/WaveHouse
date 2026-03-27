@@ -86,7 +86,7 @@ func (r *RemoteNATS) JetStream() jetstream.JetStream {
 }
 
 func (r *RemoteNATS) NatsConn() *nats.Conn {
-    return r.conn
+	return r.conn
 }
 
 func (r *RemoteNATS) Close() error {

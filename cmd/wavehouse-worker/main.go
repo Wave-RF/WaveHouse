@@ -16,9 +16,19 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
+// Pre-populated build info variables, set via ldflags in the Makefile.
+var (
+	Version   = "dev"
+	BuildTime = time.Now().Format(time.RFC3339)
+	GitCommit = "unknown"
+	Binary    = "clustered-worker"
+)
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {

@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "golang.go",
+    "tamasfe.even-better-toml",
+    "redhat.vscode-yaml",
+    "editorconfig.editorconfig",
+    "DavidAnson.vscode-markdownlint",
+    "github.vscode-github-actions"
+  ]
+}

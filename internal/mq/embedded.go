@@ -17,18 +17,23 @@ type slogNATSLogger struct{ l *slog.Logger }
 func (s *slogNATSLogger) Noticef(format string, v ...any) {
 	s.l.Info(fmt.Sprintf(format, v...), "component", "nats")
 }
+
 func (s *slogNATSLogger) Warnf(format string, v ...any) {
 	s.l.Warn(fmt.Sprintf(format, v...), "component", "nats")
 }
+
 func (s *slogNATSLogger) Fatalf(format string, v ...any) {
 	s.l.Error(fmt.Sprintf(format, v...), "component", "nats")
 }
+
 func (s *slogNATSLogger) Errorf(format string, v ...any) {
 	s.l.Error(fmt.Sprintf(format, v...), "component", "nats")
 }
+
 func (s *slogNATSLogger) Debugf(format string, v ...any) {
 	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
+
 func (s *slogNATSLogger) Tracef(format string, v ...any) {
 	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
@@ -43,7 +48,14 @@ type EmbeddedNATS struct {
 }
 
 // NewEmbedded starts an embedded NATS server with JetStream enabled.
-func NewEmbedded(storeDir string, maxBytes int64) (*EmbeddedNATS, error) {
+// An optional *slog.Logger can be passed to control server log output;
+// if omitted, slog.Default() is used.
+func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
+
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,
@@ -55,7 +67,7 @@ func NewEmbedded(storeDir string, maxBytes int64) (*EmbeddedNATS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new nats server: %w", err)
 	}
-	ns.SetLogger(&slogNATSLogger{l: slog.Default()}, false, false)
+	ns.SetLogger(&slogNATSLogger{l: l}, false, false)
 	ns.Start()
 
 	if !ns.ReadyForConnections(5 * time.Second) {

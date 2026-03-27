@@ -1,6 +1,7 @@
 version: "2"
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
@@ -11,6 +12,11 @@ linters:
     - revive
     - ineffassign
     - misspell
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
 
 run:
   timeout: 5m

@@ -32,3 +32,32 @@
   - [ ] Build dashboards for given monitoring system for development
   - [ ] Document how to run and use all of this
   - [ ] Build configuration options for users to customize what ports metrics and health checks are exposed on, whether to push metrics via OTLP or expose a Prometheus endpoint, log levels, etc.
+- [ ] CORS setup (allow from whitelisted origins via config, also allow localhost for development), protect CSRF
+- [ ] RequireRoles auth middleware needs strict config, not fallback to allow (see comment in code for more)
+- [ ] Native SQL templating for named pipes (e.g. `{{ param }}`) with proper escaping and type handling, instead of just doing string replacement on the final SQL
+- [ ] Pipes need to use KV Watcher to update in real-time across cluster instead of just on startup
+- [ ] Consider custom buffer instead of Bento for smaller binary and dependencies
+- [ ] Ack and Nak methods in mq should have context for timeouts and cancellation
+- [ ] don't make streamnames magic strings (like "WAVEHOUSE"), let them be configurable for when running staging + prod on same NATS cluster, and also to allow users to run multiple WaveHouse instances with different stream names on the same cluster if they want
+- [ ] Move API handlers into their own package for better organization and separation of concerns, and to avoid the `internal/api` package becoming too large and unwieldy as we add more endpoints and features.
+- [ ] Get Delve setup working for local development with `make dev` and VS Code Go extension for easier debugging.
+- [ ] Add more integration tests covering the full end-to-end flow from API ingestion to ClickHouse, including edge cases and failure scenarios.
+- [ ] Add benchmarks for critical code paths (e.g. batch processing, NATS message handling) to monitor performance and catch regressions.
+- [ ] Setup goreleaser for building and releasing binaries, including proper versioning and changelog generation.
+- [x] Setup one docker image with multiple entrypoints for API and worker instead of two separate images, to simplify deployment and reduce maintenance overhead.
+- [ ] Docker image multiple architecture support (amd64 + arm64)
+- [ ] Docker compose docs for running standalone vs clustered, and for running with different ClickHouse configurations (e.g. single node vs cluster)
+- [ ] Docker composes with cleaner deps for standalone vs clustered
+- [ ] Gemini in CI for auto code review comments and suggestions, especially for Go code quality and best practices, security issues, and potential bugs. Ideally also have it run some checklist to ensure docs are up to date and comprehensive, changelog is updated, agent files, readmes, etc are updated, and maybe even have it suggest release notes based on the PR description and code changes.
+- [ ] Add ldflags (-X) for version and build info in the binary, and expose an endpoint (e.g. `/version`) that returns this information for easier debugging and tracking of deployed versions.
+- [ ] Update the Makefile to include targets for building and pushing the Docker image, running the application in different modes (standalone vs clustered), and running tests and benchmarks. Also include a `make release` target that builds the binaries with the appropriate ldflags and creates a GitHub release using goreleaser.
+- [ ] Update CI pipeline to run tests, build binaries, and create releases on GitHub when new tags are pushed. Also consider adding a step to build and push Docker images to a registry like Docker Hub or GitHub Container Registry.
+- [ ] Update README and dev docs with instructions for running the application, using the new features, and contributing to the project. Include examples of how to run in standalone vs clustered mode, how to configure dependencies, and how to use the new observability features.
+- [ ] Add a roadmap or project board to track these tasks and future features, and to provide visibility into the project's direction and priorities for contributors and users.
+- [ ] Consider adding support for graceful shutdown and cleanup of resources (e.g. closing database connections, flushing metrics, etc) when the application receives termination signals, to ensure a clean shutdown and avoid potential data loss or corruption.
+- [ ] Add support for configuration via environment variables in addition to config files, for easier deployment in containerized environments. Potentially use a library like `envconfig` or `viper` to handle this in a clean way.
+- [ ] Add support for hot reloading of configuration without needing to restart the application, especially for things like log levels and metrics settings, to allow for easier tuning and debugging in production without downtime. This could potentially be done via SIGHUP signal handling or by watching config files for changes.
+- [ ] Add support for graceful handling of NATS server restarts or connectivity issues, including automatic reconnection and backoff strategies, to improve the robustness of the system in production environments where network issues can occur.
+- [ ] Add support for batching and retrying failed events in the worker, with exponential backoff and a dead letter queue for events that fail repeatedly, to improve reliability and ensure that transient issues do not result in data loss.
+- [ ] Fuzzing and security testing, especially around the API endpoints, to identify and fix potential vulnerabilities before they can be exploited in production. This could include testing for SQL injection, authentication bypass, and other common web vulnerabilities.
+- [ ] 

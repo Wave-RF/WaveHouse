@@ -6,65 +6,64 @@ builds:
     binary: wavehouse
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.Binary=standalone
+      - -X main.Version={{.Version}}
+      - -X main.BuildTime={{.Date}}
+      - -X main.GitCommit={{.ShortCommit}}
 
   - id: wavehouse-api
     main: ./cmd/wavehouse-api
     binary: wavehouse-api
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.Binary=clustered-api
+      - -X main.Version={{.Version}}
+      - -X main.BuildTime={{.Date}}
+      - -X main.GitCommit={{.ShortCommit}}
 
   - id: wavehouse-worker
     main: ./cmd/wavehouse-worker
     binary: wavehouse-worker
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.Binary=clustered-worker
+      - -X main.Version={{.Version}}
+      - -X main.BuildTime={{.Date}}
+      - -X main.GitCommit={{.ShortCommit}}
 
-dockers:
-  - ids: [wavehouse]
-    image_templates:
-      - "ghcr.io/wave-rf/wavehouse:{{ .Tag }}"
-      - "ghcr.io/wave-rf/wavehouse:latest"
-    dockerfile: deployments/docker/Dockerfile.wavehouse
-    build_flag_templates:
-      - "--platform=linux/amd64"
-
-  - ids: [wavehouse-api]
-    image_templates:
-      - "ghcr.io/wave-rf/wavehouse-api:{{ .Tag }}"
-      - "ghcr.io/wave-rf/wavehouse-api:latest"
-    dockerfile: deployments/docker/Dockerfile.wavehouse-api
-    build_flag_templates:
-      - "--platform=linux/amd64"
-
-  - ids: [wavehouse-worker]
-    image_templates:
-      - "ghcr.io/wave-rf/wavehouse-worker:{{ .Tag }}"
-      - "ghcr.io/wave-rf/wavehouse-worker:latest"
-    dockerfile: deployments/docker/Dockerfile.wavehouse-worker
-    build_flag_templates:
-      - "--platform=linux/amd64"
+checksum:
+  name_template: "checksums.txt"
 
 archives:
-  - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+  - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+dockers_v2:
+  - dockerfile: deployments/Dockerfile.goreleaser
+    images:
+      - "ghcr.io/wave-rf/wavehouse"
+    tags:
+      - "{{ .Tag }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
