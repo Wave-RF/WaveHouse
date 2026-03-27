@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -207,4 +208,16 @@ func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 		}
 	}
 	return nil
+}
+
+// NewMemoryStore creates an in-memory pipes store for testing without NATS.
+func NewMemoryStore(queries ...*NamedQuery) *Store {
+	cached := make(map[string]*NamedQuery, len(queries))
+	for _, q := range queries {
+		cached[q.Name] = q
+	}
+	return &Store{
+		cached: cached,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 }

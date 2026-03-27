@@ -1,0 +1,261 @@
+package policy
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestEvaluate_NilPolicy(t *testing.T) {
+	t.Parallel()
+	perms := Evaluate(nil, "viewer", "clicks", "select", nil)
+	require.NotNil(t, perms)
+	assert.True(t, perms.Allowed)
+	assert.True(t, perms.RawSQL, "nil policy should allow raw SQL")
+}
+
+func TestEvaluate_NoTablePolicy_AdminAllowed(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{}}
+	perms := Evaluate(p, "admin", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+}
+
+func TestEvaluate_NoTablePolicy_ViewerDenied(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{}}
+	perms := Evaluate(p, "viewer", "clicks", "select", nil)
+	assert.False(t, perms.Allowed)
+}
+
+func TestEvaluate_ExactRoleMatch(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {AllowColumns: []string{"page", "count"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "viewer", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+	assert.Equal(t, []string{"page", "count"}, perms.AllowColumns)
+}
+
+func TestEvaluate_WildcardFallback(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"*": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "anyrole", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+	assert.Equal(t, []string{"page"}, perms.AllowColumns)
+}
+
+func TestEvaluate_NoMatchingRole_NonAdminDenied(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"editor": {},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "viewer", "clicks", "select", nil)
+	assert.False(t, perms.Allowed)
+}
+
+func TestEvaluate_NoMatchingRole_AdminAllowed(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"editor": {},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "admin", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+}
+
+func TestEvaluate_UnknownOperation(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {},
+		},
+	}
+	perms := Evaluate(p, "viewer", "clicks", "delete", nil)
+	assert.False(t, perms.Allowed)
+}
+
+func TestEvaluate_FilterWithClaimTemplate(t *testing.T) {
+	t.Parallel()
+	eqVal := "{{ jwt.org_id }}"
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"user": {
+						Filter: map[string]Filter{
+							"org_id": {Eq: &eqVal},
+						},
+					},
+				},
+			},
+		},
+	}
+	claims := map[string]any{"org_id": "org-123"}
+	perms := Evaluate(p, "user", "clicks", "select", claims)
+	assert.True(t, perms.Allowed)
+	assert.Contains(t, perms.WhereClause, "org_id = ?")
+	require.Len(t, perms.WhereParams, 1)
+	assert.Equal(t, "org-123", perms.WhereParams[0])
+}
+
+func TestEvaluate_CheckClauses(t *testing.T) {
+	t.Parallel()
+	eqVal := "{{ jwt.org_id }}"
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Insert: map[string]RolePermissions{
+					"user": {
+						Check: map[string]Filter{
+							"org_id": {Eq: &eqVal},
+						},
+					},
+				},
+			},
+		},
+	}
+	claims := map[string]any{"org_id": "org-456"}
+	perms := Evaluate(p, "user", "clicks", "insert", claims)
+	assert.True(t, perms.Allowed)
+	require.Contains(t, perms.CheckClauses, "org_id")
+	assert.Equal(t, "org-456", perms.CheckClauses["org_id"])
+}
+
+func TestEvaluate_AggregationLimits(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"analyst": {
+						AllowedAggregations: []string{"count", "sum"},
+						DeniedAggregations:  []string{"avg"},
+						MaxRows:             1000,
+						MaxExecutionTimeMs:  5000,
+					},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "analyst", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+	assert.Equal(t, []string{"count", "sum"}, perms.AllowedAggregations)
+	assert.Equal(t, []string{"avg"}, perms.DeniedAggregations)
+	assert.Equal(t, 1000, perms.MaxRows)
+	assert.Equal(t, 5000, perms.MaxExecutionTimeMs)
+}
+
+func TestIsColumnAllowed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		perms *ResolvedPermissions
+		col   string
+		want  bool
+	}{
+		{"nil perms", nil, "any", true},
+		{"no lists - all allowed", &ResolvedPermissions{Allowed: true}, "any", true},
+		{"in allow list", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a", "b"}}, "a", true},
+		{"not in allow list", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a", "b"}}, "c", false},
+		{"wildcard allow", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, "anything", true},
+		{"in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "secret", false},
+		{"not in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "page", true},
+		{"deny overrides allow", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}, "a", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.perms.IsColumnAllowed(tt.col)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsAggregationAllowed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		perms *ResolvedPermissions
+		fn    string
+		want  bool
+	}{
+		{"nil perms", nil, "count", true},
+		{"no lists", &ResolvedPermissions{Allowed: true}, "count", true},
+		{"in denied list", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"avg"}}, "avg", false},
+		{"not in denied", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"avg"}}, "count", true},
+		{"in allowed list", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{"count", "sum"}}, "count", true},
+		{"not in allowed", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{"count"}}, "sum", false},
+		{"empty allowed = all", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{}}, "anything", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.perms.IsAggregationAllowed(tt.fn)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestNavigateClaims(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		claims map[string]any
+		parts  []string
+		want   any
+	}{
+		{"nil claims", nil, []string{"a"}, nil},
+		{"empty parts", map[string]any{"a": 1}, []string{}, nil},
+		{"top-level", map[string]any{"org": "abc"}, []string{"org"}, "abc"},
+		{"nested", map[string]any{"a": map[string]any{"b": "val"}}, []string{"a", "b"}, "val"},
+		{"missing key", map[string]any{"a": 1}, []string{"b"}, nil},
+		{"non-map intermediate", map[string]any{"a": "str"}, []string{"a", "b"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := navigateClaims(tt.claims, tt.parts)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestResolveTemplate(t *testing.T) {
+	t.Parallel()
+	claims := map[string]any{
+		"org_id": "org-123",
+		"nested": map[string]any{"val": "deep"},
+	}
+	assert.Equal(t, "org-123", resolveTemplate("{{ jwt.org_id }}", claims))
+	assert.Equal(t, "deep", resolveTemplate("{{ jwt.nested.val }}", claims))
+	assert.Equal(t, "", resolveTemplate("{{ jwt.missing }}", claims))
+	assert.Equal(t, "literal", resolveTemplate("literal", claims))
+}

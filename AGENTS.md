@@ -102,6 +102,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **JWT helpers**: Use `testutil.MakeJWT(t, claims)` and `testutil.MakeExpiredJWT(t, claims)` for auth tests. See `testutil/jwt.go`.
 - **Schema helpers**: Use `testutil.NewTestSchemaRegistry(tables)` or `discovery.NewSchemaRegistryFromMap(tables)` for schema-aware tests.
 - **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
+- **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without NATS.
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
 - **Coverage target**: 70% minimum (CI enforced). Aim for 80%+.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
@@ -180,7 +181,7 @@ Before finishing any task, do a quick search across docs for the identifiers you
 1. Create `*_test.go` files in the same package as the code under test.
 2. Use table-driven tests with `t.Run(tt.name, ...)` for multiple scenarios.
 3. Use shared mocks from `internal/testutil/` (MockPublisher, MockCache, MockDeduplicator, MockSubscriber).
-4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests.
+4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
 5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
 6. Run `make test` to verify. Run `make coverage` to check coverage.
 7. Aim for 80%+ coverage on new code. 70% is the CI-enforced minimum.

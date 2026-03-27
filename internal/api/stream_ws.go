@@ -80,12 +80,12 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
 func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
 	var evt ingest.EventMessage
-	if err := json.Unmarshal(raw, &evt); err != nil {
-		out, err := transformForClient(raw)
-		if err != nil {
+	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
+		// Not an EventMessage — pass through if valid JSON, skip otherwise.
+		if !json.Valid(raw) {
 			return nil
 		}
-		return out
+		return raw
 	}
 
 	if h.PolicyStore != nil {
