@@ -11,7 +11,7 @@ import (
 // client-friendly format.
 func transformForClient(raw []byte) ([]byte, error) {
 	var evt ingest.EventMessage
-	if err := json.Unmarshal(raw, &evt); err != nil {
+	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
 		return raw, nil // Not an EventMessage — pass through unchanged.
 	}
 

@@ -64,7 +64,7 @@ jobs:
       - name: Enforce coverage threshold & generate badge
         uses: vladopajic/go-test-coverage@v2
         with:
-          profile: coverage.txt
+          profile: tmp/coverage/coverage.txt
           local-prefix: github.com/Wave-RF/WaveHouse
           threshold-total: 70
           git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
@@ -74,7 +74,7 @@ jobs:
         run: |
           echo '## Test Coverage' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          go tool cover -func=coverage.txt >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=tmp/coverage/coverage.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   build:

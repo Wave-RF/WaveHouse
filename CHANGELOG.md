@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Generated artifacts moved to `tmp/`**: Coverage output now goes to `tmp/coverage/`, analysis artifacts (`size-map.*`, `graph.*`) to `tmp/analysis/`. Repo root is no longer cluttered with generated files. Updated Makefile, `.gitignore`, CI workflow, and all docs.
+- **GoReleaser config**: Added `ids` filter to `dockers_v2` (only linux builds go into Docker image) and OCI labels for image metadata.
+- **`make vulncheck`**: Default output is now a summary (`-show=summary`). Use `V=1 make vulncheck` for full details.
+- **`make clean`**: Simplified to `rm -rf bin/ tmp/ data/ dist/` — all generated files now live under `tmp/`.
 - **CI workflow**: Refactored `.github/workflows/ci.yml` to use Makefile targets (`make mod-tidy-check`, `make fmt-check`, `make vulncheck`, `make coverage`, `make test-integration`). Pinned golangci-lint to v2.1.6.
 - **`filterEventColumns()`**: Returns filtered copy instead of mutating shared event data (prevents cross-client data corruption during SSE/WS broadcast).
 - **Hub bridge subscription**: `cmd/wavehouse-api/main.go` now fails startup on Subscribe error instead of suppressing it.

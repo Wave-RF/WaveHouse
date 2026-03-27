@@ -170,16 +170,17 @@ test-all: ## Unit + integration tests
 	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race $(ARGS)
 	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="integration $(TAGS)" -timeout 120s ./tests/... -race -count=1 $(ARGS)
 
-coverage: ## Unit test coverage → coverage.html and summary
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race -coverprofile=coverage.txt -covermode=atomic $(ARGS)
-	@go tool cover -html=coverage.txt -o coverage.html
+coverage: ## Unit test coverage → tmp/coverage/ and summary
+	@mkdir -p tmp/coverage
+	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race -coverprofile=tmp/coverage/coverage.txt -covermode=atomic $(ARGS)
+	@go tool cover -html=tmp/coverage/coverage.txt -o tmp/coverage/coverage.html
 	@echo "$(GREEN)==> Coverage Summary:$(RESET)"
-	@go tool cover -func=coverage.txt | tail -n 1 | awk '{print "  Total Coverage: $(CYAN)" $$3 "$(RESET)"}'
-	@echo "$(YELLOW)==> Open coverage.html in your browser for line-by-line details$(RESET)"
+	@go tool cover -func=tmp/coverage/coverage.txt | tail -n 1 | awk '{print "  Total Coverage: $(CYAN)" $$3 "$(RESET)"}'
+	@echo "$(YELLOW)==> Open tmp/coverage/coverage.html in your browser for line-by-line details$(RESET)"
 
 COVERAGE_THRESHOLD := 70
 coverage-enforce: coverage ## Fail if unit test coverage is below threshold (default: 70%)
-	@TOTAL=$$(go tool cover -func=coverage.txt | tail -n 1 | awk '{gsub(/%/,""); print $$3}'); \
+	@TOTAL=$$(go tool cover -func=tmp/coverage/coverage.txt | tail -n 1 | awk '{gsub(/%/,""); print $$3}'); \
 	THRESHOLD=$(COVERAGE_THRESHOLD); \
 	if [ $$(echo "$$TOTAL < $$THRESHOLD" | bc -l) -eq 1 ]; then \
 		echo "$(RED)==> FAIL: Coverage $$TOTAL%% is below $$THRESHOLD%% threshold$(RESET)"; \
@@ -213,7 +214,7 @@ ci: ## Full CI check: tidy + fmt + lint + vulncheck + build + tests
 	@golangci-lint run ./...
 	@echo ""
 	@echo "$(GREEN)── Step 4/7: Vulnerability check ──$(RESET)"
-	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	@go run golang.org/x/vuln/cmd/govulncheck@latest -scan package ./...
 	@echo ""
 	@echo "$(GREEN)── Step 5/7: Build ──$(RESET)"
 	@$(MAKE) build
@@ -243,8 +244,8 @@ deps-wipe: ## Destroy and recreate dependencies
 	docker compose -f deployments/compose/dependencies.yaml down -v --remove-orphans
 	docker compose -f deployments/compose/dependencies.yaml up -d --force-recreate
 
-clean: ## Remove bin/, tmp/, data/, coverage, analysis artifacts
-	@rm -rf bin/ tmp/ data/ coverage.txt coverage.html graph.dot graph.svg size-map.svg size-map.html
+clean: ## Remove bin/, tmp/, data/, dist/
+	@rm -rf bin/ tmp/ data/ dist/
 
 # ── Releases ──────────────────────────────────────────────────────
 release-test: ## Test cross-compiling all binaries via GoReleaser (doesn't publish)
@@ -253,9 +254,13 @@ release-test: ## Test cross-compiling all binaries via GoReleaser (doesn't publi
 	@goreleaser build --snapshot --clean --parallelism 2
 
 # ── Security & Analysis ───────────────────────────────────────────
-vulncheck: ## Run Go vulnerability check
+vulncheck: ## Run Go vulnerability check (summary; use V=1 for full call stacks)
 	@echo "$(GREEN)==> Running govulncheck...$(RESET)"
+ifdef V
 	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+else
+	@go run golang.org/x/vuln/cmd/govulncheck@latest -scan package ./...
+endif
 
 security: vulncheck ## Combined security scan (vulncheck + gosec via linter)
 	@echo "$(GREEN)==> Running gosec via golangci-lint...$(RESET)"
@@ -298,34 +303,36 @@ size-treemap: build-debug ## Full binary size analysis → text + SVG + interact
 	@echo "$(GREEN)==> Analyzing bin/wavehouse (debug build for DWARF accuracy)...$(RESET)"
 	@echo "  Note: debug builds add ~30%% DWARF metadata but package proportions match production."
 	@echo ""
+	@mkdir -p tmp/analysis
 	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
 		--format text --hide-sections bin/wavehouse 2>/dev/null
 	@echo ""
 	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
-		--format svg --output size-map.svg --hide-sections bin/wavehouse 2>/dev/null
-	@echo "  $(CYAN)SVG  → size-map.svg$(RESET)"
+		--format svg --output tmp/analysis/size-map.svg --hide-sections bin/wavehouse 2>/dev/null
+	@echo "  $(CYAN)SVG  → tmp/analysis/size-map.svg$(RESET)"
 	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
-		--format html --output size-map.html --hide-sections bin/wavehouse 2>/dev/null
-	@echo "  $(CYAN)HTML → size-map.html (interactive treemap)$(RESET)"
+		--format html --output tmp/analysis/size-map.html --hide-sections bin/wavehouse 2>/dev/null
+	@echo "  $(CYAN)HTML → tmp/analysis/size-map.html (interactive treemap)$(RESET)"
 	@if [ -z "$$CI" ]; then \
-		if command -v open >/dev/null 2>&1; then open size-map.html; \
-		elif command -v xdg-open >/dev/null 2>&1; then xdg-open size-map.html; \
+		if command -v open >/dev/null 2>&1; then open tmp/analysis/size-map.html; \
+		elif command -v xdg-open >/dev/null 2>&1; then xdg-open tmp/analysis/size-map.html; \
 		fi; \
 	fi
 
-dep-graph: ## Dependency graph → graph.svg (requires graphviz `dot`)
+dep-graph: ## Dependency graph → tmp/analysis/graph.svg (requires graphviz `dot`)
 	@echo "$(GREEN)==> Generating dependency graph...$(RESET)"
-	@go run github.com/loov/goda@latest graph -cluster -short "github.com/Wave-RF/WaveHouse/...:all" > graph.dot
+	@mkdir -p tmp/analysis
+	@go run github.com/loov/goda@latest graph -cluster -short "github.com/Wave-RF/WaveHouse/...:all" > tmp/analysis/graph.dot
 	@if command -v dot >/dev/null 2>&1; then \
-		dot -Tsvg graph.dot -o graph.svg 2>/dev/null; \
-		echo "$(GREEN)==> graph.svg generated$(RESET)"; \
+		dot -Tsvg tmp/analysis/graph.dot -o tmp/analysis/graph.svg 2>/dev/null; \
+		echo "$(GREEN)==> tmp/analysis/graph.svg generated$(RESET)"; \
 		if [ -z "$$CI" ]; then \
-			if command -v open >/dev/null 2>&1; then open graph.svg; \
-			elif command -v xdg-open >/dev/null 2>&1; then xdg-open graph.svg; \
+			if command -v open >/dev/null 2>&1; then open tmp/analysis/graph.svg; \
+			elif command -v xdg-open >/dev/null 2>&1; then xdg-open tmp/analysis/graph.svg; \
 			fi; \
 		fi; \
 	else \
-		echo "$(YELLOW)==> graph.dot generated (install graphviz for SVG rendering)$(RESET)"; \
+		echo "$(YELLOW)==> tmp/analysis/graph.dot generated (install graphviz for SVG rendering)$(RESET)"; \
 		echo "  $(CYAN)brew install graphviz$(RESET)  then re-run this target"; \
 		echo "  or paste graph.dot into $(CYAN)https://dreampuf.github.io/GraphvizOnline/$(RESET)"; \
 	fi

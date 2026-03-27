@@ -71,7 +71,7 @@ make test              # Unit tests with race detector
 make test-integration  # Integration tests (needs Docker)
 make test-all          # Unit + integration tests
 make ci                # Full CI check: tidy + fmt + lint + vulncheck + build + tests
-make coverage          # Unit test coverage → coverage.html
+make coverage          # Unit test coverage → tmp/coverage/
 make coverage-enforce  # Fail if coverage is below 70% threshold
 make mod-tidy-check    # Verify go.mod/go.sum are tidy
 make vulncheck         # Run govulncheck vulnerability scanner
@@ -81,14 +81,14 @@ make audit-cgo         # Audit deps for C code (informational — builds use CGO
 make size-report       # Show binary sizes
 make size-tree         # Top packages by size in the binary (text table)
 make size-treemap      # Full binary analysis → text + SVG + interactive HTML
-make dep-graph         # Dependency graph → graph.svg (requires graphviz)
+make dep-graph         # Dependency graph → tmp/analysis/graph.svg (requires graphviz)
 make dep-why MOD=...   # Show why a module is included
 make dep-cut           # Top cuttable deps by transitive impact (LIMIT=N)
 make binary-analysis   # Combined: sizes + dead code + CGO audit
 make smoke-test        # Manual Bento insert+delete (needs running WaveHouse)
 make dev               # Hot-reload dev server (air)
 make docker            # Build Docker image
-make clean             # Remove bin/, tmp/, data/, coverage
+make clean             # Remove bin/, tmp/, data/, dist/
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.

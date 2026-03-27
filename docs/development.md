@@ -216,7 +216,7 @@ make test-integration                  # Integration tests (requires Docker)
 V=1 make test-integration              # Integration tests, verbose
 make test-all                          # Unit + integration
 make ci                                # Full CI check: fmt + lint + all tests
-make coverage                          # Unit test coverage → coverage.html
+make coverage                          # Unit test coverage → tmp/coverage/
 make smoke-test                        # Manual Bento insert+delete (needs running WaveHouse)
 ```
 
@@ -340,7 +340,7 @@ Run `make help` to see all targets. Key ones:
 | `make test-integration` | Integration tests (requires Docker) |
 | `make test-all` | Unit + integration tests |
 | `make ci` | Full CI check: tidy + fmt + lint + vulncheck + build + tests |
-| `make coverage` | Unit test coverage → `coverage.html` |
+| `make coverage` | Unit test coverage → `tmp/coverage/` |
 | `make coverage-enforce` | Fail if coverage is below 70% threshold |
 | `make mod-tidy-check` | Verify `go.mod`/`go.sum` are tidy |
 | `make smoke-test` | Manual Bento insert+delete (requires running WaveHouse) |
@@ -350,8 +350,8 @@ Run `make help` to see all targets. Key ones:
 | `make audit-cgo` | Audit dependencies for C code (informational) |
 | `make size-report` | Show binary sizes |
 | `make size-tree` | Top packages by size in the binary (text table) |
-| `make size-treemap` | Full binary analysis → text + SVG + interactive HTML |
-| `make dep-graph` | Dependency graph → `graph.svg` (requires graphviz) |
+| `make size-treemap` | Full binary analysis → `tmp/analysis/` (text + SVG + HTML) |
+| `make dep-graph` | Dependency graph → `tmp/analysis/graph.svg` (requires graphviz) |
 | `make dep-why MOD=...` | Show why a module is included |
 | `make dep-cut` | Top cuttable deps by transitive impact (`LIMIT=N`) |
 | `make binary-analysis` | Combined: sizes + dead code + CGO audit |
@@ -361,7 +361,7 @@ Run `make help` to see all targets. Key ones:
 | `make compose-deps` | Start infrastructure dependencies only |
 | `make deps-wipe` | Destroy and recreate dependency containers |
 | `make release-test` | Test cross-compilation via GoReleaser |
-| `make clean` | Remove `bin/`, `tmp/`, `data/`, and coverage files |
+| `make clean` | Remove `bin/`, `tmp/`, `data/`, `dist/` |
 
 All test targets accept `ARGS="..."` for pass-through flags. Build targets accept `TAGS="..."` for build tags (e.g., `make build TAGS="scylla"`).
 

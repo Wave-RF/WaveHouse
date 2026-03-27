@@ -200,8 +200,12 @@ func navigateClaims(claims map[string]any, parts []string) any {
 }
 
 // IsColumnAllowed checks if a column is permitted by the resolved permissions.
+// A nil receiver means no policy applies — all columns are allowed.
 func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
-	if rp == nil || !rp.Allowed {
+	if rp == nil {
+		return true
+	}
+	if !rp.Allowed {
 		return false
 	}
 	// Check deny list first.
@@ -223,8 +227,12 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 }
 
 // IsAggregationAllowed checks if an aggregation function is permitted.
+// A nil receiver means no policy applies — all aggregations are allowed.
 func (rp *ResolvedPermissions) IsAggregationAllowed(fn string) bool {
-	if rp == nil || !rp.Allowed {
+	if rp == nil {
+		return true
+	}
+	if !rp.Allowed {
 		return false
 	}
 	// Check deny list.

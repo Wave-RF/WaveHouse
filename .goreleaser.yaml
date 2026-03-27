@@ -51,6 +51,10 @@ archives:
 
 dockers_v2:
   - dockerfile: deployments/Dockerfile.goreleaser
+    ids:
+      - wavehouse
+      - wavehouse-api
+      - wavehouse-worker
     images:
       - "ghcr.io/wave-rf/wavehouse"
     tags:
@@ -59,6 +63,14 @@ dockers_v2:
     platforms:
       - linux/amd64
       - linux/arm64
+    labels:
+      "org.opencontainers.image.title": "WaveHouse"
+      "org.opencontainers.image.description": "Schema-aware real-time API gateway for ClickHouse"
+      "org.opencontainers.image.url": "https://github.com/Wave-RF/WaveHouse"
+      "org.opencontainers.image.source": "{{ .GitURL }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.created": "{{ .Date }}"
 
 changelog:
   sort: asc
