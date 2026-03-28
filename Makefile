@@ -4,7 +4,7 @@ GOFUMPT   := go run mvdan.cc/gofumpt
 GOIMPORTS := go run golang.org/x/tools/cmd/goimports
 
 # ── External tool versions (for `make tools`) ─────────────────────
-GOLANGCI_LINT_VERSION := v2.1.6
+GOLANGCI_LINT_VERSION := v2.11.4
 
 # Build tags (e.g., TAGS="scylla dynamodb")
 TAGS ?=

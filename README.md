@@ -1,7 +1,7 @@
 # 🏖️ WaveHouse
 
 [![CI](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml)
-[![Coverage](https://raw.githubusercontent.com/Wave-RF/WaveHouse/badges/badge-coverage.svg)](https://github.com/Wave-RF/WaveHouse/actions)
+[![Coverage](https://github.com/Wave-RF/WaveHouse/blob/badges/.badges/main/coverage.svg?raw=true)](https://github.com/Wave-RF/WaveHouse/actions)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
