@@ -259,3 +259,123 @@ func TestResolveTemplate(t *testing.T) {
 	assert.Equal(t, "", resolveTemplate("{{ jwt.missing }}", claims))
 	assert.Equal(t, "literal", resolveTemplate("literal", claims))
 }
+
+func TestResolveTemplate_NilClaims(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "", resolveTemplate("{{ jwt.org_id }}", nil))
+}
+
+func TestResolveTemplate_MultipleTemplates(t *testing.T) {
+	t.Parallel()
+	claims := map[string]any{"a": "1", "b": "2"}
+	result := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
+	assert.Equal(t, "1-2", result)
+}
+
+func TestValidate_NilPolicy(t *testing.T) {
+	t.Parallel()
+	err := Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nil")
+}
+
+func TestValidate_ValidPolicy(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}, MaxRows: 100},
+				},
+			},
+		},
+	}
+	assert.NoError(t, Validate(p))
+}
+
+func TestValidate_NegativeMaxRows(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {MaxRows: -1},
+				},
+			},
+		},
+	}
+	err := Validate(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_rows")
+}
+
+func TestValidate_NegativeMaxExecutionTime(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Insert: map[string]RolePermissions{
+					"user": {MaxExecutionTimeMs: -500},
+				},
+			},
+		},
+	}
+	err := Validate(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_execution_time_ms")
+}
+
+func TestEvaluate_NilRolePermsMap_AdminAllowed(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {}, // No select/insert maps.
+		},
+	}
+	perms := Evaluate(p, "admin", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+}
+
+func TestEvaluate_NilRolePermsMap_ViewerDenied(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {},
+		},
+	}
+	perms := Evaluate(p, "viewer", "clicks", "select", nil)
+	assert.False(t, perms.Allowed)
+}
+
+func TestEvaluate_ServiceRoleTreatedLikeAdmin(t *testing.T) {
+	t.Parallel()
+	p := &Policy{Tables: map[string]TablePolicy{}}
+	perms := Evaluate(p, "service", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+	assert.True(t, perms.RawSQL)
+}
+
+func TestResolveFilters_MultipleOperators(t *testing.T) {
+	t.Parallel()
+	neqVal := "deleted"
+	gtVal := "0"
+	filters := map[string]Filter{
+		"status": {Neq: &neqVal},
+		"count":  {Gt: &gtVal},
+	}
+	clauses, params := resolveFilters(filters, nil)
+	assert.Len(t, clauses, 2)
+	assert.Len(t, params, 2)
+}
+
+func TestResolveFilters_LtOperator(t *testing.T) {
+	t.Parallel()
+	ltVal := "100"
+	filters := map[string]Filter{
+		"price": {Lt: &ltVal},
+	}
+	clauses, params := resolveFilters(filters, nil)
+	require.Len(t, clauses, 1)
+	assert.Contains(t, clauses[0], "price < ?")
+	assert.Equal(t, "100", params[0])
+}

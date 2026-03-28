@@ -1,7 +1,9 @@
 package query
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/stretchr/testify/assert"
@@ -34,7 +36,7 @@ func TestBuild_SelectStar(t *testing.T) {
 	t.Parallel()
 	result, err := Build("clicks", &StructuredQuery{}, testSchema(), 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM clicks", result.SQL)
+	assert.Equal(t, "SELECT * FROM clicks LIMIT 10000", result.SQL)
 }
 
 func TestBuild_WithAggregation(t *testing.T) {
@@ -185,4 +187,97 @@ func TestIsValidAggFn(t *testing.T) {
 	}
 	assert.False(t, isValidAggFn("drop_table"))
 	assert.False(t, isValidAggFn(""))
+}
+
+func TestBuild_DefaultMaxRows_Applied(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{Columns: []string{"page"}} // Limit: 0.
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Contains(t, result.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows))
+}
+
+func TestBuild_LimitExceedsDefaultMaxRows_Capped(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{Columns: []string{"page"}, Limit: DefaultMaxRows + 1}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Contains(t, result.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows))
+	assert.NotContains(t, result.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows+1))
+}
+
+func TestBuild_LimitWithinRange_Respected(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{Columns: []string{"page"}, Limit: 50}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Contains(t, result.SQL, "LIMIT 50")
+}
+
+func TestBuild_InvalidFilterColumn(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		Filters: []Filter{{Column: "nonexistent", Op: "eq", Value: "x"}},
+	}
+	_, err := Build("clicks", sq, testSchema(), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown column")
+}
+
+func TestBuild_InvalidGroupByColumn(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		GroupBy: []string{"nonexistent"},
+	}
+	_, err := Build("clicks", sq, testSchema(), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown column")
+}
+
+func TestResolveTimeValue_RelativeDuration(t *testing.T) {
+	t.Parallel()
+	result := resolveTimeValue("1h", 0)
+	assert.NotEmpty(t, result)
+	assert.NotEqual(t, "1h", result, "relative duration should resolve to a timestamp")
+}
+
+func TestResolveTimeValue_RFC3339(t *testing.T) {
+	t.Parallel()
+	result := resolveTimeValue("2024-01-01T00:00:00Z", 0)
+	assert.Equal(t, "2024-01-01T00:00:00Z", result)
+}
+
+func TestResolveTimeValue_WithBucketing(t *testing.T) {
+	t.Parallel()
+	// With 60s buckets, a time at :30 should truncate to :00.
+	result := resolveTimeValue("2024-01-01T12:34:30Z", 60)
+	assert.Equal(t, "2024-01-01T12:34:00Z", result)
+}
+
+func TestBucketTime_ZeroBucket(t *testing.T) {
+	t.Parallel()
+	ts, _ := time.Parse(time.RFC3339, "2024-01-01T12:34:56Z")
+	got := bucketTime(ts, 0)
+	assert.Equal(t, ts, got, "zero bucket should not truncate")
+}
+
+func TestFindInsertPoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		sql  string
+		want int
+	}{
+		{"SELECT * FROM t GROUP BY x", 15},
+		{"SELECT * FROM t ORDER BY x", 15},
+		{"SELECT * FROM t LIMIT 10", 15},
+		{"SELECT * FROM t", 15}, // len("SELECT * FROM t") == 15
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, findInsertPoint(tt.sql))
+		})
+	}
 }

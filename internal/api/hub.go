@@ -30,12 +30,14 @@ func (h *Hub) Subscribe(topic string, ch chan []byte) {
 	h.subscribers[topic][ch] = struct{}{}
 }
 
-// Unsubscribe removes a channel from a topic.
+// Unsubscribe removes a channel from a topic and closes it.
+// The caller must not send to or read from ch after calling Unsubscribe.
 func (h *Hub) Unsubscribe(topic string, ch chan []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if subs, ok := h.subscribers[topic]; ok {
 		delete(subs, ch)
+		close(ch)
 		if len(subs) == 0 {
 			delete(h.subscribers, topic)
 		}

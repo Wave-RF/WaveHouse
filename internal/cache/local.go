@@ -53,7 +53,14 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	return nil
 }
 
+// Wait blocks until all buffered writes have been applied.
+// Exposed for testing; production callers rarely need this.
+func (l *LocalCache) Wait() {
+	l.cache.Wait()
+}
+
 func (l *LocalCache) Close() error {
+	l.cache.Wait()
 	l.cache.Close()
 	return nil
 }

@@ -51,7 +51,8 @@ func TestLocalCache_ExpiredKey(t *testing.T) {
 	err = c.Set(ctx, "expires", []byte("data"), 1*time.Millisecond)
 	assert.NoError(t, err)
 
-	// Wait for expiry.
+	// Ensure async admission completes, then wait for expiry.
+	c.Wait()
 	time.Sleep(50 * time.Millisecond)
 
 	val, _, err := c.Get(ctx, "expires")

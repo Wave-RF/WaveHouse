@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CORS origin allowlist**: New `server.cors_allowed_origins` config field (`WH_SERVER_CORS_ALLOWED_ORIGINS`) controls which origins receive CORS headers. Defaults to `*` (allow all). When specific origins are listed, only matching requests get CORS headers with `Vary: Origin`.
+- **Config validation**: `config.Validate()` runs at startup, catching invalid mode, out-of-range port, negative timeouts, missing auth credentials, zero schema refresh interval, and negative cache/gap-window values.
+- **Default query limit**: Structured queries are capped at `DefaultMaxRows` (10,000) to prevent unbounded result sets. Explicit limits exceeding the cap are silently reduced.
+- **WebSocket origin enforcement**: WebSocket upgrades respect the same `cors_allowed_origins` config as HTTP CORS middleware.
+- **Pipes Store nil-safe Put/Delete**: `pipes.Store.Put()` and `Delete()` gracefully handle nil KV backing (memory-only mode), enabling seamless unit testing with `NewMemoryStore`.
+- **Unit tests — security & robustness**: Config validation tests (11 scenarios), coerceValue tests (20 subtests), builder DefaultMaxRows tests, policy Validate/Evaluate edge cases (nil policy, negative MaxRows/MaxExecutionTime, service role, nil claims, multiple templates), ingest policy check clause match/auto-inject/deny-columns/admin bypass, discovery validation (Tuple/Enum16/Decimal/IPv4/IPv6/unknown type, nil data, all-defaults), tiered cache singleflight dedup verification, pipes handler Put/Delete success paths, router wiring verification, middleware default role claim and non-bearer token tests.
 - **Test infrastructure**: Expanded `internal/testutil/` with shared mocks (`MockPublisher`, `MockCache`, `MockDeduplicator`, `MockSubscriber` in `mocks.go`), JWT helpers (`MakeJWT`, `MakeExpiredJWT` in `jwt.go`), schema helpers (`NewTestSchemaRegistry`), and response assertions (`AssertJSONResponse`, `AssertJSONContains`).
 - **Policy test helper**: `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
 - **Schema test helper**: `discovery.NewSchemaRegistryFromMap(tables)` factory for schema-aware tests without ClickHouse.
@@ -55,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SQL injection in Bento ingest**: Table names are now validated against `^[a-zA-Z_][a-zA-Z0-9_]*$` regex before use in SQL queries, preventing injection via crafted NATS subject metadata.
+- **CORS origin reflection**: Replaced permissive origin-echoing CORS middleware with allowlist-based validation. Non-matching origins receive no CORS headers.
+- **os.Exit in library code**: `ingest.StartIngestWorker` now returns `(*service.Stream, error)` instead of calling `os.Exit(1)`, enabling proper error handling by callers.
+- **Policy nil claim injection**: `resolveTemplate()` returns `""` for unresolvable JWT claim templates instead of leaking raw template text into SQL filters.
+- **Data loss on shutdown**: Buffer ticker goroutine now calls `flush()` before returning on context cancellation, ensuring in-flight batches are written to ClickHouse during graceful shutdown.
+- **Hub channel leak**: `Hub.Unsubscribe()` now calls `close(ch)` after removing the channel, preventing goroutine leaks in SSE/WS handlers waiting on the channel.
 - **Docs — configuration**: Added missing `clickhouse.http_port` field, fixed `policy.file_path` default to `policy.yaml`, fixed `pipes.directory` default to `./pipes`.
 - **Docs — deployment**: Fixed `cluster.yaml` → `clustered.yaml` Docker Compose file references.
 - **Docs — development**: Updated Makefile targets table (removed nonexistent `build-all`/`compose-cluster`, added all new targets), added missing linters to list, added missing packages to project structure, updated vulnerability scanning to use `make vulncheck`.

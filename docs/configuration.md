@@ -28,6 +28,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | -------- | ------- | ------- | ----------- |
 | `server.port` | `WH_SERVER_PORT` | `8080` | HTTP server listen port. |
 | `server.shutdown_timeout` | `WH_SERVER_SHUTDOWN_TIMEOUT` | `10` | Graceful shutdown timeout in seconds. |
+| `server.cors_allowed_origins` | `WH_SERVER_CORS_ALLOWED_ORIGINS` | `*` | Comma-separated list of allowed CORS origins. `*` allows all origins. |
 
 ### ClickHouse
 

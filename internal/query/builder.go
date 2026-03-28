@@ -13,6 +13,10 @@ import (
 // validIdentifierRe matches safe SQL identifiers (letters, digits, underscores).
 var validIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+// DefaultMaxRows is applied when no explicit LIMIT is specified and no policy MaxRows is set.
+// This prevents unbounded queries from consuming excessive memory.
+const DefaultMaxRows = 10000
+
 // BuildResult holds the generated SQL and bound parameters.
 type BuildResult struct {
 	SQL    string
@@ -102,9 +106,11 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, buck
 		sql += " ORDER BY " + strings.Join(orderParts, ", ")
 	}
 
-	// LIMIT.
-	if q.Limit > 0 {
+	// LIMIT — apply explicit or default maximum.
+	if q.Limit > 0 && q.Limit <= DefaultMaxRows {
 		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
+	} else {
+		sql += fmt.Sprintf(" LIMIT %d", DefaultMaxRows)
 	}
 
 	return &BuildResult{SQL: sql, Params: params}, nil

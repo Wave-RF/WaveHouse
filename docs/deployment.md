@@ -170,6 +170,9 @@ WH_CH_ADDR=clickhouse:9000
 # Schema discovery
 WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 
+# CORS
+WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+
 # Optional auth
 WH_AUTH_ENABLED=true
 WH_AUTH_JWT_SECRET=<strong-random-secret>

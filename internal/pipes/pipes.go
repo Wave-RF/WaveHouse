@@ -101,8 +101,10 @@ func (s *Store) Put(ctx context.Context, q *NamedQuery) error {
 		return fmt.Errorf("marshal pipe: %w", err)
 	}
 
-	if _, err := s.kv.Put(ctx, q.Name, data); err != nil {
-		return fmt.Errorf("put pipe to kv: %w", err)
+	if s.kv != nil {
+		if _, err := s.kv.Put(ctx, q.Name, data); err != nil {
+			return fmt.Errorf("put pipe to kv: %w", err)
+		}
 	}
 
 	s.mu.Lock()
@@ -115,8 +117,10 @@ func (s *Store) Put(ctx context.Context, q *NamedQuery) error {
 
 // Delete removes a named query from the store.
 func (s *Store) Delete(ctx context.Context, name string) error {
-	if err := s.kv.Delete(ctx, name); err != nil {
-		return fmt.Errorf("delete pipe: %w", err)
+	if s.kv != nil {
+		if err := s.kv.Delete(ctx, name); err != nil {
+			return fmt.Errorf("delete pipe: %w", err)
+		}
 	}
 
 	s.mu.Lock()

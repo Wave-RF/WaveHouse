@@ -97,3 +97,26 @@ func TestPolicyHandler_Put_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 }
+
+func TestPolicyHandler_Validate_InvalidPolicy(t *testing.T) {
+	t.Parallel()
+	store := policy.NewMemoryStore(nil)
+	h := NewPolicyHandler(store)
+
+	p := policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Select: map[string]policy.RolePermissions{
+					"viewer": {MaxRows: -1},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(p)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/policy/validate", bytes.NewReader(body))
+	h.Validate(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "max_rows")
+}

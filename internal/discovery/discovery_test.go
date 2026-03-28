@@ -220,3 +220,79 @@ func TestIsNullable(t *testing.T) {
 	assert.False(t, isNullable("String"))
 	assert.False(t, isNullable("LowCardinality(String)"))
 }
+
+func TestIsTypeCompatible_Tuple(t *testing.T) {
+	t.Parallel()
+	// Tuple accepts arrays or objects.
+	assert.True(t, isTypeCompatible("Tuple(String, Int32)", []any{"a", 1.0}))
+	assert.True(t, isTypeCompatible("Tuple(a String, b Int32)", map[string]any{"a": "x", "b": 1.0}))
+	assert.False(t, isTypeCompatible("Tuple(String, Int32)", "not-a-tuple"))
+	assert.False(t, isTypeCompatible("Tuple(String)", 42.0))
+}
+
+func TestIsTypeCompatible_Enum16(t *testing.T) {
+	t.Parallel()
+	assert.True(t, isTypeCompatible("Enum16('a'=1,'b'=2)", "a"))
+	assert.False(t, isTypeCompatible("Enum16('a'=1)", 42.0))
+}
+
+func TestIsTypeCompatible_UnknownType(t *testing.T) {
+	t.Parallel()
+	// Unknown types accept any value (let ClickHouse validate).
+	assert.True(t, isTypeCompatible("SomeFutureType", "anything"))
+	assert.True(t, isTypeCompatible("SomeFutureType", 42.0))
+	assert.True(t, isTypeCompatible("SomeFutureType", true))
+}
+
+func TestIsTypeCompatible_Decimal(t *testing.T) {
+	t.Parallel()
+	assert.True(t, isTypeCompatible("Decimal(10,2)", 42.5))
+	assert.True(t, isTypeCompatible("Decimal128(5)", 99.0))
+	assert.False(t, isTypeCompatible("Decimal(10,2)", "not-a-number"))
+}
+
+func TestIsTypeCompatible_IPv4IPv6(t *testing.T) {
+	t.Parallel()
+	assert.True(t, isTypeCompatible("IPv4", "192.168.1.1"))
+	assert.True(t, isTypeCompatible("IPv6", "::1"))
+	assert.False(t, isTypeCompatible("IPv4", 42.0))
+	assert.False(t, isTypeCompatible("IPv6", true))
+}
+
+func TestValidate_NilData(t *testing.T) {
+	t.Parallel()
+	schema := &TableSchema{
+		Name: "test",
+		Columns: []Column{
+			{Name: "id", Type: "UInt64"},
+		},
+	}
+	err := Validate(schema, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing required column")
+}
+
+func TestValidate_EmptyData_AllDefaults(t *testing.T) {
+	t.Parallel()
+	schema := &TableSchema{
+		Name: "test",
+		Columns: []Column{
+			{Name: "id", Type: "UInt64", HasDefault: true},
+			{Name: "name", Type: "String", IsNullable: true},
+		},
+	}
+	assert.NoError(t, Validate(schema, map[string]any{}))
+}
+
+func TestIsNumericType(t *testing.T) {
+	t.Parallel()
+	for _, typ := range []string{
+		"UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256",
+		"Int8", "Int16", "Int32", "Int64", "Int128", "Int256",
+		"Float32", "Float64",
+	} {
+		assert.True(t, isNumericType(typ), "expected %q to be numeric", typ)
+	}
+	assert.False(t, isNumericType("String"))
+	assert.False(t, isNumericType("Bool"))
+}

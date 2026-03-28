@@ -165,11 +165,13 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
+// If a claim path cannot be resolved, the template placeholder is replaced with
+// an empty string to prevent "<nil>" from leaking into SQL filters.
 func resolveTemplate(tmpl string, claims map[string]any) string {
 	return claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
 		sub := claimTemplateRe.FindStringSubmatch(match)
 		if len(sub) < 2 {
-			return match
+			return ""
 		}
 		parts := strings.Split(sub[1], ".")
 		val := navigateClaims(claims, parts)

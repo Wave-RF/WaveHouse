@@ -275,3 +275,136 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "check failed")
 }
+
+func TestIngest_Policy_CheckClause_Match(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub)
+	orgTemplate := "{{ jwt.org_id }}"
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {
+						Check: map[string]policy.Filter{
+							"org_id": {Eq: &orgTemplate},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// org_id in body matches JWT claim — should pass.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "my-org"})
+	claims := jwt.MapClaims{"org_id": "my-org"}
+	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
+	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "should have published")
+}
+
+func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub)
+	orgTemplate := "{{ jwt.org_id }}"
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {
+						Check: map[string]policy.Filter{
+							"org_id": {Eq: &orgTemplate},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// org_id NOT in body — should be auto-injected from JWT claim.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	claims := jwt.MapClaims{"org_id": "injected-org"}
+	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
+	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	// Verify the published message has org_id injected.
+	msg := pub.LastMessage()
+	require.NotNil(t, msg)
+	assert.Contains(t, string(msg.Data), "injected-org")
+}
+
+func TestIngest_Dedup_MissingIDField(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	dedup := testutil.NewMockDeduplicator()
+	h := NewIngestHandler(testRegistry(), pub)
+	h.Dedup = dedup
+	h.IDField = "event_id"
+
+	// Payload does NOT include event_id — should skip dedup and publish.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "should have published even without dedup ID")
+}
+
+func TestIngest_Policy_DenyColumns(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub)
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"writer": {
+						DenyColumns: []string{"count"},
+					},
+				},
+			},
+		},
+	})
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 42})
+	ctx := context.WithValue(req.Context(), ContextKeyRole, "writer")
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "not allowed for insert")
+}
+
+func TestIngest_AdminRole_NoPolicy(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub)
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {},
+		},
+	})
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	ctx := context.WithValue(req.Context(), ContextKeyRole, "admin")
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}

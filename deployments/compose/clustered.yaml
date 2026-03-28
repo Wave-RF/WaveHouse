@@ -56,6 +56,7 @@ services:
       WH_DEDUPE_SCYLLA_KEYSPACE: wavehouse
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"
+      WH_SERVER_CORS_ALLOWED_ORIGINS: "*"
     depends_on:
       - clickhouse
       - nats
@@ -78,6 +79,7 @@ services:
       WH_DEDUPE_SCYLLA_KEYSPACE: wavehouse
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"
+      WH_SERVER_CORS_ALLOWED_ORIGINS: "*"
     depends_on:
       - clickhouse
       - nats

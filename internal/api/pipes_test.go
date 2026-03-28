@@ -228,3 +228,99 @@ func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 }
+
+func TestPipesHandler_Put_Success(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore()
+	h := NewPipesHandler(store, nil, nil, 0)
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPut, "/v1/pipes/new_pipe", "new_pipe", map[string]any{
+		"sql":         "SELECT count(*) FROM clicks",
+		"description": "counts",
+	})
+	h.Put(w, r)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"ok":true`)
+	// Verify the pipe is in the store.
+	assert.NotNil(t, store.Get("new_pipe"))
+	assert.Equal(t, "SELECT count(*) FROM clicks", store.Get("new_pipe").SQL)
+}
+
+func TestPipesHandler_Put_MissingSQL(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore()
+	h := NewPipesHandler(store, nil, nil, 0)
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPut, "/v1/pipes/bad", "bad", map[string]any{
+		"description": "no sql",
+	})
+	h.Put(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "SQL is required")
+}
+
+func TestPipesHandler_Delete_Success(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "to_delete", SQL: "SELECT 1"},
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodDelete, "/v1/pipes/to_delete", "to_delete", nil)
+	h.Delete(w, r)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"ok":true`)
+	assert.Nil(t, store.Get("to_delete"))
+}
+
+func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name: "by_page",
+			SQL:  "SELECT * FROM clicks WHERE page = {{page}}",
+			Parameters: []pipes.ParamDef{
+				{Name: "page", Type: "string", Required: true},
+			},
+		},
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+
+	w := httptest.NewRecorder()
+	body := map[string]any{"page": "/about"}
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", body)
+
+	safeHandle(h.Execute, w, r)
+
+	// Should pass param binding — will fail at executeQuery (nil conn).
+	assert.NotEqual(t, http.StatusBadRequest, w.Code)
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+func TestPipesHandler_Execute_NoRolesAllowsAll(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name: "open_pipe",
+			SQL:  "SELECT count(*) FROM clicks",
+			// AllowedRoles is nil — open to everyone.
+		},
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open_pipe/execute", "open_pipe", nil)
+	ctx := context.WithValue(r.Context(), ContextKeyRole, "random_role")
+	r = r.WithContext(ctx)
+
+	safeHandle(h.Execute, w, r)
+
+	assert.NotEqual(t, http.StatusForbidden, w.Code)
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}

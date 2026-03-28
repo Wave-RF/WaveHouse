@@ -186,7 +186,7 @@ func main() {
 	sseHandler := api.NewSSEHandler(hub, remoteMQ.JetStream())
 	sseHandler.PolicyStore = policyStore
 
-	wsHandler := api.NewWSHandler(hub, remoteMQ.JetStream())
+	wsHandler := api.NewWSHandler(hub, remoteMQ.JetStream(), cfg.Server.CORSAllowedOrigins)
 	wsHandler.PolicyStore = policyStore
 
 	deps := api.Dependencies{
@@ -207,7 +207,8 @@ func main() {
 			RoleClaim: cfg.Auth.RoleClaim,
 			DevMode:   cfg.Auth.DevMode,
 		}),
-		JS: remoteMQ.JetStream(),
+		JS:          remoteMQ.JetStream(),
+		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 	}
 	router := api.NewRouter(deps)
 

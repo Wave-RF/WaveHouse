@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 )
 
 type memCache struct {
+	mu    sync.RWMutex
 	store map[string]cacheEntry
 }
 
@@ -21,7 +24,9 @@ type cacheEntry struct {
 func newMemCache() *memCache { return &memCache{store: make(map[string]cacheEntry)} }
 
 func (m *memCache) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
+	m.mu.RLock()
 	e, ok := m.store[key]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, 0, nil
 	}
@@ -29,7 +34,9 @@ func (m *memCache) Get(_ context.Context, key string) ([]byte, time.Duration, er
 }
 
 func (m *memCache) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
+	m.mu.Lock()
 	m.store[key] = cacheEntry{data: value, ttl: ttl}
+	m.mu.Unlock()
 	return nil
 }
 
@@ -105,3 +112,50 @@ func TestTieredCache_Close_NilL2(t *testing.T) {
 	t.Parallel()
 	assert.NoError(t, NewTiered(newMemCache(), nil).Close())
 }
+
+func TestTieredCache_SingleflightDedup(t *testing.T) {
+	t.Parallel()
+	l1 := newMemCache()
+	l2 := &slowCache{inner: newMemCache(), delay: 50 * time.Millisecond}
+	tc := NewTiered(l1, l2)
+	ctx := context.Background()
+	require.NoError(t, l2.Set(ctx, "key", []byte("slow-val"), 5*time.Minute))
+
+	// Launch many concurrent Gets for the same key.
+	const n = 20
+	done := make(chan []byte, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			val, _, _ := tc.Get(ctx, "key")
+			done <- val
+		}()
+	}
+
+	for i := 0; i < n; i++ {
+		val := <-done
+		assert.Equal(t, []byte("slow-val"), val)
+	}
+
+	// Despite N concurrent calls, L2 should have been hit exactly once (singleflight).
+	count := l2.getCount.Load()
+	assert.Equal(t, int32(1), count, "expected singleflight to coalesce L2 Gets to 1")
+}
+
+// slowCache wraps memCache with a delay and an atomic access counter for singleflight testing.
+type slowCache struct {
+	inner    *memCache
+	delay    time.Duration
+	getCount atomic.Int32
+}
+
+func (s *slowCache) Get(ctx context.Context, key string) ([]byte, time.Duration, error) {
+	s.getCount.Add(1)
+	time.Sleep(s.delay)
+	return s.inner.Get(ctx, key)
+}
+
+func (s *slowCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	return s.inner.Set(ctx, key, value, ttl)
+}
+
+func (s *slowCache) Close() error { return nil }

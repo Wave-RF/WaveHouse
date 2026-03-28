@@ -272,3 +272,59 @@ func TestExtractClaim(t *testing.T) {
 		})
 	}
 }
+
+func TestJWTAuthMiddleware_DefaultRoleClaim(t *testing.T) {
+	t.Parallel()
+	// Empty RoleClaim should default to "role".
+	mw := JWTAuthMiddleware(AuthConfig{
+		Enabled:   true,
+		JWTSecret: testutil.TestJWTSecret,
+		RoleClaim: "", // should default to "role"
+	})
+
+	var capturedRole string
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRole = RoleFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tok := testutil.MakeJWT(t, jwt.MapClaims{"role": "viewer"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "viewer", capturedRole)
+}
+
+func TestJWTAuthMiddleware_NonBearerToken(t *testing.T) {
+	t.Parallel()
+	mw := JWTAuthMiddleware(AuthConfig{Enabled: true, JWTSecret: "secret"})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz") // Basic auth
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestJWTAuthMiddleware_NoHeader(t *testing.T) {
+	t.Parallel()
+	mw := JWTAuthMiddleware(AuthConfig{Enabled: true, JWTSecret: "secret"})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// No Authorization header.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "missing authorization")
+}

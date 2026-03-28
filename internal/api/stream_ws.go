@@ -15,18 +15,23 @@ import (
 
 // WSHandler handles GET /v1/stream/ws.
 type WSHandler struct {
-	Hub         *Hub
-	JS          jetstream.JetStream
-	PolicyStore *policy.Store
+	Hub            *Hub
+	JS             jetstream.JetStream
+	PolicyStore    *policy.Store
+	AllowedOrigins []string
 }
 
-func NewWSHandler(hub *Hub, js jetstream.JetStream) *WSHandler {
-	return &WSHandler{Hub: hub, JS: js}
+func NewWSHandler(hub *Hub, js jetstream.JetStream, allowedOrigins []string) *WSHandler {
+	return &WSHandler{Hub: hub, JS: js, AllowedOrigins: allowedOrigins}
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	origins := h.AllowedOrigins
+	if len(origins) == 0 {
+		origins = []string{"*"}
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
+		OriginPatterns: origins,
 	})
 	if err != nil {
 		return

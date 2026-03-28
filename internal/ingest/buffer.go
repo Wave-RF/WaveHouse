@@ -85,6 +85,7 @@ func (b *BufferConsumer) Start(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
+				flush() // Final flush on shutdown to prevent data loss.
 				return
 			case <-ticker.C:
 				flush()

@@ -69,14 +69,12 @@ func TestHub_Unsubscribe(t *testing.T) {
 	hub.Subscribe("t", ch)
 	hub.Unsubscribe("t", ch)
 
+	// After unsubscribe, the channel is closed.
+	// Verify Broadcast doesn't panic and the channel is indeed closed.
 	hub.Broadcast("t", ingest.EventMessage{TableName: "t"})
 
-	select {
-	case <-ch:
-		t.Fatal("should not receive after unsubscribe")
-	case <-time.After(50 * time.Millisecond):
-		// expected
-	}
+	_, open := <-ch
+	assert.False(t, open, "channel should be closed after unsubscribe")
 }
 
 func TestHub_MultipleSubscribers(t *testing.T) {

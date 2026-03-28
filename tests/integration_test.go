@@ -145,7 +145,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	require.NoError(t, registry.Refresh(ctx))
 
 	// Start Bento ingest worker.
-	ingest.StartIngestWorker(
+	_, err = ingest.StartIngestWorker(
 		embeddedMQ.NatsConn(),
 		chConn,
 		chAddr,
@@ -154,6 +154,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		"test",
 		"default",
 	)
+	require.NoError(t, err)
 
 	// Hub for SSE/WS.
 	hub := api.NewHub()
@@ -167,7 +168,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
 	queryHandler := api.NewQueryHandler(chConn, tiered, 5*time.Second)
 	sseHandler := api.NewSSEHandler(hub, js)
-	wsHandler := api.NewWSHandler(hub, js)
+	wsHandler := api.NewWSHandler(hub, js, nil)
 	dlqHandler := api.NewDLQHandler(js, logger)
 
 	deps := api.Dependencies{

@@ -151,7 +151,7 @@ func main() {
 	go policyStore.Watch(ctx)
 
 	// Start batch consumer → ClickHouse.
-	ingest.StartIngestWorker(
+	_, err = ingest.StartIngestWorker(
 		embeddedMQ.NatsConn(),
 		chConn,
 		cfg.ClickHouse.Addr,
@@ -160,6 +160,10 @@ func main() {
 		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,
 	)
+	if err != nil {
+		logger.Error("ingest worker init", "error", err)
+		os.Exit(1)
+	}
 	// Start active sweeper.
 	go sweeper.Start(ctx)
 
@@ -198,7 +202,7 @@ func main() {
 	sseHandler := api.NewSSEHandler(hub, js)
 	sseHandler.PolicyStore = policyStore
 
-	wsHandler := api.NewWSHandler(hub, js)
+	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
 	wsHandler.PolicyStore = policyStore
 
 	deps := api.Dependencies{
@@ -219,7 +223,8 @@ func main() {
 			RoleClaim: cfg.Auth.RoleClaim,
 			DevMode:   cfg.Auth.DevMode,
 		}),
-		JS: js,
+		JS:          js,
+		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 	}
 	router := api.NewRouter(deps)
 

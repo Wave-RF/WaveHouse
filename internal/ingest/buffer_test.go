@@ -188,3 +188,58 @@ func TestFlushBatch_MixedTables_PartialDLQ(t *testing.T) {
 	assert.Equal(t, 3, acked, "all messages should be ACKed when DLQ is enabled")
 	mu.Unlock()
 }
+
+func TestCoerceValue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		chType string
+		input  any
+		want   any
+	}{
+		{"Int8", "Int8", float64(42), int8(42)},
+		{"Int16", "Int16", float64(1000), int16(1000)},
+		{"Int32", "Int32", float64(100000), int32(100000)},
+		{"Int64", "Int64", float64(1e12), int64(1e12)},
+		{"Int128", "Int128", float64(99), int64(99)},
+		{"UInt8", "UInt8", float64(255), uint8(255)},
+		{"UInt16", "UInt16", float64(60000), uint16(60000)},
+		{"UInt32", "UInt32", float64(4e9), uint32(4e9)},
+		{"UInt64", "UInt64", float64(1e18), uint64(1e18)},
+		{"UInt128", "UInt128", float64(42), uint64(42)},
+		{"Float32", "Float32", float64(3.14), float32(3.14)},
+		{"Float64", "Float64", float64(3.14159), float64(3.14159)},
+		{"Bool true", "Bool", float64(1), true},
+		{"Bool false", "Bool", float64(0), false},
+		{"Nullable(Int32)", "Nullable(Int32)", float64(5), int32(5)},
+		{"LowCardinality(String)", "LowCardinality(String)", "hello", "hello"},
+		{"Nullable(LowCardinality(UInt64))", "Nullable(LowCardinality(UInt64))", float64(7), uint64(7)},
+		{"String passthrough", "String", "hello", "hello"},
+		{"DateTime passthrough", "DateTime", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z"},
+		{"Unknown type passthrough", "Point", float64(1), float64(1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := coerceValue(tt.chType, tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestEventMessage_RoundTrip(t *testing.T) {
+	t.Parallel()
+	evt := EventMessage{
+		TableName:         "clicks",
+		ReceivedTimestamp: "2024-01-01T00:00:00Z",
+		Data:              map[string]any{"page": "/home", "count": float64(42)},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	var got EventMessage
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, evt.TableName, got.TableName)
+	assert.Equal(t, evt.ReceivedTimestamp, got.ReceivedTimestamp)
+	assert.Equal(t, evt.Data["page"], got.Data["page"])
+}

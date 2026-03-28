@@ -31,8 +31,9 @@ type Config struct {
 }
 
 type Server struct {
-	Port            int `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
-	ShutdownTimeout int `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
+	Port               int      `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
+	ShutdownTimeout    int      `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
+	CORSAllowedOrigins []string `yaml:"cors_allowed_origins" env:"WH_SERVER_CORS_ALLOWED_ORIGINS" env-default:"*"`
 }
 
 type ClickHouse struct {
@@ -93,6 +94,39 @@ type DLQ struct {
 	Enabled bool `yaml:"enabled" env:"WH_DLQ_ENABLED" env-default:"true"`
 }
 
+// Validate checks the loaded configuration for logical consistency.
+func (c *Config) Validate() error {
+	if c.Mode != ModeStandalone && c.Mode != ModeClustered {
+		return fmt.Errorf("invalid mode %q: must be %q or %q", c.Mode, ModeStandalone, ModeClustered)
+	}
+
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		return fmt.Errorf("server.port %d out of range 1-65535", c.Server.Port)
+	}
+
+	if c.Server.ShutdownTimeout < 0 {
+		return fmt.Errorf("server.shutdown_timeout must be non-negative")
+	}
+
+	if c.Auth.Enabled && !c.Auth.DevMode && c.Auth.JWTSecret == "" && c.Auth.JWKSURL == "" {
+		return fmt.Errorf("auth.enabled requires at least one of jwt_secret or jwks_url (or enable dev_mode)")
+	}
+
+	if c.Schema.RefreshInterval < 1 {
+		return fmt.Errorf("schema.refresh_interval must be >= 1 second")
+	}
+
+	if c.Cache.DefaultTTL < 0 {
+		return fmt.Errorf("cache.default_ttl must be non-negative")
+	}
+
+	if c.MQ.GapWindowMinutes < 0 {
+		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
+	}
+
+	return nil
+}
+
 // Load reads config from a YAML file (if it exists) with env var overrides.
 func Load(path string) (*Config, error) {
 	var cfg Config
@@ -105,5 +139,10 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("read env: %w", err)
 		}
 	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
+
 	return &cfg, nil
 }

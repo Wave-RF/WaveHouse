@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
+	"regexp"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +28,9 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/io"
 	"github.com/warpstreamlabs/bento/public/service"
 )
+
+// safeIdentifierRe matches safe SQL identifiers to prevent injection.
+var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 type jsInput struct {
 	consumer jetstream.Consumer
@@ -58,6 +61,14 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			ID        string `json:"id"`
 		}
 		_ = json.Unmarshal(m.Data(), &raw)
+
+		// Validate table name to prevent SQL injection.
+		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
+			slog.Error("rejecting message with unsafe table name", "table", raw.TableName)
+			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
+			m.Ack() // Drop malformed messages.
+			continue
+		}
 
 		// Delete case
 		if raw.Action == "delete" {
@@ -137,7 +148,10 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 	return nil
 }
 
-func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) {
+// StartIngestWorker sets up the Bento-based ingest pipeline and returns the
+// running stream for lifecycle management. Callers should call stream.Stop(ctx)
+// during graceful shutdown. Returns an error instead of calling os.Exit.
+func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -147,8 +161,7 @@ func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, ch
 
 	js, err := jetstream.New(nc)
 	if err != nil {
-		logger.Error("failed to initialize JetStream", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("initialize JetStream: %w", err)
 	}
 
 	cons, err := js.CreateOrUpdateConsumer(context.Background(), "WAVEHOUSE", jetstream.ConsumerConfig{
@@ -157,8 +170,7 @@ func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, ch
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
 	if err != nil {
-		logger.Error("failed to create durable pull consumer", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("create durable pull consumer: %w", err)
 	}
 
 	if err := service.RegisterInput("nats_bridge", service.NewConfigSpec(),
@@ -169,8 +181,7 @@ func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, ch
 			}, nil
 		},
 	); err != nil {
-		logger.Error("failed to register Bento input", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("register Bento input: %w", err)
 	}
 
 	if err := service.RegisterBatchOutput("nats_dlq_bridge", service.NewConfigSpec(),
@@ -181,8 +192,7 @@ func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, ch
 			}, service.BatchPolicy{}, 1, nil
 		},
 	); err != nil {
-		logger.Error("failed to register Bento DLQ output", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("register Bento DLQ output: %w", err)
 	}
 
 	yamlConfig := fmt.Sprintf(`
@@ -216,14 +226,12 @@ output:
 	builder.SetLogger(logger)
 
 	if err := builder.SetYAML(yamlConfig); err != nil {
-		logger.Error("Bento config error", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("bento config: %w", err)
 	}
 
 	stream, err := builder.Build()
 	if err != nil {
-		logger.Error("Bento build error", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("bento build: %w", err)
 	}
 
 	go func() {
@@ -232,4 +240,6 @@ output:
 			logger.Error("ingest worker stopped", "error", err)
 		}
 	}()
+
+	return stream, nil
 }
