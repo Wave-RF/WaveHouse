@@ -13,8 +13,6 @@ TAGS ?=
 LIMIT ?= 30
 
 # ── Build Configuration ───────────────────────────────────────────
-# Force CGO disabled for all local builds to match GoReleaser exactly.
-export CGO_ENABLED=0
 # Strip debugging symbols to reduce binary size (~30%).
 # Use `make build-debug` for delve/profiling builds with full symbols.
 LDFLAGS := -s -w
@@ -96,7 +94,7 @@ build: $(BINARIES) ## Compile all binaries (run `make -j3 build` for parallel)
 $(BINARIES):
 	@echo "$(GREEN)==> Building $@...$(RESET)"
 	@START=$$(date +%s); \
-	go build -tags="$(TAGS)" -ldflags="$(LDFLAGS)" -o bin/$@ ./cmd/$@; \
+	CGO_ENABLED=0 go build -tags="$(TAGS)" -ldflags="$(LDFLAGS)" -o bin/$@ ./cmd/$@; \
 	END=$$(date +%s); \
 	SIZE=$$(ls -lh bin/$@ | awk '{print $$5}'); \
 	printf "$(GREEN)✔$(RESET) $(CYAN)%-25s$(RESET) built in %ss (Size: $(YELLOW)%s$(RESET))\n" "$@" "$$((END - START))" "$$SIZE"
@@ -217,7 +215,7 @@ ci: ## Full CI check: tidy + fmt + lint + vulncheck + build + tests
 	@go run golang.org/x/vuln/cmd/govulncheck@latest -scan package ./...
 	@echo ""
 	@echo "$(GREEN)── Step 5/7: Build ──$(RESET)"
-	@$(MAKE) build
+	@CGO_ENABLED=0 $(MAKE) build
 	@echo ""
 	@echo "$(GREEN)── Step 6/7: Unit tests ──$(RESET)"
 	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race

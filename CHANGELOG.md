@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Generated artifacts moved to `tmp/`**: Coverage output now goes to `tmp/coverage/`, analysis artifacts (`size-map.*`, `graph.*`) to `tmp/analysis/`. Repo root is no longer cluttered with generated files. Updated Makefile, `.gitignore`, CI workflow, and all docs.
+- **CGO scoped to build targets only**: Removed global `export CGO_ENABLED=0` from Makefile. `CGO_ENABLED=0` is now set per-command on `go build` invocations only. Test targets use the system default (`CGO_ENABLED=1`), which is required for `-race` on Linux CI runners. Tests continue to work on macOS (which has a pure-Go race detector) and now also work on Linux CI.
+- **CI jobs parallelized**: `lint`, `test`, `build`, and `check` jobs now run fully in parallel. Previously `lint` waited for `check` and `integration` waited for `build`. Integration tests now gate only on `test` (unit tests must pass first).
 - **GoReleaser config**: Added `ids` filter to `dockers_v2` (only linux builds go into Docker image) and OCI labels for image metadata.
 - **`make vulncheck`**: Default output is now a summary (`-show=summary`). Use `V=1 make vulncheck` for full details.
 - **`make clean`**: Simplified to `rm -rf bin/ tmp/ data/ dist/` — all generated files now live under `tmp/`.
@@ -67,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Policy nil claim injection**: `resolveTemplate()` returns `""` for unresolvable JWT claim templates instead of leaking raw template text into SQL filters.
 - **Data loss on shutdown**: Buffer ticker goroutine now calls `flush()` before returning on context cancellation, ensuring in-flight batches are written to ClickHouse during graceful shutdown.
 - **Hub channel leak**: `Hub.Unsubscribe()` now calls `close(ch)` after removing the channel, preventing goroutine leaks in SSE/WS handlers waiting on the channel.
+- **Ristretto race on Close**: `LocalCache.Close()` now calls `cache.Wait()` before `cache.Close()`, ensuring all async admission goroutines have finished before teardown. Added `LocalCache.Wait()` for test use.
+- **Test race in tiered cache**: `memCache` test helper now uses `sync.RWMutex` to prevent concurrent map read/write during singleflight tests.
 - **Docs — configuration**: Added missing `clickhouse.http_port` field, fixed `policy.file_path` default to `policy.yaml`, fixed `pipes.directory` default to `./pipes`.
 - **Docs — deployment**: Fixed `cluster.yaml` → `clustered.yaml` Docker Compose file references.
 - **Docs — development**: Updated Makefile targets table (removed nonexistent `build-all`/`compose-cluster`, added all new targets), added missing linters to list, added missing packages to project structure, updated vulnerability scanning to use `make vulncheck`.
