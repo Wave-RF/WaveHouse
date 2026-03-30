@@ -3,10 +3,12 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"regexp"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,23 +16,22 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	// Import the core framework (pure data processors, basic routing)
-	_ "github.com/warpstreamlabs/bento/public/components/pure"
-
-	// Import ONLY the ClickHouse SQL driver
-	_ "github.com/ClickHouse/clickhouse-go/v2" // Ensure the CH driver is registered
-	_ "github.com/warpstreamlabs/bento/public/components/sql/base"
-
-	// Import ONLY the NATS components
-	_ "github.com/warpstreamlabs/bento/public/components/nats"
-
-	// Optional: basic I/O if you use stdin/stdout for debugging
+	// Bento component imports: only pure (processors) and io (http_client output).
 	_ "github.com/warpstreamlabs/bento/public/components/io"
+	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
 // safeIdentifierRe matches safe SQL identifiers to prevent injection.
 var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// registerOnce ensures Bento components are registered exactly once per process.
+// Bento's global registry silently overwrites duplicate names without returning
+// an error, so calling RegisterInput twice would corrupt closed-over state.
+var (
+	registerOnce sync.Once
+	registerErr  error
+)
 
 type jsInput struct {
 	consumer jetstream.Consumer
@@ -60,10 +61,21 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			TableName string `json:"table_name"`
 			ID        string `json:"id"`
 		}
-		_ = json.Unmarshal(m.Data(), &raw)
+		if err := json.Unmarshal(m.Data(), &raw); err != nil {
+			slog.Error("rejecting message: invalid JSON", "error", err)
+			m.Ack() // Drop — not retryable.
+			continue
+		}
+
+		// Reject messages with no table name.
+		if raw.TableName == "" {
+			slog.Error("rejecting message: empty table_name")
+			m.Ack()
+			continue
+		}
 
 		// Validate table name to prevent SQL injection.
-		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
+		if !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.Error("rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
 			m.Ack() // Drop malformed messages.
@@ -74,6 +86,11 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.Action == "delete" {
 			slog.Info("DELETE DETECTED: Pausing ingestion to flush buffer...", "table", raw.TableName, "id", raw.ID)
 
+			// Wait for in-flight insert messages to be acked by Bento's pipeline.
+			// The inFlight counter is decremented when the http_client output
+			// receives a 200 from ClickHouse, so inFlight==0 means all prior
+			// inserts have been committed to ClickHouse. This requires Bento's
+			// default max_in_flight > 1 so acks can flow back while Read blocks.
 			ticker := time.NewTicker(10 * time.Millisecond)
 			for j.inFlight.Load() > 0 {
 				select {
@@ -142,7 +159,9 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 			subject = "dlq." + tableName
 		}
 
-		_, _ = d.js.Publish(ctx, subject, data)
+		if _, err := d.js.Publish(ctx, subject, data); err != nil {
+			d.logger.Error("failed to publish to DLQ", "subject", subject, "error", err)
+		}
 		d.logger.Warn("Sent failed message to DLQ", "subject", subject)
 	}
 	return nil
@@ -150,8 +169,9 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
-// during graceful shutdown. Returns an error instead of calling os.Exit.
-func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
+// during graceful shutdown to drain in-flight batches. The provided ctx controls
+// the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -164,7 +184,10 @@ func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, ch
 		return nil, fmt.Errorf("initialize JetStream: %w", err)
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(context.Background(), "WAVEHOUSE", jetstream.ConsumerConfig{
+	setupCtx, setupCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer setupCancel()
+
+	cons, err := js.CreateOrUpdateConsumer(setupCtx, "WAVEHOUSE", jetstream.ConsumerConfig{
 		Durable:       "buffer-consumer",
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
@@ -173,26 +196,32 @@ func StartIngestWorker(nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, ch
 		return nil, fmt.Errorf("create durable pull consumer: %w", err)
 	}
 
-	if err := service.RegisterInput("nats_bridge", service.NewConfigSpec(),
-		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
-			return &jsInput{
-				consumer: cons,
-				chConn:   chConn,
-			}, nil
-		},
-	); err != nil {
-		return nil, fmt.Errorf("register Bento input: %w", err)
-	}
+	registerOnce.Do(func() {
+		if err := service.RegisterInput("nats_bridge", service.NewConfigSpec(),
+			func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
+				return &jsInput{
+					consumer: cons,
+					chConn:   chConn,
+				}, nil
+			},
+		); err != nil {
+			registerErr = fmt.Errorf("register Bento input: %w", err)
+			return
+		}
 
-	if err := service.RegisterBatchOutput("nats_dlq_bridge", service.NewConfigSpec(),
-		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
-			return &dlqOutput{
-				js:     js,
-				logger: logger,
-			}, service.BatchPolicy{}, 1, nil
-		},
-	); err != nil {
-		return nil, fmt.Errorf("register Bento DLQ output: %w", err)
+		if err := service.RegisterBatchOutput("nats_dlq_bridge", service.NewConfigSpec(),
+			func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
+				return &dlqOutput{
+					js:     js,
+					logger: logger,
+				}, service.BatchPolicy{}, 1, nil
+			},
+		); err != nil {
+			registerErr = fmt.Errorf("register Bento DLQ output: %w", err)
+		}
+	})
+	if registerErr != nil {
+		return nil, registerErr
 	}
 
 	yamlConfig := fmt.Sprintf(`
@@ -216,7 +245,7 @@ output:
             - mapping: |
                 meta table_name = this.table_name
                 root = this.data | {}
-                root.received_timestamp = this.received_timestamp
+                root.received_timestamp = this.received_timestamp | deleted()
             - archive:
                 format: lines
     - nats_dlq_bridge: {}
@@ -236,7 +265,7 @@ output:
 
 	go func() {
 		logger.Info("ingest worker started")
-		if err := stream.Run(context.Background()); err != nil {
+		if err := stream.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("ingest worker stopped", "error", err)
 		}
 	}()

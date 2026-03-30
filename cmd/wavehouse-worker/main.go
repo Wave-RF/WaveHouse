@@ -88,7 +88,8 @@ func main() {
 	go registry.StartAutoRefresh(ctx)
 
 	// Batch consumer → ClickHouse.
-	_, err = ingest.StartIngestWorker(
+	ingestStream, err := ingest.StartIngestWorker(
+		ctx,
 		remoteMQ.NatsConn(),
 		chConn,
 		cfg.ClickHouse.Addr,
@@ -115,4 +116,9 @@ func main() {
 
 	logger.Info("shutting down worker")
 	cancel()
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	if err := ingestStream.Stop(shutCtx); err != nil {
+		logger.Error("ingest worker drain error", "error", err)
+	}
 }

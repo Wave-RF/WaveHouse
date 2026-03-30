@@ -146,6 +146,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 
 	// Start Bento ingest worker.
 	_, err = ingest.StartIngestWorker(
+		ctx,
 		embeddedMQ.NatsConn(),
 		chConn,
 		chAddr,

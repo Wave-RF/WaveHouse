@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/nats-io/nats.go/jetstream"
@@ -332,4 +333,206 @@ func TestJsInput_Close_NilIter(t *testing.T) {
 	t.Parallel()
 	input := &jsInput{}
 	assert.NoError(t, input.Close(context.Background()))
+}
+
+// ---------------------------------------------------------------------------
+// jsInput.Connect tests
+// ---------------------------------------------------------------------------
+
+// bentoMockConsumer satisfies jetstream.Consumer; only Messages is overridden.
+type bentoMockConsumer struct {
+	jetstream.Consumer
+	msgsFn func(opts ...jetstream.PullMessagesOpt) (jetstream.MessagesContext, error)
+}
+
+func (m *bentoMockConsumer) Messages(opts ...jetstream.PullMessagesOpt) (jetstream.MessagesContext, error) {
+	return m.msgsFn(opts...)
+}
+
+func TestJsInput_Connect_Success(t *testing.T) {
+	t.Parallel()
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
+	consumer := &bentoMockConsumer{
+		msgsFn: func(_ ...jetstream.PullMessagesOpt) (jetstream.MessagesContext, error) {
+			return iter, nil
+		},
+	}
+
+	input := &jsInput{consumer: consumer}
+	require.NoError(t, input.Connect(context.Background()))
+	assert.NotNil(t, input.iter, "iter should be set after Connect")
+}
+
+func TestJsInput_Connect_Error(t *testing.T) {
+	t.Parallel()
+	consumer := &bentoMockConsumer{
+		msgsFn: func(_ ...jetstream.PullMessagesOpt) (jetstream.MessagesContext, error) {
+			return nil, errors.New("consumer unavailable")
+		},
+	}
+
+	input := &jsInput{consumer: consumer}
+	err := input.Connect(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "jetstream iterator")
+}
+
+// ---------------------------------------------------------------------------
+// jsInput.Read — malformed JSON
+// ---------------------------------------------------------------------------
+
+func TestJsInput_Read_MalformedJSON(t *testing.T) {
+	t.Parallel()
+	badMsg := &bentoMockMsg{data: []byte(`not valid json`)}
+
+	good := EventMessage{TableName: "safe_table", Data: map[string]any{"id": "1"}}
+	goodData, _ := json.Marshal(good)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- badMsg
+	iter.msgs <- goodMsg
+
+	input := &jsInput{iter: iter}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	// Bad message should be acked and dropped.
+	assert.True(t, badMsg.acked, "malformed JSON message should be acked and dropped")
+
+	// Returned message should be the valid one.
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "safe_table", table)
+}
+
+// ---------------------------------------------------------------------------
+// jsInput.Read — empty table_name
+// ---------------------------------------------------------------------------
+
+func TestJsInput_Read_EmptyTableName(t *testing.T) {
+	t.Parallel()
+	emptyData, _ := json.Marshal(map[string]any{"data": map[string]any{"x": 1}})
+	emptyMsg := &bentoMockMsg{data: emptyData}
+
+	good := EventMessage{TableName: "events", Data: map[string]any{"id": "2"}}
+	goodData, _ := json.Marshal(good)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- emptyMsg
+	iter.msgs <- goodMsg
+
+	input := &jsInput{iter: iter}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, emptyMsg.acked, "empty table_name message should be acked and dropped")
+
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table)
+}
+
+// ---------------------------------------------------------------------------
+// jsInput.Read — delete with unsafe table name
+// ---------------------------------------------------------------------------
+
+func TestJsInput_Read_DeleteUnsafeTableName(t *testing.T) {
+	t.Parallel()
+	del := map[string]any{"action": "delete", "table_name": "; DROP TABLE users", "id": "x"}
+	delData, _ := json.Marshal(del)
+	delMsg := &bentoMockMsg{data: delData}
+
+	good := EventMessage{TableName: "safe_table", Data: map[string]any{"id": "1"}}
+	goodData, _ := json.Marshal(good)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	var execCalled bool
+	conn := &bentoMockConn{
+		execFn: func(context.Context, string, ...any) error {
+			execCalled = true
+			return nil
+		},
+	}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- delMsg
+	iter.msgs <- goodMsg
+
+	input := &jsInput{iter: iter, chConn: conn}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	// Delete with unsafe table name should be dropped, NOT executed.
+	assert.True(t, delMsg.acked, "unsafe delete should be acked and dropped")
+	assert.False(t, execCalled, "delete should not be executed for unsafe table name")
+
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "safe_table", table)
+}
+
+// ---------------------------------------------------------------------------
+// jsInput.Read — delete with context cancellation during flush-wait
+// ---------------------------------------------------------------------------
+
+func TestJsInput_Read_DeleteCancelledCtx(t *testing.T) {
+	t.Parallel()
+	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "abc"}
+	delData, _ := json.Marshal(del)
+	delMsg := &bentoMockMsg{data: delData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
+	iter.msgs <- delMsg
+
+	input := &jsInput{iter: iter, chConn: &bentoMockConn{}}
+	// Simulate in-flight messages so the flush-wait loop blocks.
+	input.inFlight.Store(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after a short delay to unblock the flush-wait.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, _, err := input.Read(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.True(t, delMsg.naked, "delete should be Nak'd when context is cancelled")
+}
+
+// ---------------------------------------------------------------------------
+// dlqOutput — DLQ publish error is logged, WriteBatch still returns nil
+// ---------------------------------------------------------------------------
+
+type bentoMockJSWithError struct {
+	jetstream.JetStream
+	publishErr error
+}
+
+func (m *bentoMockJSWithError) Publish(_ context.Context, _ string, _ []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	return nil, m.publishErr
+}
+
+func TestDLQOutput_WriteBatch_PublishError(t *testing.T) {
+	t.Parallel()
+	js := &bentoMockJSWithError{publishErr: errors.New("NATS unavailable")}
+	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	msg := service.NewMessage([]byte(`{"data": "orphan"}`))
+	msg.MetaSet("table_name", "clicks")
+
+	err := d.WriteBatch(context.Background(), service.MessageBatch{msg})
+	assert.NoError(t, err, "WriteBatch should still return nil even when publish fails")
+}
+
+// ---------------------------------------------------------------------------
+// dlqOutput — Connect, Wait, Close are all no-ops
+// ---------------------------------------------------------------------------
+
+func TestDLQOutput_NoOps(t *testing.T) {
+	t.Parallel()
+	d := &dlqOutput{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	assert.NoError(t, d.Connect(context.Background()))
+	assert.NoError(t, d.Wait(context.Background()))
+	assert.NoError(t, d.Close(context.Background()))
 }

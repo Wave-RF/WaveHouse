@@ -151,7 +151,8 @@ func main() {
 	go policyStore.Watch(ctx)
 
 	// Start batch consumer → ClickHouse.
-	_, err = ingest.StartIngestWorker(
+	ingestStream, err := ingest.StartIngestWorker(
+		ctx,
 		embeddedMQ.NatsConn(),
 		chConn,
 		cfg.ClickHouse.Addr,
@@ -242,6 +243,7 @@ func main() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 		defer shutCancel()
 		cancel()
+		_ = ingestStream.Stop(shutCtx)
 		srv.Shutdown(shutCtx)
 	}()
 
