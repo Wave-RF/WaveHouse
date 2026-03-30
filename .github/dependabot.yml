@@ -20,3 +20,15 @@ updates:
       day: monday
     commit-message:
       prefix: "ci"
+
+  # Docs site (npm)
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      docs-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: "docs"

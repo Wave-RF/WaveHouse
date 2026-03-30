@@ -38,3 +38,10 @@ Thumbs.db
 
 # Debug
 __debug_bin*
+
+# Docs site (generated at build time)
+site/src/content/docs/
+!site/src/content/docs/index.mdx
+site/public/md/
+site/dist/
+site/.astro/

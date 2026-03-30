@@ -6,53 +6,37 @@ This document describes the internal architecture of WaveHouse, a schema-aware C
 
 WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the entry and exit point for data. It discovers your real ClickHouse table schemas, validates data at ingest time, batches inserts asynchronously, and provides real-time streaming and query caching.
 
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│                         Clients                                 │
-│              (REST API, SSE, WebSocket)                          │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    WaveHouse API Layer                         │
-│  ┌──────────┐   ┌──────────┐ ┌──────────┐  ┌──────────────┐     │
-│  │  Ingest  │   │  Query   │ │   SSE    │  │  WebSocket   │     │
-│  │  Handler │   │  Handler │ │  Handler │  │   Handler    │     │
-│  └────┬─────┘   └────┬─────┘ └────┬─────┘  └──────┬───────┘     │
-│       │              │            │               │             │
-│  ┌────▼────┐    ┌────▼────┐   ┌───▼───┐           │             │
-│  │ Schema  │    │ Cache   │   │  Hub  │  (broadcast fan-out)    │
-│  │Registry │    │ (Tiered)│   └───┬───┘                         │
-│  └────┬────┘    └────┬────┘       │                             │
-│       │              │            │                             │
-│  ┌────▼────┐         │                                          │
-│  │ Dedupe  │         │       (NATS JetStream retains messages   │
-│  │(optional)│        │        for SSE/WS gap-fill via           │
-│  └────┬────┘         │        DeliverByStartTime)               │
-│       │              │                                          │
-│       ▼              │                                          │
-│  ┌─────────┐         │                                          │
-│  │   MQ    │         │                                          │
-│  │ (NATS)  │         │                                          │
-│  └────┬────┘         │                                          │
-│       │              │                                          │
-│  ┌────▼──────────┐   │                                          │
-│  │ Buffer        │   │       ┌───────────┐                      │
-│  │ Consumer      │   │       │  Active   │                      │
-│  │ (batch flush) │   │       │  Sweeper  │ (purges old msgs)    │
-│  └────┬──────────┘   │       └───────────┘                      │
-│       │              │                                          │
-│  ┌────▼──────┐       │                                          │
-│  │   DLQ     │       │       (failed inserts → WAVEHOUSE_DLQ)  │
-│  └───────────┘       │                                          │
-│                      │                                          │
-└───────┼──────────────┼──────────────────────────────────────────┘
-        │              │
-        ▼              ▼
-┌─────────────────────────────┐   ┌───────────┐
-│        ClickHouse           │   │   Redis   │  (L2 cache,
-│   (analytics storage)       │   │           │   clustered only)
-└─────────────────────────────┘   └───────────┘
+```mermaid
+flowchart TD
+    Clients["Clients<br/>(REST API, SSE, WebSocket)"]
+
+    Clients --> IH
+    Clients --> QH
+    Clients --> SSH
+    Clients --> WSH
+
+    subgraph api["WaveHouse API Layer"]
+        IH["Ingest Handler"] --> SR["Schema Registry"]
+        SR --> DD["Dedupe (optional)"]
+        DD --> MQ["MQ (NATS)"]
+        MQ --> BC["Buffer Consumer<br/>(batch flush)"]
+        BC -.->|failed inserts| DLQ["DLQ"]
+
+        QH["Query Handler"] --> Cache["Cache (Tiered)"]
+
+        SSH["SSE Handler"] --> Hub["Hub<br/>(broadcast fan-out)"]
+        WSH["WebSocket Handler"] --> Hub
+
+        SW["Active Sweeper"] -.->|purges old msgs| MQ
+
+        NATS["NATS JetStream retains messages<br/>for SSE/WS gap-fill<br/>via DeliverByStartTime"]
+    end
+
+    BC --> CH[("ClickHouse<br/>(analytics storage)")]
+    Cache --> CH
+    Cache --> Redis["Redis<br/>(L2 cache, clustered only)"]
+
+    style NATS fill:none,stroke-dasharray:5 5,stroke:#888,color:#888
 ```
 
 ## Binaries

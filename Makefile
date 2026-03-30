@@ -41,7 +41,8 @@ RESET  := \033[0m
         docker compose-standalone compose-clustered compose-deps deps-wipe \
         clean release-test \
         vulncheck security deadcode audit-cgo \
-        size-report size-tree size-treemap dep-graph dep-why dep-cut binary-analysis
+        size-report size-tree size-treemap dep-graph dep-why dep-cut binary-analysis \
+        docs-install docs-convert docs-dev docs-build docs-preview
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -364,3 +365,19 @@ binary-analysis: size-report deadcode audit-cgo ## Combined binary analysis (siz
 	@echo "  For package weight breakdown:  $(CYAN)make size-tree$(RESET)"
 	@echo "  For dependency graph:          $(CYAN)make dep-graph$(RESET)"
 	@echo "  For dependency cut analysis:   $(CYAN)make dep-cut$(RESET)"
+
+# ── Documentation ────────────────────────────────────────────────
+docs-install: ## Install docs site dependencies
+	@cd site && npm ci
+
+docs-convert: ## Convert /docs/ markdown to Starlight format
+	@node site/scripts/convert-docs.mjs
+
+docs-dev: docs-convert ## Start docs dev server with hot-reload
+	@cd site && npm run dev
+
+docs-build: docs-convert ## Build docs site for production
+	@cd site && npm run build
+
+docs-preview: docs-build ## Preview production build locally
+	@cd site && npm run preview
