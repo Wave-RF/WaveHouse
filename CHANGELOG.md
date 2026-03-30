@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Removed
+
+- **Dead code: `BufferConsumer`** — Removed `BufferConsumer`, `coerceValue`, `insertTableBatch`, `flushBatch`, and `sendToDLQ` from `internal/ingest/buffer.go` (replaced by Bento pipeline in `bento.go`). The `EventMessage` struct and `BufferConsumerName` constant were preserved in a new `types.go`.
+
 ### Added
 
+- **Unit tests — Bento pipeline**: `bento_test.go` covering `safeIdentifierRe` (15 subtests), `dlqOutput.WriteBatch` (3 subtests), `jsInput.Read` (6 subtests), and `jsInput.Close`.
+- **Unit tests — Sweeper**: `sweeper_test.go` covering `sweep()` (8 subtests), `findGapSequence()` (7 subtests), and `Start()` context cancellation.
 - **CORS origin allowlist**: New `server.cors_allowed_origins` config field (`WH_SERVER_CORS_ALLOWED_ORIGINS`) controls which origins receive CORS headers. Defaults to `*` (allow all). When specific origins are listed, only matching requests get CORS headers with `Vary: Origin`.
 - **Config validation**: `config.Validate()` runs at startup, catching invalid mode, out-of-range port, negative timeouts, missing auth credentials, zero schema refresh interval, and negative cache/gap-window values.
 - **Default query limit**: Structured queries are capped at `DefaultMaxRows` (10,000) to prevent unbounded result sets. Explicit limits exceeding the cap are silently reduced.
