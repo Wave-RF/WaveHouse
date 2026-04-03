@@ -37,6 +37,7 @@ RESET  := \033[0m
 .PHONY: help setup tools check-tools build build-debug dev \
         fmt fmt-check lint lint-fix fix \
         test test-integration test-all ci coverage coverage-enforce \
+        test-sdk test-e2e test-e2e-dev test-e2e-setup test-everything \
         smoke-test mod-tidy-check \
         docker compose-standalone compose-clustered compose-deps deps-wipe \
         clean release-test \
@@ -103,7 +104,7 @@ build-debug: LDFLAGS= ## Compile all binaries with debug symbols (for delve/prof
 build-debug: build
 
 # ── Development ───────────────────────────────────────────────────
-dev: ## Hot-reload dev server (requires air)
+dev: ## Hot-reload dev server (starts ClickHouse via tests/compose.yaml + air)
 	@command -v air >/dev/null 2>&1 || { \
 		echo "$(RED)==> air not found$(RESET)"; \
 		echo "Install: https://github.com/air-verse/air"; \
@@ -111,6 +112,13 @@ dev: ## Hot-reload dev server (requires air)
 		echo "  go install github.com/air-verse/air@latest"; \
 		exit 1; \
 	}
+	@echo "$(GREEN)==> Starting ClickHouse...$(RESET)"
+	@docker compose -f tests/compose.yaml up -d clickhouse
+	@echo "$(GREEN)==> Applying SQL fixtures...$(RESET)"
+	@for f in tests/fixtures/*.sql; do \
+		curl -sf http://localhost:8123 -d @"$$f" >/dev/null 2>&1 || true; \
+	done
+	@echo "$(GREEN)==> Starting air (hot-reload)...$(RESET)"
 	@air -c .air.toml
 
 # ── Formatting ────────────────────────────────────────────────────
@@ -189,6 +197,21 @@ coverage-enforce: coverage ## Fail if unit test coverage is below threshold (def
 
 smoke-test: ## Manual Bento insert+delete (requires running WaveHouse)
 	@go run ./tests/cmd/bento_pub
+
+# ── SDK & E2E Testing ─────────────────────────────────────────────
+test-sdk: ## Run SDK unit tests (clients/ts)
+	@cd clients/ts && npm test
+
+test-e2e-setup: ## Install E2E test dependencies
+	@cd tests/sdk && npm install
+
+test-e2e: ## Run E2E integration tests via SDK (auto-starts Docker if needed)
+	@cd tests/sdk && npm install --silent && npx vitest run
+
+test-e2e-dev: ## Run E2E integration tests in watch mode
+	@cd tests/sdk && npm install --silent && npx vitest
+
+test-everything: test test-sdk test-integration test-e2e ## Run ALL tests: Go unit + SDK unit + Go integration + E2E
 
 mod-tidy-check: ## Verify go.mod and go.sum are tidy
 	@echo "$(GREEN)==> Checking module tidiness...$(RESET)"

@@ -86,7 +86,11 @@ make dep-why MOD=...   # Show why a module is included
 make dep-cut           # Top cuttable deps by transitive impact (LIMIT=N)
 make binary-analysis   # Combined: sizes + dead code + CGO audit
 make smoke-test        # Manual Bento insert+delete (needs running WaveHouse)
-make dev               # Hot-reload dev server (air)
+make test-sdk          # TypeScript SDK unit tests
+make test-e2e          # E2E integration tests via SDK (starts Docker services)
+make test-e2e-dev      # E2E tests in watch mode
+make test-everything   # All four test layers: unit + SDK + integration + E2E
+make dev               # Hot-reload dev server (air) — starts ClickHouse + applies fixtures
 make docker            # Build Docker image
 make clean             # Remove bin/, tmp/, data/, dist/
 ```
@@ -106,6 +110,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
 - **Coverage target**: 70% minimum (CI enforced). Aim for 80%+.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
+- **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
 
 ## Documentation & Consistency Sync (MANDATORY)
 
@@ -201,7 +206,10 @@ internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstra
 internal/policy/        → Access control policies (types, evaluation, NATS KV store)
 internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
-tests/                  → Integration tests (build tag: integration)
+tests/                  → Integration & E2E tests
+tests/compose.yaml      → Shared Docker Compose (ClickHouse + optional WaveHouse via profiles)
+tests/fixtures/         → Idempotent ClickHouse DDL scripts for test tables
+tests/sdk/              → E2E integration tests via TypeScript SDK (Vitest)
 tests/cmd/bento_pub/    → Manual smoke-test tool (insert+delete via NATS)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles

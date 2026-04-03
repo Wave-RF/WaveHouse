@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -131,29 +133,101 @@ func (s *Store) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-// BindParams replaces {{param}} placeholders in a NamedQuery's SQL with supplied values.
-// Returns the bound SQL and positional parameters.
+// inlineParamRe matches {{name}} or {{name:default}} placeholders in SQL templates.
+var inlineParamRe = regexp.MustCompile(`\{\{(\w+)(?::([^}]*))?\}\}`)
+
+// BindParams replaces {{param}} and {{param:default}} placeholders in a NamedQuery's SQL
+// with supplied values or defaults. Formally declared Parameters provide type info and
+// required/default metadata. Inline {{name:default}} syntax also works without formal
+// parameter definitions.
+//
+// Values are inlined directly into the SQL string (strings are single-quote escaped).
+// This avoids driver-level positional parameter limitations (e.g. LIMIT position).
 func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
-	sql := q.SQL
-	var params []any
+	// Build lookup from formal parameter definitions.
+	formal := make(map[string]*ParamDef, len(q.Parameters))
+	for i := range q.Parameters {
+		formal[q.Parameters[i].Name] = &q.Parameters[i]
+	}
+
+	// Pre-check: all required formal params must be supplied (even if not in SQL).
 	for _, p := range q.Parameters {
-		val, ok := supplied[p.Name]
-		if !ok {
-			if p.Required {
+		if p.Required {
+			if _, ok := supplied[p.Name]; !ok {
 				return "", nil, fmt.Errorf("missing required parameter: %s", p.Name)
-			}
-			val = p.Default
-		}
-		placeholder := "{{" + p.Name + "}}"
-		count := strings.Count(sql, placeholder)
-		if count > 0 {
-			sql = strings.ReplaceAll(sql, placeholder, "?")
-			for i := 0; i < count; i++ {
-				params = append(params, val)
 			}
 		}
 	}
-	return sql, params, nil
+
+	// Single pass: find all {{name}} / {{name:default}} placeholders and resolve each.
+	var bindErr error
+
+	sql := inlineParamRe.ReplaceAllStringFunc(q.SQL, func(match string) string {
+		if bindErr != nil {
+			return match
+		}
+		sub := inlineParamRe.FindStringSubmatch(match)
+		name := sub[1]
+		inlineDefault := sub[2] // empty string if no :default
+
+		var val any
+		if v, ok := supplied[name]; ok {
+			val = v
+		} else if p, ok := formal[name]; ok {
+			val = p.Default
+		} else if inlineDefault != "" {
+			val = inlineDefault
+		} else {
+			bindErr = fmt.Errorf("missing required parameter: %s", name)
+			return match
+		}
+
+		return formatParamValue(val)
+	})
+
+	if bindErr != nil {
+		return "", nil, bindErr
+	}
+	return sql, nil, nil
+}
+
+// formatParamValue converts a Go value to a safe SQL literal for inline substitution.
+func formatParamValue(v any) string {
+	if v == nil {
+		return "NULL"
+	}
+	switch val := v.(type) {
+	case string:
+		// If the string looks like a number (common with inline defaults), return it bare.
+		if _, err := strconv.ParseFloat(val, 64); err == nil {
+			return val
+		}
+		escaped := strings.ReplaceAll(val, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `'`, `''`)
+		return "'" + escaped + "'"
+	case float64:
+		// JSON numbers are float64; if it's a whole number, format as integer.
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val))
+		}
+		return fmt.Sprintf("%g", val)
+	case float32:
+		if val == float32(int32(val)) {
+			return fmt.Sprintf("%d", int32(val))
+		}
+		return fmt.Sprintf("%g", val)
+	case bool:
+		if val {
+			return "1"
+		}
+		return "0"
+	case int, int8, int16, int32, int64:
+		return fmt.Sprintf("%d", val)
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", val)
+	default:
+		return fmt.Sprintf("%v", val)
+	}
 }
 
 // refresh reloads all pipes from NATS KV into the cache.

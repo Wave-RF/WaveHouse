@@ -23,6 +23,7 @@ func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
 const DLQStreamName = "WAVEHOUSE_DLQ"
 
 // Stats returns per-table message counts in the DLQ stream.
+// Supports optional ?table= query parameter to filter by table name.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	stream, err := h.JS.Stream(r.Context(), DLQStreamName)
 	if err != nil {
@@ -32,7 +33,14 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := stream.Info(r.Context(), jetstream.WithSubjectFilter(">"))
+	// If table filter is specified, only query that subject.
+	subjectFilter := ">"
+	tableFilter := r.URL.Query().Get("table")
+	if tableFilter != "" {
+		subjectFilter = "dlq." + tableFilter
+	}
+
+	info, err := stream.Info(r.Context(), jetstream.WithSubjectFilter(subjectFilter))
 	if err != nil {
 		http.Error(w, `{"error":"stream info failed"}`, http.StatusInternalServerError)
 		return

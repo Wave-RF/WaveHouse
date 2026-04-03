@@ -281,3 +281,56 @@ func TestFindInsertPoint(t *testing.T) {
 		})
 	}
 }
+
+func TestCoerceFilterValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   any
+		wantTyp string
+		wantVal any
+	}{
+		{"RFC3339", "2026-04-02T16:02:07Z", "string", "2026-04-02 16:02:07"},
+		{"RFC3339Nano", "2026-04-02T16:02:07.666Z", "string", "2026-04-02 16:02:07.666"},
+		{"RFC3339Nano_short", "2026-04-02T16:02:07.15Z", "string", "2026-04-02 16:02:07.15"},
+		{"plain_string", "hello", "string", "hello"},
+		{"number", 42, "int", 42},
+		{"nil", nil, "<nil>", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := coerceFilterValue(tt.input)
+			assert.Equal(t, tt.wantTyp, fmt.Sprintf("%T", got))
+			if tt.wantVal != nil {
+				assert.Equal(t, tt.wantVal, got)
+			}
+		})
+	}
+}
+
+func TestBuild_FilterWithTimestampValue(t *testing.T) {
+	t.Parallel()
+	schema := &discovery.TableSchema{
+		Name: "events",
+		Columns: []discovery.Column{
+			{Name: "received_timestamp", Type: "DateTime64(3)"},
+			{Name: "event_id", Type: "String"},
+		},
+	}
+	sq := &StructuredQuery{
+		Filters: []Filter{
+			{Column: "received_timestamp", Op: "lt", Value: "2026-04-02T16:02:07.666Z"},
+		},
+		OrderBy: []OrderClause{{Column: "received_timestamp", Dir: "desc"}},
+		Limit:   3,
+	}
+	result, err := Build("events", sq, schema, 0)
+	require.NoError(t, err)
+	assert.Contains(t, result.SQL, "received_timestamp < ?")
+	require.Len(t, result.Params, 1)
+	strVal, isString := result.Params[0].(string)
+	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
+	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
+}

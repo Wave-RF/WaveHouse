@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
@@ -14,6 +15,18 @@ import (
 )
 
 // WSHandler handles GET /v1/stream/ws.
+// Supports multiplexed subscriptions via in-band JSON commands:
+//
+//	{"action":"subscribe","topic":"ingest.clicks"}
+//	{"action":"unsubscribe","topic":"ingest.clicks"}
+//
+// Outbound messages are wrapped in a topic envelope:
+//
+//	{"topic":"ingest.clicks","data":{...event...}}
+//
+// For backward compatibility, the ?topic= query parameter auto-subscribes
+// on connect. If no ?topic= is set, the connection starts with no
+// subscriptions and waits for in-band subscribe commands.
 type WSHandler struct {
 	Hub            *Hub
 	JS             jetstream.JetStream
@@ -23,6 +36,12 @@ type WSHandler struct {
 
 func NewWSHandler(hub *Hub, js jetstream.JetStream, allowedOrigins []string) *WSHandler {
 	return &WSHandler{Hub: hub, JS: js, AllowedOrigins: allowedOrigins}
+}
+
+// wsCommand represents an in-band subscribe/unsubscribe command.
+type wsCommand struct {
+	Action string `json:"action"`
+	Topic  string `json:"topic"`
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -38,43 +57,122 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 
-	topic := r.URL.Query().Get("topic")
-	if topic == "" {
-		topic = "ingest.>"
-	}
-
 	// Resolve stream permissions for this request.
 	role := RoleFromContext(r.Context())
 	claims, _ := ClaimsFromContext(r.Context())
 
-	// Subscribe for live events.
-	ch := make(chan []byte, 64)
-	h.Hub.Subscribe(topic, ch)
-	defer h.Hub.Unsubscribe(topic, ch)
+	ctx := r.Context()
 
-	// Gap fill from NATS using DeliverByStartTime.
-	if since := r.URL.Query().Get("since"); since != "" {
-		if ts, err := time.Parse(time.RFC3339, since); err == nil && h.JS != nil {
-			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-				out := h.applyStreamPolicy(data, role, claims)
-				if out == nil {
-					return true // skip this message
+	// Merged channel receives messages from all subscribed topics.
+	merged := make(chan []byte, 64)
+
+	// Track active topic subscriptions and their per-topic channels.
+	var mu sync.Mutex
+	subs := make(map[string]chan []byte) // topic → per-topic channel
+
+	subscribeTopic := func(topic string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if _, exists := subs[topic]; exists {
+			return // already subscribed
+		}
+		ch := make(chan []byte, 64)
+		subs[topic] = ch
+		h.Hub.Subscribe(topic, ch)
+		// Pump per-topic channel into merged channel.
+		go func() {
+			for msg := range ch {
+				select {
+				case merged <- msg:
+				default: // drop if slow
 				}
-				return conn.Write(r.Context(), websocket.MessageText, out) == nil
-			})
+			}
+		}()
+	}
+
+	unsubscribeTopic := func(topic string) {
+		mu.Lock()
+		ch, exists := subs[topic]
+		if !exists {
+			mu.Unlock()
+			return
+		}
+		delete(subs, topic)
+		mu.Unlock()
+		h.Hub.Unsubscribe(topic, ch) // closes ch, which stops the pump goroutine
+	}
+
+	unsubscribeAll := func() {
+		mu.Lock()
+		topics := make([]string, 0, len(subs))
+		for t := range subs {
+			topics = append(topics, t)
+		}
+		mu.Unlock()
+		for _, t := range topics {
+			unsubscribeTopic(t)
+		}
+	}
+	defer unsubscribeAll()
+
+	// Backward compat: auto-subscribe if ?topic= is set.
+	if topic := r.URL.Query().Get("topic"); topic != "" {
+		subscribeTopic(topic)
+
+		// Gap fill from NATS.
+		if since := r.URL.Query().Get("since"); since != "" {
+			if ts, parseErr := time.Parse(time.RFC3339, since); parseErr == nil && h.JS != nil {
+				h.replayFromNATS(ctx, ts, topic, func(data []byte) bool {
+					out := h.applyStreamPolicy(data, role, claims, topic)
+					if out == nil {
+						return true
+					}
+					return conn.Write(ctx, websocket.MessageText, out) == nil
+				})
+			}
 		}
 	}
 
+	// Read loop: process in-band commands from the client.
+	go func() {
+		for {
+			_, data, readErr := conn.Read(ctx)
+			if readErr != nil {
+				return // connection closed or error
+			}
+			var cmd wsCommand
+			if json.Unmarshal(data, &cmd) != nil || cmd.Topic == "" {
+				continue // ignore malformed commands
+			}
+			switch cmd.Action {
+			case "subscribe":
+				subscribeTopic(cmd.Topic)
+			case "unsubscribe":
+				unsubscribeTopic(cmd.Topic)
+			}
+		}
+	}()
+
+	// Write loop: send events from merged channel.
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
-		case data := <-ch:
-			out := h.applyStreamPolicy(data, role, claims)
+		case data := <-merged:
+			// Determine the event's table_name to use as the topic in the envelope.
+			var rawEvt struct {
+				TableName string `json:"table_name"`
+			}
+			evtTopic := ""
+			if json.Unmarshal(data, &rawEvt) == nil && rawEvt.TableName != "" {
+				evtTopic = "ingest." + rawEvt.TableName
+			}
+
+			out := h.applyStreamPolicy(data, role, claims, evtTopic)
 			if out == nil {
 				continue
 			}
-			if err := conn.Write(r.Context(), websocket.MessageText, out); err != nil {
+			if writeErr := conn.Write(ctx, websocket.MessageText, out); writeErr != nil {
 				return
 			}
 		}
@@ -83,14 +181,20 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 // applyStreamPolicy transforms raw event data for the client, filtering columns
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
-func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
+// The result is wrapped in a topic envelope: {"topic":"...","data":{...}}.
+func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any, topic string) []byte {
 	var evt ingest.EventMessage
 	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
-		// Not an EventMessage — pass through if valid JSON, skip otherwise.
 		if !json.Valid(raw) {
 			return nil
 		}
-		return raw
+		// Non-EventMessage JSON — wrap in envelope.
+		envelope := map[string]any{"topic": topic, "data": json.RawMessage(raw)}
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			return nil
+		}
+		return data
 	}
 
 	if h.PolicyStore != nil {
@@ -102,12 +206,16 @@ func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string
 		evt.Data = filterEventColumns(evt.Data, perms)
 	}
 
-	out := map[string]any{
+	inner := map[string]any{
 		"table_name":         evt.TableName,
 		"received_timestamp": evt.ReceivedTimestamp,
 		"data":               evt.Data,
 	}
-	data, err := json.Marshal(out)
+	envelope := map[string]any{
+		"topic": "ingest." + evt.TableName,
+		"data":  inner,
+	}
+	data, err := json.Marshal(envelope)
 	if err != nil {
 		return nil
 	}
@@ -137,3 +245,5 @@ func (h *WSHandler) replayFromNATS(ctx context.Context, since time.Time, subject
 		}
 	}
 }
+
+

@@ -45,22 +45,43 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	// Subscribe for live events.
-	ch := make(chan []byte, 64)
+	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...
 	h.Hub.Subscribe(topic, ch)
 	defer h.Hub.Unsubscribe(topic, ch)
 
 	// Gap fill from NATS using DeliverByStartTime.
-	if since := r.URL.Query().Get("since"); since != "" {
-		if ts, err := time.Parse(time.RFC3339, since); err == nil && h.JS != nil {
+	// Prefer Last-Event-ID header (set automatically by EventSource on reconnect)
+	// over the "since" query parameter.
+	sinceStr := r.Header.Get("Last-Event-ID")
+	if sinceStr == "" {
+		sinceStr = r.URL.Query().Get("since")
+	}
+	if sinceStr != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
 			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
 				out := h.applyStreamPolicy(data, role, claims)
 				if out == nil {
 					return true // skip this message
 				}
-				fmt.Fprintf(w, "data: %s\n\n", out)
+				id := extractEventTimestamp(out)
+				fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 				flusher.Flush()
 				return true
 			})
+		} else if parseErr := err; parseErr != nil {
+			// Try RFC3339 without nanos as fallback.
+			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
+				h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
+					out := h.applyStreamPolicy(data, role, claims)
+					if out == nil {
+						return true
+					}
+					id := extractEventTimestamp(out)
+					fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+					flusher.Flush()
+					return true
+				})
+			}
 		}
 	}
 
@@ -73,10 +94,23 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			if out == nil {
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", out)
+			id := extractEventTimestamp(out)
+			fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 			flusher.Flush()
 		}
 	}
+}
+
+// extractEventTimestamp extracts the received_timestamp field from a JSON event
+// payload for use as the SSE id: field. Returns empty string on failure.
+func extractEventTimestamp(data []byte) string {
+	var envelope struct {
+		ReceivedTimestamp string `json:"received_timestamp"`
+	}
+	if err := json.Unmarshal(data, &envelope); err == nil && envelope.ReceivedTimestamp != "" {
+		return envelope.ReceivedTimestamp
+	}
+	return ""
 }
 
 // applyStreamPolicy transforms raw event data for the client, filtering columns

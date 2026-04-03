@@ -1,0 +1,54 @@
+# SDK Development Environment
+#
+# Runs ClickHouse + WaveHouse standalone for SDK playground scripts.
+#
+# Usage:
+#   docker compose -f playground/compose.yaml up -d
+#   npm run playground:setup   # seed data
+#   npm run playground:public  # run public playground
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  wavehouse:
+    build:
+      context: ../../..
+      dockerfile: deployments/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      WH_MODE: standalone
+      WH_CH_ADDR: clickhouse:9000
+      WH_MQ_EMBEDDED_DIR: /data/nats
+      WH_MQ_MAX_BYTES_GB: "1"
+      WH_AUTH_ENABLED: "true"
+      WH_AUTH_JWT_SECRET: sdk-dev-secret
+      WH_AUTH_DEV_MODE: "true"
+      WH_AUTH_ROLE_CLAIM: role
+      WH_DEDUPE_ENABLED: "false"
+      WH_SCHEMA_REFRESH_INTERVAL: "5"
+      WH_DLQ_ENABLED: "true"
+      WH_SERVER_CORS_ALLOWED_ORIGINS: "*"
+    volumes:
+      - wavehouse-data:/data
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  clickhouse-data:
+  wavehouse-data:
