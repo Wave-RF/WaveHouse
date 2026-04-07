@@ -7,6 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // RemoteNATS connects to an external NATS cluster.
@@ -47,8 +48,12 @@ func NewRemote(url string, maxBytes int64) (*RemoteNATS, error) {
 	return &RemoteNATS{conn: nc, js: js}, nil
 }
 
-func (r *RemoteNATS) Publish(_ context.Context, subject string, data []byte) error {
-	_, err := r.js.Publish(context.Background(), subject, data)
+func (r *RemoteNATS) Publish(ctx context.Context, subject string, data []byte) error {
+	msg := nats.NewMsg(subject)
+	msg.Data = data
+
+	observability.InjectNATS(ctx, msg)
+	_, err := r.js.PublishMsg(ctx, msg)
 	return err
 }
 
@@ -63,11 +68,14 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-		msg := NewMessage(m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
-		if err := handler(msg); err != nil {
-			_ = m.Nak()
-		}
-	})
+        msgCtx := observability.ExtractNATS(context.Background(), m)
+
+        msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
+        
+        if err := handler(msg); err != nil {
+            _ = m.Nak()
+        }
+    })
 	if err != nil {
 		return fmt.Errorf("consume: %w", err)
 	}

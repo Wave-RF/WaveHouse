@@ -1,14 +1,27 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+
+func unwrapTestMessage(t *testing.T, data []byte) []byte {
+	var envelope struct {
+		TraceHeaders map[string]string `json:"trace_headers"`
+		Payload      []byte            `json:"payload"`
+	}
+	err := json.Unmarshal(data, &envelope)
+	require.NoError(t, err, "failed to unmarshal hub envelope")
+	return envelope.Payload
+}
 
 func TestHub_SubscribeAndBroadcast(t *testing.T) {
 	t.Parallel()
@@ -18,10 +31,11 @@ func TestHub_SubscribeAndBroadcast(t *testing.T) {
 	hub.Subscribe("clicks", ch)
 	defer hub.Unsubscribe("clicks", ch)
 
-	hub.Broadcast("clicks", ingest.EventMessage{
-		TableName:         "clicks",
-		ReceivedTimestamp: "2024-01-01T00:00:00Z",
-		Data:              map[string]any{"page": "/home"},
+	payload := []byte(`{"table_name":"clicks","page":"/home"}`)
+	hub.Broadcast("clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "clicks",
+		Data:    payload,
 	})
 
 	select {
@@ -44,7 +58,11 @@ func TestHub_TopicIsolation(t *testing.T) {
 	defer hub.Unsubscribe("clicks", chClicks)
 	defer hub.Unsubscribe("users", chUsers)
 
-	hub.Broadcast("clicks", ingest.EventMessage{TableName: "clicks"})
+	hub.Broadcast("clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case <-chClicks:
@@ -71,7 +89,11 @@ func TestHub_Unsubscribe(t *testing.T) {
 
 	// After unsubscribe, the channel is closed.
 	// Verify Broadcast doesn't panic and the channel is indeed closed.
-	hub.Broadcast("t", ingest.EventMessage{TableName: "t"})
+	hub.Broadcast("t", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "t",
+		Data:    []byte(`{"table_name":"t"}`),
+	})
 
 	_, open := <-ch
 	assert.False(t, open, "channel should be closed after unsubscribe")
@@ -88,7 +110,11 @@ func TestHub_MultipleSubscribers(t *testing.T) {
 		hub.Subscribe("topic", chs[i])
 	}
 
-	hub.Broadcast("topic", ingest.EventMessage{TableName: "topic"})
+	hub.Broadcast("topic", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "topic",
+		Data:    []byte(`{"table_name":"topic"}`),
+	})
 
 	for i, ch := range chs {
 		select {
@@ -112,7 +138,11 @@ func TestHub_SlowConsumerDropped(t *testing.T) {
 	// Broadcast should not block (drops message for slow consumer).
 	done := make(chan struct{})
 	go func() {
-		hub.Broadcast("t", ingest.EventMessage{TableName: "t"})
+		hub.Broadcast("t", &mq.Message{
+			Ctx:     context.Background(),
+			Subject: "t",
+			Data:    []byte(`{"table_name":"t"}`),
+		})
 		close(done)
 	}()
 
@@ -135,7 +165,11 @@ func TestHub_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			ch := make(chan []byte, 1)
 			hub.Subscribe("t", ch)
-			hub.Broadcast("t", ingest.EventMessage{TableName: "t"})
+			hub.Broadcast("t", &mq.Message{
+				Ctx:     context.Background(),
+				Subject: "t",
+				Data:    []byte(`{"table_name":"t"}`),
+			})
 			hub.Unsubscribe("t", ch)
 		}()
 	}
@@ -183,7 +217,11 @@ func TestHub_WildcardGreaterThan(t *testing.T) {
 	hub.Subscribe("ingest.>", ch)
 	defer hub.Unsubscribe("ingest.>", ch)
 
-	hub.Broadcast("ingest.clicks", ingest.EventMessage{TableName: "clicks"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case msg := <-ch:
@@ -201,7 +239,11 @@ func TestHub_WildcardStar(t *testing.T) {
 	hub.Subscribe("ingest.*", ch)
 	defer hub.Unsubscribe("ingest.*", ch)
 
-	hub.Broadcast("ingest.clicks", ingest.EventMessage{TableName: "clicks"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case msg := <-ch:
@@ -220,7 +262,11 @@ func TestHub_WildcardStarNoMultiToken(t *testing.T) {
 	defer hub.Unsubscribe("ingest.*", ch)
 
 	// "ingest.*" should NOT match "ingest.clicks.subpath" (star = one token).
-	hub.Broadcast("ingest.clicks.subpath", ingest.EventMessage{TableName: "clicks"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case <-ch:
@@ -239,7 +285,11 @@ func TestHub_WildcardGreaterThanMultiToken(t *testing.T) {
 	defer hub.Unsubscribe("ingest.>", ch)
 
 	// "ingest.>" should match multi-token subjects.
-	hub.Broadcast("ingest.clicks.subpath", ingest.EventMessage{TableName: "clicks"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case msg := <-ch:
@@ -258,7 +308,11 @@ func TestHub_WildcardDoesNotMatchExact(t *testing.T) {
 	defer hub.Unsubscribe("ingest.>", ch)
 
 	// "ingest.>" should NOT match "ingest" alone (> requires 1+ tokens after).
-	hub.Broadcast("ingest", ingest.EventMessage{TableName: "ingest"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case <-ch:
@@ -276,7 +330,11 @@ func TestHub_BareGreaterThanMatchesAll(t *testing.T) {
 	hub.Subscribe(">", ch)
 	defer hub.Unsubscribe(">", ch)
 
-	hub.Broadcast("anything.here", ingest.EventMessage{TableName: "t"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	select {
 	case <-ch:
@@ -297,7 +355,11 @@ func TestHub_WildcardNoDuplicateDelivery(t *testing.T) {
 	defer hub.Unsubscribe("ingest.clicks", ch)
 	defer hub.Unsubscribe("ingest.>", ch)
 
-	hub.Broadcast("ingest.clicks", ingest.EventMessage{TableName: "clicks"})
+	hub.Broadcast("ingest.clicks", &mq.Message{
+		Ctx:     context.Background(),
+		Subject: "ingest.clicks",
+		Data:    []byte(`{"table_name":"clicks"}`),
+	})
 
 	// Should receive exactly one message, not two.
 	select {

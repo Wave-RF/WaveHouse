@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"go.opentelemetry.io/otel"
 )
 
 // Column describes a single ClickHouse column.
@@ -48,6 +50,11 @@ func NewSchemaRegistry(conn driver.Conn, database string, refreshInterval time.D
 
 // Refresh queries system.columns and rebuilds the in-memory schema cache.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
+
+	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
+    ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
+    defer span.End()
+
 	rows, err := sr.conn.Query(ctx,
 		`SELECT table, name, type, default_kind
 		 FROM system.columns

@@ -9,9 +9,14 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
+
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // WSHandler handles GET /v1/stream/ws.
@@ -74,17 +79,18 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		if _, exists := subs[topic]; exists {
-			return // already subscribed
+			return 
 		}
 		ch := make(chan []byte, 64)
 		subs[topic] = ch
 		h.Hub.Subscribe(topic, ch)
-		// Pump per-topic channel into merged channel.
+		
+		// Pump per-topic channel into merged channel
 		go func() {
 			for msg := range ch {
 				select {
 				case merged <- msg:
-				default: // drop if slow
+				default: 
 				}
 			}
 		}()
@@ -123,7 +129,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		if since := r.URL.Query().Get("since"); since != "" {
 			if ts, parseErr := time.Parse(time.RFC3339, since); parseErr == nil && h.JS != nil {
 				h.replayFromNATS(ctx, ts, topic, func(data []byte) bool {
-					out := h.applyStreamPolicy(data, role, claims, topic)
+					out := h.applyStreamPolicy(data, role, map[string]any(claims), topic)
 					if out == nil {
 						return true
 					}
@@ -138,11 +144,11 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, data, readErr := conn.Read(ctx)
 			if readErr != nil {
-				return // connection closed or error
+				return 
 			}
 			var cmd wsCommand
 			if json.Unmarshal(data, &cmd) != nil || cmd.Topic == "" {
-				continue // ignore malformed commands
+				continue 
 			}
 			switch cmd.Action {
 			case "subscribe":
@@ -153,28 +159,52 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	tracer := otel.Tracer("wavehouse-api")
+
 	// Write loop: send events from merged channel.
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		// Determine the event's table_name to use as the topic in the envelope.
 		case data := <-merged:
-			// Determine the event's table_name to use as the topic in the envelope.
+			var envelope struct {
+				TraceHeaders map[string]string `json:"trace_headers"`
+				Payload      []byte            `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				continue 
+			}
+
+			// 2. OLD LOGIC RESTORED: We lost the topic string, so we must peek 
+			// into the nested Payload JSON to extract the table_name
 			var rawEvt struct {
 				TableName string `json:"table_name"`
 			}
 			evtTopic := ""
-			if json.Unmarshal(data, &rawEvt) == nil && rawEvt.TableName != "" {
+			if json.Unmarshal(envelope.Payload, &rawEvt) == nil && rawEvt.TableName != "" {
 				evtTopic = "ingest." + rawEvt.TableName
 			}
 
-			out := h.applyStreamPolicy(data, role, claims, evtTopic)
+			// 3. Continue with tracing and policy logic
+			parentCtx := otel.GetTextMapPropagator().Extract(
+				context.Background(),
+				propagation.MapCarrier(envelope.TraceHeaders),
+			)
+
+			_, pushSpan := tracer.Start(parentCtx, "WS.PushEvent")
+
+			out := h.applyStreamPolicy(envelope.Payload, role, map[string]any(claims), evtTopic)
 			if out == nil {
+				pushSpan.End()
 				continue
 			}
-			if writeErr := conn.Write(ctx, websocket.MessageText, out); writeErr != nil {
+			
+			if err := conn.Write(r.Context(), websocket.MessageText, out); err != nil {
+				pushSpan.End()
 				return
 			}
+			pushSpan.End()
 		}
 	}
 }
@@ -188,7 +218,6 @@ func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string
 		if !json.Valid(raw) {
 			return nil
 		}
-		// Non-EventMessage JSON — wrap in envelope.
 		envelope := map[string]any{"topic": topic, "data": json.RawMessage(raw)}
 		data, err := json.Marshal(envelope)
 		if err != nil {
@@ -235,15 +264,21 @@ func (h *WSHandler) replayFromNATS(ctx context.Context, since time.Time, subject
 		return
 	}
 
+	tracer := otel.Tracer("wavehouse-api")
+
 	for {
 		msg, err := cons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		if err != nil {
 			return
 		}
+		msgCtx := observability.ExtractNATS(context.Background(), msg)
+		_, pushSpan := tracer.Start(msgCtx, "WS.ReplayEvent")
+
 		if !send(msg.Data()) {
+			pushSpan.End()
 			return
 		}
+
+		pushSpan.End()
 	}
 }
-
-

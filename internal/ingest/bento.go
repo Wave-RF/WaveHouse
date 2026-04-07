@@ -20,15 +20,25 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/io"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
+
+	"go.opentelemetry.io/otel"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
+
+	"go.opentelemetry.io/otel/attribute" // ADD THIS
+    "go.opentelemetry.io/otel/metric"
+
 )
 
 // safeIdentifierRe matches safe SQL identifiers to prevent injection.
 var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-// registerOnce ensures Bento components are registered exactly once per process.
-// Bento's global registry silently overwrites duplicate names without returning
-// an error, so calling RegisterInput twice would corrupt closed-over state.
 var (
+	bentoMeter                = otel.Meter("wavehouse-bento")
+	bentoEventsProcessed, _   = bentoMeter.Int64Counter(
+		"wavehouse_bento_events_processed",
+		metric.WithDescription("Total number of events successfully processed by Bento"),
+	)
+
 	registerOnce sync.Once
 	registerErr  error
 )
@@ -56,6 +66,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			return nil, nil, service.ErrNotConnected
 		}
 
+		msgCtx := observability.ExtractNATS(context.Background(), m)
+		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
+
 		var raw struct {
 			Action    string `json:"action"`
 			TableName string `json:"table_name"`
@@ -75,8 +88,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		// Validate table name to prevent SQL injection.
-		if !safeIdentifierRe.MatchString(raw.TableName) {
-			slog.Error("rejecting message with unsafe table name", "table", raw.TableName)
+		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
+			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
 			m.Ack() // Drop malformed messages.
 			continue
@@ -84,7 +97,10 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Delete case
 		if raw.Action == "delete" {
-			slog.Info("DELETE DETECTED: Pausing ingestion to flush buffer...", "table", raw.TableName, "id", raw.ID)
+			tracer := otel.Tracer("wavehouse-worker")
+			spanCtx, span := tracer.Start(msgCtx, "clickhouse_delete") // Use the extracted msgCtx
+
+			slog.InfoContext(spanCtx, "DELETE DETECTED: Flushing buffer...", "table", raw.TableName)
 
 			// Wait for in-flight insert messages to be acked by Bento's pipeline.
 			// The inFlight counter is decremented when the http_client output
@@ -105,30 +121,58 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			delQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ?", raw.TableName)
 
-			if err := j.chConn.Exec(ctx, delQuery, raw.ID); err != nil {
-				slog.Error("Failed lightweight delete", "table", raw.TableName, "id", raw.ID, "error", err)
-				m.Nak()
+			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
+				span.RecordError(err)
+				slog.ErrorContext(spanCtx, "clickhouse delete failed", 
+				"table", raw.TableName, 
+				"id", raw.ID, 
+				"error", err,
+			)
+			m.Nak()
 			} else {
-				slog.Info("Successfully deleted record", "table", raw.TableName, "id", raw.ID)
+				// Log the success with all context
+				slog.InfoContext(spanCtx, "successfully deleted record", 
+					"table", raw.TableName, 
+					"id", raw.ID,
+				)
 				m.Ack()
 			}
+			span.End()
 			continue
 		}
 
 		// Insert case
 		msg := service.NewMessage(m.Data())
+		msg = msg.WithContext(msgCtx)
+
+		tracer := otel.Tracer("wavehouse-worker")
+		bufferCtx, bufferSpan := tracer.Start(msgCtx, "bento_batch_buffer")
+
 		msg.MetaSet("table_name", raw.TableName)
 
 		j.inFlight.Add(1)
 
 		ackFn := func(ctx context.Context, err error) error {
 			j.inFlight.Add(-1)
+			
+			if err != nil {
+				bufferSpan.RecordError(err)
+				slog.ErrorContext(bufferCtx, "batch processing failed", "error", err)
+			} else {
+				slog.InfoContext(bufferCtx, "message batch successfully acknowledged by ClickHouse")
+				
+				bentoEventsProcessed.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("table", raw.TableName),
+				))
+			}
+			
+			bufferSpan.End() 
+			
 			if err != nil {
 				return m.Nak()
 			}
 			return m.Ack()
 		}
-
 		return msg, ackFn, nil
 	}
 }
@@ -150,6 +194,7 @@ func (d *dlqOutput) Wait(ctx context.Context) error    { return nil }
 func (d *dlqOutput) Close(ctx context.Context) error   { return nil }
 func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	for _, m := range batch {
+		msgCtx := m.Context()
 		data, _ := m.AsBytes()
 
 		tableName, exists := m.MetaGet("table_name")
@@ -159,10 +204,8 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 			subject = "dlq." + tableName
 		}
 
-		if _, err := d.js.Publish(ctx, subject, data); err != nil {
-			d.logger.Error("failed to publish to DLQ", "subject", subject, "error", err)
-		}
-		d.logger.Warn("Sent failed message to DLQ", "subject", subject)
+		_, _ = d.js.Publish(ctx, subject, data)
+		slog.WarnContext(msgCtx, "Sent failed message to DLQ", "subject", subject)
 	}
 	return nil
 }

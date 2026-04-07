@@ -45,3 +45,8 @@ func (d *DistributedDeduplicator) Close() error {
 	d.session.Close()
 	return nil
 }
+
+func (d *DistributedDeduplicator) Stats() map[string]int64 {
+	return nil // ScyllaDB metrics are handled externally
+	// Todo for distributed
+}

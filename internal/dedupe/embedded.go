@@ -48,3 +48,11 @@ func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, eventID string) (
 func (d *EmbeddedDeduplicator) Close() error {
 	return d.db.Close()
 }
+
+func (d *EmbeddedDeduplicator) Stats() map[string]int64 {
+	m := d.db.Metrics()
+	return map[string]int64{
+		"pebble_wal_size":    int64(m.WAL.Size),
+		"pebble_table_count": m.Total().NumFiles,
+	}
+}
