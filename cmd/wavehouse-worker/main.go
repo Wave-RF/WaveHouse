@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // Pre-populated build info variables, set via ldflags in the Makefile.
@@ -28,8 +30,6 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
-
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
 		cfgPath = p
@@ -40,6 +40,36 @@ func main() {
 		logger.Error("load config", "error", err)
 		os.Exit(1)
 	}
+
+	// OTEL.
+	ctx := context.Background()
+	serviceName := "wavehouse-" + Binary
+	otelAddr := os.Getenv("WH_OTEL_ADDR")
+	if otelAddr == "" {
+		otelAddr = "172.18.240.1:4317" // WSL Gateway
+	}
+
+	fmt.Println("DEBUG - Endpoint:", otelAddr)
+
+	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
+	if err != nil {
+		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		_ = otelShutdown(context.Background())
+	}()
+
+	// Slogger.
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo) // DEFAULT
+
+	// Create the logger from our observability package
+	logger = observability.NewLogger(serviceName, logLevel, true) // true = JSON output
+	slog.SetDefault(logger)
+
+	logger.Info("starting WaveHouse", "version", Version, "binary", Binary)
 
 	// ClickHouse.
 	chConn, err := clickhouse.Open(&clickhouse.Options{

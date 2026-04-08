@@ -7,6 +7,7 @@ import (
 
 // Message represents a message received from the queue.
 type Message struct {
+	Ctx       context.Context
 	Subject   string
 	Data      []byte
 	Timestamp time.Time
@@ -15,8 +16,8 @@ type Message struct {
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(subject string, data []byte, ts time.Time, ack, nak func()) *Message {
-	return &Message{Subject: subject, Data: data, Timestamp: ts, ack: ack, nak: nak}
+func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, ack, nak func()) *Message {
+	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, ack: ack, nak: nak}
 }
 
 // Ack acknowledges successful processing.

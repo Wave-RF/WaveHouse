@@ -11,6 +11,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // SSEHandler handles GET /v1/stream/sse.
@@ -85,18 +88,36 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	tracer := otel.Tracer("wavehouse-api")
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case data := <-ch:
-			out := h.applyStreamPolicy(data, role, claims)
+			var envelope struct {
+				TraceHeaders map[string]string `json:"trace_headers"`
+				Payload      []byte            `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				continue
+			}
+
+			parentCtx := otel.GetTextMapPropagator().Extract(
+				context.Background(),
+				propagation.MapCarrier(envelope.TraceHeaders),
+			)
+
+			_, pushSpan := tracer.Start(parentCtx, "SSE.PushEvent")
+
+			out := h.applyStreamPolicy(envelope.Payload, role, claims)
 			if out == nil {
 				continue
 			}
 			id := extractEventTimestamp(out)
 			fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 			flusher.Flush()
+			pushSpan.End()
 		}
 	}
 }

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
 
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Hub manages broadcast fan-out from a single MQ subscription to N clients.
@@ -56,14 +59,25 @@ func (h *Hub) Unsubscribe(topic string, ch chan []byte) {
 	close(ch)
 }
 
-// Broadcast sends an event to all subscribers whose topic pattern matches the
-// given subject. Patterns support NATS-style wildcards:
-//   - "*" matches exactly one token (e.g. "ingest.*" matches "ingest.clicks")
-//   - ">" as the last token matches one or more tokens (e.g. "ingest.>" matches "ingest.clicks")
-//
-// Exact matches are checked first, then wildcard patterns are evaluated.
-func (h *Hub) Broadcast(topic string, evt ingest.EventMessage) {
-	data, err := json.Marshal(evt)
+// Broadcast sends an event to all subscribers of a topic.
+func (h *Hub) Broadcast(topic string, msg *mq.Message) {
+	ctx := msg.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	carrier := make(propagation.MapCarrier)
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
+	envelope := struct {
+		TraceHeaders map[string]string `json:"trace_headers"`
+		Payload      []byte            `json:"payload"`
+	}{
+		TraceHeaders: carrier,
+		Payload:      msg.Data, // This is the raw ingest.EventMessage JSON
+	}
+
+	data, err := json.Marshal(envelope)
 	if err != nil {
 		return
 	}
@@ -74,7 +88,6 @@ func (h *Hub) Broadcast(topic string, evt ingest.EventMessage) {
 
 	// Exact match.
 	for ch := range h.subscribers[topic] {
-		sent[ch] = struct{}{}
 		select {
 		case ch <- data:
 		default:

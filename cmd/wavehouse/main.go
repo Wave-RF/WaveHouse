@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
@@ -58,6 +59,30 @@ func main() {
 			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
 		}
 	}
+
+	ctx := context.Background()
+	serviceName := "wavehouse-" + Binary
+	otelAddr := os.Getenv("WH_OTEL_ADDR")
+	if otelAddr == "" {
+		otelAddr = "127.0.0.1:4317" // Use your WSL Gateway
+	}
+
+	fmt.Println("DEBUG: STANDALONE OTel Initializing with endpoint:", otelAddr)
+
+	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
+	if err != nil {
+		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		_ = otelShutdown(context.Background()) // From InitProvider to flush traces before process dies
+	}()
+
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo)
+	logger = observability.NewLogger(serviceName, logLevel, true)
+	slog.SetDefault(logger)
 
 	// ClickHouse connection.
 	chConn, err := clickhouse.Open(&clickhouse.Options{
@@ -101,6 +126,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer embeddedMQ.Close()
+
+	if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
+		logger.Error("failed to register system metrics", "error", err)
+	}
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
@@ -175,7 +204,7 @@ func main() {
 			msg.Ack()
 			return nil
 		}
-		hub.Broadcast(msg.Subject, evt)
+		hub.Broadcast(msg.Subject, msg)
 		msg.Ack()
 		return nil
 	}); err != nil {
@@ -226,6 +255,7 @@ func main() {
 		}),
 		JS:          js,
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
+		LogLevel:    logLevel,
 	}
 	router := api.NewRouter(deps)
 
