@@ -76,11 +76,11 @@ func NewMockDeduplicator() *MockDeduplicator {
 }
 
 func (m *MockDeduplicator) Stats() map[string]int64 {
-    // Return empty stats or mock data for testing
-    return map[string]int64{
-        "pebble_wal_size":    0,
-        "pebble_table_count": 0,
-    }
+	// Return empty stats or mock data for testing
+	return map[string]int64{
+		"pebble_wal_size":    0,
+		"pebble_table_count": 0,
+	}
 }
 
 func (m *MockDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool, error) {

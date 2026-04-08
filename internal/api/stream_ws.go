@@ -79,18 +79,18 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		if _, exists := subs[topic]; exists {
-			return 
+			return
 		}
 		ch := make(chan []byte, 64)
 		subs[topic] = ch
 		h.Hub.Subscribe(topic, ch)
-		
+
 		// Pump per-topic channel into merged channel
 		go func() {
 			for msg := range ch {
 				select {
 				case merged <- msg:
-				default: 
+				default:
 				}
 			}
 		}()
@@ -144,11 +144,11 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, data, readErr := conn.Read(ctx)
 			if readErr != nil {
-				return 
+				return
 			}
 			var cmd wsCommand
 			if json.Unmarshal(data, &cmd) != nil || cmd.Topic == "" {
-				continue 
+				continue
 			}
 			switch cmd.Action {
 			case "subscribe":
@@ -173,7 +173,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				Payload      []byte            `json:"payload"`
 			}
 			if err := json.Unmarshal(data, &envelope); err != nil {
-				continue 
+				continue
 			}
 
 			var rawEvt struct {
@@ -196,7 +196,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				pushSpan.End()
 				continue
 			}
-			
+
 			if err := conn.Write(r.Context(), websocket.MessageText, out); err != nil {
 				pushSpan.End()
 				return

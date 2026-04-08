@@ -2,14 +2,14 @@ package observability
 
 import (
 	"context"
-    "log/slog"
-    "os"
+	"log/slog"
+	"os"
 
-    "github.com/samber/slog-multi"
-    "github.com/samber/slog-sampling"
-    "go.opentelemetry.io/contrib/bridges/otelslog"
-    "go.opentelemetry.io/otel/log/global"
-    "go.opentelemetry.io/otel/trace"
+	slogmulti "github.com/samber/slog-multi"
+	slogsampling "github.com/samber/slog-sampling"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TraceHandler intercepts every log call to inject OpenTelemetry IDs
@@ -30,29 +30,29 @@ func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 
 // NewLogger creates a production-ready logger with component tags and trace support
 func NewLogger(component string, level *slog.LevelVar, isJSON bool) *slog.Logger {
-    opts := &slog.HandlerOptions{
-        Level:     level,
-        AddSource: true,
-    }
+	opts := &slog.HandlerOptions{
+		Level:     level,
+		AddSource: true,
+	}
 
-    var consoleHandler slog.Handler
-    if isJSON {
-        consoleHandler = slog.NewJSONHandler(os.Stdout, opts)
-    } else {
-        consoleHandler = slog.NewTextHandler(os.Stdout, opts)
-    }
+	var consoleHandler slog.Handler
+	if isJSON {
+		consoleHandler = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		consoleHandler = slog.NewTextHandler(os.Stdout, opts)
+	}
 
-    otelHandler := otelslog.NewHandler(component, otelslog.WithLoggerProvider(global.GetLoggerProvider()))
+	otelHandler := otelslog.NewHandler(component, otelslog.WithLoggerProvider(global.GetLoggerProvider()))
 
-    sampler := slogsampling.UniformSamplingOption{
-        Rate: 0.1, // Keep 10% of logs
-    }.NewMiddleware()
+	sampler := slogsampling.UniformSamplingOption{
+		Rate: 0.1, // Keep 10% of logs
+	}.NewMiddleware()
 
-    handler := slogmulti.Fanout(
-        consoleHandler,
-        slogmulti.Pipe(sampler).Handler(otelHandler),
-    )
+	handler := slogmulti.Fanout(
+		consoleHandler,
+		slogmulti.Pipe(sampler).Handler(otelHandler),
+	)
 
-    handler = &TraceHandler{handler}
-    return slog.New(handler).With("component", component)
+	handler = &TraceHandler{handler}
+	return slog.New(handler).With("component", component)
 }

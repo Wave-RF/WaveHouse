@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-
 func unwrapTestMessage(t *testing.T, data []byte) []byte {
 	var envelope struct {
 		TraceHeaders map[string]string `json:"trace_headers"`

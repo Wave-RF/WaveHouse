@@ -64,14 +64,13 @@ func main() {
 	ctx := context.Background()
 	serviceName := "wavehouse-" + Binary
 	otelAddr := os.Getenv("WH_OTEL_ADDR")
-    if otelAddr == "" {
-        otelAddr = "127.0.0.1:4317"
-    }
+	if otelAddr == "" {
+		otelAddr = "127.0.0.1:4317"
+	}
 
-    fmt.Println("DEBUG - Endpoint:", otelAddr)
+	fmt.Println("DEBUG - Endpoint:", otelAddr)
 
-    otelShutdown, err := observability.InitProvider(ctx, "wavehouse-standalone", otelAddr)
-
+	otelShutdown, err := observability.InitProvider(ctx, "wavehouse-standalone", otelAddr)
 	if err != nil {
 		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
 		os.Exit(1)
@@ -84,7 +83,7 @@ func main() {
 	// Slogger.
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(slog.LevelInfo)
-	
+
 	// Create the logger from our observability package
 	logger = observability.NewLogger(serviceName, logLevel, true) // true = JSON output
 	slog.SetDefault(logger)

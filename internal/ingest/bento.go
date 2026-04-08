@@ -21,20 +21,19 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 
-	"go.opentelemetry.io/otel"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"go.opentelemetry.io/otel"
 
 	"go.opentelemetry.io/otel/attribute" // ADD THIS
-    "go.opentelemetry.io/otel/metric"
-
+	"go.opentelemetry.io/otel/metric"
 )
 
 // safeIdentifierRe matches safe SQL identifiers to prevent injection.
 var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
-	bentoMeter                = otel.Meter("wavehouse-bento")
-	bentoEventsProcessed, _   = bentoMeter.Int64Counter(
+	bentoMeter              = otel.Meter("wavehouse-bento")
+	bentoEventsProcessed, _ = bentoMeter.Int64Counter(
 		"wavehouse_bento_events_processed",
 		metric.WithDescription("Total number of events successfully processed by Bento"),
 	)
@@ -123,16 +122,16 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
 				span.RecordError(err)
-				slog.ErrorContext(spanCtx, "clickhouse delete failed", 
-				"table", raw.TableName, 
-				"id", raw.ID, 
-				"error", err,
-			)
-			m.Nak()
+				slog.ErrorContext(spanCtx, "clickhouse delete failed",
+					"table", raw.TableName,
+					"id", raw.ID,
+					"error", err,
+				)
+				m.Nak()
 			} else {
 				// Log the success with all context
-				slog.InfoContext(spanCtx, "successfully deleted record", 
-					"table", raw.TableName, 
+				slog.InfoContext(spanCtx, "successfully deleted record",
+					"table", raw.TableName,
 					"id", raw.ID,
 				)
 				m.Ack()
@@ -154,20 +153,20 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		ackFn := func(ctx context.Context, err error) error {
 			j.inFlight.Add(-1)
-			
+
 			if err != nil {
 				bufferSpan.RecordError(err)
 				slog.ErrorContext(bufferCtx, "batch processing failed", "error", err)
 			} else {
 				slog.InfoContext(bufferCtx, "message batch successfully acknowledged by ClickHouse")
-				
+
 				bentoEventsProcessed.Add(ctx, 1, metric.WithAttributes(
 					attribute.String("table", raw.TableName),
 				))
 			}
-			
-			bufferSpan.End() 
-			
+
+			bufferSpan.End()
+
 			if err != nil {
 				return m.Nak()
 			}

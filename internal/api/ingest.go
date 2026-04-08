@@ -15,10 +15,9 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
 
-
 	"go.opentelemetry.io/otel"
-    "go.opentelemetry.io/otel/attribute"
-    "go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // IngestHandler handles POST /v1/ingest/{table}.
@@ -37,25 +36,25 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *Ing
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	table := chi.URLParam(r, "table")
 
-    // Force the use of the GLOBAL provider
-    tracer := otel.GetTracerProvider().Tracer("internal/api")
+	// Force the use of the GLOBAL provider
+	tracer := otel.GetTracerProvider().Tracer("internal/api")
 
-    ctx, span := tracer.Start(r.Context(), "IngestHandler.Handle",
-        trace.WithAttributes(attribute.String("table", table)),
-    )
-    defer span.End()
+	ctx, span := tracer.Start(r.Context(), "IngestHandler.Handle",
+		trace.WithAttributes(attribute.String("table", table)),
+	)
+	defer span.End()
 
-    // Add a standard log to prove we are inside the span logic
-    slog.InfoContext(ctx, "debug: span started for ingest", "table", table)
+	// Add a standard log to prove we are inside the span logic
+	slog.InfoContext(ctx, "debug: span started for ingest", "table", table)
 
-    r = r.WithContext(ctx)
+	r = r.WithContext(ctx)
 
 	if table == "" {
 		slog.ErrorContext(ctx, "missing table parameter in request")
 		http.Error(w, `{"error":"missing table"}`, http.StatusBadRequest)
 		return
 	}
-	
+
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		slog.WarnContext(ctx, "unknown table requested", "table", table)

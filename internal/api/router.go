@@ -1,8 +1,8 @@
 package api
 
 import (
-	"net/http"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -40,16 +40,16 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(corsMiddleware(deps.CORSOrigins))
 
 	r.Use(func(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // BYPASS: Do not use standard HTTP tracing for long-lived streams
-        if strings.HasPrefix(r.URL.Path, "/v1/stream/") {
-            next.ServeHTTP(w, r)
-            return
-        }
-        // Normal REST tracing for everything else
-        otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
-    })
-})
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// BYPASS: Do not use standard HTTP tracing for long-lived streams
+			if strings.HasPrefix(r.URL.Path, "/v1/stream/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Normal REST tracing for everything else
+			otelhttp.NewMiddleware("wavehouse-api")(next).ServeHTTP(w, r)
+		})
+	})
 
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
@@ -99,19 +99,19 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Delete("/pipes/{name}", deps.Pipes.Delete)
 			}
 			if deps.LogLevel != nil {
-                r.Put("/log-level", func(w http.ResponseWriter, r *http.Request) {
-                    levelStr := r.URL.Query().Get("level")
-                    
-                    var newLevel slog.Level
-                    if err := newLevel.UnmarshalText([]byte(levelStr)); err != nil {
-                        http.Error(w, `{"error":"invalid or missing level (use debug, info, warn, error)"}`, http.StatusBadRequest)
-                        return
-                    }
-                    
-                    deps.LogLevel.Set(newLevel)
-                    w.Write([]byte(`{"status":"success", "level":"` + levelStr + `"}`))
-                })
-            }
+				r.Put("/log-level", func(w http.ResponseWriter, r *http.Request) {
+					levelStr := r.URL.Query().Get("level")
+
+					var newLevel slog.Level
+					if err := newLevel.UnmarshalText([]byte(levelStr)); err != nil {
+						http.Error(w, `{"error":"invalid or missing level (use debug, info, warn, error)"}`, http.StatusBadRequest)
+						return
+					}
+
+					deps.LogLevel.Set(newLevel)
+					w.Write([]byte(`{"status":"success", "level":"` + levelStr + `"}`))
+				})
+			}
 		})
 	})
 

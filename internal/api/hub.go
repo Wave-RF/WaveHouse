@@ -62,12 +62,12 @@ func (h *Hub) Unsubscribe(topic string, ch chan []byte) {
 // Broadcast sends an event to all subscribers of a topic.
 func (h *Hub) Broadcast(topic string, msg *mq.Message) {
 	ctx := msg.Ctx
-    if ctx == nil {
-        ctx = context.Background()
-    }
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-    carrier := make(propagation.MapCarrier)
-    otel.GetTextMapPropagator().Inject(ctx, carrier)
+	carrier := make(propagation.MapCarrier)
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
 
 	envelope := struct {
 		TraceHeaders map[string]string `json:"trace_headers"`

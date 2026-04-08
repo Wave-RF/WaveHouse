@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // slogNATSLogger adapts slog to the natsserver.Logger interface.
@@ -128,14 +128,14 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-        msgCtx := observability.ExtractNATS(context.Background(), m)
+		msgCtx := observability.ExtractNATS(context.Background(), m)
 
-        msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
-        
-        if err := handler(msg); err != nil {
-            _ = m.Nak()
-        }
-    })
+		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
+
+		if err := handler(msg); err != nil {
+			_ = m.Nak()
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("consume: %w", err)
 	}

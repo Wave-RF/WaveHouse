@@ -64,7 +64,7 @@ func main() {
 	serviceName := "wavehouse-" + Binary
 	otelAddr := os.Getenv("WH_OTEL_ADDR")
 	if otelAddr == "" {
-		otelAddr = "127.0.0.1:4317"  // Use your WSL Gateway
+		otelAddr = "127.0.0.1:4317" // Use your WSL Gateway
 	}
 
 	fmt.Println("DEBUG: STANDALONE OTel Initializing with endpoint:", otelAddr)

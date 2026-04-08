@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/Wave-RF/WaveHouse/internal/observability"
 )
 
 // RemoteNATS connects to an external NATS cluster.
@@ -68,14 +68,14 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-        msgCtx := observability.ExtractNATS(context.Background(), m)
+		msgCtx := observability.ExtractNATS(context.Background(), m)
 
-        msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
-        
-        if err := handler(msg); err != nil {
-            _ = m.Nak()
-        }
-    })
+		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
+
+		if err := handler(msg); err != nil {
+			_ = m.Nak()
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("consume: %w", err)
 	}
