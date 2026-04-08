@@ -176,8 +176,6 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				continue 
 			}
 
-			// 2. OLD LOGIC RESTORED: We lost the topic string, so we must peek 
-			// into the nested Payload JSON to extract the table_name
 			var rawEvt struct {
 				TableName string `json:"table_name"`
 			}
@@ -186,7 +184,6 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				evtTopic = "ingest." + rawEvt.TableName
 			}
 
-			// 3. Continue with tracing and policy logic
 			parentCtx := otel.GetTextMapPropagator().Extract(
 				context.Background(),
 				propagation.MapCarrier(envelope.TraceHeaders),
