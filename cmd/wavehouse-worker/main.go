@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,8 +26,15 @@ var (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo)
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	
+	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary,)
+	
 	slog.SetDefault(logger)
+		logger.Info("starting WaveHouse worker", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
+
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
@@ -41,35 +47,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	// OTEL.
 	ctx := context.Background()
 	serviceName := "wavehouse-" + Binary
-	otelAddr := os.Getenv("WH_OTEL_ADDR")
-	if otelAddr == "" {
-		otelAddr = "172.18.240.1:4317" // WSL Gateway
+
+	if cfg.Observability.Enabled {
+		otelShutdown, err := observability.InitProvider(ctx, serviceName, cfg.Observability.OTelAddr)
+		if err != nil {
+			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
+		} else {
+			defer func() {
+				_ = otelShutdown(context.Background())
+			}()
+
+			otelLogger := observability.NewLogger(serviceName, logLevel, true)
+			logger = otelLogger.With(
+				"version", Version,
+				"build_time", BuildTime,
+				"git_commit", GitCommit,
+				"binary", Binary,
+			)
+			slog.SetDefault(logger)
+			logger.Info("observability pipeline established", "endpoint", cfg.Observability.OTelAddr)
+		}
 	}
-
-	fmt.Println("DEBUG - Endpoint:", otelAddr)
-
-	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
-	if err != nil {
-		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
-		os.Exit(1)
-	}
-
-	defer func() {
-		_ = otelShutdown(context.Background())
-	}()
-
-	// Slogger.
-	logLevel := &slog.LevelVar{}
-	logLevel.Set(slog.LevelInfo) // DEFAULT
-
-	// Create the logger from our observability package
-	logger = observability.NewLogger(serviceName, logLevel, true) // true = JSON output
-	slog.SetDefault(logger)
-
-	logger.Info("starting WaveHouse", "version", Version, "binary", Binary)
 
 	// ClickHouse.
 	chConn, err := clickhouse.Open(&clickhouse.Options{

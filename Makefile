@@ -40,7 +40,7 @@ RESET  := \033[0m
         test-sdk test-e2e test-e2e-dev test-e2e-setup test-everything \
         smoke-test mod-tidy-check \
         docker compose-standalone compose-clustered compose-deps deps-wipe \
-        clean release-test \
+        compose-signoz signoz-wipe clean release-test \
         vulncheck security deadcode audit-cgo \
         size-report size-tree size-treemap dep-graph dep-why dep-cut binary-analysis
 
@@ -258,12 +258,19 @@ compose-standalone: ## Start standalone via Docker Compose
 compose-clustered: ## Start clustered via Docker Compose
 	docker compose -f deployments/compose/clustered.yaml up -d
 
-compose-deps: ## Start infrastructure dependencies
+compose-deps: ## Start infrastructure dependencies (Project: wavehouse)
 	docker compose -f deployments/compose/dependencies.yaml up -d
 
-deps-wipe: ## Destroy and recreate dependencies
-	docker compose -f deployments/compose/dependencies.yaml down -v --remove-orphans
-	docker compose -f deployments/compose/dependencies.yaml up -d --force-recreate
+deps-wipe: ## Destroy and recreate dependencies (Project: wavehouse)
+	docker compose -p wavehouse -f deployments/compose/dependencies.yaml down -v --remove-orphans
+	docker compose -p wavehouse -f deployments/compose/dependencies.yaml up -d --force-recreate
+
+compose-signoz: ## Start SigNoz observability stack (Project: monitoring)
+	docker compose -p monitoring -f deployments/compose/signoz.yaml up -d
+
+signoz-wipe: ## Destroy and recreate SigNoz (Project: monitoring)
+	docker compose -p monitoring -f deployments/compose/signoz.yaml down -v --remove-orphans
+	docker compose -p monitoring -f deployments/compose/signoz.yaml up -d --force-recreate
 
 clean: ## Remove bin/, tmp/, data/, dist/
 	@rm -rf bin/ tmp/ data/ dist/
@@ -375,7 +382,7 @@ dep-cut: ## Top cuttable dependencies by transitive impact
 	@echo ""
 	@go run github.com/loov/goda@latest cut ./...:all 2>/dev/null | \
 		awk 'NR==1 { printf "  %-58s %4s %5s %10s\n", "Package", "Deps", "Pkgs", "Size"; next } \
-		     $$2+0 <= 3 { name=$$1; gsub(/github\.com\//, "", name); printf "  %-58s %4s %5s %10s\n", name, $$2, $$3, $$4 }' | \
+			 $$2+0 <= 3 { name=$$1; gsub(/github\.com\//, "", name); printf "  %-58s %4s %5s %10s\n", name, $$2, $$3, $$4 }' | \
 		head -n $$(($(LIMIT) + 1))
 	@echo ""
 	@echo "  $(CYAN)Full output: go run github.com/loov/goda@latest cut ./...:all$(RESET)"

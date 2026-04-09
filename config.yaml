@@ -6,6 +6,10 @@ server:
   cors_allowed_origins:
     - "*"
 
+observability:
+  enabled: true
+  otel_addr: "127.0.0.1:4317"
+  
 clickhouse:
   addr: localhost:9000
   http_port: 8123

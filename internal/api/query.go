@@ -84,7 +84,8 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Execute query with singleflight to protect ClickHouse from thundering herds.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		detachedCtx := context.WithoutCancel(r.Context())
+		queryCtx, cancel := context.WithTimeout(detachedCtx, 30*time.Second)
 		defer cancel()
 		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
 		if err != nil {
