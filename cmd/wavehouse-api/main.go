@@ -35,9 +35,22 @@ var (
 )
 
 func main() {
+	var level slog.Level
+    switch os.Getenv("WH_LOG_LEVEL") {
+    case "DEBUG":
+        level = slog.LevelDebug
+    case "WARN":
+        level = slog.LevelWarn
+    case "ERROR":
+        level = slog.LevelError
+    default:
+        level = slog.LevelInfo 
+    }
+
 	logLevel := &slog.LevelVar{}
-	logLevel.Set(slog.LevelInfo)
-	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	logLevel.Set(level)
+	
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
 
 	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary,)
 
