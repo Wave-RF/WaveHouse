@@ -69,7 +69,7 @@ func InitProvider(ctx context.Context, serviceName, endpoint string) (func(conte
 	tracerProvider := trace.NewTracerProvider(
 		trace.WithBatcher(traceExporter, trace.WithBatchTimeout(time.Second*5)),
 		trace.WithResource(res),
-		trace.WithSampler(trace.TraceIDRatioBased(0.10)), // TRACE SAMPLE RATE
+		// trace.WithSampler(trace.TraceIDRatioBased(0.10)), // TRACE SAMPLE RATE
 	)
 	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)

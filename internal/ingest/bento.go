@@ -1,13 +1,17 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +30,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute" // ADD THIS
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // safeIdentifierRe matches safe SQL identifiers to prevent injection.
@@ -142,12 +147,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Insert case
 		msg := service.NewMessage(m.Data())
-		msg = msg.WithContext(msgCtx)
-
-		tracer := otel.Tracer("wavehouse-worker")
-		bufferCtx, bufferSpan := tracer.Start(msgCtx, "bento_batch_buffer")
+		
+		msg = msg.WithContext(msgCtx) 
 
 		msg.MetaSet("table_name", raw.TableName)
+
+		// Instead of time.Now(), ask NATS exactly when this message arrived in the queue
+		publishedTime := time.Now()
+		if meta, err := m.Metadata(); err == nil {
+			publishedTime = meta.Timestamp
+		}
+		
+		msg.MetaSet("bento_start_time", fmt.Sprintf("%d", publishedTime.UnixMilli()))
 
 		j.inFlight.Add(1)
 
@@ -155,17 +166,16 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			j.inFlight.Add(-1)
 
 			if err != nil {
-				bufferSpan.RecordError(err)
-				slog.ErrorContext(bufferCtx, "batch processing failed", "error", err)
+				// Replaced bufferCtx with msgCtx and removed RecordError
+				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
 			} else {
-				slog.InfoContext(bufferCtx, "message batch successfully acknowledged by ClickHouse")
+				// Replaced bufferCtx with msgCtx
+				slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
 
 				bentoEventsProcessed.Add(ctx, 1, metric.WithAttributes(
 					attribute.String("table", raw.TableName),
 				))
 			}
-
-			bufferSpan.End()
 
 			if err != nil {
 				return m.Nak()
@@ -206,6 +216,90 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 		_, _ = d.js.Publish(ctx, subject, data)
 		slog.WarnContext(msgCtx, "Sent failed message to DLQ", "subject", subject)
 	}
+	return nil
+}
+
+type clickhouseOutput struct {
+	httpClient *http.Client
+	host       string
+	port       string
+	user       string
+	password   string
+	db         string
+}
+
+func (c *clickhouseOutput) Connect(ctx context.Context) error { return nil }
+func (c *clickhouseOutput) Close(ctx context.Context) error  { return nil }
+
+func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	tableName, _ := batch[0].MetaGet("table_name")
+
+	// 1. Fetch the timestamp stamped during jsInput.Read
+	startStr, _ := batch[0].MetaGet("bento_start_time")
+	
+	bentoStartTime := time.Now() // Default fallback
+	
+	// Parse the string into an int64 integer
+	if startMilli, err := strconv.ParseInt(startStr, 10, 64); err == nil {
+		// Convert the integer back into a real Go time.Time object
+		bentoStartTime = time.UnixMilli(startMilli)
+	} else {
+		slog.Warn("Failed to parse bento_start_time int", "startStr", startStr, "error", err)
+	}
+	// 2. Extract original API trace context and setup Tracer
+	parentCtx := batch[0].Context()
+	tracer := otel.Tracer("wavehouse-worker")
+
+	// 3. RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
+	_, bentoSpan := tracer.Start(parentCtx, "bento_queue_wait", trace.WithTimestamp(bentoStartTime))
+	bentoSpan.End(trace.WithTimestamp(time.Now()))
+
+	// 4. START THE CLICKHOUSE SPAN (Sibling to Bento span)
+	reqCtx, chSpan := tracer.Start(parentCtx, "clickhouse_insert")
+	defer chSpan.End()
+
+	var buf bytes.Buffer
+	for _, msg := range batch {
+		data, err := msg.AsBytes()
+		if err != nil {
+			chSpan.RecordError(err)
+			continue
+		}
+		buf.Write(data)
+		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
+	}
+
+	// Building the HTTP request
+	url := fmt.Sprintf("http://%s:%s/?database=%s&query=INSERT+INTO+%s+FORMAT+JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort",
+		c.host, c.port, c.db, tableName)
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", url, &buf)
+	if err != nil {
+		chSpan.RecordError(err)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ClickHouse-User", c.user)
+	req.Header.Set("X-ClickHouse-Key", c.password)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		chSpan.RecordError(err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		err := fmt.Errorf("clickhouse error %d: %s", resp.StatusCode, string(body))
+		chSpan.RecordError(err)
+		return err
+	}
+
 	return nil
 }
 
@@ -261,23 +355,32 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 		); err != nil {
 			registerErr = fmt.Errorf("register Bento DLQ output: %w", err)
 		}
+
+		if err := service.RegisterBatchOutput("clickhouse_json_bridge", service.NewConfigSpec(),
+			func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
+				return &clickhouseOutput{
+					httpClient: &http.Client{Timeout: 15 * time.Second},
+					host:       host,
+					port:       chHTTPPort,
+					user:       chUser,
+					password:   chPassword,
+					db:         chDB,
+				}, service.BatchPolicy{}, 1, nil
+			},
+		); err != nil {
+			registerErr = fmt.Errorf("register ClickHouse output: %w", err)
+		}
 	})
 	if registerErr != nil {
 		return nil, registerErr
 	}
 
-	yamlConfig := fmt.Sprintf(`
+	yamlConfig := `
 input:
   nats_bridge: {}
 output:
   fallback:
-    - http_client:
-        url: 'http://%s:%s/?database=%s&query=INSERT+INTO+${! meta("table_name") }+FORMAT+JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort'
-        verb: POST
-        headers:
-          Content-Type: application/json
-          X-ClickHouse-User: "%s"
-          X-ClickHouse-Key: "%s"
+    - clickhouse_json_bridge:
         batching:
           count: 500
           period: 5s
@@ -285,13 +388,12 @@ output:
             - group_by_value:
                 value: '${! json("table_name") }'
             - mapping: |
-                meta table_name = this.table_name
-                root = this.data | {}
-                root.received_timestamp = this.received_timestamp | deleted()
-            - archive:
-                format: lines
+                meta bento_start_time = meta("bento_start_time")
+                meta table_name = meta("table_name")
+                root = this.data
+                root.received_timestamp = deleted()
     - nats_dlq_bridge: {}
-`, host, chHTTPPort, chDB, chUser, chPassword)
+`
 
 	builder := service.NewStreamBuilder()
 	builder.SetLogger(logger)
