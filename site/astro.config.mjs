@@ -31,12 +31,43 @@ mermaid.initialize({ startOnLoad: true, theme });
 			customCss: ['./src/styles/custom.css'],
 			sidebar: [
 				{ label: 'Home', link: '/' },
-				{ label: 'Architecture', slug: 'architecture' },
-				{ label: 'API Reference', slug: 'api' },
-				{ label: 'Configuration', slug: 'configuration' },
-				{ label: 'Deployment', slug: 'deployment' },
-				{ label: 'Development', slug: 'development' },
-				{ label: 'TypeScript SDK', slug: 'sdk' },
+				{ label: 'Getting Started', slug: 'getting-started' },
+				{
+					label: 'Guides',
+					items: [
+						{ label: 'Architecture', slug: 'architecture' },
+						{ label: 'API Reference', slug: 'api' },
+						{ label: 'TypeScript SDK', slug: 'sdk' },
+					],
+				},
+				{
+					label: 'Operations',
+					items: [
+						{ label: 'Configuration', slug: 'configuration' },
+						{ label: 'Deployment', slug: 'deployment' },
+					],
+				},
+				{
+					label: 'Contributing',
+					items: [
+						{ label: 'Development', slug: 'development' },
+						{
+							label: 'Contributing Guide',
+							link: 'https://github.com/Wave-RF/WaveHouse/blob/main/CONTRIBUTING.md',
+							attrs: { target: '_blank', rel: 'noopener' },
+						},
+						{
+							label: 'Security Policy',
+							link: 'https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md',
+							attrs: { target: '_blank', rel: 'noopener' },
+						},
+						{
+							label: 'Changelog',
+							link: 'https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md',
+							attrs: { target: '_blank', rel: 'noopener' },
+						},
+					],
+				},
 			],
 			components: {
 				PageSidebar: './src/components/overrides/PageSidebar.astro',

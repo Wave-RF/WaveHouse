@@ -1,5 +1,7 @@
 # Development Guide
 
+Everything you need to build, test, lint, and contribute to WaveHouse — from first-clone to hot-reload dev server to full end-to-end SDK tests. If you're only trying the product, start with the [Getting Started](getting-started.md) guide instead.
+
 ## Prerequisites
 
 - **Go 1.25+** — [Install Go](https://go.dev/dl/)

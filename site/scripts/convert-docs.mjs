@@ -17,41 +17,47 @@ const CONTENT_DIR = join(import.meta.dirname, '..', 'src', 'content', 'docs');
 const PUBLIC_MD_DIR = join(import.meta.dirname, '..', 'public', 'md');
 
 const DOC_META = {
-	'api.md': {
-		title: 'API Reference',
+	'getting-started.md': {
+		title: 'Getting Started',
 		description:
-			'All endpoints, authentication, request/response formats for the WaveHouse API.',
-		order: 3,
+			'Run WaveHouse locally in five minutes — ingest, query, and subscribe to real-time events.',
+		order: 2,
 	},
 	'architecture.md': {
 		title: 'Architecture',
 		description:
 			'System design, data flows, internal packages, and technology stack.',
-		order: 2,
+		order: 3,
 	},
-	'configuration.md': {
-		title: 'Configuration',
+	'api.md': {
+		title: 'API Reference',
 		description:
-			'Full configuration reference — YAML settings and environment variables.',
+			'All endpoints, authentication, request/response formats for the WaveHouse API.',
 		order: 4,
-	},
-	'deployment.md': {
-		title: 'Deployment',
-		description:
-			'Standalone, clustered, Docker, releases, health checks, and schema setup.',
-		order: 5,
-	},
-	'development.md': {
-		title: 'Development',
-		description:
-			'Building, testing, linting, project structure, and contribution workflow.',
-		order: 6,
 	},
 	'sdk.md': {
 		title: 'TypeScript SDK',
 		description:
 			'Zero-dependency client SDK — query builder, real-time streaming, codegen.',
+		order: 5,
+	},
+	'configuration.md': {
+		title: 'Configuration',
+		description:
+			'Full configuration reference — YAML settings and environment variables.',
+		order: 6,
+	},
+	'deployment.md': {
+		title: 'Deployment',
+		description:
+			'Standalone, clustered, Docker, releases, health checks, and schema setup.',
 		order: 7,
+	},
+	'development.md': {
+		title: 'Development',
+		description:
+			'Building, testing, linting, project structure, and contribution workflow.',
+		order: 8,
 	},
 };
 

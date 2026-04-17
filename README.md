@@ -5,125 +5,83 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**The Open-Source Real-Time API Gateway for ClickHouse.**
+**The open-source real-time API gateway for ClickHouse.**
 
-WaveHouse is a high-performance, Go-based gateway designed to sit entirely in front of ClickHouse. It acts as the exclusive entry and exit point for your analytics data, solving the hardest parts of high-scale data ingestion and real-time querying so ClickHouse can focus on what it does best: fast analytics.
+WaveHouse is a high-performance Go gateway that sits in front of ClickHouse and acts as the exclusive entry and exit point for your analytics data. It solves the hardest parts of high-scale data ingestion and real-time querying so ClickHouse can focus on what it does best — fast analytics.
 
-If you are building user-facing analytics, **WaveHouse acts like Supabase for ClickHouse**—or an **open-source Tinybird** that pushes data to your frontend in real time over SSE and WebSockets, not just via pull-based REST queries.
+If you're building user-facing analytics, **WaveHouse is like Supabase for ClickHouse** — or an open-source Tinybird that pushes data to the frontend in real time over SSE and WebSockets, not just via pull-based REST.
 
-## ✨ Why WaveHouse?
+📖 **[Read the full documentation at docs.wavehouse.dev](https://docs.wavehouse.dev)**
 
-ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend applications comes with sharp edges. You typically have to build custom APIs, manage Kafka queues to prevent "too many parts" errors during insertion, and write complex replacing logic for deduplication. WaveHouse abstracts all of this away into a single, deployable binary so you stop interacting with ClickHouse directly.
+## ✨ Features
 
-* **📋 Schema-Aware Validation:** WaveHouse discovers your ClickHouse table schemas automatically via `system.columns` and validates every ingest payload against the real schema — unknown fields are rejected, types are checked, and nullable constraints are enforced. Bring Your Own Schema: you define tables in ClickHouse, WaveHouse enforces them.
-* **📥 Asynchronous Buffered Ingestion:** Never drop a packet. WaveHouse writes incoming data to a highly durable Write-Ahead Log (WAL) and returns `200 OK` instantly, batching inserts to ClickHouse in the background.
-* **👯 Optional Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations. Enable it when you need it, skip it when you don't.
-* **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
-* **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
-* **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
-* **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
-* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/tables/{table}/query`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
-* **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
-* **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
+- **📋 Schema-aware validation** — Discovers your ClickHouse table schemas via `system.columns` and validates every ingest payload: unknown fields rejected, types checked, null constraints enforced.
+- **📥 Async buffered ingest** — Never drop a packet. Writes land in a durable NATS JetStream WAL and return `200 OK` instantly; a background worker batch-flushes to ClickHouse.
+- **👯 Optional exact-once dedup** — Drop duplicate payloads before they reach ClickHouse, saving expensive merges. Enable it when you need it.
+- **⚡ Two-tier query caching** — L1 Ristretto (in-process) + L2 Redis (shared) with singleflight coalescing — dashboards survive thundering herds.
+- **🌊 Zero-latency real-time push** — Events are broadcast to SSE/WebSocket subscribers *before* they're flushed to ClickHouse. Gap-fill from JetStream history for late-connecting clients.
+- **🛡️ Dead Letter Queue** — Failed batch inserts go to a dedicated DLQ stream instead of blocking retries. Inspect depth via `GET /v1/dlq/stats`.
+- **🔐 Hasura-style access control** — Per-table, per-role column and row-level policies with JWT claim templating.
+- **🔍 Structured queries** — Type-safe query AST at `POST /v1/tables/{table}/query` — schema validation, permission enforcement, timestamp bucketing, aggregations.
+- **🔗 Named pipes** — Pre-defined SQL templates (Tinybird-style) with parameter binding, role restrictions, and caching.
+- **📦 TypeScript SDK** — `@wavehouse/sdk`: zero-dependency client with type-safe query builder, live queries, real-time SSE streaming, and codegen from ClickHouse schemas.
 
-## 🚀 Deployment Modes
+## 🚀 Deployment modes
 
-WaveHouse is designed using a clean architecture that allows it to run anywhere, from a laptop to a multi-region cloud.
+WaveHouse runs anywhere — from a laptop to a multi-region cloud.
 
-| Mode | Binaries | External Dependencies | Use Case |
+| Mode | Binaries | External dependencies | Use case |
 | ---- | -------- | --------------------- | -------- |
 | **Standalone** | `wavehouse` | ClickHouse only | Local dev, single-server |
 | **Clustered** | `wavehouse-api` + `wavehouse-worker` | ClickHouse, NATS, Redis, ScyllaDB | Horizontal scaling, production |
 
-## 🛠️ Quick Start (Standalone)
-
-The easiest way to see WaveHouse in action. Requires Docker.
+## 🛠️ 30-second quickstart
 
 ```bash
-# Clone the repository
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
-
-# Start ClickHouse and WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
-# Create a table in ClickHouse (Bring Your Own Schema)
+# Create a table in ClickHouse — WaveHouse discovers it automatically
 docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   clickhouse-client --query "
     CREATE TABLE IF NOT EXISTS clicks (
-      page String,
-      button String,
-      score Float64,
+      page String, button String, score Float64,
       received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
-    ) ENGINE = MergeTree()
-    ORDER BY (page)
+    ) ENGINE = MergeTree() ORDER BY (page)
   "
 
-# Ingest data (no auth required by default)
+# Ingest → query → stream
 curl -s -X POST http://localhost:8080/v1/ingest/clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
-# → {"ok":true}
 
-# Check discovered schemas
-curl -s http://localhost:8080/v1/schema | jq
-
-# Query data (wait ~5s for the batch flush to ClickHouse)
 curl -s -X POST http://localhost:8080/v1/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
-# Open a real-time SSE stream (Ctrl+C to stop)
 curl -N http://localhost:8080/v1/stream/sse
 ```
 
-WaveHouse is now accepting API requests on `http://localhost:8080`.
+Full walkthrough: **[Getting Started](https://docs.wavehouse.dev/getting-started/)**.
 
-## 🚀 Quick Start (Clustered)
-
-The full distributed stack with load balancing, NATS, Redis, and ScyllaDB:
-
-```bash
-# Start everything: Caddy LB, ClickHouse, NATS, Redis, ScyllaDB, 2x API, 2x worker
-docker compose -f deployments/compose/cluster.yaml up -d
-
-# Create your tables in ClickHouse, then WaveHouse discovers them automatically.
-# See docs/deployment.md for full setup instructions.
-```
-
-The API is available behind Caddy at `http://localhost` (port 80).
-
-## 💻 Local Development
-
-For building and testing WaveHouse locally with hot-reload:
-
-```bash
-# Install dependencies
-go mod download
-
-# Start ClickHouse (standalone mode needs nothing else)
-docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
-
-# Create your tables in ClickHouse, then:
-make dev
-```
-
-WaveHouse will automatically recompile and restart whenever you save a `.go` file.
-
-For clustered local development (run API + worker against external deps), see [docs/development.md](docs/development.md).
-
-## 🤝 Contributing
-
-We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to structure your code and run the integration test suites.
+For the clustered stack (Caddy LB + 2× API + 2× worker + NATS + Redis + ScyllaDB), see the [Deployment guide](https://docs.wavehouse.dev/deployment/#clustered-distributed).
 
 ## 📖 Documentation
 
-* [Architecture](docs/architecture.md) — System design, data flows, and package overview
-* [API Reference](docs/api.md) — All endpoints, authentication, request/response formats
-* [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/deployment.md) — Standalone, clustered, Docker, and release guide
-* [Development](docs/development.md) — Building, testing, linting, and project structure
-* [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
+All docs live at **[docs.wavehouse.dev](https://docs.wavehouse.dev)**. Source files live in [`docs/`](docs/).
+
+- [Getting Started](docs/getting-started.md) — five-minute quickstart
+- [Architecture](docs/architecture.md) — system design, data flows, package overview
+- [API Reference](docs/api.md) — endpoints, auth, request/response formats
+- [TypeScript SDK](docs/sdk.md) — client library and codegen
+- [Configuration](docs/configuration.md) — YAML + `WH_*` environment variables
+- [Deployment](docs/deployment.md) — standalone, clustered, Docker, releases
+- [Development](docs/development.md) — building, testing, linting, project structure
+
+## 🤝 Contributing
+
+Issues, pull requests, and feedback are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and the [Development guide](docs/development.md) for local setup. Security reports: see [SECURITY.md](SECURITY.md).
 
 ## 📜 License
 
