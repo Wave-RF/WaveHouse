@@ -190,21 +190,22 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 }
 
 func filterToSQL(f Filter) (string, []any) {
+	val := coerceFilterValue(f.Value)
 	switch strings.ToLower(f.Op) {
 	case "eq":
-		return f.Column + " = ?", []any{f.Value}
+		return f.Column + " = ?", []any{val}
 	case "neq":
-		return f.Column + " != ?", []any{f.Value}
+		return f.Column + " != ?", []any{val}
 	case "gt":
-		return f.Column + " > ?", []any{f.Value}
+		return f.Column + " > ?", []any{val}
 	case "gte":
-		return f.Column + " >= ?", []any{f.Value}
+		return f.Column + " >= ?", []any{val}
 	case "lt":
-		return f.Column + " < ?", []any{f.Value}
+		return f.Column + " < ?", []any{val}
 	case "lte":
-		return f.Column + " <= ?", []any{f.Value}
+		return f.Column + " <= ?", []any{val}
 	case "like":
-		return f.Column + " LIKE ?", []any{f.Value}
+		return f.Column + " LIKE ?", []any{val}
 	case "in":
 		if vals, ok := f.Value.([]any); ok && len(vals) > 0 {
 			placeholders := strings.Repeat("?,", len(vals))
@@ -215,6 +216,25 @@ func filterToSQL(f Filter) (string, []any) {
 	default:
 		return "", nil
 	}
+}
+
+// coerceFilterValue converts string values that look like RFC3339 timestamps
+// to ClickHouse-compatible DateTime strings preserving sub-second precision.
+// The clickhouse-go driver's time.Time formatting uses toDateTime() (second
+// precision), which loses milliseconds needed for DateTime64 cursor comparisons.
+// Returning a formatted string lets ClickHouse parse it with full precision.
+func coerceFilterValue(v any) any {
+	s, ok := v.(string)
+	if !ok {
+		return v
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.UTC().Format("2006-01-02 15:04:05.999999999")
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format("2006-01-02 15:04:05")
+	}
+	return v
 }
 
 // resolveTimeValue parses an RFC3339 timestamp or a relative duration like "1h", "30m".

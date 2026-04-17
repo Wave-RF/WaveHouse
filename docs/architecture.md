@@ -107,9 +107,10 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **validation.go** — `Validate(schema, data)` checks incoming JSON against the discovered schema: unknown fields, type compatibility, missing required columns, null handling.
 - **discovery_test.go** — Unit tests for validation logic.
 
-### `ingest/` — Buffering, DLQ & Sweeping
+### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **buffer.go** — `BufferConsumer` subscribes to `ingest.>`, groups events by table, and performs per-table batch inserts to ClickHouse using only the columns provided in the event data (omitted columns use ClickHouse defaults). JSON `float64` values are coerced to the correct Go types (e.g., `int32`, `uint64`) before insertion. Failed batches are sent to the DLQ (`dlq.{table}` NATS subject) when DLQ is enabled.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`.
+- **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
 ### `mq/` — Message Queue
@@ -146,13 +147,13 @@ Client POST /v1/ingest/{table}
   → 200 OK returned immediately
   → (If NATS stream is full: 503 + Retry-After header)
 
-BufferConsumer (async goroutine):
-  ← Subscribe to ingest.>
-  → Group events by table_name
-  → For each table: batch INSERT using only provided columns (CH defaults fill the rest)
-  → Coerce JSON float64 values to correct Go types for the clickhouse-go driver
+Bento ingest pipeline (StartIngestWorker):
+  ← JetStream pull consumer (buffer-consumer) on ingest.>
+  → Validate table name against safeIdentifierRe
+  → Batch events per table, bulk INSERT to ClickHouse
+  → Delete actions handled inline (chConn.Exec)
   → On success: Ack messages
-  → On failure: publish to DLQ (dlq.{table}), then Ack to prevent infinite retry
+  → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
 
 Active Sweeper (async goroutine, every 60s):
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)

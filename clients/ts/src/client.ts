@@ -1,194 +1,171 @@
-// Main WaveHouse client class.
+import type { ClientConfig, Database, Result, HttpContext, StreamOptions } from './types.js';
+import { TableRef } from './table.js';
+import { PipeRef, PipesNamespace } from './pipes.js';
+import { sql } from './sql.js';
+import { SchemaNamespace } from './schema.js';
+import { PolicyNamespace } from './policy.js';
+import { DLQNamespace } from './dlq.js';
+import { SysNamespace } from './sys.js';
+import { StreamController } from './stream/controller.js';
+import { SSETransport } from './stream/sse.js';
+import { WSTransport } from './stream/ws.js';
+import { SharedWSManager } from './stream/ws-manager.js';
 
-import type {
-  WaveHouseConfig,
-  TableSchema,
-  StructuredQuery,
-  QueryResult,
-  NamedPipe,
-  LiveQueryOptions,
-} from "./types.js";
-import { request, queryRequest } from "./fetch.js";
-import { subscribe, type SSEOptions, type SSESubscription } from "./sse.js";
-import { QueryBuilder, query } from "./query-builder.js";
-import { liveQuery, type LiveQueryHandle } from "./live.js";
+type TableName<DB> = DB extends Database ? Extract<keyof DB, string> : string;
+type RowType<DB, T extends string> = DB extends Database
+  ? T extends keyof DB
+    ? DB[T]
+    : Record<string, unknown>
+  : Record<string, unknown>;
 
-/** WaveHouse client SDK. */
-export class WaveHouseClient {
-  private readonly config: WaveHouseConfig;
+export class WaveHouseClient<DB extends Database = Database> {
+  /** @internal */
+  readonly _ctx: HttpContext;
+  private readonly _config: ClientConfig<DB>;
+  /** @internal Shared WebSocket manager for multiplexed streams. */
+  private _wsManager: SharedWSManager | null = null;
 
-  constructor(config: WaveHouseConfig) {
-    if (!config.baseUrl) throw new Error("baseUrl is required");
-    // Strip trailing slash.
-    this.config = {
-      ...config,
-      baseUrl: config.baseUrl.replace(/\/+$/, ""),
+  /** Schema introspection namespace. */
+  readonly schema: SchemaNamespace;
+  /** Access control policy namespace (admin). */
+  readonly policy: PolicyNamespace;
+  /** Dead Letter Queue namespace. */
+  readonly dlq: DLQNamespace;
+  /** System health/readiness namespace. */
+  readonly sys: SysNamespace;
+  /** Named query pipes admin namespace. */
+  readonly pipes: PipesNamespace;
+
+  constructor(config: ClientConfig<DB>) {
+    this._config = config;
+    this._ctx = {
+      baseURL: config.baseURL.replace(/\/+$/, ''),
+      auth: config.auth,
+      options: {
+        maxRetries: config.options?.maxRetries ?? 2,
+      },
     };
+
+    this.schema = new SchemaNamespace(this._ctx);
+    this.policy = new PolicyNamespace(this._ctx);
+    this.dlq = new DLQNamespace(this._ctx, (table, opts) => this._createStream(table, opts));
+    this.sys = new SysNamespace(this._ctx);
+    this.pipes = new PipesNamespace(this._ctx);
   }
 
-  // --- Schema Discovery ---
-
-  /** List all known table schemas. */
-  async schemas(): Promise<TableSchema[]> {
-    const { data } = await request<TableSchema[]>(this.config, "/v1/schema");
-    return data;
-  }
-
-  /** Get schema for a specific table. */
-  async schema(table: string): Promise<TableSchema> {
-    const { data } = await request<TableSchema>(
-      this.config,
-      `/v1/schema/${encodeURIComponent(table)}`
-    );
-    return data;
-  }
-
-  /** Force schema refresh. */
-  async refreshSchema(): Promise<void> {
-    await request(this.config, "/v1/schema/refresh", { method: "POST" });
-  }
-
-  // --- Ingestion ---
-
-  /** Ingest a single record into a table. */
-  async ingest<T extends Record<string, unknown>>(
-    table: string,
-    data: T
-  ): Promise<void> {
-    await request(this.config, `/v1/ingest/${encodeURIComponent(table)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
-  }
-
-  // --- Queries ---
-
-  /** Execute a raw SQL query. */
-  async rawQuery<T = Record<string, unknown>>(
-    sql: string
-  ): Promise<QueryResult<T>> {
-    return queryRequest<T>(this.config, "/v1/query", { sql });
-  }
-
-  /** Execute a structured query against a table. */
-  async query<T = Record<string, unknown>>(
-    table: string,
-    sq: StructuredQuery
-  ): Promise<QueryResult<T>> {
-    return queryRequest<T>(
-      this.config,
-      `/v1/tables/${encodeURIComponent(table)}/query`,
-      sq
+  /** Get a table reference for building queries, inserts, and streams. */
+  from<T extends TableName<DB>>(table: T): TableRef<RowType<DB, T>> {
+    return new TableRef<RowType<DB, T>>(
+      this._ctx,
+      table,
+      (t, opts) => this._createStream<RowType<DB, T>>(t, opts),
     );
   }
 
-  /** Create a type-safe query builder for a table. */
-  queryBuilder<TColumns extends string = string>(): QueryBuilder<TColumns> {
-    return query<TColumns>();
-  }
-
-  /** Execute a query builder against a table. */
-  async exec<T = Record<string, unknown>, TColumns extends string = string>(
-    table: string,
-    builder: QueryBuilder<TColumns>
-  ): Promise<QueryResult<T>> {
-    return this.query<T>(table, builder.build());
-  }
-
-  // --- Named Pipes ---
-
-  /** Execute a named query pipe. */
-  async pipe<T = Record<string, unknown>>(
+  /** Get a reference to a named query pipe. PromiseLike — `await` it to execute. */
+  pipe<Row = Record<string, unknown>>(
     name: string,
-    params?: Record<string, unknown>
-  ): Promise<QueryResult<T>> {
-    const qs = params
-      ? "?" + new URLSearchParams(
-          Object.entries(params).map(([k, v]) => [k, String(v)])
-        ).toString()
-      : "";
-    return queryRequest<T>(
-      this.config,
-      `/v1/pipes/${encodeURIComponent(name)}${qs}`
+    params?: Record<string, unknown>,
+  ): PipeRef<Row> {
+    return new PipeRef<Row>(this._ctx, name, params, (t, opts) =>
+      this._createStream<Row>(t, opts),
     );
   }
 
-  // --- Streaming ---
-
-  /** Subscribe to real-time SSE events. */
-  subscribe(options: SSEOptions): SSESubscription {
-    return subscribe(this.config, options);
+  /** Execute a raw SQL query against ClickHouse. Requires admin/service role when policy is active. */
+  sql<Row = Record<string, unknown>>(
+    query: string,
+    params?: unknown[],
+    opts?: { signal?: AbortSignal },
+  ): Promise<Result<Row[]>> {
+    return sql<Row>(this._ctx, query, params, opts);
   }
 
-  // --- Live Queries ---
-
-  /**
-   * Execute a structured query and keep it live via SSE.
-   * Incrementable aggregations (count, sum, min, max) update in real-time.
-   * Decomposable aggregations (avg) recompute from tracked state.
-   * Non-incrementable aggregations (median, quantile) trigger periodic re-polling.
-   */
-  async live<T = Record<string, unknown>>(
+  /** @internal Create a stream for the given table/topic. */
+  private _createStream<T = Record<string, unknown>>(
     table: string,
-    sq: StructuredQuery,
-    onChange: (result: QueryResult<T>) => void,
-    options?: LiveQueryOptions
-  ): Promise<LiveQueryHandle<T>> {
-    return liveQuery<T>(this.config, table, sq, onChange, options);
-  }
+    opts?: StreamOptions,
+  ): StreamController<T> {
+    const transportType = opts?.transport ?? this._config.transport ?? 'auto';
+    const topic = `ingest.${table}`;
 
-  // --- Admin ---
+    // The Smart 'auto' Logic
+    let useWS = transportType === 'ws';
 
-  /** Get current access control policy. */
-  async getPolicy(): Promise<unknown> {
-    const { data } = await request(this.config, "/v1/admin/policy");
-    return data;
-  }
-
-  /** Update access control policy. */
-  async setPolicy(policy: unknown): Promise<void> {
-    await request(this.config, "/v1/admin/policy", {
-      method: "PUT",
-      body: JSON.stringify(policy),
-    });
-  }
-
-  /** List named pipes (admin). */
-  async listPipes(): Promise<NamedPipe[]> {
-    const { data } = await request<NamedPipe[]>(
-      this.config,
-      "/v1/admin/pipes"
-    );
-    return data;
-  }
-
-  /** Create or update a named pipe (admin). */
-  async setPipe(name: string, pipe: Omit<NamedPipe, "name">): Promise<void> {
-    await request(
-      this.config,
-      `/v1/admin/pipes/${encodeURIComponent(name)}`,
-      { method: "PUT", body: JSON.stringify(pipe) }
-    );
-  }
-
-  /** Delete a named pipe (admin). */
-  async deletePipe(name: string): Promise<void> {
-    await request(
-      this.config,
-      `/v1/admin/pipes/${encodeURIComponent(name)}`,
-      { method: "DELETE" }
-    );
-  }
-
-  // --- Health ---
-
-  /** Check server health. */
-  async health(): Promise<boolean> {
-    try {
-      await request(this.config, "/health");
-      return true;
-    } catch {
-      return false;
+    if (transportType === 'auto') {
+      if (this._ctx.auth ) {
+        // Authenticated streams ALWAYS use WS for multiplexing
+        useWS = true;
+      } else if (typeof EventSource === 'undefined') {
+        // Node.js environments lack native EventSource. Fallback to WS safely.
+        useWS = true;
+      } else {
+        // Browsers/Deno/Bun have EventSource. Use SSE for public streams.
+        useWS = false;
+      }
     }
+
+    if (useWS) {
+      // SAFETY GUARD: Check if WebSocket actually exists before using it
+      if (typeof WebSocket === 'undefined') {
+        throw new Error(
+          "[WaveHouse SDK] Native WebSocket is not available in this environment. " +
+          "If you are using Node.js, please upgrade to Node.js 22+ or provide a global polyfill (e.g., `globalThis.WebSocket = require('ws')`)."
+        );
+      }
+
+      // Use SharedWSManager for multiplexed WebSocket connections.
+      if (!this._wsManager) {
+        this._wsManager = new SharedWSManager(this._ctx.baseURL, this._ctx.auth);
+      }
+      const mgr = this._wsManager;
+      const transport: import('./stream/controller.js').StreamTransport<T> = {
+        onEvent: null,
+        onStatus: null,
+        onError: null,
+        connect() {
+          // Subscribe to the manager; forward events to the transport callbacks.
+          const unsub = mgr.subscribe<T>(
+            topic,
+            (event) => this.onEvent?.(event),
+            (status) => this.onStatus?.(status),
+            (error) => this.onError?.(error),
+          );
+          // Store unsubscribe so disconnect() can call it.
+          (this as any)._unsub = unsub;
+        },
+        disconnect() {
+          (this as any)._unsub?.();
+        },
+      };
+      const controller = new StreamController<T>(transport);
+      if (opts?.signal) controller.attachSignal(opts.signal);
+      return controller;
+    }
+
+    // Since we know useWS is false, we must be using SSE.
+    // Double-check EventSource just in case the user explicitly forced transport: 'sse' in Node.js
+    if (typeof EventSource === 'undefined') {
+      throw new Error(
+        "[WaveHouse SDK] Native EventSource is not available in this environment. " +
+        "Please use `transport: 'ws'` or provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`)."
+      );
+    }
+
+    const transport = new SSETransport<T>({
+      baseURL: this._ctx.baseURL,
+      topic,
+      since: opts?.since,
+    });
+    const controller = new StreamController<T>(transport);
+    if (opts?.signal) controller.attachSignal(opts.signal);
+    return controller;
   }
+}
+
+/** Create a new WaveHouse client instance. */
+export function createClient<DB extends Database = Database>(
+  config: ClientConfig<DB>,
+): WaveHouseClient<DB> {
+  return new WaveHouseClient(config);
 }

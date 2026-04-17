@@ -18,8 +18,8 @@ func TestBindParams_AllSupplied(t *testing.T) {
 	}
 	sql, params, err := BindParams(q, map[string]any{"page": "/home", "min_count": 10})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM clicks WHERE page = ? AND count > ?", sql)
-	assert.Equal(t, []any{"/home", 10}, params)
+	assert.Equal(t, "SELECT * FROM clicks WHERE page = '/home' AND count > 10", sql)
+	assert.Nil(t, params)
 }
 
 func TestBindParams_MissingRequired(t *testing.T) {
@@ -41,8 +41,8 @@ func TestBindParams_DefaultApplied(t *testing.T) {
 	}
 	sql, params, err := BindParams(q, map[string]any{})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM clicks LIMIT ?", sql)
-	assert.Equal(t, []any{100}, params)
+	assert.Equal(t, "SELECT * FROM clicks LIMIT 100", sql)
+	assert.Nil(t, params)
 }
 
 func TestBindParams_MultipleOccurrences(t *testing.T) {
@@ -53,8 +53,8 @@ func TestBindParams_MultipleOccurrences(t *testing.T) {
 	}
 	sql, params, err := BindParams(q, map[string]any{"val": "x"})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM t WHERE a = ? OR b = ?", sql)
-	assert.Equal(t, []any{"x", "x"}, params)
+	assert.Equal(t, "SELECT * FROM t WHERE a = 'x' OR b = 'x'", sql)
+	assert.Nil(t, params)
 }
 
 func TestBindParams_NoParameters(t *testing.T) {
@@ -74,8 +74,8 @@ func TestBindParams_OptionalWithDefault_Supplied(t *testing.T) {
 	}
 	sql, params, err := BindParams(q, map[string]any{"limit": 50})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM clicks LIMIT ?", sql)
-	assert.Equal(t, []any{50}, params)
+	assert.Equal(t, "SELECT * FROM clicks LIMIT 50", sql)
+	assert.Nil(t, params)
 }
 
 func TestBindParams_PlaceholderNotInSQL(t *testing.T) {
@@ -88,6 +88,82 @@ func TestBindParams_PlaceholderNotInSQL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM clicks", sql)
 	assert.Empty(t, params, "unused param should not generate positional args")
+}
+
+func TestBindParams_InlineDefault_NoFormalParam(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL: "SELECT page, count() FROM clicks GROUP BY page LIMIT {{limit:10}}",
+	}
+	sql, params, err := BindParams(q, map[string]any{})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT page, count() FROM clicks GROUP BY page LIMIT 10", sql)
+	assert.Nil(t, params)
+}
+
+func TestBindParams_InlineDefault_SuppliedOverrides(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL: "SELECT * FROM clicks LIMIT {{limit:10}}",
+	}
+	sql, params, err := BindParams(q, map[string]any{"limit": float64(5)})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM clicks LIMIT 5", sql)
+	assert.Nil(t, params)
+}
+
+func TestBindParams_InlineNoDefault_MissingRequired(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL: "SELECT * FROM clicks WHERE page = {{page}}",
+	}
+	_, _, err := BindParams(q, map[string]any{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "missing required parameter: page")
+}
+
+func TestBindParams_InlineMultipleParams(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL: "SELECT * FROM clicks WHERE country = {{country:US}} LIMIT {{limit:10}}",
+	}
+	sql, params, err := BindParams(q, map[string]any{})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM clicks WHERE country = 'US' LIMIT 10", sql)
+	assert.Nil(t, params)
+}
+
+func TestBindParams_StringEscaping(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL:        "SELECT * FROM t WHERE name = {{name}}",
+		Parameters: []ParamDef{{Name: "name", Type: "string", Required: true}},
+	}
+	sql, _, err := BindParams(q, map[string]any{"name": "O'Brien"})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE name = 'O''Brien'", sql)
+}
+
+func TestBindParams_BooleanParam(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL:        "SELECT * FROM t WHERE active = {{active}}",
+		Parameters: []ParamDef{{Name: "active", Type: "boolean", Required: true}},
+	}
+	sql, _, err := BindParams(q, map[string]any{"active": true})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE active = 1", sql)
+}
+
+func TestBindParams_NilParam(t *testing.T) {
+	t.Parallel()
+	q := &NamedQuery{
+		SQL:        "SELECT * FROM t WHERE col = {{val}}",
+		Parameters: []ParamDef{{Name: "val", Type: "string", Default: nil}},
+	}
+	sql, _, err := BindParams(q, map[string]any{})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE col = NULL", sql)
 }
 
 func TestMemoryStore_GetListPut(t *testing.T) {

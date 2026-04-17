@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Hub manages broadcast fan-out from a single MQ subscription to N clients.
@@ -35,28 +39,101 @@ func (h *Hub) Subscribe(topic string, ch chan []byte) {
 func (h *Hub) Unsubscribe(topic string, ch chan []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if subs, ok := h.subscribers[topic]; ok {
-		delete(subs, ch)
-		close(ch)
-		if len(subs) == 0 {
-			delete(h.subscribers, topic)
+	subs, ok := h.subscribers[topic]
+	if !ok {
+		return
+	}
+	if _, found := subs[ch]; !found {
+		return
+	}
+	delete(subs, ch)
+	if len(subs) == 0 {
+		delete(h.subscribers, topic)
+	}
+	// Only close the channel if it is no longer registered under any topic.
+	for _, s := range h.subscribers {
+		if _, exists := s[ch]; exists {
+			return
 		}
 	}
+	close(ch)
 }
 
 // Broadcast sends an event to all subscribers of a topic.
-func (h *Hub) Broadcast(topic string, evt ingest.EventMessage) {
-	data, err := json.Marshal(evt)
+func (h *Hub) Broadcast(topic string, msg *mq.Message) {
+	ctx := msg.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	carrier := make(propagation.MapCarrier)
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
+	envelope := struct {
+		TraceHeaders map[string]string `json:"trace_headers"`
+		Payload      []byte            `json:"payload"`
+	}{
+		TraceHeaders: carrier,
+		Payload:      msg.Data, // This is the raw ingest.EventMessage JSON
+	}
+
+	data, err := json.Marshal(envelope)
 	if err != nil {
 		return
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+
+	sent := make(map[chan []byte]struct{})
+
+	// Exact match.
 	for ch := range h.subscribers[topic] {
 		select {
 		case ch <- data:
 		default:
-			// Drop if client is slow.
 		}
 	}
+
+	// Wildcard match: iterate all subscriber patterns.
+	for pattern, chs := range h.subscribers {
+		if pattern == topic {
+			continue // already handled above
+		}
+		if !matchTopic(pattern, topic) {
+			continue
+		}
+		for ch := range chs {
+			if _, dup := sent[ch]; dup {
+				continue
+			}
+			sent[ch] = struct{}{}
+			select {
+			case ch <- data:
+			default:
+			}
+		}
+	}
+}
+
+// matchTopic checks whether a NATS-style pattern matches a subject.
+// Tokens are separated by ".".
+//   - "*" matches exactly one token
+//   - ">" as the last pattern token matches one or more remaining tokens
+func matchTopic(pattern, subject string) bool {
+	pTokens := strings.Split(pattern, ".")
+	sTokens := strings.Split(subject, ".")
+
+	for i, pt := range pTokens {
+		if pt == ">" {
+			// ">" must be the last token and matches 1+ remaining subject tokens.
+			return i < len(sTokens)
+		}
+		if i >= len(sTokens) {
+			return false
+		}
+		if pt != "*" && pt != sTokens[i] {
+			return false
+		}
+	}
+	return len(pTokens) == len(sTokens)
 }

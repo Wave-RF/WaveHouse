@@ -1,6 +1,6 @@
-# TypeScript SDK
+# TypeScript SDK Reference
 
-`@wavehouse/sdk` is a zero-dependency TypeScript client for WaveHouse with type-safe queries, real-time streaming, and schema-generated types.
+`@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
 
 ## Installation
 
@@ -10,181 +10,734 @@ npm install @wavehouse/sdk
 
 ## Quick Start
 
-```typescript
-import { WaveHouseClient } from '@wavehouse/sdk';
+```ts
+import { createClient } from '@wavehouse/sdk';
 
-const wh = new WaveHouseClient({
-  baseUrl: 'http://localhost:8080',
-  token: 'your-jwt-token',
+const wh = createClient({
+  baseURL: 'http://localhost:8080',
+  auth: async () => getAccessToken(), // omit for public/unauthenticated
 });
 
-// Ingest data
-await wh.ingest('clicks', { page: '/home', button: 'signup', score: 42.5 });
+// Query
+const { data, error } = await wh.from('clicks').select('page').limit(10);
 
-// Raw query
-const result = await wh.rawQuery('SELECT page, count() FROM clicks GROUP BY page');
+// Insert
+await wh.from('clicks').insert({ page: '/home', button: 'signup' });
 
-// Structured query (type-safe)
-const data = await wh.query('clicks', {
-  columns: ['page'],
-  aggregations: [{ fn: 'count', column: '*', alias: 'total' }],
-  group_by: ['page'],
-  order_by: [{ column: 'total', dir: 'desc' }],
-  limit: 10,
+// Stream
+const stream = wh.from('clicks').stream();
+const unsub = stream.subscribe({
+  next: (event) => console.log(event.data),
+  status: (s) => console.log('Stream:', s),
 });
 ```
+
+## Creating a Client
+
+```ts
+import { createClient } from '@wavehouse/sdk';
+import type { Database } from './my-types'; // optional hand-written types
+
+const wh = createClient<Database>({
+  baseURL: 'https://wavehouse.example.com',
+  auth: async () => myAuthProvider.getToken(),
+  transport: 'auto', // 'auto' | 'sse' | 'ws'
+  options: {
+    maxRetries: 2,
+  },
+});
+```
+
+### `ClientConfig<DB>`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `baseURL` | `string` | — | WaveHouse server URL (required) |
+| `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
+| `transport` | `'auto' \| 'sse' \| 'ws'` | `'auto'` | Stream transport. Auto = SSE when no auth, WS when auth |
+| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
+
+### Type-Safe Tables
+
+Pass a `Database` type to get autocomplete on table names and row types:
+
+```ts
+interface Database {
+  clicks: { page: string; button: string; score: number; received_timestamp: string };
+  users: { id: string; name: string; email: string };
+}
+
+const wh = createClient<Database>({ baseURL: '...' });
+const clicks = wh.from('clicks'); // ✅ autocomplete
+const { data } = await clicks.select('page', 'button').limit(10);
+// data is Array<{ page: string; button: string; score: number; received_timestamp: string }> | null
+```
+
+---
+
+## Result Type
+
+Every async SDK operation returns `Result<T>` — a discriminated union that never throws:
+
+```ts
+type Result<T> =
+  | { data: T; error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
+  | { data: null; error: WaveHouseError }
+
+interface WaveHouseError {
+  status: number;     // HTTP status (0 for network errors)
+  code: string;       // e.g. 'HTTP_400', 'NETWORK_ERROR', 'ABORTED'
+  message: string;    // Human-readable error message
+  details?: unknown;  // Raw response body
+  retryable: boolean; // Whether SDK would retry this error
+}
+```
+
+Usage pattern:
+
+```ts
+const { data, error } = await wh.from('clicks').select('page').limit(10);
+if (error) {
+  console.error(error.message); // never throws
+  return;
+}
+console.log(data); // Row[]
+```
+
+---
+
+## Tables — `wh.from(table)`
+
+`from()` returns a `TableRef` — a reference to a table. It is **NOT thenable**, so it's safe to pass around or store in a variable without triggering requests.
+
+```ts
+const clicks = wh.from('clicks');
+```
+
+### `.fetch(opts?)`
+
+Shortcut for `SELECT *` with a default limit of 1000.
+
+```ts
+const { data, error, hasMore, next } = await clicks.fetch();
+const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
+```
+
+### `.insert(data, opts?)`
+
+Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest/{table}`.
+
+```ts
+// Single row
+const { data, error } = await clicks.insert({ page: '/home', button: 'cta' });
+// data: { ok: true } or { ok: true, duplicate: true }
+
+// Multiple rows
+const { error } = await clicks.insert([
+  { page: '/home', button: 'cta' },
+  { page: '/about', button: 'nav' },
+]);
+```
+
+### `.schema(opts?)`
+
+Fetch the table's column definitions from ClickHouse.
+
+```ts
+const { data } = await clicks.schema();
+// data: { name: 'clicks', columns: [{ name: 'page', type: 'String', is_nullable: false, has_default: false }, ...] }
+```
+
+### `.select(...columns)`
+
+Start a query builder chain. See [Query Builder](#query-builder).
+
+```ts
+const { data } = await clicks.select('page', 'button').where('page', '=', '/home').limit(10);
+```
+
+### `.stream(opts?)`
+
+Open a real-time event subscription. See [Streaming](#streaming).
+
+```ts
+const stream = clicks.stream({ since: '2026-01-01T00:00:00Z' });
+```
+
+---
 
 ## Query Builder
 
-Fluent, type-safe query builder with IDE autocompletion:
+Returned by `tableRef.select()`. Immutable — every chain method returns a new `QueryBuilder`. The builder is **PromiseLike**, so `await builder` auto-executes `.fetch()`.
 
-```typescript
-const result = await wh.queryBuilder('clicks')
+```ts
+// These are equivalent:
+const result = await clicks.select('page').limit(10).fetch();
+const result = await clicks.select('page').limit(10); // PromiseLike shortcut
+```
+
+### Chain Methods
+
+All methods return a new `QueryBuilder` — the original is unchanged.
+
+#### `.select(...columns)`
+
+Append columns to the SELECT clause.
+
+```ts
+const q = clicks.select('page').select('button'); // SELECT page, button
+```
+
+#### `.where(column, op, value)`
+
+Add a filter condition. SDK operators are translated to backend format.
+
+```ts
+clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
+```
+
+| SDK Operator | Backend | Description |
+|-------------|---------|-------------|
+| `'='` | `eq` | Equal |
+| `'!='` | `neq` | Not equal |
+| `'>'` | `gt` | Greater than |
+| `'>='` | `gte` | Greater than or equal |
+| `'<'` | `lt` | Less than |
+| `'<='` | `lte` | Less than or equal |
+| `'in'` | `in` | Value in array |
+| `'like'` | `like` | SQL LIKE pattern |
+| `'not_like'` | `not_like` | SQL NOT LIKE |
+
+#### Aggregations
+
+```ts
+clicks.select('page')
+  .count('*', 'total')           // COUNT(*)
+  .sum('score', 'total_score')   // SUM(score)
+  .avg('score', 'avg_score')     // AVG(score)
+  .min('score', 'min_score')     // MIN(score)
+  .max('score', 'max_score')     // MAX(score)
+  .countDistinct('page', 'unique_pages')
+  .aggregate('uniqExact', 'user_id', 'unique_users') // custom fn
+```
+
+Each aggregation method signature: `(column: string, alias?: string)`.  
+`count()` defaults to `column='*'`, `alias='count'`.
+
+#### `.groupBy(...columns)`
+
+```ts
+clicks.select('page').count().groupBy('page')
+```
+
+#### `.orderBy(column, dir?)`
+
+```ts
+clicks.select('page').count('*', 'total').orderBy('total', 'desc')
+```
+
+`dir` defaults to `'asc'`.
+
+#### `.limit(n)`
+
+```ts
+clicks.select().limit(100)
+```
+
+If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automatically to prevent unbounded result sets. The server also enforces a maximum of 10,000 rows (`DefaultMaxRows`).
+
+#### `.timeRange(column, since, until?)`
+
+Filter by a time window. `since` accepts RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`).
+
+```ts
+clicks.select('page').timeRange('received_timestamp', '1h')
+clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
+```
+
+#### `.cacheTTL(seconds)`
+
+Override the server's default cache TTL for this query.
+
+```ts
+clicks.select('page').count().cacheTTL(300) // cache for 5 minutes
+```
+
+### `.fetch(opts?)`
+
+Execute the query. Returns `Result<Row[]>` with optional pagination.
+
+```ts
+const { data, error, hasMore, next } = await clicks.select('page').limit(50).fetch();
+
+if (hasMore && next) {
+  const page2 = await next(); // cursor-based pagination
+}
+```
+
+**Options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `signal` | `AbortSignal` | Cancel the request |
+| `limit` | `number` | Override builder limit for this fetch |
+
+### `.stream(opts?)`
+
+Open a live stream from the builder's table. See [Streaming](#streaming).
+
+### Pagination
+
+When `limit` is set and the result contains exactly `limit` rows, the result includes `hasMore: true` and a `next()` function. Calling `next()` fetches the next page using cursor-based pagination (adds a filter on the sort column using the last row's value).
+
+```ts
+let result = await clicks.select().orderBy('received_timestamp', 'desc').limit(100).fetch();
+
+const allRows = [...result.data!];
+while (result.hasMore && result.next) {
+  result = await result.next();
+  if (result.data) allRows.push(...result.data);
+}
+```
+
+---
+
+## Raw SQL — `wh.sql(query, params?, opts?)`
+
+Execute a raw SQL query. Requires admin/service role when access control policy is active.
+
+```ts
+const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
+
+// With positional parameters
+const { data } = await wh.sql(
+  'SELECT * FROM clicks WHERE page = ? LIMIT ?',
+  ['/home', 100],
+);
+```
+
+---
+
+## Named Pipes — `wh.pipe(name, params?)`
+
+Execute a pre-defined named query pipe. Returns a `PipeRef` which is **PromiseLike**.
+
+```ts
+// These are equivalent:
+const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 }).fetch();
+const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 }); // PromiseLike
+```
+
+### `.fetch(opts?)`
+
+Execute and return results.
+
+### `.stream(opts?)`
+
+Open a live stream. See [Streaming](#streaming).
+
+---
+
+## Pipes Admin — `wh.pipes`
+
+Manage named query pipes. Requires admin/service role.
+
+```ts
+// List all pipes
+const { data: pipes } = await wh.pipes.list();
+
+// Get a single pipe definition
+const { data: pipe } = await wh.pipes.get('top_pages');
+
+// Create or update
+await wh.pipes.set('top_pages', {
+  sql: 'SELECT page, count() as views FROM clicks GROUP BY page LIMIT {{limit}}',
+  parameters: [{ name: 'limit', type: 'number', required: false, default: 100 }],
+  description: 'Top pages by view count',
+  allowed_roles: ['viewer', 'admin'],
+});
+
+// Delete
+await wh.pipes.delete('old_pipe');
+```
+
+---
+
+## Schema — `wh.schema`
+
+Introspect ClickHouse table schemas.
+
+```ts
+// List all table schemas
+const { data: schemas } = await wh.schema.list();
+// schemas: { clicks: { name: 'clicks', columns: [...] }, users: { ... } }
+
+// Force refresh from ClickHouse
+await wh.schema.refresh();
+```
+
+Individual table schema is also available via `wh.from('clicks').schema()`.
+
+---
+
+## Policy — `wh.policy`
+
+Manage Hasura-style access control policies. Requires admin/service role.
+
+```ts
+// Get current policy
+const { data: policy } = await wh.policy.get();
+
+// Update policy
+await wh.policy.set({
+  default_role: 'viewer',
+  tables: {
+    clicks: {
+      select: {
+        viewer: {
+          allow_columns: ['page', 'button', 'received_timestamp'],
+          filter: { tenant_id: { _eq: '{{ jwt.app_metadata.tenant_id }}' } },
+        },
+        admin: { allow_columns: ['*'] },
+      },
+    },
+  },
+});
+
+// Validate without applying (dry run)
+const { data } = await wh.policy.validate(policyDraft);
+// data: { valid: true } or error with validation details
+```
+
+---
+
+## DLQ — `wh.dlq`
+
+Dead Letter Queue operations.
+
+```ts
+// Get DLQ statistics
+const { data } = await wh.dlq.list();
+// data: { tables: { "dlq.clicks": 3, "dlq.users": 0 }, total: 3 }
+
+// Stats for a specific table
+const { data } = await wh.dlq.table('clicks');
+
+// Stream DLQ events
+const stream = wh.dlq.stream();
+```
+
+---
+
+## System — `wh.sys`
+
+Health and readiness probes.
+
+```ts
+const { data } = await wh.sys.health();
+// data: { status: 'ok' }
+
+const { data } = await wh.sys.ready();
+// data: { status: 'ready' } or { status: 'not ready', error: '...' }
+```
+
+---
+
+## Streaming
+
+Streams use SSE (Server-Sent Events) for unauthenticated connections and WebSocket for authenticated ones. The `transport: 'auto'` default selects automatically; override with `'sse'` or `'ws'`.
+
+### `StreamController`
+
+Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace`. It is **NOT thenable**.
+
+```ts
+const stream = wh.from('clicks').stream({ since: '2026-01-01T00:00:00Z' });
+```
+
+### `.subscribe(subscriber)` → `unsubscribe()`
+
+Callback-based consumption. Returns a cleanup function.
+
+```ts
+const unsub = stream.subscribe({
+  next: (event) => {
+    // event: { table: 'clicks', timestamp: '2026-...', data: { page: '/', ... } }
+    console.log('New event:', event.data);
+  },
+  status: (state) => {
+    // state: 'connecting' | 'live' | 'reconnecting' | 'closed'
+    updateIndicator(state);
+  },
+  error: (err) => {
+    console.error('Stream error:', err.message);
+  },
+});
+
+// Cleanup — closes the connection if no other subscribers remain
+unsub();
+```
+
+### Async Iterator
+
+```ts
+const stream = wh.from('clicks').stream();
+
+for await (const event of stream) {
+  console.log(event.table, event.data);
+  if (shouldStop) break; // breaking auto-closes the stream
+}
+```
+
+### `.close()`
+
+Explicitly close the stream and release all resources.
+
+```ts
+stream.close();
+```
+
+### `.status`
+
+Current connection status: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
+
+### `StreamOptions`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `since` | `string` | RFC3339 timestamp for gap-fill replay |
+| `signal` | `AbortSignal` | Cancel/close the stream. Wired via `attachSignal()` internally. |
+| `transport` | `'auto' \| 'sse' \| 'ws'` | Override client-level transport |
+
+### `StreamEvent<T>`
+
+```ts
+interface StreamEvent<T> {
+  table: string;     // table name (e.g. 'clicks')
+  timestamp: string; // received_timestamp (RFC3339Nano)
+  data: T;           // row data
+}
+```
+
+### Transport Behavior
+
+| Transport | Auth Required | Reconnect | Protocol |
+|-----------|---------------|-----------|----------|
+| SSE | No | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
+| WebSocket | Yes | Exponential backoff (1s → 30s) with auto-resubscribe | RFC 6455, multiplexed |
+
+> **SSE connection limit:** The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain). Use WebSocket transport for authenticated workloads to avoid this limit.
+
+### `SharedWSManager`
+
+When using WebSocket transport, the SDK automatically multiplexes all topic subscriptions over a single WebSocket connection per client via `SharedWSManager`. This is transparent — `.stream()` calls route through it automatically.
+
+Key behaviors:
+- Ref-counted subscriptions: unsubscribing removes only when the last subscriber for a topic disconnects.
+- Auto-reconnect with exponential backoff; all active topics resubscribed on reconnect.
+- NATS-style wildcard matching (`*` = one token, `>` = one-or-more) on the client side.
+
+### Client-Side Stream Filtering
+
+When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:
+
+```ts
+const stream = wh.from('clicks')
   .select('page', 'button')
-  .count('*', 'views')
-  .where('score', 'gt', 10)
-  .groupBy('page', 'button')
-  .orderBy('views', 'desc')
-  .limit(50)
-  .timeRange('received_timestamp', '1h')
-  .exec();
+  .where('page', 'eq', '/home')
+  .stream();
+
+// Only events where page === '/home' are emitted, with only page + button columns
 ```
 
-## Named Pipes
+Supported operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `like`, `not_like`.
 
-Execute pre-defined server-side queries with parameters:
-
-```typescript
-const result = await wh.pipe('top_pages', {
-  start_date: '2024-01-01',
-  limit: 100,
-});
-```
-
-## Real-Time SSE Streaming
-
-Subscribe to live events from one or more tables:
-
-```typescript
-const sub = wh.subscribe({
-  tables: ['clicks'],
-  onEvent: (event) => console.log(event),
-  onError: (err) => console.error(err),
-  lastEventId: 'last-seen-id', // optional gap-fill
-});
-
-// Later: close the connection
-sub.close();
-```
+---
 
 ## Live Queries
 
-Combines a cached initial query with real-time SSE updates. Aggregations are updated intelligently:
+Live queries combine a historical backfill (`.fetch()`) with a real-time stream, providing a seamless initial load + live updates experience.
 
-- **Incrementable** (count, sum, min, max): Updated in real-time from each event.
-- **Decomposable** (avg): Maintained via internal sum/count tracking.
-- **Poll-required** (median, quantile, countDistinct): Re-fetched periodically.
+```ts
+const lq = wh.from('clicks')
+  .where('page', 'eq', '/home')
+  .orderBy('received_timestamp', 'desc')
+  .limit(100)
+  .liveQuery({
+    initial: (result) => {
+      // Called once with the historical data
+      setRows(result.data ?? []);
+    },
+    next: (event) => {
+      // Called for each live event after backfill
+      addRow(event.data);
+    },
+    error: (err) => console.error(err),
+  });
 
-```typescript
-const live = wh.live('clicks', {
-  columns: ['page'],
-  aggregations: [
-    { fn: 'count', column: '*', alias: 'views' },
-    { fn: 'avg', column: 'score', alias: 'avg_score' },
-  ],
-  group_by: ['page'],
-  timeRange: { column: 'received_timestamp', since: '1h' },
-  onUpdate: (rows) => renderDashboard(rows),
-  pollInterval: 30000, // for non-incrementable aggregations
-});
-
-// Stop live updates
-live.stop();
+// Cleanup
+lq.close();
 ```
 
-## Codegen (Type Generation)
+### `StreamSubscriber<T>`
 
-Generate TypeScript types from your ClickHouse schemas:
+```ts
+interface StreamSubscriber<T> {
+  initial: (result: Result<T[]>) => void;  // Historical backfill result
+  next: (event: StreamEvent<T>) => void;    // Live events
+  status?: (state: string) => void;         // Connection state changes
+  error?: (err: WaveHouseError) => void;    // Errors
+}
+```
+
+### How it works
+
+1. Opens the stream **immediately** and buffers incoming events.
+2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result.
+3. Deduplicates buffered events by comparing timestamps against the latest historical timestamp.
+4. Flushes remaining buffered events and switches to live mode.
+
+This "stream-first" approach ensures no events are lost between the fetch and stream start.
+
+---
+
+## AbortController Support
+
+All async operations accept an `AbortSignal` for cancellation:
+
+```ts
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+const { data, error } = await wh.from('clicks').fetch({ signal: controller.signal });
+if (error?.code === 'ABORTED') {
+  console.log('Request timed out');
+}
+```
+
+---
+
+## Error Handling
+
+The SDK **never throws**. All errors are returned in `Result.error`.
+
+| Status | Code | Retryable | Description |
+|--------|------|-----------|-------------|
+| 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
+| 401 | `HTTP_401` | No | Missing or invalid JWT |
+| 403 | `HTTP_403` | No | Insufficient permissions |
+| 404 | `HTTP_404` | No | Table or pipe not found |
+| 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
+| 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
+| 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
+| 0 | `ABORTED` | No | Request cancelled via `AbortSignal` |
+
+---
+
+## Full API Tree
+
+```
+createClient<DB>(config) → WaveHouseClient
+├── .from(table) → TableRef (NOT thenable)
+│   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   ├── .select(...cols?) → QueryBuilder (PromiseLike)
+│   │   ├── .select() .where() .count() .sum() .avg() .min() .max()
+│   │   │   .countDistinct() .aggregate() .groupBy() .orderBy()
+│   │   │   .limit() .timeRange() .cacheTTL()
+│   │   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   │   ├── .stream(opts?) → StreamController
+│   │   └── .liveQuery(subscriber, opts?) → LiveQuery
+│   ├── .insert(data) → Promise<Result<InsertResult>>
+│   ├── .schema() → Promise<Result<TableSchema>>
+│   └── .stream(opts?) → StreamController
+├── .pipe(name, params?) → PipeRef (PromiseLike)
+│   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   └── .stream(opts?) → StreamController
+├── .pipes (admin)
+│   ├── .list() → Promise<Result<Pipe[]>>
+│   ├── .get(name) → Promise<Result<Pipe>>
+│   ├── .set(name, def) → Promise<Result<void>>
+│   └── .delete(name) → Promise<Result<void>>
+├── .sql(query, params?) → Promise<Result<Row[]>>
+├── .schema
+│   ├── .list() → Promise<Result<Schemas>>
+│   └── .refresh() → Promise<Result<void>>
+├── .policy (admin)
+│   ├── .get() → Promise<Result<Policy>>
+│   ├── .set(policy) → Promise<Result<void>>
+│   └── .validate(policy) → Promise<Result<ValidationResult>>
+├── .dlq
+│   ├── .list() → Promise<Result<DLQStats>>
+│   ├── .table(name) → Promise<Result<DLQStats>>
+│   └── .stream() → StreamController
+└── .sys
+    ├── .health() → Promise<Result<Health>>
+    └── .ready() → Promise<Result<Ready>>
+
+StreamController (NOT thenable)
+├── .subscribe({ next, status?, error? }) → unsubscribe()
+├── .close()
+├── .status → StreamStatus
+└── [Symbol.asyncIterator]() → AsyncIterableIterator<StreamEvent>
+```
+
+## Codegen CLI
+
+Generate TypeScript types from a running WaveHouse instance:
 
 ```bash
-npx wavehouse codegen --url http://localhost:8080 --out src/wavehouse.gen.ts
+npx tsx src/cli/codegen.ts --url http://localhost:8080 --out ./src/db.d.ts
+# or via npm script:
+npm run codegen -- --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-This generates:
+**Options:**
 
-- `{Table}Row` interfaces with correct TS types for each ClickHouse column
-- `{Table}Columns` string literal union types
-- `WaveHouseTables` table name union
-- `TableRowMap` and `TableColumnMap` mapped types
-- `typedQuery()` factory with compile-time type checking
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
+| `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
+| `--auth`, `-a` | Bearer token (if auth required) | — |
 
-### Usage with Generated Types
+**Example output:**
 
-```typescript
-import { typedQuery } from './wavehouse.gen';
+```ts
+// Auto-generated by @wavehouse/sdk codegen
+export interface Database {
+  clicks: ClicksRow;
+  events: EventsRow;
+}
 
-// Compile-time error if column name is wrong
-const q = typedQuery('clicks')
-  .select('page', 'button')
-  .where('score', 'gt', 10)
-  .build();
+export interface ClicksRow {
+  event_id: string;
+  page: string;
+  user_id: string;
+  duration_ms: number;
+  received_timestamp: string;
+}
 ```
 
-### ClickHouse → TypeScript Type Mapping
+**ClickHouse → TypeScript type mapping:**
 
-| ClickHouse | TypeScript |
-| ---------- | ---------- |
-| String, FixedString, UUID, IPv4, IPv6, Enum* | `string` |
-| UInt*, Int*, Float*, Decimal* | `number` |
-| Bool | `boolean` |
-| Date, Date32, DateTime, DateTime64 | `string` |
-| Array(*) | `T[]` |
-| Nullable(*) | `T \| null` |
-| Map(K, V), Tuple, JSON | `Record<string, unknown>` |
+| ClickHouse Type | TypeScript Type |
+|----------------|-----------------|
+| `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
+| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` |
+| `Bool` | `boolean` |
+| `Nullable(T)` | `T \| null` |
+| `Array(T)` | `T[]` |
+| `Map(K, V)` | `Record<K, V>` |
+| `LowCardinality(T)` | same as `T` |
 
-## Authentication
+## E2E Testing
 
-Provide a static token or a function that returns one (useful for token rotation):
+The SDK doubles as the E2E integration test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
 
-```typescript
-const wh = new WaveHouseClient({
-  baseUrl: 'http://localhost:8080',
-  token: async () => await getAccessToken(),
-});
+```bash
+make test-e2e          # Run all E2E tests (starts Docker services if needed)
+make test-e2e-dev      # Watch mode for iterative development
 ```
 
-## Admin API
+Test files: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
 
-```typescript
-// Access control policy
-const policy = await wh.getPolicy();
-await wh.setPolicy(updatedPolicy);
-
-// Named pipes
-const pipes = await wh.listPipes();
-await wh.setPipe('top_pages', pipeDefinition);
-await wh.deletePipe('old_pipe');
-```
-
-## API Reference
-
-### `WaveHouseClient`
-
-| Method | Description |
-| ------ | ----------- |
-| `schemas()` | List all table schemas |
-| `schema(table)` | Get schema for a specific table |
-| `refreshSchema()` | Trigger server-side schema refresh |
-| `ingest(table, data)` | Ingest a row into a table |
-| `rawQuery(sql)` | Execute raw SQL |
-| `query(table, query)` | Structured query |
-| `queryBuilder(table)` | Create a fluent query builder |
-| `pipe(name, params?)` | Execute a named pipe |
-| `subscribe(opts)` | SSE real-time subscription |
-| `live(table, opts)` | Live query with smart aggregation updates |
-| `getPolicy()` | Get access control policy |
-| `setPolicy(policy)` | Update access control policy |
-| `listPipes()` | List named pipes |
-| `setPipe(name, pipe)` | Create/update a named pipe |
-| `deletePipe(name)` | Delete a named pipe |
-| `health()` | Health check |
+See [Development Guide — E2E Tests via SDK](development.md#e2e-tests-via-sdk) for architecture details and workflow tips.

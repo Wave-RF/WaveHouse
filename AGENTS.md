@@ -21,7 +21,7 @@ Ten internal packages under `internal/`:
 - **`config/`** — YAML + env var config loading (cleanenv)
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) + `Distributed` (ScyllaDB) — optional, controlled by `dedupe.enabled`
 - **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
-- **`ingest/`** — `BufferConsumer` (per-table batch flush to ClickHouse with DLQ) + `Sweeper` (Active Sweeper for NATS message lifecycle)
+- **`ingest/`** — Bento-based ingest pipeline (`bento.go`: JetStream input → per-table batch INSERT with DLQ output, plus delete handling) + `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
 - **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
@@ -32,8 +32,8 @@ Ten internal packages under `internal/`:
 1. **Interface-first**: Core behaviors are defined as Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`). Standalone and clustered modes use different implementations.
 2. **Bring Your Own Schema (BYOS)**: Users create tables in ClickHouse directly. WaveHouse discovers schemas by querying `system.columns` and validates ingest payloads against real column definitions. No auto-migration, no fixed table schema.
 3. **Schema-driven ingest**: `POST /v1/ingest/{table}` accepts a flat JSON body. The table name comes from the URL. The body is validated against the discovered schema (unknown fields rejected, types checked, nullable constraints enforced). No envelope — just data.
-4. **Async ingestion**: Ingest returns 200 immediately after optional dedup + MQ publish. ClickHouse writes happen asynchronously via BufferConsumer. If NATS stream is full, returns 503 + Retry-After.
-5. **Per-table batching**: BufferConsumer groups events by table name and performs dynamic INSERTs using the schema's column order. Each table's batch is independent.
+4. **Async ingestion**: Ingest returns 200 immediately after optional dedup + MQ publish. ClickHouse writes happen asynchronously via the Bento ingest pipeline (`StartIngestWorker`). If NATS stream is full, returns 503 + Retry-After.
+5. **Per-table batching**: The Bento ingest pipeline groups events by table name and performs dynamic INSERTs using the schema's column order. Each table's batch is independent.
 6. **Dead Letter Queue**: Failed batch inserts are published to a separate NATS stream (`WAVEHOUSE_DLQ`) with subjects `dlq.<table>`. This prevents silent data loss. Controlled by `dlq.enabled`.
 7. **Optional auth with JWKS**: JWT authentication is opt-in via `auth.enabled`. Supports HMAC shared secret and/or JWKS endpoint (`auth.jwks_url`). Roles are extracted from a configurable claim path (`auth.role_claim`). Dev mode (`auth.dev_mode`) bypasses validation for development.
 8. **Optional dedup**: Deduplication is opt-in via `dedupe.enabled`. When enabled, the `dedupe.id_field` config specifies which JSON field to use as the dedup key.
@@ -86,7 +86,11 @@ make dep-why MOD=...   # Show why a module is included
 make dep-cut           # Top cuttable deps by transitive impact (LIMIT=N)
 make binary-analysis   # Combined: sizes + dead code + CGO audit
 make smoke-test        # Manual Bento insert+delete (needs running WaveHouse)
-make dev               # Hot-reload dev server (air)
+make test-sdk          # TypeScript SDK unit tests
+make test-e2e          # E2E integration tests via SDK (starts Docker services)
+make test-e2e-dev      # E2E tests in watch mode
+make test-everything   # All four test layers: unit + SDK + integration + E2E
+make dev               # Hot-reload dev server (air) — starts ClickHouse + applies fixtures
 make docker            # Build Docker image
 make clean             # Remove bin/, tmp/, data/, dist/
 ```
@@ -106,6 +110,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
 - **Coverage target**: 70% minimum (CI enforced). Aim for 80%+.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
+- **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
 
 ## Documentation & Consistency Sync (MANDATORY)
 
@@ -201,7 +206,10 @@ internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstra
 internal/policy/        → Access control policies (types, evaluation, NATS KV store)
 internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
-tests/                  → Integration tests (build tag: integration)
+tests/                  → Integration & E2E tests
+tests/compose.yaml      → Shared Docker Compose (ClickHouse + optional WaveHouse via profiles)
+tests/fixtures/         → Idempotent ClickHouse DDL scripts for test tables
+tests/sdk/              → E2E integration tests via TypeScript SDK (Vitest)
 tests/cmd/bento_pub/    → Manual smoke-test tool (insert+delete via NATS)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles

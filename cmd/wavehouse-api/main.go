@@ -19,9 +19,12 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/google/uuid"
+
+	"go.opentelemetry.io/otel"
 )
 
 // Pre-populated build info variables, set via ldflags in the Makefile.
@@ -35,8 +38,6 @@ var (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-
-	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
@@ -59,6 +60,35 @@ func main() {
 			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
 		}
 	}
+
+	ctx := context.Background()
+	serviceName := "wavehouse-" + Binary
+	otelAddr := os.Getenv("WH_OTEL_ADDR")
+	if otelAddr == "" {
+		otelAddr = "127.0.0.1:4317"
+	}
+
+	fmt.Println("DEBUG - Endpoint:", otelAddr)
+
+	otelShutdown, err := observability.InitProvider(ctx, "wavehouse-standalone", otelAddr)
+	if err != nil {
+		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		_ = otelShutdown(context.Background())
+	}()
+
+	// Slogger.
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo)
+
+	// Create the logger from our observability package
+	logger = observability.NewLogger(serviceName, logLevel, true) // true = JSON output
+	slog.SetDefault(logger)
+
+	logger.Info("starting WaveHouse", "version", Version, "binary", Binary)
 
 	// ClickHouse.
 	chConn, err := clickhouse.Open(&clickhouse.Options{
@@ -158,7 +188,7 @@ func main() {
 			msg.Ack()
 			return nil
 		}
-		hub.Broadcast(msg.Subject, evt)
+		hub.Broadcast(msg.Subject, msg)
 		msg.Ack()
 		return nil
 	}); err != nil {
@@ -209,6 +239,7 @@ func main() {
 		}),
 		JS:          remoteMQ.JetStream(),
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
+		LogLevel:    logLevel,
 	}
 	router := api.NewRouter(deps)
 
@@ -229,6 +260,7 @@ func main() {
 	}()
 
 	logger.Info("starting api server", "port", cfg.Server.Port, "mode", "clustered")
+	fmt.Printf("DEBUG: Global Tracer Registered: %T\n", otel.GetTracerProvider())
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		logger.Error("server error", "error", err)
 		os.Exit(1)

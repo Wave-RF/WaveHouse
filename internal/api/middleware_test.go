@@ -298,6 +298,72 @@ func TestJWTAuthMiddleware_DefaultRoleClaim(t *testing.T) {
 	assert.Equal(t, "viewer", capturedRole)
 }
 
+func TestJWTAuthMiddleware_QueryParamToken(t *testing.T) {
+	t.Parallel()
+	token := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
+
+	var capturedRole string
+	mw := JWTAuthMiddleware(AuthConfig{
+		Enabled:   true,
+		JWTSecret: testutil.TestJWTSecret,
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRole = RoleFromContext(r.Context())
+		// Verify token was stripped from the URL.
+		assert.Empty(t, r.URL.Query().Get("token"))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/?token="+token, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "viewer", capturedRole)
+}
+
+func TestJWTAuthMiddleware_HeaderTakesPrecedenceOverQueryParam(t *testing.T) {
+	t.Parallel()
+	headerToken := testutil.MakeJWT(t, map[string]any{"role": "admin"})
+	queryToken := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
+
+	var capturedRole string
+	mw := JWTAuthMiddleware(AuthConfig{
+		Enabled:   true,
+		JWTSecret: testutil.TestJWTSecret,
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRole = RoleFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/?token="+queryToken, nil)
+	req.Header.Set("Authorization", "Bearer "+headerToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "admin", capturedRole, "header should take precedence over query param")
+}
+
+func TestJWTAuthMiddleware_InvalidQueryParamToken(t *testing.T) {
+	t.Parallel()
+	mw := JWTAuthMiddleware(AuthConfig{
+		Enabled:   true,
+		JWTSecret: testutil.TestJWTSecret,
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/?token=invalid.token.here", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid token")
+}
+
 func TestJWTAuthMiddleware_NonBearerToken(t *testing.T) {
 	t.Parallel()
 	mw := JWTAuthMiddleware(AuthConfig{Enabled: true, JWTSecret: "secret"})

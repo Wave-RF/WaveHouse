@@ -21,6 +21,9 @@ data/
 vendor/
 node_modules/
 
+# E2E test state
+tests/sdk/.setup-state.json
+
 # IDE / Editor
 .idea/
 *.swp

@@ -77,13 +77,23 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var tokenStr string
+
 			auth := r.Header.Get("Authorization")
-			if !strings.HasPrefix(auth, "Bearer ") {
+			if strings.HasPrefix(auth, "Bearer ") {
+				tokenStr = strings.TrimPrefix(auth, "Bearer ")
+			} else if q := r.URL.Query().Get("token"); q != "" {
+				// Fallback: accept token as query parameter (required for
+				// WebSocket connections where headers cannot be set).
+				tokenStr = q
+				// Strip the token from the URL to avoid leaking it in logs.
+				params := r.URL.Query()
+				params.Del("token")
+				r.URL.RawQuery = params.Encode()
+			} else {
 				http.Error(w, `{"error":"missing authorization"}`, http.StatusUnauthorized)
 				return
 			}
-
-			tokenStr := strings.TrimPrefix(auth, "Bearer ")
 
 			keyFunc := func(t *jwt.Token) (interface{}, error) {
 				// Try JWKS first if configured.

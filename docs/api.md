@@ -10,6 +10,14 @@ Authorization: Bearer <token>
 
 The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url`).
 
+For WebSocket and SSE connections where custom headers are not possible, you can pass the token as a query parameter:
+
+```text
+GET /v1/stream/ws?token=<jwt>
+```
+
+The `Authorization` header takes precedence when both are provided. The `token` query parameter is stripped from the URL after extraction.
+
 When `auth.dev_mode` is enabled, all requests are treated as admin with no JWT validation — useful for development.
 
 ### Roles & Access Control
@@ -261,14 +269,23 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `topic` | string | `ingest.>` | NATS subject to subscribe to. Use `ingest.{table}` to filter by table. |
+| `topic` | string | `ingest.>` | NATS subject to subscribe to. Supports NATS wildcards: `*` matches one token, `>` matches one or more remaining tokens. |
 | `since` | string | — | RFC 3339 timestamp. If provided, replays historical events from NATS before switching to live streaming. |
+| `token` | string | — | JWT token (alternative to `Authorization` header, useful for `EventSource`). Stripped from URL after extraction. |
 
-**Response:** SSE stream (`text/event-stream`).
+**Headers:**
+
+| Header | Description |
+| ------ | ----------- |
+| `Last-Event-ID` | RFC 3339 timestamp of the last received event. If present, overrides the `since` query parameter for automatic reconnection (standard `EventSource` behavior). |
+
+**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`.
 
 ```text
+id: 2026-03-24T12:00:00.123Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","data":{"page":"/home","button":"signup"}}
 
+id: 2026-03-24T12:00:01.456Z
 data: {"table_name":"page_views","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"url":"/dashboard"}}
 ```
 
@@ -291,22 +308,45 @@ curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
 
 ### `GET /v1/stream/ws` — WebSocket Stream
 
-Opens a WebSocket connection for real-time event streaming. Same semantics as SSE but over WebSocket.
+Opens a WebSocket connection for real-time event streaming. Supports in-band multiplexing — a single WebSocket can subscribe to multiple topics dynamically.
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `topic` | string | `ingest.>` | NATS subject to subscribe to. |
-| `since` | string | — | RFC 3339 timestamp for gap-fill. |
+| `topic` | string | — | Optional initial topic to subscribe to (backward compatible). If omitted, the client must send subscribe commands. |
+| `since` | string | — | RFC 3339 timestamp for gap-fill on the initial `?topic=` subscription. |
+| `token` | string | — | JWT token (alternative to `Authorization` header). Stripped from URL after extraction. |
+
+**In-band commands (client → server):**
+
+After connecting, send JSON commands to manage subscriptions:
+
+```json
+{"action": "subscribe", "topic": "ingest.clicks"}
+{"action": "subscribe", "topic": "ingest.page_views"}
+{"action": "unsubscribe", "topic": "ingest.clicks"}
+```
+
+**Outbound message format (server → client):**
+
+Each message is wrapped in an envelope with the topic:
+
+```json
+{"topic": "ingest.clicks", "data": {"table_name": "clicks", "received_timestamp": "...", "data": {...}}}
+```
 
 **JavaScript example:**
 
 ```javascript
-const ws = new WebSocket("ws://localhost:8080/v1/stream/ws?topic=ingest.clicks");
+const ws = new WebSocket("ws://localhost:8080/v1/stream/ws?token=<jwt>");
+ws.onopen = () => {
+  ws.send(JSON.stringify({ action: "subscribe", topic: "ingest.clicks" }));
+  ws.send(JSON.stringify({ action: "subscribe", topic: "ingest.page_views" }));
+};
 ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log("Event:", data.table_name, data.data);
+  const { topic, data } = JSON.parse(event.data);
+  console.log(`[${topic}]`, data.table_name, data.data);
 };
 ```
 
@@ -371,14 +411,21 @@ Triggers an immediate re-discovery of ClickHouse table schemas.
 
 Returns per-table message counts in the Dead Letter Queue.
 
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `table` | string | — | Filter stats to a specific table name (e.g., `?table=clicks` returns only `dlq.clicks`). |
+
 **Response:**
 
 ```json
 {
-  "subjects": {
+  "tables": {
     "dlq.clicks": 3,
-    "dlq.page_views": 0
-  }
+    "dlq.page_views": 1
+  },
+  "total": 4
 }
 ```
 

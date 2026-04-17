@@ -1,35 +1,62 @@
-// @wavehouse/sdk — TypeScript client for WaveHouse.
-// Re-exports all public APIs.
+// ============================================================================
+// @wavehouse/sdk — Public API
+// ============================================================================
 
-export { WaveHouseClient } from "./client.js";
-export { QueryBuilder, query } from "./query-builder.js";
-export { subscribe } from "./sse.js";
-export { liveQuery } from "./live.js";
-export { WaveHouseError } from "./fetch.js";
-export {
-  classifyAggregation,
-  updateAggregation,
-  requiresPolling,
-} from "./aggregations.js";
+// --- Main entry point ---
+export { createClient, WaveHouseClient } from './client.js';
 
+// --- Core classes ---
+export { TableRef } from './table.js';
+export { QueryBuilder } from './query-builder.js';
+export { PipeRef, PipesNamespace } from './pipes.js';
+export { SchemaNamespace } from './schema.js';
+export { PolicyNamespace } from './policy.js';
+export { DLQNamespace } from './dlq.js';
+export { SysNamespace } from './sys.js';
+export { StreamController } from './stream/controller.js';
+export { SharedWSManager } from './stream/ws-manager.js';
+export { LiveQuery } from './stream/live-query.js';
+
+// --- Types ---
 export type {
-  WaveHouseConfig,
-  TableSchema,
-  ColumnInfo,
+  // Database & result
+  Database,
+  Result,
+  WaveHouseError,
+  // Config
+  ClientConfig,
+  ClientOptions,
+  // Query
+  FilterOp,
+  FetchOptions,
   StructuredQuery,
   Aggregation,
-  AggregationFn,
-  Filter,
-  FilterOp,
+  QueryFilter,
   OrderClause,
   TimeRange,
-  QueryResult,
+  // Schema
+  Column,
+  TableSchema,
+  Schemas,
+  // Ingest
+  InsertResult,
+  // Streaming
+  StreamStatus,
   StreamEvent,
-  NamedPipe,
-  PipeParam,
-  AggregationClass,
-  LiveQueryOptions,
-} from "./types.js";
-
-export type { SSEOptions, SSESubscription } from "./sse.js";
-export type { LiveQueryHandle } from "./live.js";
+  StreamSubscriber,
+  StreamOptions,
+  // DLQ
+  DLQStats,
+  // Health
+  Health,
+  Ready,
+  // Pipes
+  Pipe,
+  ParamDef,
+  // Policy
+  Policy,
+  TablePolicy,
+  RolePermissions,
+  PolicyFilter,
+  ValidationResult,
+} from './types.js';

@@ -1,0 +1,34 @@
+import type { Result, HttpContext, Health, Ready } from './types.js';
+import { request } from './http.js';
+import { ok, err } from './errors.js';
+
+/** Namespace for system health and readiness probes. */
+export class SysNamespace {
+  private readonly _ctx: HttpContext;
+
+  constructor(ctx: HttpContext) {
+    this._ctx = ctx;
+  }
+
+  /** Liveness probe — returns `{ status: "ok" }`. */
+  async health(opts?: { signal?: AbortSignal }): Promise<Result<Health>> {
+    const { data, error } = await request<Health>(this._ctx, {
+      method: 'GET',
+      path: '/health',
+      signal: opts?.signal,
+    });
+    if (error) return err(error);
+    return ok(data!);
+  }
+
+  /** Readiness probe — returns `{ status: "ready" }` or 503 with error details. */
+  async ready(opts?: { signal?: AbortSignal }): Promise<Result<Ready>> {
+    const { data, error } = await request<Ready>(this._ctx, {
+      method: 'GET',
+      path: '/ready',
+      signal: opts?.signal,
+    });
+    if (error) return err(error);
+    return ok(data!);
+  }
+}

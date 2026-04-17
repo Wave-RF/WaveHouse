@@ -231,7 +231,9 @@ make smoke-test                        # Manual Bento insert+delete (needs runni
 | Category | Location | Docker? | Command |
 |----------|----------|---------|---------|
 | Unit tests | `internal/*/_test.go` | No | `make test` |
-| Integration tests | `tests/integration_test.go` | Yes | `make test-integration` |
+| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-sdk` |
+| Integration tests (Go) | `tests/integration_test.go` | Yes | `make test-integration` |
+| E2E tests (SDK) | `tests/sdk/*.test.ts` | Yes | `make test-e2e` |
 | Smoke test (manual) | `tests/cmd/bento_pub/main.go` | External | `make smoke-test` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
@@ -244,7 +246,29 @@ Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()`
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
 - **Integration test needing Docker** → add a subtest inside `tests/integration_test.go` or create a new `tests/*_test.go` file with `//go:build integration`.
-- **Test helpers** → add to `internal/testutil/`.
+- **E2E test via SDK** → add a `tests/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e` or `make test-e2e-dev` (watch mode).
+- **Test helpers** → add to `internal/testutil/` (Go) or `tests/sdk/helpers.ts` (E2E).
+
+### E2E Tests via SDK
+
+The primary E2E integration test suite lives in `tests/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
+
+**Architecture**:
+- `tests/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app` (allowing `air` hot-reload as an alternative).
+- `tests/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
+- `tests/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
+
+**Running E2E tests**:
+
+```bash
+make test-e2e          # Install deps + run all E2E tests (starts Docker services if needed)
+make test-e2e-dev      # Watch mode for iterative development
+KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
+```
+
+**If you already have `air` running** (`make dev`), the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
+
+**Test files**: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
 
 ## Linting
 
@@ -298,7 +322,10 @@ WaveHouse/
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
 │   └── testutil/           # Shared test helpers and mocks
-├── tests/                  # Integration tests
+├── tests/                  # Integration & E2E tests
+│   ├── compose.yaml        # Shared Docker Compose (ClickHouse + optional WaveHouse)
+│   ├── fixtures/           # Idempotent ClickHouse DDL scripts
+│   └── sdk/                # E2E tests via TypeScript SDK (Vitest)
 ├── deployments/
 │   ├── compose/            # Docker Compose files
 │   └── docker/             # Dockerfiles
@@ -344,6 +371,10 @@ Run `make help` to see all targets. Key ones:
 | `make coverage-enforce` | Fail if coverage is below 70% threshold |
 | `make mod-tidy-check` | Verify `go.mod`/`go.sum` are tidy |
 | `make smoke-test` | Manual Bento insert+delete (requires running WaveHouse) |
+| `make test-sdk` | TypeScript SDK unit tests |
+| `make test-e2e` | E2E integration tests via SDK (starts Docker services) |
+| `make test-e2e-dev` | E2E tests in watch mode |
+| `make test-everything` | All four test layers: unit + SDK + integration + E2E |
 | `make vulncheck` | Run `govulncheck` vulnerability scanner |
 | `make security` | Combined scan: vulncheck + gosec via linter |
 | `make deadcode` | Find unreachable functions and unused code |

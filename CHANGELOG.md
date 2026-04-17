@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hub wildcard support**: `Broadcast()` now matches NATS-style topic wildcards (`*` for one token, `>` for one-or-more remaining tokens) so SSE/WS clients subscribing to patterns like `ingest.>` receive events for all matching subjects. Includes dedup to prevent double-delivery.
+- **Auth `?token=` query parameter fallback**: JWT can now be passed via `?token=<jwt>` query parameter for WebSocket and SSE connections where custom headers are not possible. The `Authorization` header takes precedence. Token is stripped from URL after extraction.
+- **SSE `id:` field and `Last-Event-ID` reconnection**: SSE events now include an `id:` field set to `received_timestamp`, enabling native `EventSource` automatic reconnection. The `Last-Event-ID` request header overrides `?since=` for seamless gap-fill on reconnect.
+- **WebSocket multiplexing**: WebSocket connections now support in-band JSON commands (`{"action":"subscribe","topic":"..."}` / `{"action":"unsubscribe","topic":"..."}`) for dynamic multi-topic subscriptions over a single connection. Outbound messages are wrapped in `{"topic":"...","data":{...}}` envelopes. Backward compatible with `?topic=` query parameter.
+- **DLQ stats table filter**: `GET /v1/dlq/stats` now accepts optional `?table=` query parameter to filter stats to a specific table.
+- **TypeScript SDK `SharedWSManager`**: Single multiplexed WebSocket per client with ref-counted subscriptions, auto-reconnect with exponential backoff, and client-side NATS-style wildcard dispatch.
+- **TypeScript SDK `LiveQuery`**: Stream-first backfill orchestrator — subscribes to the stream immediately, buffers events, fetches historical data, deduplicates by timestamp, then resumes live updates. Available via `queryBuilder.liveQuery(subscriber, opts?)`.
+- **TypeScript SDK `FilteredStreamController`**: Streams created from query builders with active filters/columns now apply client-side filtering (eq, neq, gt, gte, lt, lte, in, like, not_like) and column projection.
+- **TypeScript SDK `AbortSignal` support**: `stream({ signal })` option wires an `AbortSignal` to close the stream when aborted.
+- **TypeScript SDK SSE connection counter**: Warns when opening more than 5 concurrent SSE connections (browser limit).
+- **TypeScript SDK default query limit**: `QueryBuilder.DEFAULT_LIMIT = 1000` applied when no explicit limit is set, preventing unbounded result sets.
+- **TypeScript SDK unit tests**: Comprehensive Vitest test suite for `@wavehouse/sdk` — `errors.test.ts`, `http.test.ts`, `query-builder.test.ts`, `table.test.ts`, `pipes.test.ts`, `namespaces.test.ts` (sql, schema, policy, DLQ, sys), `client.test.ts` (factory, namespace wiring, transport selection), `stream/controller.test.ts` (subscribe, unsubscribe, async iterator, ref counting).
+- **TypeScript SDK codegen CLI**: `npm run codegen -- --url <url> --out <file>` introspects `/v1/schema` and generates a TypeScript `Database` interface with ClickHouse-to-TypeScript type mapping (String, numeric, DateTime, Array, Map, Nullable, LowCardinality, etc.).
+- **TypeScript SDK playground**: Three runnable scripts (`playground:public`, `playground:auth`, `playground:admin`) demonstrating unauthenticated queries/SSE, JWT auth/WebSocket streaming, and admin workflows (schema, policy, pipes, DLQ, raw SQL). Includes Docker Compose file and setup/seed script.
+
+### Removed
+
+- **Dead code: `BufferConsumer`** — Removed `BufferConsumer`, `coerceValue`, `insertTableBatch`, `flushBatch`, and `sendToDLQ` from `internal/ingest/buffer.go` (replaced by Bento pipeline in `bento.go`). The `EventMessage` struct and `BufferConsumerName` constant were preserved in a new `types.go`.
+
+### Added
+
+- **Unit tests — Bento pipeline**: `bento_test.go` covering `safeIdentifierRe` (15 subtests), `dlqOutput.WriteBatch` (3 subtests), `jsInput.Read` (6 subtests), and `jsInput.Close`.
+- **Unit tests — Sweeper**: `sweeper_test.go` covering `sweep()` (8 subtests), `findGapSequence()` (7 subtests), and `Start()` context cancellation.
 - **CORS origin allowlist**: New `server.cors_allowed_origins` config field (`WH_SERVER_CORS_ALLOWED_ORIGINS`) controls which origins receive CORS headers. Defaults to `*` (allow all). When specific origins are listed, only matching requests get CORS headers with `Vary: Origin`.
 - **Config validation**: `config.Validate()` runs at startup, catching invalid mode, out-of-range port, negative timeouts, missing auth credentials, zero schema refresh interval, and negative cache/gap-window values.
 - **Default query limit**: Structured queries are capped at `DefaultMaxRows` (10,000) to prevent unbounded result sets. Explicit limits exceeding the cap are silently reduced.
@@ -63,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cursor pagination with DateTime64 filters**: `coerceFilterValue` now returns ClickHouse-compatible formatted strings (e.g. `2026-04-02 16:25:50.297`) preserving sub-second precision, instead of `time.Time` which the driver formats with second-only precision via `toDateTime()`. Fixes cursor pagination returning 0 rows on subsequent pages when DateTime64 columns are used as cursor keys.
+- **Pipes template inline substitution**: `BindParams` now inlines parameter values directly into the SQL string (with proper escaping) instead of using `?` positional placeholders. String values that look numeric are inlined bare (for LIMIT etc.), other strings are single-quote escaped. Fixes `{{limit:10}}` templates causing ClickHouse syntax errors.
+- **WebSocket double "connecting" status**: `StreamController.onStatus` now deduplicates redundant status transitions and `SharedWSManager.subscribe()` defers initial status notification to `_doConnect()` when opening a new connection. Fixes duplicate `Status: connecting` events.
 - **SQL injection in Bento ingest**: Table names are now validated against `^[a-zA-Z_][a-zA-Z0-9_]*$` regex before use in SQL queries, preventing injection via crafted NATS subject metadata.
 - **CORS origin reflection**: Replaced permissive origin-echoing CORS middleware with allowlist-based validation. Non-matching origins receive no CORS headers.
 - **os.Exit in library code**: `ingest.StartIngestWorker` now returns `(*service.Stream, error)` instead of calling `os.Exit(1)`, enabling proper error handling by callers.

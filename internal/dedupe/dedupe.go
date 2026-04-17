@@ -8,6 +8,8 @@ type Deduplicator interface {
 	// If not seen, it atomically marks the event as seen.
 	CheckAndMark(ctx context.Context, eventID string) (isDuplicate bool, err error)
 
+	Stats() map[string]int64
+
 	// Close releases resources held by the deduplicator.
 	Close() error
 }
