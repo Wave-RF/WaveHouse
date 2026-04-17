@@ -50,3 +50,80 @@
 	-webkit-mask-image: none !important;
 	mask-image: none !important;
 }
+
+/* ─── Mermaid: deck-ready presentation ──────────────────────────
+ * Diagrams are rendered into <pre class="mermaid"> by the converter;
+ * mermaid.js replaces the text content with SVG on the client.
+ *
+ * Key rules:
+ *   • Collapse the raw-source text so the "dark grey box" flash
+ *     disappears before mermaid processes the block.
+ *   • No !important font-size overrides — they break mermaid's
+ *     vertical centering inside cylinder shapes.
+ *   • Cluster (subgraph) labels get transparent backgrounds so they
+ *     read as uppercase headings rather than dark chips.
+ */
+pre.mermaid {
+	display: block;
+	text-align: center;
+	background: var(--sl-color-gray-6);
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 16px;
+	padding: 2.5rem 1.5rem;
+	margin: 3rem 0;
+	box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+	overflow-x: auto;
+
+	/* Hide the raw mermaid source flash before JS renders the SVG */
+	font-size: 0;
+	line-height: 0;
+	color: transparent;
+	min-height: 240px;
+}
+
+:root[data-theme='light'] pre.mermaid {
+	background: #f8fafc;
+	box-shadow: 0 12px 32px -16px rgba(15, 42, 52, 0.15);
+}
+
+pre.mermaid svg {
+	max-width: 100%;
+	height: auto !important;
+	display: inline-block;
+	/* Restore readable text inside the rendered SVG */
+	font-size: 15px;
+	line-height: normal;
+	color: initial;
+	font-family: var(--sl-font);
+}
+
+/* Subgraph titles: render as uppercase section headings, not dark chips */
+pre.mermaid svg .cluster-label foreignObject,
+pre.mermaid svg .cluster-label foreignObject > div,
+pre.mermaid svg .cluster-label .nodeLabel {
+	background: transparent !important;
+}
+
+pre.mermaid svg .cluster-label .nodeLabel {
+	font-weight: 700;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--sl-color-gray-2);
+}
+
+/* ─── Generous heading spacing — consistent with the deck feel ──── */
+.sl-markdown-content :is(h2, h3, h4) {
+	scroll-margin-top: 2rem;
+}
+
+.sl-markdown-content h2 {
+	margin-top: 3.5rem;
+}
+
+.sl-markdown-content h3 {
+	margin-top: 2.5rem;
+}
+
+.sl-markdown-content h4 {
+	margin-top: 2rem;
+}

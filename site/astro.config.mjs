@@ -23,8 +23,37 @@ export default defineConfig({
 					attrs: { type: 'module' },
 					content: `
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-const theme = document.documentElement.dataset.theme === 'light' ? 'default' : 'dark';
-mermaid.initialize({ startOnLoad: true, theme });
+const isLight = document.documentElement.dataset.theme === 'light';
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  securityLevel: 'loose',
+  themeVariables: {
+    fontFamily: 'Helvetica Neue, Helvetica, Arial, sans-serif',
+    fontSize: '15px',
+    primaryColor: '#0e7f8f',
+    primaryTextColor: '#ffffff',
+    primaryBorderColor: '#5bbfcf',
+    lineColor: isLight ? '#576270' : '#c2c9d1',
+    secondaryColor: '#475569',
+    tertiaryColor: isLight ? '#f8f9fa' : '#1a1a1a',
+    clusterBkg: isLight ? '#f1f5f9' : '#242a33',
+    clusterBorder: isLight ? '#cbd5e1' : '#3d4752',
+    edgeLabelBackground: isLight ? '#ffffff' : '#1a1a1a',
+    titleColor: isLight ? '#1a1a1a' : '#f8f9fa',
+    labelBoxBorderColor: '#5bbfcf',
+    noteBkgColor: isLight ? '#fef3c7' : '#422006',
+    noteBorderColor: '#f59e0b',
+  },
+  flowchart: {
+    padding: 24,
+    nodeSpacing: 48,
+    rankSpacing: 60,
+    htmlLabels: true,
+    curve: 'basis',
+    useMaxWidth: true,
+  },
+});
 `,
 				},
 			],
@@ -32,6 +61,7 @@ mermaid.initialize({ startOnLoad: true, theme });
 			sidebar: [
 				{ label: 'Home', link: '/' },
 				{ label: 'Getting Started', slug: 'getting-started' },
+				{ label: 'Why WaveHouse?', slug: 'why-wavehouse' },
 				{
 					label: 'Guides',
 					items: [

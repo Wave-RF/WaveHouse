@@ -23,41 +23,47 @@ const DOC_META = {
 			'Run WaveHouse locally in five minutes — ingest, query, and subscribe to real-time events.',
 		order: 2,
 	},
+	'why-wavehouse.md': {
+		title: 'Why WaveHouse?',
+		description:
+			'How WaveHouse compares to direct ClickHouse, Kafka + ClickHouse, and Tinybird — with the failure modes, DIY cost, and feature matrix.',
+		order: 3,
+	},
 	'architecture.md': {
 		title: 'Architecture',
 		description:
 			'System design, data flows, internal packages, and technology stack.',
-		order: 3,
+		order: 4,
 	},
 	'api.md': {
 		title: 'API Reference',
 		description:
 			'All endpoints, authentication, request/response formats for the WaveHouse API.',
-		order: 4,
+		order: 5,
 	},
 	'sdk.md': {
 		title: 'TypeScript SDK',
 		description:
 			'Zero-dependency client SDK — query builder, real-time streaming, codegen.',
-		order: 5,
+		order: 6,
 	},
 	'configuration.md': {
 		title: 'Configuration',
 		description:
 			'Full configuration reference — YAML settings and environment variables.',
-		order: 6,
+		order: 7,
 	},
 	'deployment.md': {
 		title: 'Deployment',
 		description:
 			'Standalone, clustered, Docker, releases, health checks, and schema setup.',
-		order: 7,
+		order: 8,
 	},
 	'development.md': {
 		title: 'Development',
 		description:
 			'Building, testing, linting, project structure, and contribution workflow.',
-		order: 8,
+		order: 9,
 	},
 };
 
