@@ -2,6 +2,8 @@
   "name": "site",
   "type": "module",
   "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
@@ -14,5 +16,8 @@
     "astro": "^6.0.1",
     "sharp": "^0.34.2",
     "starlight-llms-txt": "^0.8.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "sharp"]
   }
 }

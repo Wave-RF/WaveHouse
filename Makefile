@@ -391,16 +391,16 @@ binary-analysis: size-report deadcode audit-cgo ## Combined binary analysis (siz
 
 # ── Documentation ────────────────────────────────────────────────
 docs-install: ## Install docs site dependencies
-	@cd site && npm ci
+	@cd site && pnpm install --frozen-lockfile
 
 docs-convert: ## Convert /docs/ markdown to Starlight format
 	@node site/scripts/convert-docs.mjs
 
 docs-dev: docs-convert ## Start docs dev server with hot-reload
-	@cd site && npm run dev
+	@cd site && pnpm dev
 
 docs-build: docs-convert ## Build docs site for production
-	@cd site && npm run build
+	@cd site && pnpm build
 
 docs-preview: docs-build ## Preview production build locally
-	@cd site && npm run preview
+	@cd site && pnpm preview

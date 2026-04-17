@@ -5,6 +5,7 @@
     "redhat.vscode-yaml",
     "editorconfig.editorconfig",
     "DavidAnson.vscode-markdownlint",
-    "github.vscode-github-actions"
+    "github.vscode-github-actions",
+    "astro-build.astro-vscode"
   ]
 }

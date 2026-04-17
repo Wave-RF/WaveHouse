@@ -48,3 +48,7 @@ site/src/content/docs/
 site/public/md/
 site/dist/
 site/.astro/
+site/.env.production
+
+# pnpm
+pnpm-debug.log*
