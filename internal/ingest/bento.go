@@ -80,14 +80,14 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.Error("rejecting message: invalid JSON", "error", err)
-			m.Ack() // Drop — not retryable.
+			_ = m.DoubleAck(ctx) // Drop — not retryable.
 			continue
 		}
 
 		// Reject messages with no table name.
 		if raw.TableName == "" {
 			slog.Error("rejecting message: empty table_name")
-			m.Ack()
+			_ = m.DoubleAck(ctx)
 			continue
 		}
 
@@ -95,7 +95,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			m.Ack() // Drop malformed messages.
+			_ = m.DoubleAck(ctx)
 			continue
 		}
 
@@ -139,7 +139,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"table", raw.TableName,
 					"id", raw.ID,
 				)
-				m.Ack()
+				_ = m.DoubleAck(ctx)
 			}
 			span.End()
 			continue
@@ -180,7 +180,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			if err != nil {
 				return m.Nak()
 			}
-			return m.Ack()
+			return m.DoubleAck(ctx)
 		}
 		return msg, ackFn, nil
 	}

@@ -198,11 +198,11 @@ func main() {
 	if err := remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			msg.Ack()
+			msg.Ack(ctx)
 			return nil
 		}
 		hub.Broadcast(msg.Subject, msg)
-		msg.Ack()
+		msg.Ack(ctx)
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge subscription failed", "error", err)

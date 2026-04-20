@@ -220,11 +220,11 @@ func main() {
 	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			msg.Ack()
+			msg.Ack(ctx)
 			return nil
 		}
 		hub.Broadcast(msg.Subject, msg)
-		msg.Ack()
+		msg.Ack(ctx)
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge start", "error", err)
