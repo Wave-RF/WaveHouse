@@ -20,6 +20,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  debug:
+    name: Debug gating
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print context
+        env:
+          DRAFT: ${{ github.event.pull_request.draft }}
+          ACTOR: ${{ github.actor }}
+          AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          echo "DRAFT=$DRAFT"
+          echo "ACTOR=$ACTOR"
+          echo "AUTHOR_ASSOC=$AUTHOR_ASSOC"
+          echo "EVENT=$EVENT"
+          echo "ACTION=$ACTION"
+
   review:
     name: Review
     if: >-
