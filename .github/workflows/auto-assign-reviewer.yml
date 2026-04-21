@@ -22,8 +22,11 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [submitted, dismissed, edited]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
+  # Note: `pull_request_review_thread` is a webhook event but not a
+  # workflow trigger (GitHub Actions doesn't accept it). Thread
+  # resolution is detected on the next push / review / check_suite
+  # event instead — one-trigger lag is acceptable since those events
+  # fire frequently during iteration.
   check_suite:
     types: [completed]
 
@@ -45,7 +48,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           case "$EVENT_NAME" in
-            pull_request|pull_request_review|pull_request_review_thread)
+            pull_request|pull_request_review)
               num="${{ github.event.pull_request.number }}"
               ;;
             check_suite)
