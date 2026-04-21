@@ -126,7 +126,7 @@ func main() {
 
 	// Remote MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)
+	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
 		os.Exit(1)

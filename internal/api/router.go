@@ -25,6 +25,7 @@ type Dependencies struct {
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
 	AuthMW          func(http.Handler) http.Handler
+	AuthEnabled     bool
 	JS              jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel        *slog.LevelVar

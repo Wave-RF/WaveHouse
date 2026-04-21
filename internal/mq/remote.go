@@ -14,10 +14,11 @@ import (
 type RemoteNATS struct {
 	conn *nats.Conn
 	js   jetstream.JetStream
+	streamName string
 }
 
 // NewRemote connects to a NATS cluster at the given URL.
-func NewRemote(url string, maxBytes int64) (*RemoteNATS, error) {
+func NewRemote(url, streamName string, maxBytes int64) (*RemoteNATS, error) {
 	nc, err := nats.Connect(url)
 	if err != nil {
 		return nil, fmt.Errorf("connect to nats: %w", err)
@@ -45,7 +46,7 @@ func NewRemote(url string, maxBytes int64) (*RemoteNATS, error) {
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
 
-	return &RemoteNATS{conn: nc, js: js}, nil
+	return &RemoteNATS{conn: nc, js: js, streamName: streamName}, nil
 }
 
 func (r *RemoteNATS) Publish(ctx context.Context, subject string, data []byte) error {
@@ -58,7 +59,7 @@ func (r *RemoteNATS) Publish(ctx context.Context, subject string, data []byte) e
 }
 
 func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error {
-	cons, err := r.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
+	cons, err := r.js.CreateOrUpdateConsumer(ctx, r.streamName, jetstream.ConsumerConfig{
 		Durable:       consumerName,
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,

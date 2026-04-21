@@ -45,6 +45,7 @@ type ClickHouse struct {
 }
 
 type MQ struct {
+	StreamName       string `yaml:"stream_name" env:"WH_MQ_STREAM_NAME" env-default:"WAVEHOUSE"`
 	EmbeddedDir      string `yaml:"embedded_dir" env:"WH_MQ_EMBEDDED_DIR" env-default:"./data/nats"`
 	URL              string `yaml:"url" env:"WH_MQ_URL" env-default:"nats://localhost:4222"`
 	GapWindowMinutes int    `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`

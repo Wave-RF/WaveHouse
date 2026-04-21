@@ -16,7 +16,7 @@ import (
 
 func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer emb.Close()
 
@@ -40,7 +40,7 @@ func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 
 func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer emb.Close()
 
@@ -80,7 +80,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 
 func TestDLQStats_SingleTable(t *testing.T) {
 	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer emb.Close()
 
@@ -110,7 +110,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 
 func TestEnsureDLQStream_Idempotent(t *testing.T) {
 	dir := t.TempDir()
-	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer emb.Close()
 

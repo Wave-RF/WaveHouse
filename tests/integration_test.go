@@ -92,6 +92,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.Default()
+	testStream := "WAVEHOUSE"
 
 	// Start ClickHouse container.
 	chReq := testcontainers.ContainerRequest{
@@ -132,7 +133,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	require.NoError(t, err)
 
 	// Start embedded NATS.
-	embeddedMQ, err := mq.NewEmbedded(t.TempDir(), 10*1024*1024, testutil.NopLogger()) // 10 MB
+	embeddedMQ, err := mq.NewEmbedded(t.TempDir(), testStream, 10*1024*1024, testutil.NopLogger()) // 10 MB
 	require.NoError(t, err)
 
 	js := embeddedMQ.JetStream()
@@ -148,6 +149,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	_, err = ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
+		testStream,
 		chConn,
 		chAddr,
 		httpPort.Port(),
@@ -181,6 +183,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		Schema: api.NewSchemaHandler(registry),
 		DLQ:    dlqHandler,
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
+		AuthEnabled: false,
 		JS:     js,
 	}
 

@@ -96,7 +96,7 @@ func main() {
 
 	// Remote MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)
+	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
 		os.Exit(1)
@@ -121,6 +121,7 @@ func main() {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		remoteMQ.NatsConn(),
+		cfg.MQ.StreamName,
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default

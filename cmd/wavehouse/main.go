@@ -120,7 +120,7 @@ func main() {
 
 	// Embedded MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, maxBytes)
+	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
 		os.Exit(1)
@@ -183,6 +183,7 @@ func main() {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
+		cfg.MQ.StreamName,
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
