@@ -25,6 +25,7 @@ type Dependencies struct {
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
 	AuthMW          func(http.Handler) http.Handler
+	AuthEnabled     bool
 	JS              jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel        *slog.LevelVar
@@ -86,7 +87,7 @@ func NewRouter(deps Dependencies) http.Handler {
 
 		// Admin routes (require admin or service role).
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(RequireRole("admin", "service"))
+			r.Use(RequireRole(deps.AuthEnabled, "admin", "service"))
 			if deps.Policy != nil {
 				r.Get("/policy", deps.Policy.Get)
 				r.Put("/policy", deps.Policy.Put)
@@ -120,7 +121,7 @@ func NewRouter(deps Dependencies) http.Handler {
 
 // RequireRole returns middleware that restricts access to the given roles.
 // When auth is disabled (no role in context), access is allowed.
-func RequireRole(roles ...string) func(http.Handler) http.Handler {
+func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := RoleFromContext(r.Context())
@@ -129,7 +130,13 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 			// 	access, make auth disabled a specific config) in order to
 			//	prevent role extraction error from granting unintended access.
 			if role == "" {
-				next.ServeHTTP(w, r)
+				if !authEnabled {
+					// Auth is disabled globally; allow for dev/testing.
+					next.ServeHTTP(w, r)
+					return
+				}
+				// FAIL-CLOSED: Auth is enabled, but no role was found in the context.
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			for _, allowed := range roles {

@@ -13,7 +13,7 @@ import (
 
 func TestRequireRole_AllowedRole(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin", "service")
+	mw := RequireRole(true, "admin", "service")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -29,7 +29,7 @@ func TestRequireRole_AllowedRole(t *testing.T) {
 
 func TestRequireRole_DeniedRole(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin", "service")
+	mw := RequireRole(true, "admin", "service")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
@@ -45,7 +45,7 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin")
+	mw := RequireRole(true, "admin")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -216,4 +216,23 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestRequireRole_NoRole_FailClosed(t *testing.T) {
+	t.Parallel()
+	
+	// Empty context is REJECTED
+	mw := RequireRole(true, "admin")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("handler should not be called - security should have blocked this!")
+	}))
+
+	// Create a request with NO role in the context
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	
+	handler.ServeHTTP(w, req)
+	
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "unauthorized")
 }
