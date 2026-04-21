@@ -1,0 +1,23 @@
+# Gemini Code Assist configuration.
+#
+# Aggressive review posture: surface LOW-severity nits alongside the
+# bigger stuff, because in this repo the AI dialog is supposed to
+# catch things humans would miss. A maintainer or follow-up bot can
+# always dismiss noise; a missed real issue is more expensive.
+
+code_review:
+  comment_severity_threshold: LOW
+  max_review_comments: -1
+  pull_request_opened:
+    summary: true
+    code_review: true
+    include_drafts: true
+    help: false
+
+# Persistent memory across PRs — improves context recognition over time.
+memory_config:
+  disabled: false
+
+# No path excludes — review everything. Add generated files here only
+# if they pollute the review.
+ignore_patterns: []

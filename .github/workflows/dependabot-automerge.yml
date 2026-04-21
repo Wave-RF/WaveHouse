@@ -1,0 +1,53 @@
+name: Dependabot auto-merge
+
+# Auto-approves and enables auto-merge for Dependabot PRs on
+# patch- and minor-version bumps. Major bumps stay held for human
+# review because they're the most likely to break behavior. The
+# ruleset's required status checks still have to pass before
+# auto-merge actually squashes — this just opts the PR into the
+# merge queue.
+#
+# CODEOWNERS note: Dependabot PRs that touch `.github/workflows/`
+# (GitHub Actions ecosystem bumps, including the SHA-pinned updates
+# that Dependabot opens as patch-level bumps) still require a human
+# codeowner's approval per the ruleset's `require_code_owner_review`.
+# The bot approval here satisfies the 1-approval count but not the
+# codeowner gate; those land only after a maintainer also approves.
+# Non-workflow bumps (gomod, npm) merge fully hands-off.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
+
+      - name: Approve and enable auto-merge (patch / minor)
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL" \
+            --body "Auto-approved by dependabot-automerge workflow (${{ steps.meta.outputs.update-type }})."
+          gh pr merge --auto --squash "$PR_URL"
+
+      - name: Comment on major bumps
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr comment "$PR_URL" --body "Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. See dependency changelog / release notes before merging."

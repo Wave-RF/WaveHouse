@@ -20,3 +20,27 @@ updates:
       day: monday
     commit-message:
       prefix: "ci"
+
+  # TypeScript SDK
+  - package-ecosystem: npm
+    directory: /clients/ts
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      sdk-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(sdk)"
+
+  # E2E test harness (runs against the SDK)
+  - package-ecosystem: npm
+    directory: /tests/sdk
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      e2e-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(tests)"
