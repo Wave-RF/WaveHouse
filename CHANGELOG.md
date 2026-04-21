@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- **`agent` label trigger was unreachable**: `.github/workflows/claude-agent.yml`'s labeled-trigger branch gated on `github.event.sender.author_association`, which doesn't exist on the `sender` User object in `issues.labeled` webhook payloads — it's only set on content objects like `comment` / `review` / `issue`. The check silently evaluated false, making the `agent` label path never fire. Removed the association check; GitHub's built-in label-write permission (Triage+ only) is the authorization boundary. Flagged in Claude's post-merge review of #55.
+- **`CONTRIBUTING.md`** — formatting guidance said `gofmt`; corrected to `gofumpt` to match what `make fmt` runs and `make fmt-check` enforces in CI. `gofmt`-formatted code would fail CI. Flagged in Claude's post-merge review of #55.
+
+### Changed
+
+- **`pr-title.yml` + `label.yml` trigger → `pull_request_target`**: now that these workflow files exist on `main` (previously the chicken-and-egg of `pull_request_target` requiring the file to be on the default branch kept them on `pull_request`), fork PRs get the Validate check + sticky comment + auto-labels. Closes #56.
+- **`goreleaser-action` CLI version pin**: `release.yml` now passes `version: "~> v2"` to `goreleaser-action` instead of `version: latest`. Picks up patch / minor GoReleaser bumps automatically but breaks loudly on a v3 major bump rather than silently changing release binaries. Flagged in Claude's post-merge review of #55.
+- **`dependabot-automerge.yml` permissions tightened**: removed `contents: write` (over-scoped — only `gh pr review` and `gh pr merge` are called, both of which need `pull-requests: write` only). Follows least-privilege. Flagged in Claude's post-merge review of #55.
+
 ### Added
 
 - **Repository governance files**: `CLAUDE.md` and `.gemini/styleguide.md` pointers to `AGENTS.md` so Claude Code and Gemini Code Assist pick up project conventions automatically. `.github/CODEOWNERS` routes governance-file changes (LICENSE, SECURITY, AGENTS, CI/CD config) to admin reviewers.
