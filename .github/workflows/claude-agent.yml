@@ -43,11 +43,12 @@ jobs:
     # CONTRIBUTOR is included because webhook payloads report users
     # with *private* org membership as CONTRIBUTOR (not MEMBER). Org
     # members who want MEMBER-level gating can set their org
-    # membership visibility to public. Since the agent has write
-    # access, the agent label path restricts label-apply authority to
-    # people who already have repo-write — which GitHub enforces at
-    # the label level — so the label trigger doesn't need a per-event
-    # author_association check.
+    # membership visibility to public.
+    #
+    # The labeled-trigger branch cannot check author_association
+    # (the `sender` object on `issues.labeled` webhooks has no such
+    # field), so permission verification happens in the first step
+    # of the job via a `gh api` collaborators/permission call.
     if: |
       (
         (
@@ -86,11 +87,7 @@ jobs:
         (
           github.event_name == 'issues' &&
           github.event.action == 'labeled' &&
-          github.event.label.name == 'agent' &&
-          (github.event.sender.author_association == 'OWNER' ||
-           github.event.sender.author_association == 'MEMBER' ||
-           github.event.sender.author_association == 'COLLABORATOR' ||
-           github.event.sender.author_association == 'CONTRIBUTOR')
+          github.event.label.name == 'agent'
         )
       )
     permissions:
@@ -99,6 +96,30 @@ jobs:
       issues: write
       id-token: write
     steps:
+      - name: Verify sender has write+ for label-triggered invocations
+        # The agent has broad write scope, so the agent-label path
+        # needs a verified-permissions check even though GitHub
+        # already restricts label writes to Triage+. A Triage-role
+        # contributor could apply the `agent` label; we want the
+        # trigger gated at COLLABORATOR/write-or-higher to match the
+        # policy documented in AGENTS.md §"Repository Automation".
+        if: github.event_name == 'issues' && github.event.action == 'labeled'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$SENDER/permission" --jq '.permission' 2>/dev/null || echo "")
+          case "$perm" in
+            admin|maintain|write)
+              echo "sender $SENDER has $perm — proceeding"
+              ;;
+            *)
+              echo "::error::sender $SENDER has '${perm:-unknown}' permission; agent label trigger requires write+."
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 1

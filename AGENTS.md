@@ -120,7 +120,12 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 
 1. **Read it, decide**: accept (it's right), push back (it's wrong or out-of-scope), or defer (it's right but deserves its own PR).
 2. **Reply substantively** — not "fixed" alone. Say *what* was changed and in which commit SHA, or *why* you're pushing back. For cross-reviewer disagreements (one bot contradicts another, or a bot contradicts a human), argue with code references or spec citations — don't just assert.
-3. **Invite counter-reply when pushing back on a bot.** If the reply is a disagreement rather than a fix, mention the bot at the end of the reply so it re-engages: `@claude` re-invokes our `claude-agent.yml` workflow, `@gemini-code-assist` re-invokes Gemini's follow-up. Copilot doesn't have a mention pattern — for Copilot push-back, rely on the re-request button if a second opinion is wanted.
+3. **Always @mention the bot you're replying to** (except Copilot). Without the mention the bot never sees your reply and the dialog silently terminates. Put the mention *below* the signature trailer, on its own line:
+   - **Claude**: end with `@claude` to re-invoke `claude-agent.yml` (gated to OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR)
+   - **Gemini**: end with `@gemini-code-assist` to re-invoke Gemini, or open with `/gemini review` / `/gemini <question>`
+   - **Copilot**: no mention works — add a parenthetical noting the re-request-review button instead
+   
+   Mention on **every** bot reply, not just pushback cases. If you accept and fix, the bot may still want to verify; if you push back, the bot may have a counter-argument. Silent termination defeats the dialog design.
 4. **Fix in the PR when the suggestion is clearly right and in scope.** If it's right but out-of-scope, reply with a tracking link (issue or planned follow-up PR) before resolving.
 5. **Resolve the thread** once the reply fully addresses the concern AND no counter-reply is pending. Don't resolve threads a human reviewer is still engaging with; wait. Bot threads can be resolved after a substantive reply since bots only re-engage when mentioned — if the reply doesn't mention the bot, it's accepted as terminal.
 6. **Re-request review** from humans after substantive code changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via an explicit re-request button (Copilot).
@@ -135,10 +140,12 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 
 | Reviewer | How it runs | Re-runs on new commits | Blocks merge |
 | -------- | ----------- | ---------------------- | ------------ |
-| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto | No (advisory) unless added to required checks |
-| Gemini Code Assist | Marketplace App at repo level | Yes, auto | No (advisory) |
+| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto — **updates the same sticky comment** rather than posting new ones | No (advisory) unless added to required checks |
+| Gemini Code Assist | Marketplace App at repo level | Yes on synchronize, **but silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — so Gemini reviews rarely see infra PRs | No (advisory) |
 | Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
 | Human codeowners | Auto-requested via CODEOWNERS paths | Re-request manually after push | Yes — required by ruleset |
+
+> **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
 ## Documentation & Consistency Sync (MANDATORY)
 
