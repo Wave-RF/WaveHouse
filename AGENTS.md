@@ -180,6 +180,8 @@ Before finishing any task, do a quick search across docs for the identifiers you
 2. Define an interface if there will be multiple implementations.
 3. Wire it into the appropriate `cmd/*/main.go`.
 4. Document in `docs/architecture.md`.
+5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it.
+6. **Update the area enumeration** in `.github/workflows/triage.yml` (the `system-prompt:` block lists every legal area the LLM is allowed to return). Without this, the triager can't categorize issues about the new package.
 
 ### Writing tests
 
@@ -224,3 +226,16 @@ docs/                   → Project documentation
 - Input JSON is validated against ClickHouse schemas before processing
 - ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself
 - **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.
+- **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. `pr-title.yml` is an inline check rather than a third-party action).
+
+## Repository Automation (three tiers)
+
+1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
+2. **Tier 2 — Code review** (Gemini Code Assist App, configured via `.gemini/styleguide.md`): Marketplace App attached at the repo/org level; comments on PRs with code-review suggestions. No workflow file.
+3. **Tier 3 — Agentic execution** (`.github/workflows/claude-agent.yml`): `anthropics/claude-code-action` runs when an OWNER, MEMBER, or COLLABORATOR mentions `@claude` in an issue, PR, review, or comment, or applies the `agent` label to an issue. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
+
+## Governance Files
+
+- **`CODEOWNERS`** (`.github/CODEOWNERS`): Governance paths (`LICENSE`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, `.gemini/`, `.github/`, `.goreleaser.yaml`) require admin review. There is intentionally **no catch-all** — routine code changes pick reviewers manually to avoid auto-pinging the whole team.
+- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
+- **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/pr-title.yml`. The PR-title linter validates squash-merge commit messages.
