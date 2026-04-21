@@ -70,7 +70,7 @@ jobs:
         run: |
           admins=("EricAndrechek" "taitelee")
 
-          pr_json=$(gh pr view "$PR_NUM" --json isDraft,author,reviewRequests,statusCheckRollup)
+          pr_json=$(gh pr view "$PR_NUM" -R "$REPO" --json isDraft,author,reviewRequests,statusCheckRollup)
           author=$(echo "$pr_json" | jq -r '.author.login')
 
           # Skip Dependabot (dependabot-automerge.yml handles those).
@@ -119,7 +119,7 @@ jobs:
           # Flip draft → ready if draft.
           if [[ "$is_draft" == "true" ]]; then
             echo "PR is draft and bot-clean; flipping to ready-for-review."
-            gh pr ready "$PR_NUM"
+            gh pr ready "$PR_NUM" -R "$REPO"
           fi
 
           # Determine candidate reviewer(s): admins who aren't the PR author.
@@ -158,5 +158,5 @@ jobs:
 
           echo "Assigning reviewer(s): ${candidates[*]}"
           for cand in "${candidates[@]}"; do
-            gh pr edit "$PR_NUM" --add-reviewer "$cand"
+            gh pr edit "$PR_NUM" -R "$REPO" --add-reviewer "$cand"
           done
