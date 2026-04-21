@@ -7,13 +7,20 @@ name: Lint PR title
 # Required by the `main branch protection` ruleset as the `Validate`
 # check — must report on every PR or merge gets stuck at "pending."
 #
-# Uses `pull_request_target` so fork PRs get the same check AND the
-# sticky comment that explains how to fix it. This is safe because the
-# workflow never checks out PR code — it only reads
-# `event.pull_request.title` from the webhook payload.
+# NOTE: stays on `pull_request` (not `pull_request_target`) for now
+# because switching the trigger in a PR creates a coverage gap — on
+# `pull_request` events GitHub evaluates the workflow from the PR
+# head (which would already say `pull_request_target`, so no match),
+# and `pull_request_target` fires from the default branch's file
+# (which would still say `pull_request`, also no match). See #56 for
+# the plan (dual-trigger transition, then drop `pull_request`).
+#
+# Fork PRs under `pull_request` see a read-only GITHUB_TOKEN, so the
+# sticky comment silently skips there — the Validate check's red X
+# is still visible, just not the helpful fix-it comment.
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, reopened, synchronize]
 
 permissions:

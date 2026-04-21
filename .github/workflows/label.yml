@@ -5,12 +5,12 @@ name: Auto-label PR
 # current changed-file set, so removing a change also removes its
 # label.
 #
-# Uses `pull_request_target` so fork PRs also get labeled (trusted
-# event, no checkout of fork code — just reads the PR metadata and
-# writes labels).
+# Stays on `pull_request` for now — same chicken-and-egg as
+# pr-title.yml (see its header comment). Fork PRs won't auto-label
+# until we do the dual-trigger transition tracked in #56.
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
