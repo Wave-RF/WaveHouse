@@ -1,0 +1,159 @@
+name: Auto-assign reviewer
+
+# Assigns the non-author admin (Eric's PR → Taite; Taite's PR → Eric;
+# anyone else's PR → both) as a reviewer **only when the PR is
+# already bot-clean**: required checks passing AND all review threads
+# resolved. Replaces the CODEOWNERS auto-request path so human
+# reviewers aren't notified until their attention actually helps.
+#
+# If the PR is still draft but otherwise clean, this workflow also
+# flips it to ready-for-review (which exposes it for merge under the
+# ruleset).
+#
+# Idempotent — if the right reviewer is already requested, no action.
+# Never removes an already-requested reviewer (so a bot re-opening a
+# thread mid-review doesn't yank the reviewer off the PR).
+#
+# Dependabot PRs are skipped entirely (dependabot-automerge.yml
+# handles those).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed, edited]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
+  check_suite:
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: write  # needed for `gh pr ready` to flip draft → ready
+
+concurrency:
+  group: auto-assign-reviewer-${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number }}
+  cancel-in-progress: true
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR number across event types
+        id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request|pull_request_review|pull_request_review_thread)
+              num="${{ github.event.pull_request.number }}"
+              ;;
+            check_suite)
+              num=$(jq -r '.check_suite.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+              ;;
+          esac
+          if [[ -z "$num" ]]; then
+            echo "No PR in event payload; exiting."
+            exit 0
+          fi
+          echo "num=$num" >> "$GITHUB_OUTPUT"
+
+      - name: Check readiness and assign
+        if: steps.pr.outputs.num != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
+        run: |
+          admins=("EricAndrechek" "taitelee")
+
+          pr_json=$(gh pr view "$PR_NUM" --json isDraft,author,reviewRequests,statusCheckRollup)
+          author=$(echo "$pr_json" | jq -r '.author.login')
+
+          # Skip Dependabot (dependabot-automerge.yml handles those).
+          if [[ "$author" == "app/dependabot" || "$author" == "dependabot[bot]" ]]; then
+            echo "Dependabot PR — skipping (handled by dependabot-automerge)."
+            exit 0
+          fi
+
+          is_draft=$(echo "$pr_json" | jq -r '.isDraft')
+
+          # All required checks green? Excludes "Admin approval" because
+          # that's self-referential — the gate opens when an admin
+          # approves, which happens after this workflow has done its
+          # assignment job, so it would deadlock.
+          required=("Check" "Build" "Validate")
+          for check in "${required[@]}"; do
+            state=$(echo "$pr_json" | jq -r --arg n "$check" \
+              '[.statusCheckRollup[] | select(.name == $n)] | .[0].conclusion // "MISSING"')
+            if [[ "$state" != "SUCCESS" ]]; then
+              echo "Required check '$check' is '$state'; waiting."
+              exit 0
+            fi
+          done
+
+          # All review threads resolved?
+          owner="${REPO%%/*}"
+          repo="${REPO##*/}"
+          unresolved=$(gh api graphql \
+            -f query='query($owner:String!, $repo:String!, $num:Int!) {
+              repository(owner:$owner, name:$repo) {
+                pullRequest(number:$num) {
+                  reviewThreads(first: 100) {
+                    nodes { isResolved }
+                  }
+                }
+              }
+            }' \
+            -F owner="$owner" -F repo="$repo" -F num="$PR_NUM" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+          if [[ "$unresolved" != "0" ]]; then
+            echo "$unresolved unresolved review thread(s); waiting."
+            exit 0
+          fi
+
+          # Flip draft → ready if draft.
+          if [[ "$is_draft" == "true" ]]; then
+            echo "PR is draft and bot-clean; flipping to ready-for-review."
+            gh pr ready "$PR_NUM"
+          fi
+
+          # Determine candidate reviewer(s): admins who aren't the PR author.
+          candidates=()
+          for admin in "${admins[@]}"; do
+            if [[ "$admin" != "$author" ]]; then
+              candidates+=("$admin")
+            fi
+          done
+
+          if [[ ${#candidates[@]} -eq 0 ]]; then
+            echo "PR author $author is the only admin; nobody to assign."
+            exit 0
+          fi
+
+          # Already requested? Skip if any candidate is already in
+          # requested_reviewers (idempotent across re-fires).
+          current_reviewers=$(echo "$pr_json" | jq -r '[.reviewRequests[] | .login // .name] | .[]' 2>/dev/null || true)
+          for cand in "${candidates[@]}"; do
+            if printf '%s\n' "$current_reviewers" | grep -Fxq "$cand"; then
+              echo "$cand already requested; skipping."
+              exit 0
+            fi
+          done
+
+          # Has a candidate already reviewed? (Don't re-request after
+          # they've submitted; avoids nagging after dismissal.)
+          for cand in "${candidates[@]}"; do
+            submitted=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
+              --jq --arg u "$cand" 'any(.[]; .user.login == $u)')
+            if [[ "$submitted" == "true" ]]; then
+              echo "$cand has already reviewed; not re-requesting."
+              exit 0
+            fi
+          done
+
+          echo "Assigning reviewer(s): ${candidates[*]}"
+          for cand in "${candidates[@]}"; do
+            gh pr edit "$PR_NUM" --add-reviewer "$cand"
+          done

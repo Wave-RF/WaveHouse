@@ -1,0 +1,73 @@
+name: Admin approval
+
+# Required status check that enforces at-least-one approval from an
+# admin (Eric or Taite) before any PR can merge. Replaces the
+# CODEOWNERS-based `require_code_owner_review` rule so that reviewer
+# assignment can be workflow-controlled (see auto-assign-reviewer.yml)
+# and human reviewers are only notified once bots are clean.
+#
+# Dependabot PRs bypass this check because they go through
+# dependabot-automerge.yml for patch/minor bumps — auto-approved by
+# the bot and merged hands-off. Major bumps post a comment and stay
+# open for human review, at which point an admin approval is recorded
+# normally.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed, edited]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: admin-approval-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  admin-approval:
+    name: Admin approval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for admin approval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # Dependabot bypass — dependabot-automerge.yml handles these.
+          if [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
+            echo "::notice::Dependabot PR — bypassing admin approval (handled by dependabot-automerge workflow)."
+            exit 0
+          fi
+
+          admins=("EricAndrechek" "taitelee")
+
+          # Collect APPROVED reviewers (sort -u handles duplicates).
+          # per_page=100 is enough for realistic PR scale.
+          approvers=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
+            --jq '.[] | select(.state == "APPROVED") | .user.login' | sort -u)
+
+          for admin in "${admins[@]}"; do
+            if printf '%s\n' "$approvers" | grep -Fxq "$admin"; then
+              echo "PR #$PR_NUM has admin approval from $admin."
+              exit 0
+            fi
+          done
+
+          {
+            echo "::error::PR #$PR_NUM needs approval from an admin."
+            echo ""
+            echo "Current APPROVED reviewers:"
+            if [[ -z "$approvers" ]]; then
+              echo "  (none)"
+            else
+              printf '  - %s\n' $approvers
+            fi
+            echo ""
+            echo "Required: at least one approving review from any of:"
+            printf '  - %s\n' "${admins[@]}"
+          } >&2
+          exit 1

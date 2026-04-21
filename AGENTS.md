@@ -143,7 +143,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 | Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto — **updates the same sticky comment** rather than posting new ones | No (advisory) unless added to required checks |
 | Gemini Code Assist | Marketplace App at repo level | Yes on synchronize, **but silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — so Gemini reviews rarely see infra PRs | No (advisory) |
 | Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
-| Human codeowners | Auto-requested via CODEOWNERS paths | Re-request manually after push | Yes — required by ruleset |
+| Human admins (Eric / Taite) | Auto-assigned by `.github/workflows/auto-assign-reviewer.yml` **only once** the PR is bot-clean: required checks green AND all review threads resolved. Draft PRs get flipped to ready at the same moment. Assignment logic: PR author == Eric → request Taite; author == Taite → request Eric; other authors → request both. | Workflow re-checks on every push / review / thread / check event; idempotent (won't re-request a reviewer who already has the PR). | Yes — `.github/workflows/admin-approval.yml` is a required status check that fails unless Eric or Taite has an `APPROVED` review. |
 
 > **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
@@ -277,6 +277,6 @@ docs/                   → Project documentation
 
 ## Governance Files
 
-- **`CODEOWNERS`** (`.github/CODEOWNERS`): Governance paths (`LICENSE`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, `.gemini/`, `.github/`, `.goreleaser.yaml`) require admin review. There is intentionally **no catch-all** — routine code changes pick reviewers manually to avoid auto-pinging the whole team.
+- **No `CODEOWNERS` file**: Removed 2026-04-21 in favor of workflow-driven reviewer assignment and approval enforcement. `CODEOWNERS`'s one-ping-on-open behavior conflicted with the "don't notify reviewers until bots are clean" design goal. Admin approval is now enforced by `.github/workflows/admin-approval.yml` (required status check that fails unless Eric or Taite has an `APPROVED` review); reviewer assignment is handled by `.github/workflows/auto-assign-reviewer.yml` (adds the non-author admin once bots are clean).
 - **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
 - **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/pr-title.yml`. The PR-title linter validates squash-merge commit messages.

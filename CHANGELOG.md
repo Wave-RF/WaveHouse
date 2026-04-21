@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- **Reviewer assignment + admin approval moved from CODEOWNERS to workflows.** Removed `.github/CODEOWNERS`; admin approval on every PR is now enforced by `.github/workflows/admin-approval.yml` as a required status check (fails unless Eric or Taite has an `APPROVED` review, Dependabot PRs bypass via `dependabot-automerge.yml`). Reviewer assignment is handled by `.github/workflows/auto-assign-reviewer.yml`: assigns the non-author admin (Eric's PR → Taite; Taite's PR → Eric; anyone else → both) but **only once the PR is bot-clean** — required checks green, all review threads resolved. Draft PRs get flipped to ready at the same moment. Net effect: human reviewers aren't pinged until their attention actually helps. Ruleset updated: `require_code_owner_review: false` (now a no-op anyway), `Admin approval` added to `required_status_checks`.
+
 ### Fixed
 
 - **`agent` label trigger was unreachable AND under-gated**: `.github/workflows/claude-agent.yml`'s labeled-trigger branch gated on `github.event.sender.author_association`, which doesn't exist on the `sender` User object in `issues.labeled` webhook payloads — it's only set on content objects like `comment` / `review` / `issue`. The check silently evaluated false, making the `agent` label path never fire (flagged in Claude's post-merge review of #55). Fix: removed the unreachable association check AND added a first-step permission verification that calls the collaborators/permission API and requires `admin` / `maintain` / `write` before proceeding — closing the privilege-escalation gap Gemini flagged where a `triage`-role user could otherwise trigger the agent.
