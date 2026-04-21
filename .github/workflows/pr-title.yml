@@ -4,14 +4,20 @@ name: Lint PR title
 # This workflow enforces Conventional Commits on the PR title so history
 # stays parseable (changelog generation, `git log --oneline`, etc).
 #
-# Informational until added to the required-status-checks ruleset.
+# Uses `pull_request_target` so fork PRs get the same check AND the
+# sticky comment that explains how to fix it. This is safe because the
+# workflow never checks out PR code — it only reads `event.pull_request.title`
+# from the webhook payload.
+#
+# Required by the `main branch protection` ruleset as the `Validate` check.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, reopened, synchronize]
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: pr-title-${{ github.event.pull_request.number }}
@@ -23,29 +29,83 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check Conventional Commits format
+        id: check
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           # Keep this type list in sync with CONTRIBUTING.md.
-          # The optional `!` marks a breaking change per Conventional Commits 1.0.0
-          # (e.g., `feat!: ...` or `feat(api)!: ...`).
+          # Optional `!` before `:` marks a breaking change per
+          # Conventional Commits 1.0.0.
           pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
-            {
-              echo "::error::PR title does not match Conventional Commits format."
-              echo ""
-              echo "Got:      $PR_TITLE"
-              echo "Expected: <type>(optional-scope): <lowercase subject, no trailing period>"
-              echo ""
-              echo "Allowed types: feat, fix, docs, refactor, test, chore, ci, deps, build, perf, revert, style"
-              echo ""
-              echo "Examples:"
-              echo "  feat: add dedupe cache"
-              echo "  fix(ingest): drop duplicate events"
-              echo "  chore(deps): bump clickhouse-go to v2.30"
-            } >&2
-            exit 1
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "PR title OK: $PR_TITLE"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"
           fi
 
-          echo "PR title OK: $PR_TITLE"
+      - name: Post / update sticky comment on failure
+        if: steps.check.outputs.passed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- pr-title-lint-comment -->'
+          BODY=$(cat <<EOF
+          $MARKER
+          ## PR title doesn't match Conventional Commits
+
+          **Got:** \`$PR_TITLE\`
+
+          **Expected format:** \`<type>(optional-scope)(optional-!): <lowercase subject, no trailing period>\`
+
+          **Allowed types:** \`feat\`, \`fix\`, \`docs\`, \`refactor\`, \`test\`, \`chore\`, \`ci\`, \`deps\`, \`build\`, \`perf\`, \`revert\`, \`style\`.
+
+          The optional \`!\` before the colon marks a breaking change per [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+
+          **Examples:**
+          - \`feat: add dedupe cache\`
+          - \`fix(ingest): drop duplicate events\`
+          - \`feat(api)!: remove deprecated endpoint\`
+          - \`chore(deps): bump clickhouse-go to v2.30\`
+
+          ---
+
+          This check is required by the \`main branch protection\` ruleset — merge is blocked until the title matches. Edit the PR title to trigger a re-check automatically. I'll clean up this comment once the title is valid.
+          EOF
+          )
+
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f "body=$BODY" > /dev/null
+            echo "Updated existing pr-title-lint comment ($EXISTING)"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f "body=$BODY" > /dev/null
+            echo "Posted new pr-title-lint comment"
+          fi
+
+          exit 1
+
+      - name: Clean up sticky comment on pass
+        if: steps.check.outputs.passed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- pr-title-lint-comment -->'
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X DELETE "repos/$REPO/issues/comments/$EXISTING"
+            echo "Removed stale pr-title-lint comment ($EXISTING)"
+          fi
