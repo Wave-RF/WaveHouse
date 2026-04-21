@@ -266,14 +266,14 @@ docs/                   → Project documentation
 ## Repository Automation (three tiers)
 
 1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
-2. **Tier 2 — Code review** (two reviewers, both advisory; CODEOWNERS + the ruleset are the actual merge-gate):
+2. **Tier 2 — Code review** (two reviewers, both advisory; the `Admin approval` required status check + the ruleset are the actual merge-gate):
    - **Gemini Code Assist App** configured via `.gemini/styleguide.md` — Marketplace App attached at the repo/org level, no workflow file.
    - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs automatically on PR open/push/ready-for-review, but only when the PR author is already OWNER/MEMBER/COLLABORATOR to bound token cost. Dependabot PRs are skipped. Fork PRs from first-time contributors aren't auto-reviewed here; a maintainer can invoke Claude on them via `@claude` (Tier 3).
 3. **Tier 3 — Agentic execution** (`.github/workflows/claude-agent.yml`): same action in a different mode. Runs when an OWNER, MEMBER, or COLLABORATOR mentions `@claude` in an issue, PR, review, or comment, or applies the `agent` label to an issue. Can make code changes and open PRs. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
 
 ### Dependabot automation
 
-`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Action-ecosystem bumps that touch `.github/workflows/` require a human codeowner's approval per the ruleset; non-workflow bumps (gomod, npm) merge fully hands-off.
+`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Dependabot PRs **bypass the `Admin approval` required status check** (see `admin-approval.yml`) — the auto-approval from the workflow + CI passing is the trust model for patch/minor bumps.
 
 ## Governance Files
 

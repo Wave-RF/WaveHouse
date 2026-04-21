@@ -460,7 +460,9 @@ The `main branch protection` ruleset requires the following checks to pass befor
 - `Build` — compile all binaries
 - `Validate` — PR title is Conventional Commits
 
-Plus 1 approving review and CODEOWNERS approval on governance paths (`LICENSE`, `AGENTS.md`, `.github/workflows/`, etc.). Linear history, no deletion, no force-push, squash-merge only.
+Plus 1 approving review, and the `Admin approval` check (enforced by `.github/workflows/admin-approval.yml`) requires at least one `APPROVED` review specifically from an admin (Eric or Taite). Linear history, no deletion, no force-push, squash-merge only.
+
+Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
 
 > **Note — temporarily relaxed**: `Lint`, `Test`, and `Integration Tests` are *not* currently required while pre-existing failures on `main` are being fixed (tracked in #57). They'll rejoin required once main is green.
 
@@ -480,7 +482,9 @@ Three bots review PRs:
 - **Gemini Code Assist** — Marketplace App, reads `.gemini/styleguide.md` and `.gemini/config.yaml`. Configured with `comment_severity_threshold: LOW` to surface more findings.
 - **Copilot** — tied to individual reviewer subscriptions; shows up on PRs where a maintainer with Copilot Pro is listed as a reviewer.
 
-All three are **advisory** — CODEOWNERS + the ruleset are the actual merge-gate.
+All three are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
+
+Human reviewers are auto-assigned by `.github/workflows/auto-assign-reviewer.yml` **only when a PR is bot-clean** (required checks green AND all review threads resolved). Assignment logic: PR author == Eric → request Taite; author == Taite → request Eric; anyone else → request both. Draft PRs get flipped to ready at the same moment. Net effect: you get exactly one GitHub notification when a PR actually needs your eyes.
 
 ### Invoking bots manually
 

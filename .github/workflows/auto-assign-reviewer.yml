@@ -31,14 +31,20 @@ on:
     types: [completed]
 
 permissions:
+  # `gh pr ready` + `gh pr edit --add-reviewer` both use the
+  # updatePullRequest mutation, which only needs pull-requests: write
+  # (not contents: write — Copilot's flag was correct).
   pull-requests: write
-  contents: write  # needed for `gh pr ready` to flip draft → ready
   checks: read     # read check-runs for statusCheckRollup
   statuses: read   # read commit statuses (legacy) for statusCheckRollup
   actions: read    # read check_suite.workflow_run for statusCheckRollup's deep fields
 
 concurrency:
-  group: auto-assign-reviewer-${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number }}
+  # Fallback to run_id when check_suite has an empty pull_requests
+  # array (e.g., check suites from direct pushes to a branch with no
+  # open PR). Without the fallback the group key can collapse to null
+  # and collide across unrelated runs.
+  group: auto-assign-reviewer-${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -138,28 +144,32 @@ jobs:
             exit 0
           fi
 
-          # Already requested? Skip if any candidate is already in
-          # requested_reviewers (idempotent across re-fires).
+          # Filter candidates: skip any already requested, skip any who
+          # already submitted a review. Continue (not exit) so remaining
+          # candidates are still considered — previous exit-on-first
+          # match was a bug for the "request both" path.
           current_reviewers=$(echo "$pr_json" | jq -r '[.reviewRequests[] | .login // .name] | .[]' 2>/dev/null || true)
+          all_reviews=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100")
+          to_add=()
           for cand in "${candidates[@]}"; do
             if printf '%s\n' "$current_reviewers" | grep -Fxq "$cand"; then
               echo "$cand already requested; skipping."
-              exit 0
+              continue
             fi
-          done
-
-          # Has a candidate already reviewed? (Don't re-request after
-          # they've submitted; avoids nagging after dismissal.)
-          for cand in "${candidates[@]}"; do
-            submitted=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
-              --jq --arg u "$cand" 'any(.[]; .user.login == $u)')
+            submitted=$(echo "$all_reviews" | jq --arg u "$cand" 'any(.[]; .user.login == $u)')
             if [[ "$submitted" == "true" ]]; then
               echo "$cand has already reviewed; not re-requesting."
-              exit 0
+              continue
             fi
+            to_add+=("$cand")
           done
 
-          echo "Assigning reviewer(s): ${candidates[*]}"
-          for cand in "${candidates[@]}"; do
+          if [[ ${#to_add[@]} -eq 0 ]]; then
+            echo "No reviewers need to be added."
+            exit 0
+          fi
+
+          echo "Assigning reviewer(s): ${to_add[*]}"
+          for cand in "${to_add[@]}"; do
             gh pr edit "$PR_NUM" -R "$REPO" --add-reviewer "$cand"
           done

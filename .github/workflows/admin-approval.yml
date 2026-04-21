@@ -45,14 +45,26 @@ jobs:
 
           admins=("EricAndrechek" "taitelee")
 
-          # Collect APPROVED reviewers (sort -u handles duplicates).
-          # per_page=100 is enough for realistic PR scale.
+          # Evaluate each user's *latest* review state and require
+          # APPROVED. Without this, a historical APPROVED review that
+          # was later followed by CHANGES_REQUESTED (or dismissed)
+          # would still satisfy the gate — Copilot flagged that false-
+          # pass on an earlier version. Reviews are grouped by user;
+          # within each group the submission with the most recent
+          # submitted_at wins.
           approvers=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
-            --jq '.[] | select(.state == "APPROVED") | .user.login' | sort -u)
+            --jq '
+              sort_by(.submitted_at)
+              | reverse
+              | unique_by(.user.login)
+              | .[]
+              | select(.state == "APPROVED")
+              | .user.login
+            ')
 
           for admin in "${admins[@]}"; do
             if printf '%s\n' "$approvers" | grep -Fxq "$admin"; then
-              echo "PR #$PR_NUM has admin approval from $admin."
+              echo "PR #$PR_NUM has admin approval from $admin (latest review state: APPROVED)."
               exit 0
             fi
           done
