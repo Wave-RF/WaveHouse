@@ -112,6 +112,33 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
 
+## Review Response (MANDATORY)
+
+**Every review comment on a PR gets a substantive reply, and every conversation gets resolved before merge. This applies equally to human reviewers and AI reviewers (Copilot, Gemini Code Assist, claude-review, future bots). The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads literally block merge.**
+
+### What to do on every review comment
+
+1. **Read it, decide**: accept (it's right), push back (it's wrong or out-of-scope), or defer (it's right but deserves its own PR).
+2. **Reply substantively** — not "fixed" alone. Say *what* was changed and in which commit SHA, or *why* you're pushing back. For cross-reviewer disagreements (one bot contradicts another, or a bot contradicts a human), argue with code references or spec citations — don't just assert.
+3. **Fix in the PR when the suggestion is clearly right and in scope.** If it's right but out-of-scope, reply with a tracking link (issue or planned follow-up PR) before resolving.
+4. **Resolve the thread** once your reply fully addresses the concern. Don't resolve threads a human reviewer is still engaging with; wait. Bot threads can be resolved after a substantive reply since bots don't follow up unless re-invoked.
+5. **Re-request review** from humans after substantive code changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via an explicit re-request button (Copilot).
+
+### What not to do
+
+- No empty acknowledgements (`LGTM`, `fixed`, `good catch`). Always include detail so the reply makes sense standalone.
+- Don't argue in circles. If a reviewer comes back with the same point after your reply, escalate to a human maintainer rather than looping.
+- Don't resolve a thread that has an open child comment from the reviewer you haven't addressed.
+
+### Review tooling reference
+
+| Reviewer | How it runs | Re-runs on new commits | Blocks merge |
+| -------- | ----------- | ---------------------- | ------------ |
+| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto | No (advisory) unless added to required checks |
+| Gemini Code Assist | Marketplace App at repo level | Yes, auto | No (advisory) |
+| Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
+| Human codeowners | Auto-requested via CODEOWNERS paths | Re-request manually after push | Yes — required by ruleset |
+
 ## Documentation & Consistency Sync (MANDATORY)
 
 **This is a hard requirement. Every code change MUST include corresponding updates to all affected files below. Do NOT wait for the user to ask — verify and update these automatically as part of every task. A code change without its documentation counterpart is incomplete.**
