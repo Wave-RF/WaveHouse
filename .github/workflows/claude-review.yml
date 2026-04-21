@@ -20,30 +20,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  debug:
-    name: Debug gating
-    runs-on: ubuntu-latest
-    steps:
-      - name: Print context
-        env:
-          DRAFT: ${{ github.event.pull_request.draft }}
-          ACTOR: ${{ github.actor }}
-          AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
-          EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-        run: |
-          echo "DRAFT=$DRAFT"
-          echo "ACTOR=$ACTOR"
-          echo "AUTHOR_ASSOC=$AUTHOR_ASSOC"
-          echo "EVENT=$EVENT"
-          echo "ACTION=$ACTION"
-
   review:
     name: Review
+    # CONTRIBUTOR is included because webhook payloads report users
+    # with *private* org membership as CONTRIBUTOR (not MEMBER) even
+    # when the REST API reports them as MEMBER. Org members who want
+    # stricter gating can flip their Wave-RF membership visibility to
+    # public, which makes webhooks report MEMBER as expected.
     if: >-
       github.event.pull_request.draft == false
       && github.actor != 'dependabot[bot]'
-      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: read

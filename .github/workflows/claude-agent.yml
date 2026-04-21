@@ -40,6 +40,14 @@ jobs:
     # Gate: must be a trusted actor AND either mention @claude or apply
     # the `agent` label. The author_association path differs per event
     # so each branch is explicit.
+    # CONTRIBUTOR is included because webhook payloads report users
+    # with *private* org membership as CONTRIBUTOR (not MEMBER). Org
+    # members who want MEMBER-level gating can set their org
+    # membership visibility to public. Since the agent has write
+    # access, the agent label path restricts label-apply authority to
+    # people who already have repo-write — which GitHub enforces at
+    # the label level — so the label trigger doesn't need a per-event
+    # author_association check.
     if: |
       (
         (
@@ -47,21 +55,24 @@ jobs:
           contains(github.event.comment.body, '@claude') &&
           (github.event.comment.author_association == 'OWNER' ||
            github.event.comment.author_association == 'MEMBER' ||
-           github.event.comment.author_association == 'COLLABORATOR')
+           github.event.comment.author_association == 'COLLABORATOR' ||
+           github.event.comment.author_association == 'CONTRIBUTOR')
         ) ||
         (
           github.event_name == 'pull_request_review_comment' &&
           contains(github.event.comment.body, '@claude') &&
           (github.event.comment.author_association == 'OWNER' ||
            github.event.comment.author_association == 'MEMBER' ||
-           github.event.comment.author_association == 'COLLABORATOR')
+           github.event.comment.author_association == 'COLLABORATOR' ||
+           github.event.comment.author_association == 'CONTRIBUTOR')
         ) ||
         (
           github.event_name == 'pull_request_review' &&
           contains(github.event.review.body, '@claude') &&
           (github.event.review.author_association == 'OWNER' ||
            github.event.review.author_association == 'MEMBER' ||
-           github.event.review.author_association == 'COLLABORATOR')
+           github.event.review.author_association == 'COLLABORATOR' ||
+           github.event.review.author_association == 'CONTRIBUTOR')
         ) ||
         (
           github.event_name == 'issues' &&
@@ -69,7 +80,8 @@ jobs:
           contains(github.event.issue.body, '@claude') &&
           (github.event.issue.author_association == 'OWNER' ||
            github.event.issue.author_association == 'MEMBER' ||
-           github.event.issue.author_association == 'COLLABORATOR')
+           github.event.issue.author_association == 'COLLABORATOR' ||
+           github.event.issue.author_association == 'CONTRIBUTOR')
         ) ||
         (
           github.event_name == 'issues' &&
