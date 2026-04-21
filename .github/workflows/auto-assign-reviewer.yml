@@ -35,6 +35,7 @@ permissions:
   # updatePullRequest mutation, which only needs pull-requests: write
   # (not contents: write — Copilot's flag was correct).
   pull-requests: write
+  contents: read   # needed by statusCheckRollup to read commit nodes
   checks: read     # read check-runs for statusCheckRollup
   statuses: read   # read commit statuses (legacy) for statusCheckRollup
   actions: read    # read check_suite.workflow_run for statusCheckRollup's deep fields
