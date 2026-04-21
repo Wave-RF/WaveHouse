@@ -20,6 +20,11 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
+  # contents: write is needed for `gh pr merge` to actually perform
+  # the squash merge when checks are already green at the time of
+  # auto-merge enablement. `gh pr merge --auto` schedules otherwise,
+  # but the edge-case immediate merge requires tree-write.
+  contents: write
   pull-requests: write
 
 jobs:
