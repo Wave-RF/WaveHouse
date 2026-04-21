@@ -1,0 +1,49 @@
+name: Lint PR title
+
+# When squash-merging, the PR title becomes the commit message on main.
+# This workflow enforces Conventional Commits on the PR title so history
+# stays parseable (changelog generation, `git log --oneline`, etc).
+#
+# Informational until added to the required-status-checks ruleset.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Conventional Commits format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Keep this type list in sync with CONTRIBUTING.md.
+          pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?: [^A-Z].+[^.]$'
+
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            {
+              echo "::error::PR title does not match Conventional Commits format."
+              echo ""
+              echo "Got:      $PR_TITLE"
+              echo "Expected: <type>(optional-scope): <lowercase subject, no trailing period>"
+              echo ""
+              echo "Allowed types: feat, fix, docs, refactor, test, chore, ci, deps, build, perf, revert, style"
+              echo ""
+              echo "Examples:"
+              echo "  feat: add dedupe cache"
+              echo "  fix(ingest): drop duplicate events"
+              echo "  chore(deps): bump clickhouse-go to v2.30"
+            } >&2
+            exit 1
+          fi
+
+          echo "PR title OK: $PR_TITLE"

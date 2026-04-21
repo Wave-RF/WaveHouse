@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Repository governance files**: `CLAUDE.md` and `.gemini/styleguide.md` pointers to `AGENTS.md` so Claude Code and Gemini Code Assist pick up project conventions automatically. `.github/CODEOWNERS` routes governance-file changes (LICENSE, SECURITY, AGENTS, CI/CD config) to admin reviewers.
+- **PR title linting**: `.github/workflows/pr-title.yml` validates that PR titles follow Conventional Commits. Runs informationally on every PR (not yet a required check). CONTRIBUTING.md updated with the full accepted type list (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`).
 - **Hub wildcard support**: `Broadcast()` now matches NATS-style topic wildcards (`*` for one token, `>` for one-or-more remaining tokens) so SSE/WS clients subscribing to patterns like `ingest.>` receive events for all matching subjects. Includes dedup to prevent double-delivery.
 - **Auth `?token=` query parameter fallback**: JWT can now be passed via `?token=<jwt>` query parameter for WebSocket and SSE connections where custom headers are not possible. The `Authorization` header takes precedence. Token is stripped from URL after extraction.
 - **SSE `id:` field and `Last-Event-ID` reconnection**: SSE events now include an `id:` field set to `received_timestamp`, enabling native `EventSource` automatic reconnection. The `Last-Event-ID` request header overrides `?since=` for seamless gap-fill on reconnect.
