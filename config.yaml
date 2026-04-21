@@ -4,7 +4,7 @@ server:
   port: 8080
   shutdown_timeout: 10
   cors_allowed_origins:
-    - "*"
+    - "http://localhost:3000"
 
 clickhouse:
   addr: localhost:9000
