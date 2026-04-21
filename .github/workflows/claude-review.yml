@@ -1,0 +1,76 @@
+name: Claude PR review
+
+# Auto-reviews pull requests on open/push/ready-for-review, but only
+# when the PR author is already trusted (OWNER, MEMBER, COLLABORATOR)
+# to bound token cost. PRs from first-time contributors on forks are
+# skipped here — a maintainer can still invoke Claude on them by
+# commenting `@claude`, which is handled by claude-agent.yml.
+#
+# Gemini Code Assist (installed as a GitHub App) also reviews PRs; the
+# two reviewers operate independently and their outputs are both
+# advisory. CODEOWNERS + the ruleset's required reviewer are the
+# merge-gate, not these bots.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review
+    if: |
+      !github.event.pull_request.draft &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event.pull_request.author_association == 'OWNER' ||
+       github.event.pull_request.author_association == 'MEMBER' ||
+       github.event.pull_request.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e  # v1.0.102
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          use_sticky_comment: true
+          track_progress: true
+          prompt: |
+            You are reviewing a pull request on the WaveHouse project.
+            AGENTS.md at the repo root has architectural context, code
+            conventions, and the mandatory documentation-sync rules —
+            read it before starting.
+
+            Focus your review on:
+              - Correctness: Go concurrency (goroutine leaks, data races,
+                context propagation), error wrapping with %w, resource
+                cleanup on error paths, SQL injection risk in any
+                ClickHouse-bound code.
+              - Schema / config / doc sync: per AGENTS.md "Documentation
+                & Consistency Sync (MANDATORY)", flag every change to
+                handlers, config structs, routes, event formats, or
+                compose files that is missing the corresponding update
+                in docs/api.md, docs/configuration.md,
+                docs/architecture.md, docs/deployment.md, or CHANGELOG.md.
+              - Test coverage: new code without tests, especially on
+                critical paths (auth middleware, ingest pipeline,
+                policy evaluation, structured query builder).
+              - Conventions: gofumpt formatting, slog structured
+                logging, Chi v5 patterns, interface-first design,
+                constructor injection, no global state — all per
+                AGENTS.md "Code Conventions" and "Testing Conventions".
+
+            Post inline comments on specific lines where issues are
+            concrete and actionable. In the summary, end with exactly
+            one of: "Ship it", "Iterate", or "Block", followed by the
+            single most important thing for the author to address.
+
+            Do not make code changes.
