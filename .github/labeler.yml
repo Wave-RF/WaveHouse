@@ -1,0 +1,113 @@
+# File-path-to-label map for actions/labeler. Keeps area/* labels on
+# PRs in sync with what files they touch — no manual label picking.
+# Rule of thumb: match the `internal/<pkg>/` → `area/<pkg>` convention
+# established in AGENTS.md.
+
+"area/api":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/api/**"
+      - "cmd/wavehouse-api/**"
+
+"area/ingest":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/ingest/**"
+      - "cmd/wavehouse-worker/**"
+
+"area/query":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/query/**"
+      - "internal/discovery/**"
+
+"area/cache":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/cache/**"
+
+"area/dedupe":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/dedupe/**"
+
+"area/policy":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/policy/**"
+
+"area/pipes":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/pipes/**"
+
+"area/sdk":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "clients/ts/**"
+      - "tests/sdk/**"
+
+"area/docs":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "docs/**"
+      - "site/**"
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - "CHANGELOG.md"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "SECURITY.md"
+      - "CODE_OF_CONDUCT.md"
+
+"area/infra":
+  - changed-files:
+    - any-glob-to-any-file:
+      - ".github/**"
+      - "Makefile"
+      - "Dockerfile*"
+      - ".goreleaser.yaml"
+      - "deployments/**"
+      - "tests/compose.yaml"
+      - ".golangci.yml"
+      - ".air.toml"
+      - ".markdownlint.json"
+      - "go.mod"
+      - "go.sum"
+
+"area/observability":
+  - changed-files:
+    - any-glob-to-any-file:
+      - "internal/**/observability/**"
+      - "internal/**/metrics*.go"
+      - "internal/**/tracing*.go"
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "go.mod"
+      - "go.sum"
+      - "**/package.json"
+      - "**/pnpm-lock.yaml"
+      - "**/package-lock.json"
+
+github_actions:
+  - changed-files:
+    - any-glob-to-any-file:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+
+go:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "**/*.go"
+
+documentation:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "docs/**"
+      - "site/**"
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - "CODE_OF_CONDUCT.md"

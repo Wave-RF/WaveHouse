@@ -1,9 +1,10 @@
 ---
 name: Feature Request
 about: Suggest a new feature or improvement
-title: "[feature] "
+title: ''
 labels: enhancement
-assignees: ""
+assignees: ''
+
 ---
 
 ## Problem

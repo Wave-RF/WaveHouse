@@ -66,7 +66,15 @@ Types:
 - `docs` — Documentation only
 - `refactor` — Code change that neither fixes a bug nor adds a feature
 - `test` — Adding or updating tests
-- `chore` — Build, CI, tooling changes
+- `chore` — Miscellaneous tasks that don't fit elsewhere
+- `ci` — CI/CD and GitHub Actions changes
+- `deps` — Dependency version bumps (typically opened by Dependabot)
+- `build` — Build system changes (Makefile, Dockerfile, goreleaser)
+- `perf` — Performance improvements
+- `revert` — Reverting a previous commit
+- `style` — Formatting changes with no functional effect
+
+The PR title is enforced via the `Lint PR title` workflow; it becomes the squash-merge commit message on `main`, so keep it parseable.
 
 Examples:
 

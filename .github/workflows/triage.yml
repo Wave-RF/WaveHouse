@@ -1,0 +1,174 @@
+name: Triage issues
+
+# Auto-classifies new and edited issues using GitHub Models (gpt-4o-mini)
+# and applies area/* labels + security / breaking-change flags. Optionally
+# writes the Priority field on the Task Board (project #7) when a
+# PROJECT_BOARD_TOKEN secret with `project` scope is configured; otherwise
+# the board-write step soft-fails and only labels are applied.
+#
+# Issue bodies are user-controlled and untrusted — the classifier's output
+# only affects labels and a board field, never code execution. A
+# prompt-injection attempt can at worst produce a wrong label.
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+  contents: read
+  models: read
+
+concurrency:
+  group: triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: Classify and label
+    runs-on: ubuntu-latest
+    # Skip re-triggering on our own label edits.
+    if: github.actor != 'github-actions[bot]' && github.event.issue.pull_request == null
+    steps:
+      - name: Fetch current area labels
+        id: areas
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        # Discovers the set of `area/*` labels currently defined on the
+        # repo and formats them for the classifier's system prompt. This
+        # keeps the triager's legal-area list in sync with the actual
+        # labels — adding a new `area/foo` label is enough; no workflow
+        # edit needed. Label descriptions are used as the classifier's
+        # per-area hint, so make them meaningful when creating labels.
+        run: |
+          gh label list -R "$REPO" --json name,description --jq '
+            [.[]
+              | select(.name | startswith("area/"))
+              | "  \(.name[5:])\(" " * (14 - (.name[5:] | length)))- \(.description // "")"
+            ] | join("\n")
+          ' > /tmp/areas.txt
+          {
+            echo 'list<<EOF'
+            cat /tmp/areas.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Classify with GitHub Models
+        id: classify
+        uses: actions/ai-inference@af6ad2c4ac4edf01884054fc3a6caa6d2567c13a  # v2.0.8
+        with:
+          model: openai/gpt-4o-mini
+          max-tokens: 200
+          system-prompt: |
+            You are an issue-triage assistant for the WaveHouse project — a
+            schema-aware real-time API gateway for ClickHouse written in Go.
+            Classify the issue. Return only a single JSON object with no
+            prose and no code fences.
+
+            Areas (pick zero or more from this exact list):
+            ${{ steps.areas.outputs.list }}
+
+            Priority (pick one, or null if unclear):
+              P0 - Broken production / data loss / security-critical
+              P1 - Blocks a major workflow, no workaround
+              P2 - Important but has a workaround
+              P3 - Nice-to-have, low urgency
+
+            Flags:
+              breaking_change: true if the issue proposes a change that
+                breaks the public API, CLI, or config format.
+              security: true if the issue is a security vulnerability,
+                hardening ask, or auth/authz concern.
+
+            Schema (all fields required):
+              {
+                "area": ["ingest", "observability"],
+                "priority": "P2",
+                "breaking_change": false,
+                "security": false
+              }
+          prompt: |
+            Title: ${{ github.event.issue.title }}
+
+            Body:
+            ${{ github.event.issue.body }}
+
+      - name: Apply labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESPONSE: ${{ steps.classify.outputs.response }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Strip any code fences the model may have added despite instructions.
+          json=$(printf '%s' "$RESPONSE" | sed -E 's/^\s*```(json)?\s*$//g; s/^\s*```\s*$//g')
+          echo "Parsed model output:"
+          echo "$json"
+
+          labels=$(echo "$json" | jq -r '
+            ([ (.area // [])[] | "area/" + . ]
+              + (if .breaking_change == true then ["breaking-change"] else [] end)
+              + (if .security == true then ["security"] else [] end)
+            ) | join(",")
+          ' 2>/dev/null || echo "")
+
+          if [[ -z "$labels" ]]; then
+            echo "::notice::No labels suggested or classifier output unparseable."
+            exit 0
+          fi
+
+          echo "Applying labels: $labels"
+          gh issue edit "$ISSUE_NUMBER" --add-label "$labels" -R "$REPO"
+
+      - name: Set Priority on Task Board
+        # Soft-fail: the default GITHUB_TOKEN lacks `project` scope, so this
+        # only succeeds when PROJECT_BOARD_TOKEN is configured as a classic
+        # PAT (or fine-grained token) with project write access. Without it,
+        # label triage still works.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN || secrets.GITHUB_TOKEN }}
+          RESPONSE: ${{ steps.classify.outputs.response }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          json=$(printf '%s' "$RESPONSE" | sed -E 's/^\s*```(json)?\s*$//g; s/^\s*```\s*$//g')
+          priority=$(echo "$json" | jq -r '.priority // empty' 2>/dev/null || echo "")
+
+          if [[ -z "$priority" || "$priority" == "null" ]]; then
+            echo "No priority returned; skipping board write."
+            exit 0
+          fi
+
+          # Field + option IDs discovered via `gh project field-list 7 --owner Wave-RF`
+          # on 2026-04-21. These are stable unless the board is recreated.
+          PROJECT_ID="PVT_kwDOCdKSOc4BUEKD"
+          FIELD_ID="PVTSSF_lADOCdKSOc4BUEKDzhBO0vI"
+          case "$priority" in
+            P0) OPTION_ID="79628723" ;;
+            P1) OPTION_ID="0a877460" ;;
+            P2) OPTION_ID="da944a9c" ;;
+            P3) OPTION_ID="e141a9e0" ;;
+            *)  echo "Unknown priority '$priority'; skipping."; exit 0 ;;
+          esac
+
+          item_id=$(gh project item-list 7 --owner Wave-RF --format json --limit 200 \
+            | jq -r --argjson n "$ISSUE_NUMBER" --arg repo "$REPO" '
+                .items[]
+                | select(.content.number == $n)
+                | select(.content.repository == ("https://github.com/" + $repo))
+                | .id
+              ' | head -n1)
+
+          if [[ -z "$item_id" ]]; then
+            echo "Issue #$ISSUE_NUMBER isn't on the board yet; skipping priority write."
+            exit 0
+          fi
+
+          echo "Setting Priority=$priority on board item $item_id"
+          gh project item-edit \
+            --id "$item_id" \
+            --field-id "$FIELD_ID" \
+            --single-select-option-id "$OPTION_ID" \
+            --project-id "$PROJECT_ID"
