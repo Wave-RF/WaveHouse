@@ -423,9 +423,95 @@ This also runs automatically in CI on every push and pull request.
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for four ecosystems:
 
-- **Go modules** — outdated or vulnerable dependencies
-- **GitHub Actions** — outdated action versions
+- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
+- **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
+- **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
+- **npm — E2E tests** (`tests/sdk/`), commit prefix `deps(tests):`
 
-PRs are grouped by ecosystem to reduce noise. Review and merge them regularly.
+PRs are grouped by ecosystem to reduce noise.
+
+**Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Note: PRs touching `.github/workflows/` still require a human codeowner's approval per the `main branch protection` ruleset — action-ecosystem bumps wait on a maintainer even when they're patch/minor.
+
+## CI & review automation
+
+This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.
+
+### PR title and Conventional Commits
+
+PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
+
+```
+<type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
+```
+
+Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`.
+
+The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`).
+
+If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
+
+### Required status checks
+
+The `main branch protection` ruleset requires the following checks to pass before any PR can merge:
+
+- `Check` — module tidiness, format verification, vulnerability scan
+- `Build` — compile all binaries
+- `Validate` — PR title is Conventional Commits
+
+Plus 1 approving review and CODEOWNERS approval on governance paths (`LICENSE`, `AGENTS.md`, `.github/workflows/`, etc.). Linear history, no deletion, no force-push, squash-merge only.
+
+> **Note — temporarily relaxed**: `Lint`, `Test`, and `Integration Tests` are *not* currently required while pre-existing failures on `main` are being fixed (tracked in #57). They'll rejoin required once main is green.
+
+### Merge behavior
+
+Squash-only merges. The **PR title** becomes the commit subject (with `(#NN)` appended automatically), the **PR body** becomes the commit message. Keep PR bodies tight — they land in `git log` on `main`. The PR template gives the right shape (Summary / Test plan / Related Issues).
+
+Include `Closes #NN` in the PR body to auto-close the related issue on merge. Alternatively, link the issue in the sidebar's **Development** section — that triggers auto-close even without the keyword.
+
+Auto-merge is enabled repo-wide: click "Enable auto-merge (squash)" on a PR and it merges once checks + approvals land.
+
+### AI reviewers
+
+Three bots review PRs:
+
+- **Claude** (`.github/workflows/claude-review.yml`) — auto-reviews PRs from OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR authors on open, push, ready-for-review. Uses Anthropic's canonical PR-review template with WaveHouse-specific focus on Go concurrency, ClickHouse SQL injection, and AGENTS.md documentation-sync rules. Skips drafts and Dependabot PRs. Sticky comment mode — updates one comment across pushes instead of spamming.
+- **Gemini Code Assist** — Marketplace App, reads `.gemini/styleguide.md` and `.gemini/config.yaml`. Configured with `comment_severity_threshold: LOW` to surface more findings.
+- **Copilot** — tied to individual reviewer subscriptions; shows up on PRs where a maintainer with Copilot Pro is listed as a reviewer.
+
+All three are **advisory** — CODEOWNERS + the ruleset are the actual merge-gate.
+
+### Invoking bots manually
+
+- **Claude**: comment `@claude <instruction>` on an issue, PR, or review. Gated to OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR. Applying the `agent` label to an issue also triggers Claude. See `.github/workflows/claude-agent.yml`.
+- **Gemini**: comment `@gemini-code-assist <question>` or use slash commands `/gemini review`, `/gemini summary`, `/gemini help`. Works in both top-level and inline review comments.
+- **Copilot**: the re-request-review button on the PR page sends a fresh request.
+
+### Review-response expectations
+
+Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response (MANDATORY)": accept / push back / defer, reply with detail, resolve when settled.
+
+When pushing back on a bot's suggestion, end the reply with `@claude` or `@gemini-code-assist` to invite a counter-reply so the dialog actually loops.
+
+### Issue triage
+
+`.github/workflows/triage.yml` classifies new and edited issues via GitHub Models (`gpt-4o-mini`) and applies:
+
+- `area/*` labels based on the issue body (areas pulled dynamically from the `area/*` repo labels — adding a new `area/foo` label with a description is all you need; no workflow edit)
+- `security` if the model flags a security concern
+- `breaking-change` if the model flags a public-API break
+- Priority on the **Task Board** project #7 via the board's `Priority` field (requires `PROJECT_BOARD_TOKEN` secret — labels apply with or without it)
+
+### Auto-labeling PRs
+
+`.github/workflows/label.yml` uses `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
+
+### When adding a new `internal/<pkg>/` package
+
+Follow the checklist in `AGENTS.md` §"Common Tasks / Adding a new internal package" — the automation-relevant steps are:
+
+1. Create a matching `area/<pkg>` repo label with a meaningful description (triage reads the description as the classifier's per-area hint).
+2. Add the path → label mapping to `.github/labeler.yml` so PRs touching the new package get auto-labeled.
+
+Triage picks up the new label automatically; no workflow edit needed.

@@ -112,6 +112,34 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
 
+## Review Response (MANDATORY)
+
+**Every review comment on a PR gets a substantive reply, and every conversation gets resolved before merge. This applies equally to human reviewers and AI reviewers (Copilot, Gemini Code Assist, claude-review, future bots). The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads literally block merge.**
+
+### What to do on every review comment
+
+1. **Read it, decide**: accept (it's right), push back (it's wrong or out-of-scope), or defer (it's right but deserves its own PR).
+2. **Reply substantively** — not "fixed" alone. Say *what* was changed and in which commit SHA, or *why* you're pushing back. For cross-reviewer disagreements (one bot contradicts another, or a bot contradicts a human), argue with code references or spec citations — don't just assert.
+3. **Invite counter-reply when pushing back on a bot.** If the reply is a disagreement rather than a fix, mention the bot at the end of the reply so it re-engages: `@claude` re-invokes our `claude-agent.yml` workflow, `@gemini-code-assist` re-invokes Gemini's follow-up. Copilot doesn't have a mention pattern — for Copilot push-back, rely on the re-request button if a second opinion is wanted.
+4. **Fix in the PR when the suggestion is clearly right and in scope.** If it's right but out-of-scope, reply with a tracking link (issue or planned follow-up PR) before resolving.
+5. **Resolve the thread** once the reply fully addresses the concern AND no counter-reply is pending. Don't resolve threads a human reviewer is still engaging with; wait. Bot threads can be resolved after a substantive reply since bots only re-engage when mentioned — if the reply doesn't mention the bot, it's accepted as terminal.
+6. **Re-request review** from humans after substantive code changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via an explicit re-request button (Copilot).
+
+### What not to do
+
+- No empty acknowledgements (`LGTM`, `fixed`, `good catch`). Always include detail so the reply makes sense standalone.
+- Don't argue in circles. If a reviewer comes back with the same point after your reply, escalate to a human maintainer rather than looping.
+- Don't resolve a thread that has an open child comment from the reviewer you haven't addressed.
+
+### Review tooling reference
+
+| Reviewer | How it runs | Re-runs on new commits | Blocks merge |
+| -------- | ----------- | ---------------------- | ------------ |
+| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto | No (advisory) unless added to required checks |
+| Gemini Code Assist | Marketplace App at repo level | Yes, auto | No (advisory) |
+| Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
+| Human codeowners | Auto-requested via CODEOWNERS paths | Re-request manually after push | Yes — required by ruleset |
+
 ## Documentation & Consistency Sync (MANDATORY)
 
 **This is a hard requirement. Every code change MUST include corresponding updates to all affected files below. Do NOT wait for the user to ask — verify and update these automatically as part of every task. A code change without its documentation counterpart is incomplete.**
@@ -180,6 +208,8 @@ Before finishing any task, do a quick search across docs for the identifiers you
 2. Define an interface if there will be multiple implementations.
 3. Wire it into the appropriate `cmd/*/main.go`.
 4. Document in `docs/architecture.md`.
+5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it.
+6. **Update the area enumeration** in `.github/workflows/triage.yml` (the `system-prompt:` block lists every legal area the LLM is allowed to return). Without this, the triager can't categorize issues about the new package.
 
 ### Writing tests
 
@@ -224,3 +254,22 @@ docs/                   → Project documentation
 - Input JSON is validated against ClickHouse schemas before processing
 - ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself
 - **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.
+- **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. `pr-title.yml` is an inline check rather than a third-party action).
+
+## Repository Automation (three tiers)
+
+1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
+2. **Tier 2 — Code review** (two reviewers, both advisory; CODEOWNERS + the ruleset are the actual merge-gate):
+   - **Gemini Code Assist App** configured via `.gemini/styleguide.md` — Marketplace App attached at the repo/org level, no workflow file.
+   - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs automatically on PR open/push/ready-for-review, but only when the PR author is already OWNER/MEMBER/COLLABORATOR to bound token cost. Dependabot PRs are skipped. Fork PRs from first-time contributors aren't auto-reviewed here; a maintainer can invoke Claude on them via `@claude` (Tier 3).
+3. **Tier 3 — Agentic execution** (`.github/workflows/claude-agent.yml`): same action in a different mode. Runs when an OWNER, MEMBER, or COLLABORATOR mentions `@claude` in an issue, PR, review, or comment, or applies the `agent` label to an issue. Can make code changes and open PRs. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
+
+### Dependabot automation
+
+`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Action-ecosystem bumps that touch `.github/workflows/` require a human codeowner's approval per the ruleset; non-workflow bumps (gomod, npm) merge fully hands-off.
+
+## Governance Files
+
+- **`CODEOWNERS`** (`.github/CODEOWNERS`): Governance paths (`LICENSE`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, `.gemini/`, `.github/`, `.goreleaser.yaml`) require admin review. There is intentionally **no catch-all** — routine code changes pick reviewers manually to avoid auto-pinging the whole team.
+- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
+- **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/pr-title.yml`. The PR-title linter validates squash-merge commit messages.

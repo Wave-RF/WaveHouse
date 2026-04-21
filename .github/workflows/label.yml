@@ -1,0 +1,34 @@
+name: Auto-label PR
+
+# File-path-based labeling for PRs. Runs on open/push; the label set
+# comes from .github/labeler.yml. Synchronized: labels follow the
+# current changed-file set, so removing a change also removes its
+# label.
+#
+# Uses `pull_request` (not `pull_request_target`) so this workflow
+# fires the first time it's added on a PR. A future follow-up PR can
+# switch to `pull_request_target` once this workflow is on main, to
+# also cover labeling on fork PRs — GITHUB_TOKEN is read-only for
+# fork PRs under `pull_request` so labeling will silently skip there.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Apply labels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b  # v6.0.1
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: true
