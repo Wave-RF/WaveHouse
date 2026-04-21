@@ -27,7 +27,9 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           # Keep this type list in sync with CONTRIBUTING.md.
-          pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?: [^A-Z].+[^.]$'
+          # The optional `!` marks a breaking change per Conventional Commits 1.0.0
+          # (e.g., `feat!: ...` or `feat(api)!: ...`).
+          pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
           if [[ ! "$PR_TITLE" =~ $pattern ]]; then
             {
