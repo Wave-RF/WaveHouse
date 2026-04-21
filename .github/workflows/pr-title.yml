@@ -4,15 +4,19 @@ name: Lint PR title
 # This workflow enforces Conventional Commits on the PR title so history
 # stays parseable (changelog generation, `git log --oneline`, etc).
 #
-# Uses `pull_request_target` so fork PRs get the same check AND the
-# sticky comment that explains how to fix it. This is safe because the
-# workflow never checks out PR code — it only reads `event.pull_request.title`
-# from the webhook payload.
+# Required by the `main branch protection` ruleset as the `Validate`
+# check — must report on every PR or merge gets stuck at "pending."
 #
-# Required by the `main branch protection` ruleset as the `Validate` check.
+# Uses `pull_request` (not `pull_request_target`) because `pull_request_target`
+# only fires when the workflow file already exists on the default branch,
+# which creates a chicken-and-egg problem on the PR that first introduces
+# this file. After this PR lands, a future PR can switch to
+# `pull_request_target` so fork PRs also get the sticky comment — but for
+# now, internal PRs get the sticky and fork PRs see the failing check
+# signal without the comment (GITHUB_TOKEN is read-only on fork PRs).
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, reopened, synchronize]
 
 permissions:
@@ -47,7 +51,11 @@ jobs:
           fi
 
       - name: Post / update sticky comment on failure
+        # continue-on-error because GITHUB_TOKEN is read-only for fork
+        # PRs, so the comment will fail there — that must not mask the
+        # final exit-1 below that drives the required-check status.
         if: steps.check.outputs.passed == 'false'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -92,10 +100,9 @@ jobs:
             echo "Posted new pr-title-lint comment"
           fi
 
-          exit 1
-
       - name: Clean up sticky comment on pass
         if: steps.check.outputs.passed == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -109,3 +116,9 @@ jobs:
             gh api -X DELETE "repos/$REPO/issues/comments/$EXISTING"
             echo "Removed stale pr-title-lint comment ($EXISTING)"
           fi
+
+      - name: Fail the check if title was invalid
+        # Final step owns the exit code so the check's red-X reliably
+        # reflects the regex result, independent of comment-step I/O.
+        if: steps.check.outputs.passed == 'false'
+        run: exit 1
