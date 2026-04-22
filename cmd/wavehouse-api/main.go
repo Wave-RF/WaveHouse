@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,13 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run executes the clustered API binary and returns a process exit code.
+// Using a separate function (rather than os.Exit directly in main) ensures
+// deferred cleanups — especially OTEL flush — still run before the process exits.
+func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -47,7 +55,7 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Validate auth config.
@@ -55,7 +63,7 @@ func main() {
 		switch cfg.Auth.JWTSecret {
 		case "":
 			logger.Error("FATAL: WH_AUTH_JWT_SECRET is required when auth is enabled")
-			os.Exit(1)
+			return 1
 		case "change-me-in-production":
 			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
 		}
@@ -73,7 +81,7 @@ func main() {
 	otelShutdown, err := observability.InitProvider(ctx, "wavehouse-standalone", otelAddr)
 	if err != nil {
 		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	defer func() {
@@ -101,16 +109,16 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("clickhouse open", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer chConn.Close()
+	defer func() { _ = chConn.Close() }()
 
 	// Schema discovery.
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
 	if err := registry.Refresh(context.Background()); err != nil {
 		logger.Error("schema discovery failed on boot", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Optional distributed dedupe (ScyllaDB).
@@ -119,9 +127,9 @@ func main() {
 		dedup, err = dedupe.NewDistributed(cfg.Dedupe.ScyllaHosts, cfg.Dedupe.ScyllaKeyspace)
 		if err != nil {
 			logger.Error("dedupe init", "error", err)
-			os.Exit(1)
+			return 1
 		}
-		defer dedup.Close()
+		defer func() { _ = dedup.Close() }()
 	}
 
 	// Remote MQ (NATS).
@@ -129,15 +137,15 @@ func main() {
 	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer remoteMQ.Close()
+	defer func() { _ = remoteMQ.Close() }()
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
 		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -145,28 +153,28 @@ func main() {
 	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
 	if err != nil {
 		logger.Error("l1 cache init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	l2, err := cache.NewShared(cfg.Cache.RedisURL)
 	if err != nil {
 		logger.Error("l2 cache init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	tiered := cache.NewTiered(l1, l2)
-	defer tiered.Close()
+	defer func() { _ = tiered.Close() }()
 
 	// Policy store (NATS KV + optional file bootstrap).
 	policyStore, err := policy.NewStore(context.Background(), remoteMQ.JetStream(), cfg.Policy.FilePath, logger)
 	if err != nil {
 		logger.Error("policy store init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Pipes store (NATS KV + optional SQL file directory).
 	pipesStore, err := pipes.NewStore(context.Background(), remoteMQ.JetStream(), cfg.Pipes.Directory, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	hub := api.NewHub()
@@ -193,7 +201,7 @@ func main() {
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge subscription failed", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Build handlers.
@@ -244,8 +252,9 @@ func main() {
 	router := api.NewRouter(deps)
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
@@ -256,13 +265,16 @@ func main() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 		defer shutCancel()
 		cancel()
-		srv.Shutdown(shutCtx)
+		if err := srv.Shutdown(shutCtx); err != nil {
+			logger.Error("server shutdown error", "error", err)
+		}
 	}()
 
 	logger.Info("starting api server", "port", cfg.Server.Port, "mode", "clustered")
 	fmt.Printf("DEBUG: Global Tracer Registered: %T\n", otel.GetTracerProvider())
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server error", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

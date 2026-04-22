@@ -27,6 +27,13 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run executes the clustered worker binary and returns a process exit code.
+// Using a separate function (rather than os.Exit directly in main) ensures
+// deferred cleanups — especially OTEL flush — still run before the process exits.
+func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -38,7 +45,7 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// OTEL.
@@ -54,7 +61,7 @@ func main() {
 	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
 	if err != nil {
 		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	defer func() {
@@ -82,16 +89,16 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("clickhouse open", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer chConn.Close()
+	defer func() { _ = chConn.Close() }()
 
 	// Schema discovery.
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
 	if err := registry.Refresh(context.Background()); err != nil {
 		logger.Error("schema discovery failed on boot", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Remote MQ (NATS).
@@ -99,15 +106,15 @@ func main() {
 	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer remoteMQ.Close()
+	defer func() { _ = remoteMQ.Close() }()
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
 		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -130,7 +137,7 @@ func main() {
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Active sweeper — purges processed + expired messages every minute.
@@ -151,4 +158,5 @@ func main() {
 	if err := ingestStream.Stop(shutCtx); err != nil {
 		logger.Error("ingest worker drain error", "error", err)
 	}
+	return 0
 }

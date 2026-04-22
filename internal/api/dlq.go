@@ -29,7 +29,9 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Stream may not exist yet if no failures have occurred.
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"tables": map[string]any{}, "total": 0})
+		if err := json.NewEncoder(w).Encode(map[string]any{"tables": map[string]any{}, "total": 0}); err != nil {
+			h.Logger.Error("dlq stats encode failed", "error", err)
+		}
 		return
 	}
 
@@ -52,7 +54,9 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"tables": tables, "total": info.State.Msgs})
+	if err := json.NewEncoder(w).Encode(map[string]any{"tables": tables, "total": info.State.Msgs}); err != nil {
+		h.Logger.Error("dlq stats encode failed", "error", err)
+	}
 }
 
 // EnsureDLQStream creates the DLQ JetStream stream if it doesn't exist.

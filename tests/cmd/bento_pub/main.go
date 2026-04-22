@@ -22,13 +22,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:     "WAVEHOUSE",
 		Subjects: []string{"ingest.>"},
 		Storage:  jetstream.FileStorage,
-	})
-	if err != nil {
-		log.Fatal("Failed to setup NATS Stream: ", err)
+	}); err != nil {
+		log.Printf("Failed to setup NATS Stream: %v", err)
+		return
 	}
 	log.Println("NATS Stream 'WAVEHOUSE' is configured and ready.")
 
@@ -41,7 +41,8 @@ func main() {
 		},
 	})
 	if err != nil {
-		log.Fatal("ClickHouse Connect Error: ", err)
+		log.Printf("ClickHouse Connect Error: %v", err)
+		return
 	}
 
 	createTable := `
@@ -52,9 +53,9 @@ func main() {
         table_name String
     ) ENGINE = MergeTree()
     ORDER BY id`
-	err = chConn.Exec(context.Background(), createTable)
-	if err != nil {
-		log.Fatal("Failed to create table: ", err)
+	if err := chConn.Exec(context.Background(), createTable); err != nil {
+		log.Printf("Failed to create table: %v", err)
+		return
 	}
 	log.Println("ClickHouse table 'users' is ready.")
 
@@ -63,9 +64,9 @@ func main() {
 		"table_name": "users",
 		"data":       map[string]string{"id": "99", "name": "Bento User"},
 	})
-	_, err = js.Publish(ctx, "ingest.users", insertData)
-	if err != nil {
-		log.Fatal("Insert Publish Error: ", err)
+	if _, err := js.Publish(ctx, "ingest.users", insertData); err != nil {
+		log.Printf("Insert Publish Error: %v", err)
+		return
 	}
 	log.Println("Published Insert to ingest.users")
 
@@ -77,9 +78,9 @@ func main() {
 		"table_name": "users",
 		"id":         "99",
 	})
-	_, err = js.Publish(ctx, "ingest.users", deleteData)
-	if err != nil {
-		log.Fatal("Delete Publish Error: ", err)
+	if _, err := js.Publish(ctx, "ingest.users", deleteData); err != nil {
+		log.Printf("Delete Publish Error: %v", err)
+		return
 	}
 	log.Println("Published Delete to ingest.users")
 

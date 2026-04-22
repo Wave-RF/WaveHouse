@@ -17,7 +17,7 @@ import (
 // Used when tests verify validation logic but pass nil for driver.Conn,
 // which would panic once the handler reaches executeQuery.
 func safeHandle(handler http.HandlerFunc, w *httptest.ResponseRecorder, r *http.Request) {
-	defer func() { recover() }()
+	defer func() { _ = recover() }()
 	handler(w, r)
 }
 
@@ -26,7 +26,7 @@ func TestQueryHandler_MissingSQL(t *testing.T) {
 	h := NewQueryHandler(nil, nil, 0)
 	body, _ := json.Marshal(queryRequest{SQL: ""})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader(body))
 	h.Handle(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -37,7 +37,7 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	h := NewQueryHandler(nil, nil, 0)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/query", bytes.NewReader([]byte(`{bad}`)))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader([]byte(`{bad}`)))
 	h.Handle(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -61,7 +61,7 @@ func TestQueryHandler_PolicyForbidsRawSQL(t *testing.T) {
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM clicks"})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader(body))
 
 	// Set role to "viewer" (no RawSQL permission).
 	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
@@ -90,7 +90,7 @@ func TestQueryHandler_PolicyAllowsAdmin(t *testing.T) {
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM clicks"})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader(body))
 
 	// Admin bypasses the raw SQL check.
 	ctx := context.WithValue(r.Context(), ContextKeyRole, "admin")
@@ -120,7 +120,7 @@ func TestQueryHandler_PolicyAllowsRawSQLRole(t *testing.T) {
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM clicks"})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader(body))
 
 	ctx := context.WithValue(r.Context(), ContextKeyRole, "analyst")
 	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
@@ -138,7 +138,7 @@ func TestQueryHandler_NoPolicyAllowsAll(t *testing.T) {
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader(body))
 
 	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
 	r = r.WithContext(ctx)

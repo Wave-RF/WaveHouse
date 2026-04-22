@@ -88,6 +88,7 @@ func (h *Hub) Broadcast(topic string, msg *mq.Message) {
 
 	// Exact match.
 	for ch := range h.subscribers[topic] {
+		sent[ch] = struct{}{}
 		select {
 		case ch <- data:
 		default:

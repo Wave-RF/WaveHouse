@@ -75,14 +75,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.Error("rejecting message: invalid JSON", "error", err)
-			m.Ack() // Drop — not retryable.
+			if ackErr := m.Ack(); ackErr != nil { // Drop — not retryable.
+				slog.Warn("ack failed for invalid JSON message", "error", ackErr)
+			}
 			continue
 		}
 
 		// Reject messages with no table name.
 		if raw.TableName == "" {
 			slog.Error("rejecting message: empty table_name")
-			m.Ack()
+			if ackErr := m.Ack(); ackErr != nil {
+				slog.Warn("ack failed for empty-table message", "error", ackErr)
+			}
 			continue
 		}
 
@@ -90,7 +94,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			m.Ack() // Drop malformed messages.
+			if ackErr := m.Ack(); ackErr != nil { // Drop malformed messages.
+				slog.Warn("ack failed for unsafe-table message", "error", ackErr)
+			}
 			continue
 		}
 
@@ -111,7 +117,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				select {
 				case <-ctx.Done():
 					ticker.Stop()
-					m.Nak()
+					if nakErr := m.Nak(); nakErr != nil {
+						slog.WarnContext(spanCtx, "nak failed during ctx cancellation", "error", nakErr)
+					}
 					return nil, nil, ctx.Err()
 				case <-ticker.C:
 				}
@@ -127,14 +135,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"id", raw.ID,
 					"error", err,
 				)
-				m.Nak()
+				if nakErr := m.Nak(); nakErr != nil {
+					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+				}
 			} else {
 				// Log the success with all context
 				slog.InfoContext(spanCtx, "successfully deleted record",
 					"table", raw.TableName,
 					"id", raw.ID,
 				)
-				m.Ack()
+				if ackErr := m.Ack(); ackErr != nil {
+					slog.WarnContext(spanCtx, "ack failed after delete", "error", ackErr)
+				}
 			}
 			span.End()
 			continue

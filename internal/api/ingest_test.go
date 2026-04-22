@@ -37,7 +37,7 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 	t.Helper()
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
-	r := httptest.NewRequest(http.MethodPost, "/v1/ingest/"+table, bytes.NewReader(data))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest/"+table, bytes.NewReader(data))
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("table", table)
@@ -69,7 +69,7 @@ func TestIngest_MissingTable(t *testing.T) {
 	h := NewIngestHandler(testRegistry(), pub)
 
 	// No chi URL param → empty table.
-	req := httptest.NewRequest(http.MethodPost, "/v1/ingest/", bytes.NewReader([]byte(`{}`)))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest/", bytes.NewReader([]byte(`{}`)))
 	rctx := chi.NewRouteContext()
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 
@@ -97,7 +97,7 @@ func TestIngest_InvalidJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub)
 
-	r := httptest.NewRequest(http.MethodPost, "/v1/ingest/clicks", bytes.NewReader([]byte("not json")))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest/clicks", bytes.NewReader([]byte("not json")))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("table", "clicks")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))

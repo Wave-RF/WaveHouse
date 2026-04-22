@@ -20,7 +20,7 @@ func NewSchemaHandler(registry *discovery.SchemaRegistry) *SchemaHandler {
 // List returns all discovered table schemas.
 func (h *SchemaHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.Registry.List())
+	_ = json.NewEncoder(w).Encode(h.Registry.List())
 }
 
 // Get returns the schema for a single table.
@@ -32,7 +32,7 @@ func (h *SchemaHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(schema)
+	_ = json.NewEncoder(w).Encode(schema)
 }
 
 // Refresh forces an immediate schema refresh from ClickHouse.
@@ -42,5 +42,5 @@ func (h *SchemaHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.Registry.List())
+	_ = json.NewEncoder(w).Encode(h.Registry.List())
 }
