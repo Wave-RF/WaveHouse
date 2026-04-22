@@ -93,7 +93,8 @@ jobs:
         id: action
         if: steps.pr.outputs.num != ''
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
           EVENT_NAME: ${{ github.event_name }}
@@ -143,7 +144,8 @@ jobs:
       - name: Apply ready-state transition (bot-clean → assign + Ready)
         if: steps.action.outputs.action == 'reeval'
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
           PR_AUTHOR: ${{ steps.action.outputs.author }}
@@ -226,16 +228,16 @@ jobs:
           # is idempotent via the project's own "auto-add" workflow
           # (already enabled), but we still explicitly set the status.
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
-          item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+          item_id=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
             --jq --arg url "$pr_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
 
           if [[ -z "$item_id" ]]; then
             echo "PR not yet on board — adding."
-            item_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$pr_url" --format json --jq '.id')
+            item_id=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$pr_url" --format json --jq '.id')
           fi
 
           echo "Setting PR card ($item_id) Status = Ready"
-          gh project item-edit \
+          GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
             --id "$item_id" \
             --field-id "$STATUS_FIELD_ID" \
             --single-select-option-id "$STATUS_READY" \
@@ -244,18 +246,19 @@ jobs:
       - name: Apply changes-requested transition
         if: steps.action.outputs.action == 'changes_requested'
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
         run: |
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
 
           # Move PR card → In review (reviewer waiting on coder).
-          pr_item=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
             --jq --arg url "$pr_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
           if [[ -n "$pr_item" ]]; then
             echo "Moving PR card → In review"
-            gh project item-edit \
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
               --id "$pr_item" \
               --field-id "$STATUS_FIELD_ID" \
               --single-select-option-id "$STATUS_IN_REVIEW" \
@@ -278,11 +281,11 @@ jobs:
 
           for issue_num in $issue_numbers; do
             issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
               --jq --arg url "$issue_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
             if [[ -n "$issue_item" ]]; then
               echo "Moving linked issue #$issue_num card → Ready"
-              gh project item-edit \
+              GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
                 --id "$issue_item" \
                 --field-id "$STATUS_FIELD_ID" \
                 --single-select-option-id "$STATUS_READY" \
@@ -293,18 +296,19 @@ jobs:
       - name: Apply review-re-requested transition
         if: steps.action.outputs.action == 're_requested'
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
         run: |
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
 
           # Move PR card → Ready (reviewer action needed).
-          pr_item=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
             --jq --arg url "$pr_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
           if [[ -n "$pr_item" ]]; then
             echo "Moving PR card → Ready (coder re-requested review)"
-            gh project item-edit \
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
               --id "$pr_item" \
               --field-id "$STATUS_FIELD_ID" \
               --single-select-option-id "$STATUS_READY" \
@@ -327,11 +331,11 @@ jobs:
 
           for issue_num in $issue_numbers; do
             issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
               --jq --arg url "$issue_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
             if [[ -n "$issue_item" ]]; then
               echo "Moving linked issue #$issue_num card → In review"
-              gh project item-edit \
+              GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
                 --id "$issue_item" \
                 --field-id "$STATUS_FIELD_ID" \
                 --single-select-option-id "$STATUS_IN_REVIEW" \
