@@ -484,7 +484,15 @@ Three bots review PRs:
 
 All three are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
 
-Human reviewers are auto-assigned by `.github/workflows/auto-assign-reviewer.yml` **only when a PR is bot-clean** (required checks green AND all review threads resolved). Assignment logic: PR author == Eric → request Taite; author == Taite → request Eric; anyone else → request both. Draft PRs get flipped to ready at the same moment. Net effect: you get exactly one GitHub notification when a PR actually needs your eyes.
+### Task Board is the single signal
+
+`.github/workflows/project-orchestrator.yml` drives the Task Board (project #7) as the real "who needs to look at this next" channel. GitHub's review-request notifications are treated as noise; what matters is the position of your assigned card on the board.
+
+- **Coder flow**: open PR (draft or not) → address bot feedback → once all required checks pass and all review threads are resolved, the orchestrator adds the PR to the board, sets its Status to `Ready`, and assigns the non-author admin. You're done for now.
+- **Reviewer flow**: PR card shows up on your board in `Ready`. You move it to `In progress` when you start reviewing (this is the one manual step). You review. Either (a) approve → `admin-approval.yml` passes, auto-merge takes over, card auto-flips to `Done`; or (b) click "Request changes" → orchestrator moves PR card to `In review`, linked issue card to `Ready` (now the coder's ball).
+- **Coder addressing feedback**: push fixes, resolve threads, then click "re-request review" on your reviewer in GitHub's sidebar (this is the trigger the orchestrator listens for). Orchestrator moves PR card back to `Ready`, issue card back to `In review`. Reviewer sees the card returned to their column.
+
+Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review). Dependabot PRs do not appear on the Task Board.
 
 ### Invoking bots manually
 
