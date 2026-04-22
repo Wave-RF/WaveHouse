@@ -87,7 +87,7 @@ test(cache): add tiered cache stampede test
 
 ## Code Style
 
-- **Formatting**: Code must be formatted with `gofmt`. The CI pipeline enforces this.
+- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` runs it; CI enforces it via `make fmt-check`.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.

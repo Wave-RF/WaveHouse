@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- **`agent` label trigger was unreachable AND under-gated**: `.github/workflows/claude-agent.yml`'s labeled-trigger branch gated on `github.event.sender.author_association`, which doesn't exist on the `sender` User object in `issues.labeled` webhook payloads — it's only set on content objects like `comment` / `review` / `issue`. The check silently evaluated false, making the `agent` label path never fire (flagged in Claude's post-merge review of #55). Fix: removed the unreachable association check AND added a first-step permission verification that calls the collaborators/permission API and requires `admin` / `maintain` / `write` before proceeding — closing the privilege-escalation gap Gemini flagged where a `triage`-role user could otherwise trigger the agent.
+- **`CONTRIBUTING.md`** — formatting guidance said `gofmt`; corrected to `gofumpt` to match what `make fmt` runs and `make fmt-check` enforces in CI. `gofmt`-formatted code would fail CI. Flagged in Claude's post-merge review of #55.
+
+### Changed
+
+- **`goreleaser-action` CLI version pin**: `release.yml` now passes `version: "~> v2"` to `goreleaser-action` instead of `version: latest`. Picks up patch / minor GoReleaser bumps automatically but breaks loudly on a v3 major bump rather than silently changing release binaries. Flagged in Claude's post-merge review of #55.
+- **`dependabot-automerge.yml` permissions kept at `contents: write` + `pull-requests: write`**: initially considered dropping `contents: write` per Claude's post-merge review of #55 (citing that `gh pr review` + `gh pr merge --auto` only need `pull-requests: write`). Copilot's review of #64 caught the edge case — when required checks are already green at the moment `gh pr merge --auto` runs, it performs an immediate squash merge, which needs tree-write. Keeping the broader scope to avoid silent failures in the all-green edge case.
+
 ### Added
 
 - **Repository governance files**: `CLAUDE.md` and `.gemini/styleguide.md` pointers to `AGENTS.md` so Claude Code and Gemini Code Assist pick up project conventions automatically. `.github/CODEOWNERS` routes governance-file changes (LICENSE, SECURITY, AGENTS, CI/CD config) to admin reviewers.
