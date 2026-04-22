@@ -12,6 +12,7 @@ import (
 )
 
 func TestValidate_ValidData(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -32,6 +33,7 @@ func TestValidate_ValidData(t *testing.T) {
 }
 
 func TestValidate_UnknownField(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -50,6 +52,7 @@ func TestValidate_UnknownField(t *testing.T) {
 }
 
 func TestValidate_TypeMismatch(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -67,6 +70,7 @@ func TestValidate_TypeMismatch(t *testing.T) {
 }
 
 func TestValidate_MissingRequiredColumn(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -86,6 +90,7 @@ func TestValidate_MissingRequiredColumn(t *testing.T) {
 }
 
 func TestValidate_NullableColumnCanBeOmitted(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -102,6 +107,7 @@ func TestValidate_NullableColumnCanBeOmitted(t *testing.T) {
 }
 
 func TestValidate_DefaultColumnCanBeOmitted(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -118,6 +124,7 @@ func TestValidate_DefaultColumnCanBeOmitted(t *testing.T) {
 }
 
 func TestValidate_NullForNonNullable(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -135,6 +142,7 @@ func TestValidate_NullForNonNullable(t *testing.T) {
 }
 
 func TestValidate_NullForNullable(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -150,6 +158,7 @@ func TestValidate_NullForNullable(t *testing.T) {
 }
 
 func TestValidate_NullForNonNullableWithDefault(t *testing.T) {
+	t.Parallel()
 	schema := &TableSchema{
 		Name: "clicks",
 		Columns: []Column{
@@ -167,6 +176,7 @@ func TestValidate_NullForNonNullableWithDefault(t *testing.T) {
 }
 
 func TestIsTypeCompatible_StringTypes(t *testing.T) {
+	t.Parallel()
 	stringTypes := []string{
 		"String", "FixedString(32)", "UUID",
 		"DateTime64(3, 'UTC')", "Date", "Date32",
@@ -179,6 +189,7 @@ func TestIsTypeCompatible_StringTypes(t *testing.T) {
 }
 
 func TestIsTypeCompatible_NumericTypes(t *testing.T) {
+	t.Parallel()
 	numTypes := []string{
 		"UInt8", "UInt16", "UInt32", "UInt64",
 		"Int8", "Int16", "Int32", "Int64",
@@ -192,6 +203,7 @@ func TestIsTypeCompatible_NumericTypes(t *testing.T) {
 }
 
 func TestIsTypeCompatible_Bool(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isTypeCompatible("Bool", true))
 	assert.True(t, isTypeCompatible("Bool", false))
 	assert.True(t, isTypeCompatible("Bool", 1.0)) // JSON number 1/0
@@ -199,27 +211,32 @@ func TestIsTypeCompatible_Bool(t *testing.T) {
 }
 
 func TestIsTypeCompatible_Array(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isTypeCompatible("Array(String)", []any{"a", "b"}))
 	assert.False(t, isTypeCompatible("Array(String)", "not-an-array"))
 }
 
 func TestIsTypeCompatible_Map(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isTypeCompatible("Map(String, String)", map[string]any{"k": "v"}))
 	assert.False(t, isTypeCompatible("Map(String, String)", "not-a-map"))
 }
 
 func TestIsTypeCompatible_LowCardinality(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isTypeCompatible("LowCardinality(String)", "hello"))
 	assert.False(t, isTypeCompatible("LowCardinality(String)", 42.0))
 }
 
 func TestIsTypeCompatible_NullableUnwrap(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isTypeCompatible("Nullable(String)", "hello"))
 	assert.False(t, isTypeCompatible("Nullable(String)", 42.0))
 	assert.True(t, isTypeCompatible("Nullable(Float64)", 42.0))
 }
 
 func TestIsNullable(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isNullable("Nullable(String)"))
 	assert.False(t, isNullable("String"))
 	assert.False(t, isNullable("LowCardinality(String)"))

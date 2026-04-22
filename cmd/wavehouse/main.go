@@ -75,7 +75,7 @@ func run() int {
 		otelAddr = "127.0.0.1:4317" // Use your WSL Gateway
 	}
 
-	fmt.Println("DEBUG: STANDALONE OTel Initializing with endpoint:", otelAddr)
+	logger.Info("initializing observability", "endpoint", otelAddr, "service", serviceName)
 
 	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
 	if err != nil {

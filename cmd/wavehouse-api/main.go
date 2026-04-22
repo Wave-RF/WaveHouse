@@ -76,7 +76,7 @@ func run() int {
 		otelAddr = "127.0.0.1:4317"
 	}
 
-	fmt.Println("DEBUG - Endpoint:", otelAddr)
+	logger.Info("initializing observability", "endpoint", otelAddr, "service", serviceName)
 
 	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
 	if err != nil {
@@ -270,8 +270,11 @@ func run() int {
 		}
 	}()
 
-	logger.Info("starting api server", "port", cfg.Server.Port, "mode", "clustered")
-	fmt.Printf("DEBUG: Global Tracer Registered: %T\n", otel.GetTracerProvider())
+	logger.Info("starting api server",
+		"port", cfg.Server.Port,
+		"mode", "clustered",
+		"tracer_provider", fmt.Sprintf("%T", otel.GetTracerProvider()),
+	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server error", "error", err)
 		return 1

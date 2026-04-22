@@ -53,10 +53,10 @@ func run() int {
 	serviceName := "wavehouse-" + Binary
 	otelAddr := os.Getenv("WH_OTEL_ADDR")
 	if otelAddr == "" {
-		otelAddr = "172.18.240.1:4317" // WSL Gateway
+		otelAddr = "127.0.0.1:4317"
 	}
 
-	fmt.Println("DEBUG - Endpoint:", otelAddr)
+	logger.Info("initializing observability", "endpoint", otelAddr, "service", serviceName)
 
 	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
 	if err != nil {
