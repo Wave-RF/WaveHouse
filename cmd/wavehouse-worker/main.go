@@ -153,7 +153,7 @@ func run() int {
 
 	logger.Info("shutting down worker")
 	cancel()
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 	defer shutCancel()
 	if err := ingestStream.Stop(shutCtx); err != nil {
 		logger.Error("ingest worker drain error", "error", err)

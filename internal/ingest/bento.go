@@ -215,8 +215,11 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 			subject = "dlq." + tableName
 		}
 
-		_, _ = d.js.Publish(ctx, subject, data)
-		slog.WarnContext(msgCtx, "Sent failed message to DLQ", "subject", subject)
+		if _, err := d.js.Publish(ctx, subject, data); err != nil {
+			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
+		} else {
+			slog.WarnContext(msgCtx, "sent failed message to DLQ", "subject", subject)
+		}
 	}
 	return nil
 }

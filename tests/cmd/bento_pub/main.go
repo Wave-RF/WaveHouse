@@ -27,7 +27,11 @@ func run() int {
 		return 1
 	}
 	defer nc.Close()
-	js, _ := jetstream.New(nc)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		log.Printf("JetStream Init Error: %v", err)
+		return 1
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
