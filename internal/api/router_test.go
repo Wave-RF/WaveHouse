@@ -220,7 +220,7 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 
 func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 	t.Parallel()
-	
+
 	// Empty context is REJECTED
 	mw := RequireRole(true, "admin")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -230,9 +230,9 @@ func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 	// Create a request with NO role in the context
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
-	
+
 	handler.ServeHTTP(w, req)
-	
+
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), "unauthorized")
 }
