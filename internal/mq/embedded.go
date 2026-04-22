@@ -39,12 +39,11 @@ func (s *slogNATSLogger) Tracef(format string, v ...any) {
 	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-
 // EmbeddedNATS runs an in-process NATS server with JetStream.
 type EmbeddedNATS struct {
-	server *natsserver.Server
-	conn   *nats.Conn
-	js     jetstream.JetStream
+	server     *natsserver.Server
+	conn       *nats.Conn
+	js         jetstream.JetStream
 	streamName string
 }
 

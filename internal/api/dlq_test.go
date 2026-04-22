@@ -123,10 +123,10 @@ func TestEnsureDLQStream_Idempotent(t *testing.T) {
 
 	// Calling twice should not error.
 	require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
-    require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
+	require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
 
 	handler := NewDLQHandler(js, streamName, slog.Default())
-	
+
 	// Stream should be accessible.
 	stream, err := js.Stream(ctx, handler.DLQStreamName)
 	require.NoError(t, err)

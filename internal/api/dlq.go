@@ -11,15 +11,14 @@ import (
 
 // DLQHandler exposes Dead Letter Queue statistics.
 type DLQHandler struct {
-	JS     jetstream.JetStream
+	JS            jetstream.JetStream
 	DLQStreamName string
-	Logger *slog.Logger
+	Logger        *slog.Logger
 }
 
 func NewDLQHandler(js jetstream.JetStream, baseStreamName string, logger *slog.Logger) *DLQHandler {
 	return &DLQHandler{JS: js, DLQStreamName: baseStreamName + "_DLQ", Logger: logger}
 }
-
 
 // Stats returns per-table message counts in the DLQ stream.
 // Supports optional ?table= query parameter to filter by table name.

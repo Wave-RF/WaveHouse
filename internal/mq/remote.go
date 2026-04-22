@@ -12,8 +12,8 @@ import (
 
 // RemoteNATS connects to an external NATS cluster.
 type RemoteNATS struct {
-	conn *nats.Conn
-	js   jetstream.JetStream
+	conn       *nats.Conn
+	js         jetstream.JetStream
 	streamName string
 }
 
