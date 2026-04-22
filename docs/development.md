@@ -432,7 +432,7 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 
 PRs are grouped by ecosystem to reduce noise.
 
-**Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Note: PRs touching `.github/workflows/` still require a human codeowner's approval per the `main branch protection` ruleset — action-ecosystem bumps wait on a maintainer even when they're patch/minor.
+**Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Dependabot PRs bypass the `Admin approval` required check entirely (see `admin-approval.yml`), so **all** patch/minor bumps — including workflow-touching ones — merge without human intervention; the trust model for that is CI passing + `dependabot/fetch-metadata` classification.
 
 ## CI & review automation
 

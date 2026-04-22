@@ -3,8 +3,9 @@ name: Admin approval
 # Required status check that enforces at-least-one approval from an
 # admin (Eric or Taite) before any PR can merge. Replaces the
 # CODEOWNERS-based `require_code_owner_review` rule so that reviewer
-# assignment can be workflow-controlled (see auto-assign-reviewer.yml)
-# and human reviewers are only notified once bots are clean.
+# assignment + Task Board state can be workflow-controlled (see
+# `.github/workflows/project-orchestrator.yml`) and human reviewers
+# are only notified once bots are clean.
 #
 # Dependabot PRs bypass this check because they go through
 # dependabot-automerge.yml for patch/minor bumps — auto-approved by

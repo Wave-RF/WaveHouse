@@ -37,10 +37,20 @@ name: Project orchestrator
 # without appearing on the board.
 
 on:
-  pull_request:
+  # pull_request_target (not pull_request) because the job consumes
+  # PROJECT_BOARD_TOKEN — with pull_request, the workflow definition
+  # comes from the PR head commit, so a malicious same-repo branch
+  # could modify this file to exfiltrate the token. pull_request_target
+  # uses the workflow from the default branch, which is safe since we
+  # never check out PR code (this workflow only reads event data and
+  # calls APIs). Note: that means the orchestrator won't run on the PR
+  # that first introduces it — that's expected; testing is manual.
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
   pull_request_review:
     types: [submitted, dismissed]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
   check_suite:
     types: [completed]
 
@@ -76,7 +86,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           case "$EVENT_NAME" in
-            pull_request|pull_request_review)
+            pull_request|pull_request_target|pull_request_review|pull_request_review_thread)
               num="${{ github.event.pull_request.number }}"
               ;;
             check_suite)
@@ -128,11 +138,19 @@ jobs:
               approved)          action="approved" ;;
               *)                 action="none" ;;
             esac
-          elif [[ "$EVENT_NAME" == "pull_request" && "$EVENT_ACTION" == "review_requested" ]]; then
-            # Author re-requested review — signals "I've addressed feedback, back to reviewer."
-            action="re_requested"
-          elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "check_suite" ]]; then
-            # Any other PR / check event → re-evaluate bot-clean state.
+          elif [[ ( "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" ) && "$EVENT_ACTION" == "review_requested" ]]; then
+            # `review_requested` fires on initial reviewer assignment
+            # too. Gate on sender == PR author so this only matches
+            # the "author clicked re-request" case (Copilot's flag).
+            sender="${{ github.event.sender.login }}"
+            pr_author="${{ github.event.pull_request.user.login }}"
+            if [[ "$sender" == "$pr_author" ]]; then
+              action="re_requested"
+            else
+              action="none"
+            fi
+          elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "pull_request_review_thread" || "$EVENT_NAME" == "check_suite" ]]; then
+            # Any other PR / thread / check event → re-evaluate bot-clean state.
             action="reeval"
           fi
 
@@ -228,7 +246,7 @@ jobs:
           # is idempotent via the project's own "auto-add" workflow
           # (already enabled), but we still explicitly set the status.
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
-          item_id=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+          item_id=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 10000 --format json \
             --jq --arg url "$pr_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
 
           if [[ -z "$item_id" ]]; then
@@ -254,7 +272,7 @@ jobs:
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
 
           # Move PR card → In review (reviewer waiting on coder).
-          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 10000 --format json \
             --jq --arg url "$pr_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
           if [[ -n "$pr_item" ]]; then
             echo "Moving PR card → In review"
@@ -281,7 +299,7 @@ jobs:
 
           for issue_num in $issue_numbers; do
             issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 10000 --format json \
               --jq --arg url "$issue_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
             if [[ -n "$issue_item" ]]; then
               echo "Moving linked issue #$issue_num card → Ready"
@@ -304,7 +322,7 @@ jobs:
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
 
           # Move PR card → Ready (reviewer action needed).
-          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 10000 --format json \
             --jq --arg url "$pr_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
           if [[ -n "$pr_item" ]]; then
             echo "Moving PR card → Ready (coder re-requested review)"
@@ -331,7 +349,7 @@ jobs:
 
           for issue_num in $issue_numbers; do
             issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 200 --format json \
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --limit 10000 --format json \
               --jq --arg url "$issue_url" '.items[] | select(.content.url == $url) | .id' | head -n1)
             if [[ -n "$issue_item" ]]; then
               echo "Moving linked issue #$issue_num card → In review"
