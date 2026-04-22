@@ -57,6 +57,7 @@ func run() int {
 		log.Printf("ClickHouse Connect Error: %v", err)
 		return 1
 	}
+	defer func() { _ = chConn.Close() }()
 
 	createTable := `
     CREATE TABLE IF NOT EXISTS users (

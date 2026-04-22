@@ -86,11 +86,13 @@ func (h *Hub) Broadcast(topic string, msg *mq.Message) {
 
 	sent := make(map[chan []byte]struct{})
 
-	// Exact match.
+	// Exact match. Only mark a channel as "sent" after the send actually
+	// succeeds — if the channel is full and we hit the default case, the
+	// wildcard loop below gets a second chance.
 	for ch := range h.subscribers[topic] {
-		sent[ch] = struct{}{}
 		select {
 		case ch <- data:
+			sent[ch] = struct{}{}
 		default:
 		}
 	}
@@ -107,9 +109,9 @@ func (h *Hub) Broadcast(topic string, msg *mq.Message) {
 			if _, dup := sent[ch]; dup {
 				continue
 			}
-			sent[ch] = struct{}{}
 			select {
 			case ch <- data:
+				sent[ch] = struct{}{}
 			default:
 			}
 		}

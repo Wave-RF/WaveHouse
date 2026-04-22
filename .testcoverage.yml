@@ -5,8 +5,9 @@ profile: tmp/coverage/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
 threshold:
-  # Interim total threshold. AGENTS.md states 70% minimum; we are at ~65%
-  # after the fixes in #66 and climbing. Follow-up tracked in #67.
+  # Interim total threshold. Historical target (AGENTS.md, CHANGELOG) is 70%;
+  # we are at ~65% after the fixes in #66 and climbing. #67 tracks restoring
+  # the 70% bar.
   total: 60
 
 exclude:

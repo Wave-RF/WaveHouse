@@ -368,7 +368,7 @@ Run `make help` to see all targets. Key ones:
 | `make test-all` | Unit + integration tests |
 | `make ci` | Full CI check: tidy + fmt + lint + vulncheck + build + tests |
 | `make coverage` | Unit test coverage → `tmp/coverage/` |
-| `make coverage-enforce` | Fail if coverage is below 70% threshold |
+| `make coverage-enforce` | Fail if coverage is below 60% threshold (interim; #67 tracks restoring 70%) |
 | `make mod-tidy-check` | Verify `go.mod`/`go.sum` are tidy |
 | `make smoke-test` | Manual Bento insert+delete (requires running WaveHouse) |
 | `make test-sdk` | TypeScript SDK unit tests |
