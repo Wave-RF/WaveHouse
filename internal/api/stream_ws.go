@@ -60,7 +60,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	// Resolve stream permissions for this request.
 	role := RoleFromContext(r.Context())

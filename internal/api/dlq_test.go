@@ -18,11 +18,11 @@ func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 	dir := t.TempDir()
 	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
-	defer emb.Close()
+	defer func() { _ = emb.Close() }()
 
 	handler := NewDLQHandler(emb.JetStream(), slog.Default())
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/dlq/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.Stats(rec, req)
@@ -42,7 +42,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	dir := t.TempDir()
 	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
-	defer emb.Close()
+	defer func() { _ = emb.Close() }()
 
 	js := emb.JetStream()
 	ctx := context.Background()
@@ -61,7 +61,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	}
 
 	handler := NewDLQHandler(js, slog.Default())
-	req := httptest.NewRequest(http.MethodGet, "/v1/dlq/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.Stats(rec, req)
@@ -82,7 +82,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	dir := t.TempDir()
 	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
-	defer emb.Close()
+	defer func() { _ = emb.Close() }()
 
 	js := emb.JetStream()
 	ctx := context.Background()
@@ -93,7 +93,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := NewDLQHandler(js, slog.Default())
-	req := httptest.NewRequest(http.MethodGet, "/v1/dlq/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.Stats(rec, req)
@@ -112,7 +112,7 @@ func TestEnsureDLQStream_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
-	defer emb.Close()
+	defer func() { _ = emb.Close() }()
 
 	js := emb.JetStream()
 	ctx := context.Background()

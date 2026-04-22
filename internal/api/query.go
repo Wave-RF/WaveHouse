@@ -77,7 +77,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 	}
@@ -108,7 +108,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	w.Write(v.([]byte))
+	_, _ = w.Write(v.([]byte))
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
@@ -116,7 +116,7 @@ func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []an
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	columns := rows.ColumnTypes()
 	var results []map[string]any
@@ -157,7 +157,7 @@ func queryCacheKey(sql string, params []any) string {
 	h := sha256.New()
 	h.Write([]byte(sql))
 	for _, p := range params {
-		fmt.Fprintf(h, "\x00%v", p)
+		_, _ = fmt.Fprintf(h, "\x00%v", p)
 	}
 	return "query:" + hex.EncodeToString(h.Sum(nil))
 }

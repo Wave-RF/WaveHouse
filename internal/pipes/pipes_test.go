@@ -1,6 +1,9 @@
 package pipes
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -199,4 +202,67 @@ func TestMemoryStore_Empty(t *testing.T) {
 	store := NewMemoryStore()
 	assert.Empty(t, store.List())
 	assert.Nil(t, store.Get("anything"))
+}
+
+func TestStore_Put_ValidatesRequiredFields(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.Put(ctx, &NamedQuery{SQL: "SELECT 1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name is required")
+
+	err = store.Put(ctx, &NamedQuery{Name: "only_name"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SQL is required")
+}
+
+func TestStore_Put_CachesWithoutKV(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	q := &NamedQuery{Name: "count_clicks", SQL: "SELECT count() FROM clicks"}
+	require.NoError(t, store.Put(ctx, q))
+
+	got := store.Get("count_clicks")
+	require.NotNil(t, got)
+	assert.Equal(t, q.SQL, got.SQL)
+}
+
+func TestStore_Delete_RemovesFromCacheWithoutKV(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore(
+		&NamedQuery{Name: "a", SQL: "SELECT 1"},
+		&NamedQuery{Name: "b", SQL: "SELECT 2"},
+	)
+	ctx := context.Background()
+
+	require.NoError(t, store.Delete(ctx, "a"))
+	assert.Nil(t, store.Get("a"))
+	assert.NotNil(t, store.Get("b"))
+	assert.Len(t, store.List(), 1)
+}
+
+func TestStore_LoadFromDirectory_MissingDirIsOK(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	ctx := context.Background()
+	// Non-existent directory returns nil (not an error).
+	assert.NoError(t, store.loadFromDirectory(ctx, filepath.Join(t.TempDir(), "does-not-exist")))
+}
+
+func TestStore_LoadFromDirectory_EmptyDirReturnsNil(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+	ctx := context.Background()
+	// Empty directory: ReadDir succeeds, no entries to iterate. kv is never touched.
+	assert.NoError(t, store.loadFromDirectory(ctx, t.TempDir()))
+
+	// Directory with only non-.sql files: each is skipped before kv is touched.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.md"), []byte("ignored"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "sub"), 0o750))
+	assert.NoError(t, store.loadFromDirectory(ctx, dir))
 }

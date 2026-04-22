@@ -268,6 +268,7 @@ func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 			continue
 		}
 		name := strings.TrimSuffix(entry.Name(), ".sql")
+		// #nosec G304 -- dir is operator-configured; filename comes from os.ReadDir of that dir.
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			s.logger.Warn("failed to read pipe file", "file", entry.Name(), "error", err)

@@ -3,6 +3,8 @@ package dedupe
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"math"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -31,7 +33,7 @@ func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, eventID string) (
 		_ = closer.Close()
 		return true, nil
 	}
-	if err != pebble.ErrNotFound {
+	if !errors.Is(err, pebble.ErrNotFound) {
 		return false, err
 	}
 
@@ -51,8 +53,12 @@ func (d *EmbeddedDeduplicator) Close() error {
 
 func (d *EmbeddedDeduplicator) Stats() map[string]int64 {
 	m := d.db.Metrics()
+	walSize := m.WAL.Size
+	if walSize > math.MaxInt64 {
+		walSize = math.MaxInt64
+	}
 	return map[string]int64{
-		"pebble_wal_size":    int64(m.WAL.Size),
+		"pebble_wal_size":    int64(walSize),
 		"pebble_table_count": m.Total().NumFiles,
 	}
 }

@@ -19,7 +19,7 @@ func TestJWTAuthMiddleware_Disabled(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -39,7 +39,7 @@ func TestJWTAuthMiddleware_DevMode(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -58,7 +58,7 @@ func TestJWTAuthMiddleware_MissingToken(t *testing.T) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -76,7 +76,7 @@ func TestJWTAuthMiddleware_InvalidToken(t *testing.T) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer invalid.token.here")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -96,7 +96,7 @@ func TestJWTAuthMiddleware_ExpiredToken(t *testing.T) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -121,7 +121,7 @@ func TestJWTAuthMiddleware_ValidToken_FlatRole(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -151,7 +151,7 @@ func TestJWTAuthMiddleware_ValidToken_NestedRoleClaim(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -172,7 +172,7 @@ func TestJWTAuthMiddleware_WrongSecret(t *testing.T) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -289,7 +289,7 @@ func TestJWTAuthMiddleware_DefaultRoleClaim(t *testing.T) {
 	}))
 
 	tok := testutil.MakeJWT(t, jwt.MapClaims{"role": "viewer"})
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -314,7 +314,7 @@ func TestJWTAuthMiddleware_QueryParamToken(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/?token="+token, nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?token="+token, nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -337,7 +337,7 @@ func TestJWTAuthMiddleware_HeaderTakesPrecedenceOverQueryParam(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/?token="+queryToken, nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?token="+queryToken, nil)
 	req.Header.Set("Authorization", "Bearer "+headerToken)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -356,7 +356,7 @@ func TestJWTAuthMiddleware_InvalidQueryParamToken(t *testing.T) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/?token=invalid.token.here", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?token=invalid.token.here", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -371,7 +371,7 @@ func TestJWTAuthMiddleware_NonBearerToken(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz") // Basic auth
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -386,7 +386,7 @@ func TestJWTAuthMiddleware_NoHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	// No Authorization header.
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

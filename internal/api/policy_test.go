@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,7 @@ func TestPolicyHandler_Get_NilPolicy(t *testing.T) {
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/policy", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/policy", nil)
 	h.Get(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -40,7 +41,7 @@ func TestPolicyHandler_Get_WithPolicy(t *testing.T) {
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/policy", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/policy", nil)
 	h.Get(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -65,7 +66,7 @@ func TestPolicyHandler_Validate_Valid(t *testing.T) {
 	}
 	body, _ := json.Marshal(p)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/policy/validate", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/policy/validate", bytes.NewReader(body))
 	h.Validate(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -78,7 +79,7 @@ func TestPolicyHandler_Validate_InvalidJSON(t *testing.T) {
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/policy/validate", bytes.NewReader([]byte(`not json`)))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/policy/validate", bytes.NewReader([]byte(`not json`)))
 	h.Validate(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -91,7 +92,7 @@ func TestPolicyHandler_Put_InvalidJSON(t *testing.T) {
 	h := NewPolicyHandler(store)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPut, "/v1/policy", bytes.NewReader([]byte(`{bad}`)))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/policy", bytes.NewReader([]byte(`{bad}`)))
 	h.Put(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -114,7 +115,7 @@ func TestPolicyHandler_Validate_InvalidPolicy(t *testing.T) {
 	}
 	body, _ := json.Marshal(p)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/policy/validate", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/policy/validate", bytes.NewReader(body))
 	h.Validate(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
