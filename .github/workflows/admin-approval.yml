@@ -17,7 +17,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
-    types: [submitted, dismissed, edited]
+    # `edited` drops intentionally — editing a review's body doesn't
+    # change its state, so re-running the approval check on edits
+    # just burns workflow minutes (Claude flagged this).
+    types: [submitted, dismissed]
 
 permissions:
   pull-requests: read

@@ -57,9 +57,12 @@ on:
     types: [completed]
 
 permissions:
+  # Only the scopes the workflow actually uses. `issues: write` is
+  # intentionally omitted — the orchestrator doesn't write issues,
+  # it only updates their project-board items (which go through
+  # PROJECT_TOKEN on the GraphQL mutations).
   contents: read
   pull-requests: write
-  issues: write
   checks: read
   statuses: read
   actions: read
