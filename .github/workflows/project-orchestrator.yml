@@ -368,14 +368,20 @@ jobs:
                 }
               }' -F url="$issue_url" \
               --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
-            if [[ -n "$issue_item" ]]; then
-              echo "Moving linked issue #$issue_num → Ready"
-              GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-                --id "$issue_item" \
-                --field-id "$STATUS_FIELD_ID" \
-                --single-select-option-id "$STATUS_READY" \
-                --project-id "$PROJECT_ID" > /dev/null
+            # Add the issue to the board if it's not already there —
+            # ensures the state-machine transition applies even on
+            # issues that somehow bypassed the project's own auto-add
+            # workflow (Copilot's concern about silent skips).
+            if [[ -z "$issue_item" ]]; then
+              echo "Linked issue #$issue_num not on board — adding."
+              issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$issue_url" --format json --jq '.id')
             fi
+            echo "Moving linked issue #$issue_num → Ready"
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
+              --id "$issue_item" \
+              --field-id "$STATUS_FIELD_ID" \
+              --single-select-option-id "$STATUS_READY" \
+              --project-id "$PROJECT_ID" > /dev/null
           done
 
       - name: Apply review-re-requested transition
@@ -427,12 +433,17 @@ jobs:
                 }
               }' -F url="$issue_url" \
               --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
-            if [[ -n "$issue_item" ]]; then
-              echo "Moving linked issue #$issue_num → In review"
-              GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-                --id "$issue_item" \
-                --field-id "$STATUS_FIELD_ID" \
-                --single-select-option-id "$STATUS_IN_REVIEW" \
-                --project-id "$PROJECT_ID" > /dev/null
+            # Add the issue to the board if it's not already there —
+            # matches the changes-requested path's behavior so the
+            # state-machine transition always applies.
+            if [[ -z "$issue_item" ]]; then
+              echo "Linked issue #$issue_num not on board — adding."
+              issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$issue_url" --format json --jq '.id')
             fi
+            echo "Moving linked issue #$issue_num → In review"
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
+              --id "$issue_item" \
+              --field-id "$STATUS_FIELD_ID" \
+              --single-select-option-id "$STATUS_IN_REVIEW" \
+              --project-id "$PROJECT_ID" > /dev/null
           done

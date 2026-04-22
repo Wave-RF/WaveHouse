@@ -56,15 +56,18 @@ jobs:
           # Evaluate each user's *latest* review state and require
           # APPROVED. Without this, a historical APPROVED review that
           # was later followed by CHANGES_REQUESTED (or dismissed)
-          # would still satisfy the gate — Copilot flagged that false-
-          # pass on an earlier version. Reviews are grouped by user;
-          # within each group the submission with the most recent
-          # submitted_at wins.
+          # would still satisfy the gate.
+          #
+          # Uses explicit group_by(user) | map(max_by(submitted_at))
+          # rather than sort + unique_by — Copilot flagged that
+          # `unique_by` sorts internally and could keep an arbitrary
+          # review within each user-group depending on input order.
+          # group_by + max_by is unambiguous: pick the most recent
+          # review per user, then filter for APPROVED.
           approvers=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
             --jq '
-              sort_by(.submitted_at)
-              | reverse
-              | unique_by(.user.login)
+              group_by(.user.login)
+              | map(max_by(.submitted_at))
               | .[]
               | select(.state == "APPROVED")
               | .user.login
