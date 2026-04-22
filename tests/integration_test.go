@@ -139,7 +139,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	js := embeddedMQ.JetStream()
 
 	// Create DLQ stream.
-	require.NoError(t, api.EnsureDLQStream(ctx, js, 1024*1024))
+	require.NoError(t, api.EnsureDLQStream(ctx, js, testStream, 1024*1024))
 
 	// Schema registry.
 	registry := discovery.NewSchemaRegistry(chConn, "default", time.Minute, logger)
@@ -172,7 +172,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	queryHandler := api.NewQueryHandler(chConn, tiered, 5*time.Second)
 	sseHandler := api.NewSSEHandler(hub, js)
 	wsHandler := api.NewWSHandler(hub, js, nil)
-	dlqHandler := api.NewDLQHandler(js, logger)
+	dlqHandler := api.NewDLQHandler(js, testStream, logger)
 
 	deps := api.Dependencies{
 		Ingest: ingestHandler,
@@ -183,7 +183,6 @@ func setupTestEnv(t *testing.T) *testEnv {
 		Schema: api.NewSchemaHandler(registry),
 		DLQ:    dlqHandler,
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
-		AuthEnabled: false,
 		JS:     js,
 	}
 

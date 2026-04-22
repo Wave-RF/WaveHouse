@@ -12,20 +12,19 @@ import (
 // DLQHandler exposes Dead Letter Queue statistics.
 type DLQHandler struct {
 	JS     jetstream.JetStream
+	DLQStreamName string
 	Logger *slog.Logger
 }
 
-func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
-	return &DLQHandler{JS: js, Logger: logger}
+func NewDLQHandler(js jetstream.JetStream, baseStreamName string, logger *slog.Logger) *DLQHandler {
+	return &DLQHandler{JS: js, DLQStreamName: baseStreamName + "_DLQ", Logger: logger}
 }
 
-// DLQStreamName is the NATS JetStream stream used for dead-lettered events.
-const DLQStreamName = "WAVEHOUSE_DLQ"
 
 // Stats returns per-table message counts in the DLQ stream.
 // Supports optional ?table= query parameter to filter by table name.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
-	stream, err := h.JS.Stream(r.Context(), DLQStreamName)
+	stream, err := h.JS.Stream(r.Context(), h.DLQStreamName)
 	if err != nil {
 		// Stream may not exist yet if no failures have occurred.
 		w.Header().Set("Content-Type", "application/json")
@@ -56,9 +55,9 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 // EnsureDLQStream creates the DLQ JetStream stream if it doesn't exist.
-func EnsureDLQStream(ctx context.Context, js jetstream.JetStream, maxBytes int64) error {
+func EnsureDLQStream(ctx context.Context, js jetstream.JetStream, baseStreamName string, maxBytes int64) error {
 	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      DLQStreamName,
+		Name:      baseStreamName + "_DLQ",
 		Subjects:  []string{"dlq.>"},
 		Retention: jetstream.LimitsPolicy,
 		MaxBytes:  maxBytes,

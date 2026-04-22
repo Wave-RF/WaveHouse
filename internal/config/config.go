@@ -125,6 +125,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
 	}
 
+	if c.MQ.StreamName == "" {
+		return fmt.Errorf("mq.stream_name cannot be empty")
+	}
+
 	return nil
 }
 

@@ -135,7 +135,7 @@ func main() {
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), cfg.MQ.StreamName, maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
 			os.Exit(1)
 		}
@@ -207,7 +207,7 @@ func main() {
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
-		dlqHandler = api.NewDLQHandler(js, logger)
+		dlqHandler = api.NewDLQHandler(js, cfg.MQ.StreamName, logger)
 	}
 
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
