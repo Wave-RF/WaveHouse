@@ -25,7 +25,13 @@ on:
     types: [opened, edited, reopened, synchronize]
 
 permissions:
+  # `issues: write` is required for /repos/.../issues/{num}/comments
+  # (the sticky-comment endpoint) — PRs are issues at the REST layer
+  # for comments but `pull-requests: write` alone does NOT grant that
+  # scope. Without it, fork PR runs fail to post the comment even on
+  # `pull_request_target` with full base-repo permissions.
   contents: read
+  issues: write
   pull-requests: write
 
 concurrency:

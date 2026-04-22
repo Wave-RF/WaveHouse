@@ -51,9 +51,14 @@ on:
   # `pull_request_review_thread` is rejected by the Actions parser
   # (observed 2026-04-22 on this repo). Including it marks the whole
   # workflow as "Invalid workflow file" and suppresses ALL triggers.
-  # Thread-resolution events re-trigger orchestration via the next
-  # `pull_request_target: synchronize` or `check_suite: completed`
-  # event that follows, which is fine in practice.
+  # Caveat Copilot flagged: when a reviewer ONLY resolves threads
+  # without any push or new check_suite following, orchestration
+  # won't re-eval immediately. In practice the next push from the
+  # coder (addressing feedback) or check_suite (CI completion from
+  # that push) always follows thread resolution closely, so the
+  # gap is small. If it becomes a real pain point, consider adding
+  # a `schedule:` cron re-eval or a `workflow_dispatch:` manual
+  # re-eval path.
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
   pull_request_review:
@@ -108,7 +113,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           case "$EVENT_NAME" in
-            pull_request|pull_request_target|pull_request_review)
+            pull_request_target|pull_request_review)
               num="${{ github.event.pull_request.number }}"
               ;;
             check_suite)
@@ -167,7 +172,7 @@ jobs:
             # A review was dismissed — re-evaluate so the board
             # reflects the invalidated-approval state.
             action="reeval"
-          elif [[ ( "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" ) && "$EVENT_ACTION" == "review_requested" ]]; then
+          elif [[ "$EVENT_NAME" == "pull_request_target" && "$EVENT_ACTION" == "review_requested" ]]; then
             # `review_requested` fires on every reviewer-add, including
             # the initial one when the PR opens with pre-populated
             # reviewers. Copilot flagged that sender == author alone
@@ -195,7 +200,7 @@ jobs:
                 action="none"
               fi
             fi
-          elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "check_suite" ]]; then
+          elif [[ "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "check_suite" ]]; then
             action="reeval"
           fi
 
