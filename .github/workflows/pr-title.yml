@@ -29,7 +29,13 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: pr-title-${{ github.event.pull_request.number }}
+  # Include event_name in the group so `pull_request` and
+  # `pull_request_target` don't cancel each other. Copilot flagged
+  # the original single-key group would let the first-to-start run
+  # get cancelled by the second, which on fork PRs could kill the
+  # only run (pull_request_target) with permissions to post the
+  # sticky comment.
+  group: pr-title-${{ github.event.pull_request.number }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:

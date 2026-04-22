@@ -25,7 +25,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: label-${{ github.event.pull_request.number }}
+  # Same reasoning as pr-title.yml: include event_name so
+  # `pull_request` and `pull_request_target` don't cancel each
+  # other (which on fork PRs could kill the only run with
+  # permissions to apply labels).
+  group: label-${{ github.event.pull_request.number }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:

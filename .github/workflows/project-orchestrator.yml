@@ -47,12 +47,17 @@ name: Project orchestrator
 # and fresh forks don't produce failing runs.
 
 on:
+  # Note: despite being documented in GitHub's event-list docs,
+  # `pull_request_review_thread` is rejected by the Actions parser
+  # (observed 2026-04-22 on this repo). Including it marks the whole
+  # workflow as "Invalid workflow file" and suppresses ALL triggers.
+  # Thread-resolution events re-trigger orchestration via the next
+  # `pull_request_target: synchronize` or `check_suite: completed`
+  # event that follows, which is fine in practice.
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
   pull_request_review:
     types: [submitted, dismissed]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
   check_suite:
     types: [completed]
 
@@ -103,7 +108,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           case "$EVENT_NAME" in
-            pull_request|pull_request_target|pull_request_review|pull_request_review_thread)
+            pull_request|pull_request_target|pull_request_review)
               num="${{ github.event.pull_request.number }}"
               ;;
             check_suite)
@@ -190,7 +195,7 @@ jobs:
                 action="none"
               fi
             fi
-          elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "pull_request_review_thread" || "$EVENT_NAME" == "check_suite" ]]; then
+          elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "check_suite" ]]; then
             action="reeval"
           fi
 
