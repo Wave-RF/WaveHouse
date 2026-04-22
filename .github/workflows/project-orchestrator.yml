@@ -138,6 +138,13 @@ jobs:
               approved)          action="approved" ;;
               *)                 action="none" ;;
             esac
+          elif [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "dismissed" ]]; then
+            # A review was dismissed (e.g., admin approval invalidated
+            # by dismiss_stale_reviews_on_push, or explicit dismissal).
+            # Re-evaluate so the board state reflects "admin approval
+            # no longer present" — otherwise the PR card could sit at
+            # Ready while the Admin approval gate is red.
+            action="reeval"
           elif [[ ( "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" ) && "$EVENT_ACTION" == "review_requested" ]]; then
             # `review_requested` fires on initial reviewer assignment
             # too. Gate on sender == PR author so this only matches
