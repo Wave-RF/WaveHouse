@@ -39,7 +39,11 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           # Dependabot bypass — dependabot-automerge.yml handles these.
-          if [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
+          # Match both login shapes ("dependabot[bot]" is the standard
+          # user-context login; "app/dependabot" shows up in some GH
+          # API / app contexts). Keeping both keeps this check aligned
+          # with project-orchestrator.yml.
+          if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
             echo "::notice::Dependabot PR — bypassing admin approval (handled by dependabot-automerge workflow)."
             exit 0
           fi
