@@ -120,15 +120,14 @@ func NewRouter(deps Dependencies) http.Handler {
 }
 
 // RequireRole returns middleware that restricts access to the given roles.
-// When auth is disabled (no role in context), access is allowed.
+// When no role is present in the request context, access is allowed only if
+// authEnabled is false. If authEnabled is true, the request is denied (fail-closed)
+// with a 401 Unauthorized response.
 func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := RoleFromContext(r.Context())
-			// Allow if no role is set (auth disabled).
-			// TODO: Make this behavior configurable (e.g., default to denying
-			// 	access, make auth disabled a specific config) in order to
-			//	prevent role extraction error from granting unintended access.
+			// Fail-closed: if auth is explicitly enabled, an empty role is a security failure.
 			if role == "" {
 				if !authEnabled {
 					// Auth is disabled globally; allow for dev/testing.

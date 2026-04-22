@@ -45,7 +45,7 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole(true, "admin")
+	mw := RequireRole(false, "admin")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
