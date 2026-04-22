@@ -156,14 +156,31 @@ jobs:
             action="reeval"
           elif [[ ( "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" ) && "$EVENT_ACTION" == "review_requested" ]]; then
             # `review_requested` fires on every reviewer-add, including
-            # the initial one. Gate on sender == PR author to only
-            # match "author clicked re-request" (Copilot's flag).
+            # the initial one when the PR opens with pre-populated
+            # reviewers. Copilot flagged that sender == author alone
+            # isn't enough — that's true for BOTH the initial request
+            # (author opened PR with reviewers sidebar populated) AND
+            # a re-request. The distinguishing signal is whether the
+            # newly-requested reviewer has a *prior* review on this PR
+            # — if yes, this must be a re-request. If no, it's a
+            # first-time request and we shouldn't flip cards.
             sender="${{ github.event.sender.login }}"
             pr_author="${{ github.event.pull_request.user.login }}"
-            if [[ "$sender" == "$pr_author" ]]; then
-              action="re_requested"
-            else
+            requested_reviewer="${{ github.event.requested_reviewer.login }}"
+            if [[ "$sender" != "$pr_author" ]]; then
               action="none"
+            elif [[ -z "$requested_reviewer" ]]; then
+              # No `requested_reviewer` (e.g., team request or stale
+              # payload) — can't verify prior review. Safe default: no-op.
+              action="none"
+            else
+              has_prior_review=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
+                --jq --arg u "$requested_reviewer" 'any(.[]; .user.login == $u)' 2>/dev/null || echo "false")
+              if [[ "$has_prior_review" == "true" ]]; then
+                action="re_requested"
+              else
+                action="none"
+              fi
             fi
           elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "pull_request_review_thread" || "$EVENT_NAME" == "check_suite" ]]; then
             action="reeval"
@@ -256,7 +273,7 @@ jobs:
 
           # Look up board item via GraphQL resource(url). O(1) —
           # replaces the old gh-project-item-list full-board scan.
-          item_info=$(gh api graphql -f query='query($url: URI!) {
+          item_info=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
                 ... on PullRequest {
                   projectItems(first: 20) {
@@ -308,7 +325,7 @@ jobs:
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
 
           # O(1) board-item lookup via GraphQL resource.
-          pr_item=$(gh api graphql -f query='query($url: URI!) {
+          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
                 ... on PullRequest {
                   projectItems(first: 20) { nodes { id project { number } } }
@@ -342,7 +359,7 @@ jobs:
 
           for issue_num in $issue_numbers; do
             issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(gh api graphql -f query='query($url: URI!) {
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
                 resource(url: $url) {
                   ... on Issue { projectItems(first: 20) { nodes { id project { number } } } }
                 }
@@ -368,7 +385,7 @@ jobs:
         run: |
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
 
-          pr_item=$(gh api graphql -f query='query($url: URI!) {
+          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
                 ... on PullRequest {
                   projectItems(first: 20) { nodes { id project { number } } }
@@ -401,7 +418,7 @@ jobs:
 
           for issue_num in $issue_numbers; do
             issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(gh api graphql -f query='query($url: URI!) {
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
                 resource(url: $url) {
                   ... on Issue { projectItems(first: 20) { nodes { id project { number } } } }
                 }
