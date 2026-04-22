@@ -7,20 +7,21 @@ name: Lint PR title
 # Required by the `main branch protection` ruleset as the `Validate`
 # check — must report on every PR or merge gets stuck at "pending."
 #
-# NOTE: stays on `pull_request` (not `pull_request_target`) for now
-# because switching the trigger in a PR creates a coverage gap — on
-# `pull_request` events GitHub evaluates the workflow from the PR
-# head (which would already say `pull_request_target`, so no match),
-# and `pull_request_target` fires from the default branch's file
-# (which would still say `pull_request`, also no match). See #56 for
-# the plan (dual-trigger transition, then drop `pull_request`).
+# Dual-trigger: `pull_request` runs from the PR head branch (works
+# on internal PRs with full permissions for the sticky comment);
+# `pull_request_target` runs from the default branch with base-repo
+# permissions (so fork PRs also get the sticky comment). Both fire
+# on internal PRs — the second run is a harmless duplicate because
+# the comment marker and title-check logic are idempotent.
 #
-# Fork PRs under `pull_request` see a read-only GITHUB_TOKEN, so the
-# sticky comment silently skips there — the Validate check's red X
-# is still visible, just not the helpful fix-it comment.
+# A follow-up PR can drop the `pull_request` trigger once we've
+# confirmed `pull_request_target` is firing correctly in production.
+# Closes #56 (the dual-trigger transition).
 
 on:
   pull_request:
+    types: [opened, edited, reopened, synchronize]
+  pull_request_target:
     types: [opened, edited, reopened, synchronize]
 
 permissions:

@@ -5,12 +5,19 @@ name: Auto-label PR
 # current changed-file set, so removing a change also removes its
 # label.
 #
-# Stays on `pull_request` for now — same chicken-and-egg as
-# pr-title.yml (see its header comment). Fork PRs won't auto-label
-# until we do the dual-trigger transition tracked in #56.
+# Dual-trigger: `pull_request` runs from the PR head branch (works
+# on internal PRs); `pull_request_target` runs from the default
+# branch with base-repo permissions (so fork PRs also get labels).
+# `actions/labeler` is idempotent — same label set applied twice is
+# a no-op, so the duplicate run on internal PRs is harmless.
+#
+# A follow-up PR can drop the `pull_request` trigger once we've
+# confirmed `pull_request_target` is firing correctly. Closes #56.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
