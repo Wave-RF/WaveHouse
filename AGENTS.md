@@ -143,7 +143,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 | Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto — **updates the same sticky comment** rather than posting new ones | No (advisory) unless added to required checks |
 | Gemini Code Assist | Marketplace App at repo level | Yes on synchronize, **but silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — so Gemini reviews rarely see infra PRs | No (advisory) |
 | Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
-| Human codeowners | Auto-requested via CODEOWNERS paths | Re-request manually after push | Yes — required by ruleset |
+| Human admins (Eric / Taite) | Auto-assigned to the **PR** (as the `assignees` field, not a review request) by `.github/workflows/project-orchestrator.yml` **only once** the PR is bot-clean: required checks green AND all review threads resolved. Draft PRs get flipped to ready at the same moment, PR card goes on Task Board (project #7) with Status=Ready. Assignment logic: PR author == Eric → assign Taite; author == Taite → assign Eric; other authors → assign both. The Task Board card + assignee are the single signal — GitHub's native review-request channel is intentionally NOT used so notifications don't fire mid-iteration. | Workflow re-checks on every push (`pull_request_target`), review (`pull_request_review`), thread resolution (`pull_request_review_thread`), and check completion (`check_suite: completed`). Idempotent across re-fires. | Yes — `.github/workflows/admin-approval.yml` is a required status check that fails unless Eric or Taite has an `APPROVED` review (Dependabot PRs bypass). |
 
 > **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
@@ -266,17 +266,30 @@ docs/                   → Project documentation
 ## Repository Automation (three tiers)
 
 1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
-2. **Tier 2 — Code review** (two reviewers, both advisory; CODEOWNERS + the ruleset are the actual merge-gate):
+2. **Tier 2 — Code review** (two reviewers, both advisory; the `Admin approval` required status check + the ruleset are the actual merge-gate):
    - **Gemini Code Assist App** configured via `.gemini/styleguide.md` — Marketplace App attached at the repo/org level, no workflow file.
    - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs automatically on PR open/push/ready-for-review, but only when the PR author is already OWNER/MEMBER/COLLABORATOR to bound token cost. Dependabot PRs are skipped. Fork PRs from first-time contributors aren't auto-reviewed here; a maintainer can invoke Claude on them via `@claude` (Tier 3).
 3. **Tier 3 — Agentic execution** (`.github/workflows/claude-agent.yml`): same action in a different mode. Runs when an OWNER, MEMBER, or COLLABORATOR mentions `@claude` in an issue, PR, review, or comment, or applies the `agent` label to an issue. Can make code changes and open PRs. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
 
 ### Dependabot automation
 
-`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Action-ecosystem bumps that touch `.github/workflows/` require a human codeowner's approval per the ruleset; non-workflow bumps (gomod, npm) merge fully hands-off.
+`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Dependabot PRs **bypass the `Admin approval` required status check** (see `admin-approval.yml`) — the auto-approval from the workflow + CI passing is the trust model for patch/minor bumps.
 
 ## Governance Files
 
-- **`CODEOWNERS`** (`.github/CODEOWNERS`): Governance paths (`LICENSE`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, `.gemini/`, `.github/`, `.goreleaser.yaml`) require admin review. There is intentionally **no catch-all** — routine code changes pick reviewers manually to avoid auto-pinging the whole team.
+- **No `CODEOWNERS` file**: Removed 2026-04-21 in favor of workflow-driven reviewer assignment and approval enforcement. `CODEOWNERS`'s one-ping-on-open behavior conflicted with the "don't notify reviewers until bots are clean" design goal. Admin approval is now enforced by `.github/workflows/admin-approval.yml` (required status check that fails unless Eric or Taite has an `APPROVED` review, Dependabot PRs bypass). Reviewer assignment + Task Board orchestration is handled by `.github/workflows/project-orchestrator.yml` (adds PR to board, assigns the non-author admin, transitions card state on review events).
+
+### Task Board state machine
+
+The Task Board (project #7) card position + assignee is the single source of truth for "who needs to look at this next." `project-orchestrator.yml` automates most of the flow:
+
+- **PR bot-clean** (required checks green + threads resolved): PR added to board, Status=`Ready`, assignee=non-author admin. Draft PRs flipped to ready-for-review at the same moment.
+- **Review submitted with `CHANGES_REQUESTED`**: PR card → `In review` (reviewer now waiting on coder), linked issue card → `Ready` (coder attention needed).
+- **Author re-requests review** (explicit "I've addressed feedback" signal via GitHub's re-request-review button): PR card → `Ready` (reviewer attention), linked issue card → `In review` (coder waiting).
+- **Review approved**: no workflow action; `admin-approval.yml` flips its status check to success, auto-merge takes over, GitHub's native project workflows transition PR+issue cards to `Done` after merge.
+
+The **one manual step** intentionally NOT automated: when the reviewer starts reviewing, they move the PR card `Ready` → `In progress` themselves. GitHub doesn't emit a "review started" event we could hook, and making this automatic would misrepresent state.
+
+Dependabot PRs skip the orchestrator entirely — they go through `dependabot-automerge.yml` and don't appear on the board.
 - **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
 - **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/pr-title.yml`. The PR-title linter validates squash-merge commit messages.
