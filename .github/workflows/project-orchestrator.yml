@@ -150,7 +150,12 @@ jobs:
           if [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "submitted" ]]; then
             case "$REVIEW_STATE" in
               changes_requested) action="changes_requested" ;;
-              approved)          action="approved" ;;
+              # APPROVED intentionally falls through to no-op: admin-
+              # approval.yml flips its required-check to success and
+              # auto-merge + the project's "pull request merged"
+              # automation close the loop. No orchestrator state
+              # change is needed on approval submission.
+              approved)          action="none" ;;
               *)                 action="none" ;;
             esac
           elif [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "dismissed" ]]; then
@@ -403,14 +408,22 @@ jobs:
             }' -F url="$pr_url" \
             --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
 
-          if [[ -n "$pr_item" ]]; then
-            echo "Moving PR card → Ready (coder re-requested review)"
-            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-              --id "$pr_item" \
-              --field-id "$STATUS_FIELD_ID" \
-              --single-select-option-id "$STATUS_READY" \
-              --project-id "$PROJECT_ID" > /dev/null
+          # Add the PR to the board if it's somehow fallen off (manual
+          # removal, etc.) — mirrors the changes-requested path's
+          # behavior so the state machine self-heals. Claude flagged
+          # this asymmetry — previously re_requested silently no-op'd
+          # if the PR card was missing.
+          if [[ -z "$pr_item" ]]; then
+            echo "PR #$PR_NUM not on board — adding."
+            pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$pr_url" --format json --jq '.id')
           fi
+
+          echo "Moving PR card → Ready (coder re-requested review)"
+          GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
+            --id "$pr_item" \
+            --field-id "$STATUS_FIELD_ID" \
+            --single-select-option-id "$STATUS_READY" \
+            --project-id "$PROJECT_ID" > /dev/null
 
           owner="${REPO%%/*}"
           repo_name="${REPO##*/}"
