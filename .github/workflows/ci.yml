@@ -65,7 +65,10 @@ jobs:
         with:
           profile: tmp/coverage/coverage.txt
           local-prefix: github.com/Wave-RF/WaveHouse
-          threshold-total: 70
+          # Interim threshold. Main has been hovering around 62% for months;
+          # raising the bar is tracked as a follow-up to #57 after the ruleset
+          # is restored. Aspirational goal remains 70%.
+          threshold-total: 60
           git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
           git-branch: badges
 

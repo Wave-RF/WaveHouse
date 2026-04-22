@@ -1,7 +1,11 @@
 package discovery
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -295,4 +299,73 @@ func TestIsNumericType(t *testing.T) {
 	}
 	assert.False(t, isNumericType("String"))
 	assert.False(t, isNumericType("Bool"))
+}
+
+func TestNewSchemaRegistry_ConstructorDefaults(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sr := NewSchemaRegistry(nil, "wavehouse", 30*time.Second, logger)
+	require.NotNil(t, sr)
+	assert.Equal(t, "wavehouse", sr.database)
+	assert.Equal(t, 30*time.Second, sr.refreshInterval)
+	assert.Same(t, logger, sr.logger)
+	assert.NotNil(t, sr.tables)
+	assert.Empty(t, sr.List())
+	assert.Nil(t, sr.Get("anything"))
+}
+
+func TestNewSchemaRegistryFromMap_PopulatesAndLookups(t *testing.T) {
+	t.Parallel()
+	clicks := &TableSchema{Name: "clicks", Columns: []Column{{Name: "id", Type: "String"}}}
+	users := &TableSchema{Name: "users", Columns: []Column{{Name: "id", Type: "UInt64"}}}
+
+	sr := NewSchemaRegistryFromMap([]*TableSchema{clicks, users})
+	require.NotNil(t, sr)
+
+	assert.Same(t, clicks, sr.Get("clicks"))
+	assert.Same(t, users, sr.Get("users"))
+	assert.Nil(t, sr.Get("missing"))
+
+	got := sr.List()
+	assert.Len(t, got, 2)
+	names := map[string]bool{}
+	for _, s := range got {
+		names[s.Name] = true
+	}
+	assert.True(t, names["clicks"])
+	assert.True(t, names["users"])
+}
+
+func TestNewSchemaRegistryFromMap_Empty(t *testing.T) {
+	t.Parallel()
+	sr := NewSchemaRegistryFromMap(nil)
+	require.NotNil(t, sr)
+	assert.Empty(t, sr.List())
+	assert.Nil(t, sr.Get("x"))
+}
+
+// TestStartAutoRefresh_ExitsOnContextCancel verifies the ticker loop exits
+// cleanly when the context is cancelled, without calling Refresh (nil conn
+// would otherwise panic).
+func TestStartAutoRefresh_ExitsOnContextCancel(t *testing.T) {
+	t.Parallel()
+	sr := NewSchemaRegistryFromMap(nil)
+	// Long interval so the ticker never fires before cancel.
+	sr.refreshInterval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		sr.StartAutoRefresh(ctx)
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartAutoRefresh did not return after ctx cancel")
+	}
 }

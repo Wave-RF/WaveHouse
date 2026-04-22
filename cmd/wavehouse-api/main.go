@@ -78,7 +78,7 @@ func run() int {
 
 	fmt.Println("DEBUG - Endpoint:", otelAddr)
 
-	otelShutdown, err := observability.InitProvider(ctx, "wavehouse-standalone", otelAddr)
+	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
 	if err != nil {
 		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
 		return 1

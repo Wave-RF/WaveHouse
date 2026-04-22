@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -13,9 +14,17 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run orchestrates the smoke test and returns a non-zero exit code on any
+// setup or verification failure so CI scripts and `make smoke-test` wrappers
+// can distinguish success from failure.
+func run() int {
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
-		log.Fatal("NATS Connect Error: ", err)
+		log.Printf("NATS Connect Error: %v", err)
+		return 1
 	}
 	defer nc.Close()
 	js, _ := jetstream.New(nc)
@@ -28,7 +37,7 @@ func main() {
 		Storage:  jetstream.FileStorage,
 	}); err != nil {
 		log.Printf("Failed to setup NATS Stream: %v", err)
-		return
+		return 1
 	}
 	log.Println("NATS Stream 'WAVEHOUSE' is configured and ready.")
 
@@ -42,7 +51,7 @@ func main() {
 	})
 	if err != nil {
 		log.Printf("ClickHouse Connect Error: %v", err)
-		return
+		return 1
 	}
 
 	createTable := `
@@ -55,7 +64,7 @@ func main() {
     ORDER BY id`
 	if err := chConn.Exec(context.Background(), createTable); err != nil {
 		log.Printf("Failed to create table: %v", err)
-		return
+		return 1
 	}
 	log.Println("ClickHouse table 'users' is ready.")
 
@@ -66,7 +75,7 @@ func main() {
 	})
 	if _, err := js.Publish(ctx, "ingest.users", insertData); err != nil {
 		log.Printf("Insert Publish Error: %v", err)
-		return
+		return 1
 	}
 	log.Println("Published Insert to ingest.users")
 
@@ -80,7 +89,7 @@ func main() {
 	})
 	if _, err := js.Publish(ctx, "ingest.users", deleteData); err != nil {
 		log.Printf("Delete Publish Error: %v", err)
-		return
+		return 1
 	}
 	log.Println("Published Delete to ingest.users")
 
@@ -89,14 +98,14 @@ func main() {
 	time.Sleep(7 * time.Second)
 
 	var count uint64
-	err = chConn.QueryRow(context.Background(), "SELECT count() FROM users WHERE id = '99'").Scan(&count)
-	if err != nil {
+	if err := chConn.QueryRow(context.Background(), "SELECT count() FROM users WHERE id = '99'").Scan(&count); err != nil {
 		log.Printf("Verification Query Failed: %v", err)
-		return
+		return 1
 	}
 	if count == 0 {
 		fmt.Println("SUCCESS: The record was inserted and then deleted correctly!")
-	} else {
-		fmt.Printf("FAILED: Record still exists (%d rows). Check worker logs for 'DELETE DETECTED' message.\n", count)
+		return 0
 	}
+	fmt.Printf("FAILED: Record still exists (%d rows). Check worker logs for 'DELETE DETECTED' message.\n", count)
+	return 1
 }
