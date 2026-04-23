@@ -111,7 +111,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 			wait.ForHTTP("/ping").WithPort("8123/tcp").WithStatusCodeMatcher(func(status int) bool {
 				return status == http.StatusOK
 			}),
-		).WithStartupTimeoutDefault(120 * time.Second),
+		).WithDeadline(120 * time.Second),
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: chReq,
@@ -135,15 +135,20 @@ func setupTestEnv(t *testing.T) *testEnv {
 
 	// `clickhouse.Open` is lazy — it doesn't dial until the first query.
 	// Force the dial here with retries so the first real Exec below
-	// can't be the one that meets a half-ready server.
+	// can't be the one that meets a half-ready server. Capture the
+	// last Ping error so a timeout reports the real cause (e.g.
+	// "connection refused", DNS failure) instead of a generic
+	// context.DeadlineExceeded that doesn't help triage.
 	pingCtx, pingCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer pingCancel()
+	var lastPingErr error
 	for {
-		if err := chConn.Ping(pingCtx); err == nil {
+		lastPingErr = chConn.Ping(pingCtx)
+		if lastPingErr == nil {
 			break
 		}
 		if pingCtx.Err() != nil {
-			require.NoError(t, pingCtx.Err(), "ClickHouse never became reachable on native protocol")
+			require.NoError(t, lastPingErr, "ClickHouse never became reachable on native protocol")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
