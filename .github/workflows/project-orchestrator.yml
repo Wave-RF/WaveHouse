@@ -193,7 +193,7 @@ jobs:
               action="none"
             else
               has_prior_review=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
-                --jq --arg u "$requested_reviewer" 'any(.[]; .user.login == $u)' 2>/dev/null || echo "false")
+                | jq -r --arg u "$requested_reviewer" 'any(.[]; .user.login == $u)' 2>/dev/null || echo "false")
               if [[ "$has_prior_review" == "true" ]]; then
                 action="re_requested"
               else
@@ -291,6 +291,9 @@ jobs:
 
           # Look up board item via GraphQL resource(url). O(1) —
           # replaces the old gh-project-item-list full-board scan.
+          # `gh api --jq` takes a single jq expression and can't pass
+          # `--arg`; pipe to `jq` directly when we need variable
+          # injection.
           item_info=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
                 ... on PullRequest {
@@ -306,7 +309,7 @@ jobs:
                 }
               }
             }' -F url="$pr_url" \
-            --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber))')
+            | jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber))')
           item_id=$(echo "$item_info" | jq -r '.id // empty' | head -n1)
           current_status=$(echo "$item_info" | jq -r '.fieldValueByName.name // empty' | head -n1)
 
@@ -350,7 +353,7 @@ jobs:
                 }
               }
             }' -F url="$pr_url" \
-            --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
+            | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
 
           if [[ -n "$pr_item" ]]; then
             echo "Moving PR card → In review"
@@ -382,7 +385,7 @@ jobs:
                   ... on Issue { projectItems(first: 20) { nodes { id project { number } } } }
                 }
               }' -F url="$issue_url" \
-              --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
             # Add the issue to the board if it's not already there —
             # ensures the state-machine transition applies even on
             # issues that somehow bypassed the project's own auto-add
@@ -416,7 +419,7 @@ jobs:
                 }
               }
             }' -F url="$pr_url" \
-            --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
+            | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
 
           # Add the PR to the board if it's somehow fallen off (manual
           # removal, etc.) — mirrors the changes-requested path's
@@ -455,7 +458,7 @@ jobs:
                   ... on Issue { projectItems(first: 20) { nodes { id project { number } } } }
                 }
               }' -F url="$issue_url" \
-              --jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
+              | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
             # Add the issue to the board if it's not already there —
             # matches the changes-requested path's behavior so the
             # state-machine transition always applies.
