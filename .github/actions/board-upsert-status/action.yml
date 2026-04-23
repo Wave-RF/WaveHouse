@@ -92,6 +92,22 @@ runs:
             }
           }' -F url="$URL")
 
+        # Copilot R9 flagged: without a .errors check, a successful
+        # HTTP response with a GraphQL-level error (bad scope, URL
+        # permissions, schema issue) would leave item_id empty and
+        # trip the "item not on board — adding" branch, which would
+        # mask the real failure as a spurious re-add. Fail loudly
+        # instead.
+        graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
+        if [ -n "$graphql_errors" ]; then
+          echo "::error::GraphQL lookup failed for $URL: $graphql_errors"
+          exit 1
+        fi
+        if echo "$resp" | jq -e '.data.resource == null' > /dev/null; then
+          echo "::error::GraphQL returned null resource for $URL — check URL validity and that the token has read access."
+          exit 1
+        fi
+
         item_id=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
           .data.resource.projectItems.nodes[]?
           | select(.project.number == ($n | tonumber))

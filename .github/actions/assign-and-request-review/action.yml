@@ -21,6 +21,19 @@ inputs:
       Space-separated GitHub logins. Duplicates are de-duped. Users already
       assigned or requested are no-ops — GitHub silently ignores repeats.
     required: true
+  request-review:
+    description: >-
+      Whether to POST /requested_reviewers in addition to setting assignees.
+      Default "true" — set "false" on reeval re-fires after a reviewer has
+      already submitted a review and GitHub legitimately cleared the
+      request. Assigning-only in that case lets the reviewer stay in the
+      Task Board queue without re-notifying them before the author has
+      explicitly re-requested. Copilot flagged that the all-idempotent
+      repair-the-pair logic in the composite was re-firing review requests
+      after CHANGES_REQUESTED reviews, defeating the explicit re_requested
+      signal.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -32,6 +45,7 @@ runs:
         REPO: ${{ inputs.repo }}
         PR_NUMBER: ${{ inputs.pr-number }}
         REVIEWERS: ${{ inputs.reviewers }}
+        REQUEST_REVIEW: ${{ inputs.request-review }}
       run: |
         set -euo pipefail
 
@@ -91,7 +105,17 @@ runs:
         # (already-approved-on-head-SHA post-dismiss-stale) stays a
         # notice; other failures surface with gh stderr inline so
         # operators can debug.
-        if [ "${#MISSING_REVIEW_REQUESTS[@]}" -gt 0 ]; then
+        #
+        # Callers set request-review=false on reeval re-fires after a
+        # reviewer has legitimately submitted a review (GitHub cleared
+        # the request by design). Re-firing it there would re-notify
+        # the reviewer before the author has hit "re-request review,"
+        # defeating the explicit re_requested signal.
+        if [ "$REQUEST_REVIEW" != "true" ]; then
+          if [ "${#MISSING_REVIEW_REQUESTS[@]}" -gt 0 ]; then
+            echo "request-review=false — skipping /requested_reviewers for [${MISSING_REVIEW_REQUESTS[*]}] (assignees reconciled)."
+          fi
+        elif [ "${#MISSING_REVIEW_REQUESTS[@]}" -gt 0 ]; then
           reviewer_json=$(printf '%s\n' "${MISSING_REVIEW_REQUESTS[@]}" | jq -R . | jq -sc '{reviewers: .}')
 
           set +e

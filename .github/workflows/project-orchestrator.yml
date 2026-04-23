@@ -416,6 +416,14 @@ jobs:
           repo: ${{ github.repository }}
           pr-number: ${{ steps.pr.outputs.num }}
           reviewers: ${{ steps.reviewers.outputs.reviewers }}
+          # Only request review on the first bot-clean → Ready
+          # transition. After a CHANGES_REQUESTED review GitHub
+          # legitimately clears the review-request; re-firing it on a
+          # subsequent re-eval would re-notify the reviewer before the
+          # author has explicitly re-requested, defeating the
+          # re_requested signal. Assignees still get reconciled either
+          # way (gap-repair path). (Copilot R9 flagged.)
+          request-review: ${{ steps.pr-status.outputs.promote == 'true' }}
 
       - name: Linked issues → In review (reeval)
         if: steps.botclean.outputs.clean == 'true' && env.SKIP_BOARD != 'true' && steps.pr-status.outputs.promote == 'true'

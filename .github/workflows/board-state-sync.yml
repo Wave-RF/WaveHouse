@@ -259,6 +259,19 @@ jobs:
                 }
               }' -F id="$counterpart_id")
 
+            # Guard: fail if the lookup itself errored (Copilot R9)
+            # instead of misinterpreting an error response as "item
+            # not on board" and emitting a misleading skip warning.
+            graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
+            if [ -n "$graphql_errors" ]; then
+              echo "::error::GraphQL error looking up counterpart $counterpart_id: $graphql_errors"
+              exit 1
+            fi
+            if echo "$resp" | jq -e '.data.node == null' > /dev/null; then
+              echo "::error::GraphQL returned null node for counterpart $counterpart_id — likely a permissions or invalid-ID issue."
+              exit 1
+            fi
+
             item_id=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
               .data.node.projectItems.nodes[]?
               | select(.project.number == ($n | tonumber))

@@ -90,6 +90,24 @@ runs:
           }' \
           -F owner="$owner" -F repo="$repo_name" -F num="$PR_NUMBER")
 
+        # Guard against GraphQL errors and a missing PR node up front
+        # (Copilot R9): without this, jq below extracts empty/null
+        # from a broken response and the downstream numeric compare
+        # + node iteration can error in confusing ways.
+        graphql_errors=$(echo "$linked_resp" | jq -r '
+          if (.errors // []) | length > 0
+          then [.errors[].message] | join("; ")
+          else empty
+          end')
+        if [ -n "$graphql_errors" ]; then
+          echo "::error::Failed to fetch linked issues for PR #$PR_NUMBER in $REPO: $graphql_errors"
+          exit 1
+        fi
+        if ! echo "$linked_resp" | jq -e '.data.repository.pullRequest != null' > /dev/null; then
+          echo "::error::Failed to fetch linked issues for PR #$PR_NUMBER in $REPO: pull request not found in GraphQL response."
+          exit 1
+        fi
+
         total=$(echo "$linked_resp" | jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount')
         issue_count=$(echo "$linked_resp" | jq -r '.data.repository.pullRequest.closingIssuesReferences.nodes | length')
 
