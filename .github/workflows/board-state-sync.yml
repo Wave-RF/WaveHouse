@@ -165,24 +165,37 @@ jobs:
             # `closedByPullRequestsReferences` is the inverse edge of
             # the PR's `closingIssuesReferences`. It returns the PRs
             # that declared `Closes #this-issue` / `Fixes #this-issue`.
-            counterparts=$(gh api graphql -f query='query($id: ID!) {
+            # Distinguish "no linked PRs" (empty result, fine) from
+            # "GraphQL query failed" (real error, should be loud) —
+            # previously 2>/dev/null || true swallowed both and
+            # silently no-op'd on token/API failures (Copilot flagged).
+            issue_resp=$(gh api graphql -f query='query($id: ID!) {
                 node(id: $id) {
                   ... on Issue {
                     closedByPullRequestsReferences(first: 50, includeClosedPrs: false) { nodes { id } }
                   }
                 }
-              }' -F id="$CONTENT_NODE_ID" \
-              --jq '.data.node.closedByPullRequestsReferences.nodes[].id' 2>/dev/null || true)
+              }' -F id="$CONTENT_NODE_ID")
 
-            # Older GraphQL schema versions don't have
-            # closedByPullRequestsReferences — log and skip if empty.
-            # If we hit this in practice, fallback candidates are
-            # `timelineItems` (ConnectedEvent / CrossReferencedEvent).
-            if [ -z "$counterparts" ]; then
-              echo "::notice::No closed-by PRs found for issue $CONTENT_NODE_ID (or the field isn't available in this GraphQL schema version). Skipping mirror from Issue side."
-              echo "run=false" >> "$GITHUB_OUTPUT"
-              exit 0
+            # gh api exit != 0 already aborts the step via set -e.
+            # A successful response with .errors set indicates a
+            # schema-level failure (e.g., the field isn't available on
+            # this GraphQL version). Log + skip in that specific case;
+            # in all other cases (including real errors) the script
+            # fails loudly.
+            graphql_errors=$(echo "$issue_resp" | jq -c '.errors // empty')
+            if [ -n "$graphql_errors" ]; then
+              if echo "$graphql_errors" | grep -q "closedByPullRequestsReferences"; then
+                echo "::notice::GraphQL schema doesn't expose closedByPullRequestsReferences on this version. Skipping Issue-side mirror. Fallback if this becomes frequent: timelineItems / ConnectedEvent."
+                echo "run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              else
+                echo "::error::Unexpected GraphQL error querying Issue counterparts: $graphql_errors"
+                exit 1
+              fi
             fi
+
+            counterparts=$(echo "$issue_resp" | jq -r '.data.node.closedByPullRequestsReferences.nodes[].id')
           else
             echo "Content type '$CONTENT_TYPE' not supported — skipping."
             echo "run=false" >> "$GITHUB_OUTPUT"

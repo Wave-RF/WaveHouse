@@ -100,8 +100,16 @@ jobs:
           # path above covers the common submit case; this retry
           # guards non-submit events (synchronize, opened) that fire
           # in the same cluster as a submit.
+          # Retry until an *admin* login appears in approvers — not
+          # merely until approvers is non-empty. A non-admin approval
+          # (e.g. an external contributor approving their own PR's
+          # author) would otherwise satisfy the `-n "$approvers"` break
+          # condition on the first attempt, short-circuiting before
+          # a newly-submitted admin approval has propagated through
+          # the reviews API (Copilot flagged this).
           attempts=0
           approvers=""
+          admin_found=""
           while [ $attempts -lt 3 ]; do
             approvers=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
               --jq '
@@ -111,17 +119,23 @@ jobs:
                 | select(.state == "APPROVED")
                 | .user.login
               ' 2>/dev/null || echo "")
-            [ -n "$approvers" ] && break
+
+            for admin in "${admins[@]}"; do
+              if printf '%s\n' "$approvers" | grep -Fxq "$admin"; then
+                admin_found="$admin"
+                break
+              fi
+            done
+            [ -n "$admin_found" ] && break
+
             attempts=$((attempts + 1))
             [ $attempts -lt 3 ] && sleep 2
           done
 
-          for admin in "${admins[@]}"; do
-            if printf '%s\n' "$approvers" | grep -Fxq "$admin"; then
-              echo "PR #$PR_NUM has admin approval from $admin (latest review state: APPROVED)."
-              exit 0
-            fi
-          done
+          if [ -n "$admin_found" ]; then
+            echo "PR #$PR_NUM has admin approval from $admin_found (latest review state: APPROVED)."
+            exit 0
+          fi
 
           {
             echo "::error::PR #$PR_NUM needs approval from an admin."
