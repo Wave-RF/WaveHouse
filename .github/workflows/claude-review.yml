@@ -45,42 +45,64 @@ jobs:
       checks: read
       id-token: write
     steps:
-      - name: Wait for CI to settle, then skip if any required check failed
+      - name: Wait for required CI checks, skip review if any failed
         # Don't burn Claude review tokens on PRs whose required CI is
-        # already red — the human will just bounce them back as "fix CI
-        # first." `gh pr checks --watch` blocks until every non-skipped
-        # check on the PR head SHA reaches a terminal state, then exits
-        # non-zero if any failed. We want a *specific* skip on red CI
-        # (not a workflow failure), so swallow the exit code and look
-        # at the conclusions ourselves.
+        # already red — the human will bounce them back as "fix CI
+        # first." Poll the specific required checks (not all checks,
+        # which would include our own Review job and deadlock); when
+        # they reach a terminal state, skip if any failed.
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
           # Required checks from the `main branch protection` ruleset.
-          # Keep in sync. If a check listed here doesn't exist on a PR
-          # (e.g. paths-filtered out), it's treated as "not failing."
-          REQUIRED_CHECKS: "Check Build Validate"
+          # Newline-separated so names with spaces ("Integration Tests")
+          # round-trip correctly. Keep in sync with the ruleset. A
+          # check missing from the PR (paths-filtered or not yet
+          # created at the deadline) is treated as "not failing"
+          # rather than blocking the review forever.
+          REQUIRED_CHECKS: |
+            Check
+            Build
+            Validate
+            Lint
+            Test
+            Integration Tests
         run: |
-          # Wait up to 15 minutes for the rest of CI to finish.
-          # `--watch` blocks until terminal; we don't care about its
-          # exit code, just the per-check conclusions afterward.
-          gh pr checks "$PR_NUMBER" --repo "$REPO" --watch --interval 30 || true
+          set -u
+          mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | sed '/^$/d')
 
-          FAILED=""
-          for check in $REQUIRED_CHECKS; do
-            CONCLUSION=$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json name,state \
-              --jq ".[] | select(.name == \"$check\") | .state" | head -n1)
-            # Empty = check didn't run on this PR (paths-filtered) — not a failure.
-            if [[ "$CONCLUSION" == "FAILURE" || "$CONCLUSION" == "CANCELLED" || "$CONCLUSION" == "TIMED_OUT" ]]; then
-              FAILED="$FAILED $check"
-            fi
+          deadline=$(( $(date +%s) + 900 ))  # 15-minute cap
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            RUNS=$(gh api "repos/$REPO/commits/$PR_HEAD_SHA/check-runs" --paginate)
+            ALL_DONE=1
+            for check in "${CHECKS[@]}"; do
+              STATUS=$(jq -r --arg n "$check" \
+                '.check_runs[] | select(.name == $n) | .status' <<<"$RUNS" | head -n1)
+              if [ -n "$STATUS" ] && [ "$STATUS" != "completed" ]; then
+                ALL_DONE=0
+                break
+              fi
+            done
+            [ "$ALL_DONE" = "1" ] && break
+            sleep 30
           done
 
-          if [[ -n "$FAILED" ]]; then
+          RUNS=$(gh api "repos/$REPO/commits/$PR_HEAD_SHA/check-runs" --paginate)
+          FAILED=""
+          for check in "${CHECKS[@]}"; do
+            CONCLUSION=$(jq -r --arg n "$check" \
+              '.check_runs[] | select(.name == $n) | .conclusion' <<<"$RUNS" | head -n1)
+            case "$CONCLUSION" in
+              failure|cancelled|timed_out)
+                FAILED="$FAILED $check"
+                ;;
+            esac
+          done
+
+          if [ -n "$FAILED" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "failed_checks=$FAILED" >> "$GITHUB_OUTPUT"
             echo "::notice::Skipping Claude review — required CI checks failing:$FAILED"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
