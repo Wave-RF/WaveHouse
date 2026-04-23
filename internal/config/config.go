@@ -126,7 +126,7 @@ func (c *Config) Validate() error {
 	}
 
 	if c.MQ.StreamName == "" {
-		return fmt.Errorf("mq.stream_name cannot be empty")
+		c.MQ.StreamName = "WAVEHOUSE"
 	}
 
 	return nil
