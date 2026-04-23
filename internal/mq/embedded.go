@@ -39,19 +39,18 @@ func (s *slogNATSLogger) Tracef(format string, v ...any) {
 	s.l.Debug(fmt.Sprintf(format, v...), "component", "nats")
 }
 
-const streamName = "WAVEHOUSE"
-
 // EmbeddedNATS runs an in-process NATS server with JetStream.
 type EmbeddedNATS struct {
-	server *natsserver.Server
-	conn   *nats.Conn
-	js     jetstream.JetStream
+	server     *natsserver.Server
+	conn       *nats.Conn
+	js         jetstream.JetStream
+	streamName string
 }
 
 // NewEmbedded starts an embedded NATS server with JetStream enabled.
 // An optional *slog.Logger can be passed to control server log output;
 // if omitted, slog.Default() is used.
-func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
+func NewEmbedded(storeDir, streamName string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
 	l := slog.Default()
 	if len(logger) > 0 && logger[0] != nil {
 		l = logger[0]
@@ -105,7 +104,7 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
 
-	return &EmbeddedNATS{server: ns, conn: nc, js: js}, nil
+	return &EmbeddedNATS{server: ns, conn: nc, js: js, streamName: streamName}, nil
 }
 
 func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte) error {
@@ -118,7 +117,7 @@ func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte)
 }
 
 func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error {
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, e.streamName, jetstream.ConsumerConfig{
 		Durable:       consumerName,
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
