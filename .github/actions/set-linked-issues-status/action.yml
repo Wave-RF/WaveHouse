@@ -1,10 +1,12 @@
 name: Set linked-issue board Status
 description: >-
-  For the given PR, fetches all linked issues (via GraphQL
-  closingIssuesReferences — the `Closes #N` / `Fixes #N` graph) and
-  upserts each onto the Task Board with the given target Status.
-  Idempotent. Used by project-orchestrator.yml on every state transition
-  that needs to mirror PR status to the linked issues.
+  For the given PR, fetches its linked issues (up to the first 50, via
+  GraphQL `closingIssuesReferences` — the `Closes #N` / `Fixes #N`
+  graph) and upserts each onto the Task Board with the given target
+  Status. Idempotent. Used by project-orchestrator.yml on every state
+  transition that needs to mirror PR status to the linked issues.
+  The 50-item limit is practical: our PRs close at most a handful of
+  linked issues; we log a warning if the cap is hit.
 
 inputs:
   project-token:
@@ -56,59 +58,71 @@ runs:
         owner="${REPO%%/*}"
         repo_name="${REPO##*/}"
 
-        # Fetch linked issues via GraphQL. closingIssuesReferences
-        # captures the "Closes #N" / "Fixes #N" backlinks.
-        issue_numbers=$(gh api graphql \
+        # One GraphQL round-trip for linked issues AND their project
+        # items (Gemini flagged the earlier N+1 loop — the previous
+        # version was one query per linked issue). closingIssuesReferences
+        # captures the "Closes #N" / "Fixes #N" backlinks; cap at 50
+        # per PR. Use PROJECT_TOKEN because GITHUB_TOKEN typically
+        # lacks org-project read scope on private projects.
+        linked_resp=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql \
           -f query='query($owner:String!, $repo:String!, $num:Int!) {
             repository(owner:$owner, name:$repo) {
               pullRequest(number:$num) {
-                closingIssuesReferences(first: 10) { nodes { number } }
-              }
-            }
-          }' \
-          -F owner="$owner" -F repo="$repo_name" -F num="$PR_NUMBER" \
-          --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
-
-        if [ -z "$issue_numbers" ]; then
-          echo "No linked issues for PR #$PR_NUMBER."
-          exit 0
-        fi
-
-        echo "Linked issues: $issue_numbers"
-
-        for issue_num in $issue_numbers; do
-          issue_url="https://github.com/$REPO/issues/$issue_num"
-
-          # Use PROJECT_TOKEN for reading project-scoped data too —
-          # GITHUB_TOKEN typically lacks the org-project read scope on
-          # private projects.
-          resp=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
-              resource(url: $url) {
-                ... on Issue {
-                  projectItems(first: 20) {
-                    nodes {
-                      id
-                      project { number }
-                      fieldValueByName(name: "Status") {
-                        ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                closingIssuesReferences(first: 50) {
+                  totalCount
+                  nodes {
+                    number
+                    projectItems(first: 20) {
+                      nodes {
+                        id
+                        project { number }
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                        }
                       }
                     }
                   }
                 }
               }
-            }' -F url="$issue_url")
+            }
+          }' \
+          -F owner="$owner" -F repo="$repo_name" -F num="$PR_NUMBER")
 
-          issue_item=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-            .data.resource.projectItems.nodes[]?
-            | select(.project.number == ($n | tonumber))
-            | .id' | head -n1)
-          current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-            .data.resource.projectItems.nodes[]?
-            | select(.project.number == ($n | tonumber))
-            | .fieldValueByName.optionId // ""' | head -n1)
+        total=$(echo "$linked_resp" | jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount')
+        issue_count=$(echo "$linked_resp" | jq -r '.data.repository.pullRequest.closingIssuesReferences.nodes | length')
+
+        if [ "$issue_count" = "0" ]; then
+          echo "No linked issues for PR #$PR_NUMBER."
+          exit 0
+        fi
+
+        if [ "$total" -gt 50 ]; then
+          echo "::warning::PR #$PR_NUMBER links $total issues; only the first 50 will be updated. Bump the GraphQL page size in set-linked-issues-status if this is real."
+        fi
+
+        # Extract [{number, item_id or empty, current_option or empty}]
+        # for this project. `map(select ...)[0]` picks the single
+        # matching project item safely (won't emit multiple rows per
+        # issue even if multiple project items somehow match).
+        issue_rows=$(echo "$linked_resp" | jq -c --arg n "$PROJECT_NUMBER" '
+          .data.repository.pullRequest.closingIssuesReferences.nodes[]
+          | . as $node
+          | ([.projectItems.nodes[] | select(.project.number == ($n | tonumber))] | .[0]) as $item
+          | {
+              number,
+              item_id: ($item.id // ""),
+              current_option: ($item.fieldValueByName.optionId // "")
+            }')
+
+        echo "$issue_rows" | while IFS= read -r row; do
+          [ -z "$row" ] && continue
+          issue_num=$(echo "$row" | jq -r '.number')
+          issue_item=$(echo "$row" | jq -r '.item_id')
+          current_option=$(echo "$row" | jq -r '.current_option')
 
           if [ -z "$issue_item" ]; then
             echo "Linked issue #$issue_num not on board — adding."
+            issue_url="https://github.com/$REPO/issues/$issue_num"
             issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" \
               --owner "$PROJECT_OWNER" --url "$issue_url" --format json --jq '.id')
             current_option=""

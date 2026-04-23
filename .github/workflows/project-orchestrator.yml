@@ -285,9 +285,9 @@ jobs:
         run: |
           # Reeval promotes to Ready only from empty/Backlog — don't
           # yank a card that's already In progress / In review / Done.
-          # The composite action is idempotent so calling it with the
-          # wrong intent would be safe, but the "don't yank" policy is
-          # this workflow's business, so check here.
+          # Compare against optionId rather than the Status option's
+          # display name (Copilot flagged this) so a rename on the
+          # project UI doesn't silently break the guard.
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
           resp=$(gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
@@ -296,7 +296,7 @@ jobs:
                     nodes {
                       project { number }
                       fieldValueByName(name: "Status") {
-                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        ... on ProjectV2ItemFieldSingleSelectValue { optionId name }
                       }
                     }
                   }
@@ -304,21 +304,22 @@ jobs:
               }
             }' -F url="$pr_url")
 
-          current=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+          current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            .data.resource.projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber))
+            | .fieldValueByName.optionId // ""' | head -n1)
+          current_name=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
             .data.resource.projectItems.nodes[]?
             | select(.project.number == ($n | tonumber))
             | .fieldValueByName.name // ""' | head -n1)
 
-          case "$current" in
-            ""|Backlog)
-              echo "PR card Status is '${current:-<unset>}' — ok to promote."
-              echo "promote=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "PR card Status is '$current' — leaving alone."
-              echo "promote=false" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
+          if [ -z "$current_option" ] || [ "$current_option" = "$STATUS_BACKLOG" ]; then
+            echo "PR card Status is '${current_name:-<unset>}' (option $current_option) — ok to promote."
+            echo "promote=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "PR card Status is '$current_name' (option $current_option) — leaving alone."
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upsert PR card → Ready (reeval)
         if: steps.botclean.outputs.clean == 'true' && env.SKIP_BOARD != 'true' && steps.pr-status.outputs.promote == 'true'

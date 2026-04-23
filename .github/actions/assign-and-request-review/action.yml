@@ -43,10 +43,12 @@ runs:
           exit 0
         fi
 
-        for user in "${USERS[@]}"; do
-          echo "Assigning $user to PR #$PR_NUMBER"
-          gh pr edit "$PR_NUMBER" -R "$REPO" --add-assignee "$user" > /dev/null
-        done
+        # `gh pr edit --add-assignee` accepts a comma-separated list,
+        # so one API call assigns everyone (Gemini's suggestion). The
+        # endpoint is idempotent for users already assigned.
+        assignee_csv=$(IFS=,; echo "${USERS[*]}")
+        echo "Assigning [$assignee_csv] to PR #$PR_NUMBER"
+        gh pr edit "$PR_NUMBER" -R "$REPO" --add-assignee "$assignee_csv" > /dev/null
 
         # Request review. The REST endpoint accepts an array and is idempotent
         # for already-pending requests. It returns 422 if the user has already

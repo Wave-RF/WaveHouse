@@ -152,6 +152,9 @@ jobs:
               }' -F id="$CONTENT_NODE_ID" \
               --jq '.data.node.closingIssuesReferences.nodes[].id')
           elif [ "$CONTENT_TYPE" = "Issue" ]; then
+            # `closedByPullRequestsReferences` is the inverse edge of
+            # the PR's `closingIssuesReferences`. It returns the PRs
+            # that declared `Closes #this-issue` / `Fixes #this-issue`.
             counterparts=$(gh api graphql -f query='query($id: ID!) {
                 node(id: $id) {
                   ... on Issue {
@@ -162,11 +165,9 @@ jobs:
               --jq '.data.node.closedByPullRequestsReferences.nodes[].id' 2>/dev/null || true)
 
             # Older GraphQL schema versions don't have
-            # closedByPullRequestsReferences — fall back to the
-            # `timelineItems` heuristic (ConnectedEvent /
-            # CrossReferencedEvent) if needed. For now log and
-            # continue — if we hit this in practice we'll add the
-            # fallback.
+            # closedByPullRequestsReferences — log and skip if empty.
+            # If we hit this in practice, fallback candidates are
+            # `timelineItems` (ConnectedEvent / CrossReferencedEvent).
             if [ -z "$counterparts" ]; then
               echo "::notice::No closed-by PRs found for issue $CONTENT_NODE_ID (or the field isn't available in this GraphQL schema version). Skipping mirror from Issue side."
               echo "run=false" >> "$GITHUB_OUTPUT"
@@ -185,9 +186,14 @@ jobs:
           fi
 
           # Write to output as space-separated for downstream iteration.
-          echo "counterparts=$(echo $counterparts | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
-          echo "mirror_option_id=$mirror_option_id" >> "$GITHUB_OUTPUT"
-          echo "run=true" >> "$GITHUB_OUTPUT"
+          # `printf '%s '` preserves the list structure without the
+          # word-splitting/globbing concern of unquoted $counterparts.
+          counterparts_flat=$(printf '%s ' $counterparts)
+          {
+            echo "counterparts=${counterparts_flat% }"
+            echo "mirror_option_id=$mirror_option_id"
+            echo "run=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Mirror Status to linked counterpart(s)
         if: steps.mirror.outputs.run == 'true'
