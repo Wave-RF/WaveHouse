@@ -17,17 +17,17 @@ const (
 
 // Config is the top-level application configuration.
 type Config struct {
-	Mode       Mode       `yaml:"mode" env:"WH_MODE" env-default:"standalone"`
-	Server     Server     `yaml:"server"`
-	ClickHouse ClickHouse `yaml:"clickhouse"`
-	MQ         MQ         `yaml:"mq"`
-	Dedupe     Dedupe     `yaml:"dedupe"`
-	Cache      Cache      `yaml:"cache"`
-	Auth       Auth       `yaml:"auth"`
-	Schema     Schema     `yaml:"schema"`
-	DLQ        DLQ        `yaml:"dlq"`
-	Policy     Policy     `yaml:"policy"`
-	Pipes      Pipes      `yaml:"pipes"`
+	Mode          Mode          `yaml:"mode" env:"WH_MODE" env-default:"standalone"`
+	Server        Server        `yaml:"server"`
+	ClickHouse    ClickHouse    `yaml:"clickhouse"`
+	MQ            MQ            `yaml:"mq"`
+	Dedupe        Dedupe        `yaml:"dedupe"`
+	Cache         Cache         `yaml:"cache"`
+	Auth          Auth          `yaml:"auth"`
+	Schema        Schema        `yaml:"schema"`
+	DLQ           DLQ           `yaml:"dlq"`
+	Policy        Policy        `yaml:"policy"`
+	Pipes         Pipes         `yaml:"pipes"`
 	Observability Observability `yaml:"observability"`
 }
 

@@ -47,14 +47,9 @@ func run() int {
 
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
-	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 
-	logger := baseLogger.With(
-		"version", Version, 
-		"build_time", BuildTime, 
-		"git_commit", GitCommit, 
-		"binary", Binary,
-	)
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
+	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
 	slog.SetDefault(logger)
 	logger.Info("starting WaveHouse worker", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)

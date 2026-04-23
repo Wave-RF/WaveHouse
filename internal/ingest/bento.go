@@ -151,8 +151,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Insert case
 		msg := service.NewMessage(m.Data())
-		
-		msg = msg.WithContext(msgCtx) 
+
+		msg = msg.WithContext(msgCtx)
 
 		msg.MetaSet("table_name", raw.TableName)
 
@@ -161,7 +161,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if meta, err := m.Metadata(); err == nil {
 			publishedTime = meta.Timestamp
 		}
-		
+
 		msg.MetaSet("bento_start_time", fmt.Sprintf("%d", publishedTime.UnixMilli()))
 
 		j.inFlight.Add(1)
@@ -236,20 +236,23 @@ type clickhouseOutput struct {
 }
 
 func (c *clickhouseOutput) Connect(ctx context.Context) error { return nil }
-func (c *clickhouseOutput) Close(ctx context.Context) error  { return nil }
+func (c *clickhouseOutput) Close(ctx context.Context) error   { return nil }
 
 func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
-	tableName, _ := batch[0].MetaGet("table_name")
+	tableName, ok := batch[0].MetaGet("table_name")
+	if !ok || tableName == "" {
+		return fmt.Errorf("missing table_name in message metadata")
+	}
 
 	// 1. Fetch the timestamp stamped during jsInput.Read
 	startStr, _ := batch[0].MetaGet("bento_start_time")
-	
+
 	bentoStartTime := time.Now() // Default fallback
-	
+
 	// Parse the string into an int64 integer
 	if startMilli, err := strconv.ParseInt(startStr, 10, 64); err == nil {
 		// Convert the integer back into a real Go time.Time object

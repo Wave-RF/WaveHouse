@@ -129,12 +129,12 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
 		msgCtx := observability.ExtractNATS(context.Background(), m)
 
-		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), 
-			func(ctx context.Context) error { 
-				return m.DoubleAck(ctx) 
-			}, 
-			func(ctx context.Context) error { 
-				return m.Nak() 
+		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(),
+			func(ctx context.Context) error {
+				return m.DoubleAck(ctx)
+			},
+			func(ctx context.Context) error {
+				return m.Nak()
 			},
 		)
 

@@ -7,16 +7,16 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/log/global"
-	"go.opentelemetry.io/otel/sdk/log"
 )
 
 // InitProvider sets up the OpenTelemetry pipeline for traces and metrics, routing them to a SigNoz OTLP gRPC endpoint.
@@ -72,7 +72,7 @@ func InitProvider(ctx context.Context, serviceName, endpoint string) (func(conte
 	tracerProvider := trace.NewTracerProvider(
 		trace.WithBatcher(traceExporter, trace.WithBatchTimeout(time.Second*5)),
 		trace.WithResource(res),
-		trace.WithSampler(trace.TraceIDRatioBased(0.10)), // TRACE SAMPLE RATE COMMENTED OUT FOR TESTING
+		trace.WithSampler(trace.TraceIDRatioBased(0.10)), // Sample 10% of traces.
 	)
 	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
@@ -107,7 +107,7 @@ func InitProvider(ctx context.Context, serviceName, endpoint string) (func(conte
 		log.WithResource(res),
 	)
 	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-	
+
 	global.SetLoggerProvider(loggerProvider)
 
 	if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {

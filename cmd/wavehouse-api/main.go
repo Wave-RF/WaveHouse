@@ -58,14 +58,9 @@ func run() int {
 
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
-	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 
-	logger := baseLogger.With(
-		"version", Version, 
-		"build_time", BuildTime, 
-		"git_commit", GitCommit, 
-		"binary", Binary,
-	)
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
+	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
 	slog.SetDefault(logger)
 	logger.Info("starting WaveHouse API", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
@@ -94,7 +89,7 @@ func run() int {
 
 	ctx := context.Background()
 	serviceName := "wavehouse-" + Binary
-	
+
 	if cfg.Observability.Enabled {
 		otelShutdown, err := observability.InitProvider(ctx, serviceName, cfg.Observability.OTelAddr)
 		if err != nil {
@@ -211,11 +206,11 @@ func run() int {
 	if err := remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			msg.Ack(ctx)
+			msg.Ack(context.Background()) // Safe standalone context
 			return nil
 		}
 		hub.Broadcast(msg.Subject, msg)
-		msg.Ack(ctx)
+		msg.Ack(context.Background()) // Safe standalone context
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge subscription failed", "error", err)
