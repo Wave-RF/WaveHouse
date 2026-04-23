@@ -360,24 +360,18 @@ jobs:
           url: https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.num }}
 
       - name: Assign + request review (reeval)
-        # Gate on promote == 'true' in addition to bot-clean: when the
-        # PR card is already In progress / In review / Done, someone
-        # is actively handling and we shouldn't re-spam a review
-        # request (Copilot flagged). The re_requested path still
-        # re-requests on demand.
-        #
-        # Also allow the assignment to proceed when SKIP_BOARD is set
-        # (no PROJECT_BOARD_TOKEN). The pr-status step runs only when
-        # SKIP_BOARD != 'true', so `promote` is unset in that case and
-        # the condition below would otherwise silently skip review
-        # assignment — a regression from the pre-refactor behaviour.
-        # Claude review flagged this as Medium: reviewer assignment
-        # uses GITHUB_TOKEN and doesn't actually need the board token,
-        # so the board-absent case should still assign+request.
-        if: >-
-          steps.botclean.outputs.clean == 'true'
-          && steps.reviewers.outputs.reviewers != ''
-          && (steps.pr-status.outputs.promote == 'true' || env.SKIP_BOARD == 'true')
+        # No board-status gate here — the composite action checks
+        # current assignees + requested reviewers and skips if the
+        # desired reviewer is already present. That correctly handles
+        # both directions:
+        #   - PR card already In progress/In review with reviewer set:
+        #     composite no-ops (no re-spam).
+        #   - PR card already In progress but reviewer NEVER assigned
+        #     (e.g., manually moved before first bot-clean): composite
+        #     sets the missing reviewer.
+        # Copilot's R6 feedback flagged the prior `promote`-based
+        # gating as creating the second gap.
+        if: steps.botclean.outputs.clean == 'true' && steps.reviewers.outputs.reviewers != ''
         uses: ./.github/actions/assign-and-request-review
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

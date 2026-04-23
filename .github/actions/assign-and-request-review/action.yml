@@ -43,23 +43,56 @@ runs:
           exit 0
         fi
 
+        # Short-circuit per-user: only act on users who aren't already
+        # assigned AND aren't already requested. `gh pr edit --add-
+        # assignee` and the /requested_reviewers API are both
+        # idempotent server-side, so calling them redundantly is
+        # technically free — but Copilot flagged re-firing them
+        # every reeval as noise anyway, since an unchanged server
+        # state shouldn't generate a workflow action. This check
+        # handles both the original "don't re-spam on already-
+        # reviewing" concern and the inverse gap ("PR card is non-
+        # Backlog but reviewer was never actually assigned"). The
+        # composite is now the single source of idempotency —
+        # callers don't need to gate on board status.
+        pr_state=$(gh pr view "$PR_NUMBER" -R "$REPO" \
+          --json assignees,reviewRequests \
+          --jq '{
+            assignees: [.assignees[].login],
+            requested: [.reviewRequests[].login]
+          }')
+        mapfile -t MISSING < <(
+          for user in "${USERS[@]}"; do
+            has_assignee=$(echo "$pr_state" | jq -r --arg u "$user" '.assignees | index($u)')
+            has_requested=$(echo "$pr_state" | jq -r --arg u "$user" '.requested | index($u)')
+            if [ "$has_assignee" = "null" ] && [ "$has_requested" = "null" ]; then
+              printf '%s\n' "$user"
+            fi
+          done
+        )
+
+        if [ "${#MISSING[@]}" -eq 0 ]; then
+          echo "All desired reviewers (${USERS[*]}) are already assigned or requested — skipping."
+          exit 0
+        fi
+
         # `gh pr edit --add-assignee` accepts a comma-separated list,
-        # so one API call assigns everyone (Gemini's suggestion). The
-        # endpoint is idempotent for users already assigned.
-        assignee_csv=$(IFS=,; echo "${USERS[*]}")
-        echo "Assigning [$assignee_csv] to PR #$PR_NUMBER"
+        # so one API call assigns everyone (Gemini's original
+        # suggestion). The endpoint is idempotent for users already
+        # assigned, but we're only passing the missing subset.
+        assignee_csv=$(IFS=,; echo "${MISSING[*]}")
+        echo "Assigning [$assignee_csv] to PR #$PR_NUMBER (missing from assignees + requested)."
         gh pr edit "$PR_NUMBER" -R "$REPO" --add-assignee "$assignee_csv" > /dev/null
 
-        # Request review. The REST endpoint accepts an array and is
-        # idempotent for already-pending requests. It returns 422 when
-        # the user has already approved on the current head SHA — a
-        # known post-dismiss-stale outcome — so we log that as a
-        # notice. Other failures (rate limit, permissions regression,
-        # network) surface as warnings with the gh stderr attached so
-        # operators can actually debug, rather than being silently
-        # swallowed behind a generic line (Copilot flagged the blanket
-        # suppression as dangerous).
-        reviewer_json=$(printf '%s\n' "${USERS[@]}" | jq -R . | jq -sc '{reviewers: .}')
+        # Request review for the same missing subset. The REST
+        # endpoint accepts an array and is idempotent for already-
+        # pending requests. It returns 422 when the user has already
+        # approved on the current head SHA — a known post-dismiss-
+        # stale outcome — so we log that as a notice. Other failures
+        # (rate limit, permissions regression, network) surface as
+        # warnings with the gh stderr attached so operators can
+        # actually debug, rather than being silently swallowed.
+        reviewer_json=$(printf '%s\n' "${MISSING[@]}" | jq -R . | jq -sc '{reviewers: .}')
 
         set +e
         api_out=$(gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/requested_reviewers" \
