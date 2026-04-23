@@ -1,0 +1,62 @@
+name: Assign reviewers + request review
+description: >-
+  Sets PR assignees and requests GitHub reviews from the same users. Idempotent:
+  users already assigned/requested don't get duplicate notifications. The pair
+  is always applied together because the Task Board queue (driven by assignees)
+  and GitHub's native review request (driven by `dismiss_stale_reviews_on_push`)
+  encode the same "who's on deck" signal — they must stay in sync.
+
+inputs:
+  github-token:
+    description: Token with pull-requests:write scope. GITHUB_TOKEN is fine.
+    required: true
+  repo:
+    description: "owner/repo"
+    required: true
+  pr-number:
+    description: PR number.
+    required: true
+  reviewers:
+    description: >-
+      Space-separated GitHub logins. Duplicates are de-duped. Users already
+      assigned or requested are no-ops — GitHub silently ignores repeats.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Assign + request review
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ inputs.repo }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        REVIEWERS: ${{ inputs.reviewers }}
+      run: |
+        set -euo pipefail
+
+        # De-dupe and drop empties.
+        mapfile -t USERS < <(printf '%s\n' $REVIEWERS | awk 'NF' | sort -u)
+
+        if [ "${#USERS[@]}" -eq 0 ]; then
+          echo "No reviewers to assign — skipping."
+          exit 0
+        fi
+
+        for user in "${USERS[@]}"; do
+          echo "Assigning $user to PR #$PR_NUMBER"
+          gh pr edit "$PR_NUMBER" -R "$REPO" --add-assignee "$user" > /dev/null
+        done
+
+        # Request review. The REST endpoint accepts an array and is idempotent
+        # for already-pending requests. It returns 422 if the user has already
+        # approved on the current head SHA — that's expected when re-requesting
+        # after dismiss_stale_reviews_on_push fires, and we swallow it.
+        reviewer_json=$(printf '%s\n' "${USERS[@]}" | jq -R . | jq -sc '{reviewers: .}')
+
+        if ! gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/requested_reviewers" \
+              --input - <<<"$reviewer_json" > /dev/null 2>&1; then
+          echo "::warning::Request-review API returned non-2xx. Likely a stale-but-approved state on the current SHA; assignees are still set."
+        else
+          echo "Requested review from: ${USERS[*]}"
+        fi

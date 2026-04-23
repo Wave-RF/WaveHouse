@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 ### Added
 - Configurable NATS JetStream stream names via `WH_MQ_STREAM_NAME` to support multi-tenant deployments.
+- **Composite actions for board operations** (`.github/actions/board-upsert-status`, `.github/actions/assign-and-request-review`, `.github/actions/set-linked-issues-status`): reusable building blocks for idempotent "upsert item on the Task Board + set Status," "assign PR reviewers + request their review as a pair," and "mirror status to all linked issues" across workflows. Replaces ~200 lines of duplicated GraphQL/gh-project bash between `project-orchestrator.yml` and `dependabot-automerge.yml`, and gives the new `board-state-sync.yml` a single place to debug board interactions.
+- **Bidirectional board state sync** (`.github/workflows/board-state-sync.yml`): when a human manually moves a card's Status on the Task Board UI, mirrors the change to the linked PR/Issue. Uses the `projects_v2_item: edited` event + `changes.field_value` payload to detect Status changes specifically; guards against ping-pong loops by no-oping when the target counterpart is already in the expected mirrored state. Mapping: PR Ready ↔ Issue In review, PR In review ↔ Issue Ready, both Done together. In progress on one side doesn't clobber the other (manual mid-review state, preserved).
+- **Dependabot major-bump Task Board placement** (`.github/workflows/dependabot-automerge.yml`): on a held major-version bump, the workflow now adds the PR to the board with Status=Ready and assigns both admins + requests review — parity with the `reeval` path for non-Dependabot PRs, so major bumps don't vanish into the PR list.
+
+### Changed
+
+- **`project-orchestrator.yml` refactored to the set-once-assignees + mirrored-status model.** Assignees are now treated as per-card identity (Issue = implementer, PR = reviewer) rather than rotated across state transitions; statuses mirror across linked PR↔Issue pairs. Specific changes:
+  - On bot-clean → Ready: linked issues now promoted to `In review` (was missing; previously only `re_requested` path moved issues).
+  - Assignee and GitHub review-request are now applied together via a single composite action — board queue and GitHub notification stay in sync.
+  - `Lint`, `Test`, `Integration Tests`, `SDK Tests` joined `Check`/`Build`/`Validate` in the bot-clean required-checks set, matching the updated ruleset.
+  - Promotion guard ("don't yank In progress / In review / Done back to Ready") preserved.
+  - ~250 lines of duplicate GraphQL/item-edit shell collapsed into composite-action calls. Full state-machine spec in `AGENTS.md §Task Board state machine`.
 
 ### Fixed
 

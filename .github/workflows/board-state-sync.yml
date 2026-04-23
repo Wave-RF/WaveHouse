@@ -1,0 +1,258 @@
+name: Board state sync
+
+# When a human manually moves a card's Status on the Task Board, mirror
+# the change to the linked PR/Issue so the two cards stay in the
+# opposite-status pairing the state machine expects:
+#
+#   PR Ready        ↔  Issue In review
+#   PR In review    ↔  Issue Ready
+#   PR / Issue In progress → other stays wherever it is (manual move
+#     mid-review; don't clobber)
+#   PR Done         ↔  Issue Done
+#
+# Event: `projects_v2_item: edited`. Payload's `changes.field_value`
+# tells us which field and what the old/new values were. We only react
+# when the Status field changed; other field edits (Priority, Iteration,
+# etc.) are ignored.
+#
+# Loop prevention: before writing the mirror, check what the target
+# card's Status already is. If it already matches the expected mirror
+# value, skip — otherwise the mirror would re-fire this workflow
+# indefinitely.
+#
+# The workflow runs only when the token configured in
+# PROJECT_BOARD_TOKEN has project:write on Wave-RF's project #7. Fork
+# PRs, forks of this repo, and fresh installs silently no-op.
+
+on:
+  projects_v2_item:
+    types: [edited]
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_NUMBER: "7"
+  PROJECT_ID: PVT_kwDOCdKSOc4BUEKD
+  STATUS_FIELD_ID: PVTSSF_lADOCdKSOc4BUEKDzhBO0l8
+  STATUS_READY: "61e4505c"
+  STATUS_IN_PROGRESS: "47fc9ee4"
+  STATUS_IN_REVIEW: "df73e18b"
+  STATUS_DONE: "98236657"
+  STATUS_BACKLOG: "f75ad846"
+
+jobs:
+  mirror:
+    # Only on our project.
+    if: github.event.projects_v2_item.project_node_id == 'PVT_kwDOCdKSOc4BUEKD'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard — require PROJECT_BOARD_TOKEN
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+        run: |
+          if [[ -z "$PROJECT_TOKEN" ]]; then
+            echo "::warning::PROJECT_BOARD_TOKEN not configured; skipping."
+            exit 0
+          fi
+
+      - name: Inspect event + filter to Status-field changes
+        id: event
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # The projects_v2_item event payload's `changes.field_value`
+          # is populated only when a field's value changed. It has
+          # field_node_id, field_type ("single_select"), and from/to
+          # option references. Other changes (like archived_at) have a
+          # different shape.
+          field_node_id=$(jq -r '.changes.field_value.field_node_id // empty' "$GITHUB_EVENT_PATH")
+          if [ -z "$field_node_id" ]; then
+            echo "Not a field-value change — skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$field_node_id" != "$STATUS_FIELD_ID" ]; then
+            echo "Field-value change is not Status ($field_node_id) — skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # New Status option (the option the user moved to).
+          new_option_id=$(jq -r '.changes.field_value.to.id // empty' "$GITHUB_EVENT_PATH")
+          if [ -z "$new_option_id" ]; then
+            echo "Could not read new Status option id — skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The content this project item wraps (PR / Issue / Draft).
+          content_node_id=$(jq -r '.projects_v2_item.content_node_id // empty' "$GITHUB_EVENT_PATH")
+          content_type=$(jq -r '.projects_v2_item.content_type // empty' "$GITHUB_EVENT_PATH")
+
+          if [ -z "$content_node_id" ] || [ -z "$content_type" ]; then
+            echo "Project item has no content (draft issue?) — skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "new_option_id=$new_option_id" >> "$GITHUB_OUTPUT"
+          echo "content_node_id=$content_node_id" >> "$GITHUB_OUTPUT"
+          echo "content_type=$content_type" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve linked counterpart + compute mirror Status
+        id: mirror
+        if: steps.event.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          NEW_OPTION_ID: ${{ steps.event.outputs.new_option_id }}
+          CONTENT_NODE_ID: ${{ steps.event.outputs.content_node_id }}
+          CONTENT_TYPE: ${{ steps.event.outputs.content_type }}
+        run: |
+          set -euo pipefail
+
+          # Map the moved card's new Status to the mirror Status that
+          # the linked counterpart should show. Done is the only "both
+          # same" state; everything else is opposite-pair. In progress
+          # on one side doesn't dictate the other (reviewer "in
+          # progress" while author is In review, for example) so we
+          # leave the counterpart alone in those cases.
+          case "$NEW_OPTION_ID" in
+            "$STATUS_READY")
+              mirror_option_id="$STATUS_IN_REVIEW"
+              ;;
+            "$STATUS_IN_REVIEW")
+              mirror_option_id="$STATUS_READY"
+              ;;
+            "$STATUS_DONE")
+              mirror_option_id="$STATUS_DONE"
+              ;;
+            *)
+              echo "New Status ($NEW_OPTION_ID) has no mirror action — skipping."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          # Resolve the linked counterpart(s). For a PR, the linked
+          # issues come from `closingIssuesReferences`. For an Issue,
+          # the "Development"-linked PRs come from
+          # `closingPullRequestsReferences` (the inverse edge).
+          if [ "$CONTENT_TYPE" = "PullRequest" ]; then
+            counterparts=$(gh api graphql -f query='query($id: ID!) {
+                node(id: $id) {
+                  ... on PullRequest {
+                    closingIssuesReferences(first: 10) { nodes { id } }
+                  }
+                }
+              }' -F id="$CONTENT_NODE_ID" \
+              --jq '.data.node.closingIssuesReferences.nodes[].id')
+          elif [ "$CONTENT_TYPE" = "Issue" ]; then
+            counterparts=$(gh api graphql -f query='query($id: ID!) {
+                node(id: $id) {
+                  ... on Issue {
+                    closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { id } }
+                  }
+                }
+              }' -F id="$CONTENT_NODE_ID" \
+              --jq '.data.node.closedByPullRequestsReferences.nodes[].id' 2>/dev/null || true)
+
+            # Older GraphQL schema versions don't have
+            # closedByPullRequestsReferences — fall back to the
+            # `timelineItems` heuristic (ConnectedEvent /
+            # CrossReferencedEvent) if needed. For now log and
+            # continue — if we hit this in practice we'll add the
+            # fallback.
+            if [ -z "$counterparts" ]; then
+              echo "::notice::No closed-by PRs found for issue $CONTENT_NODE_ID (or the field isn't available in this GraphQL schema version). Skipping mirror from Issue side."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            echo "Content type '$CONTENT_TYPE' not supported — skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$counterparts" ]; then
+            echo "No linked counterpart(s) — nothing to mirror."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Write to output as space-separated for downstream iteration.
+          echo "counterparts=$(echo $counterparts | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          echo "mirror_option_id=$mirror_option_id" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Mirror Status to linked counterpart(s)
+        if: steps.mirror.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          COUNTERPARTS: ${{ steps.mirror.outputs.counterparts }}
+          MIRROR_OPTION_ID: ${{ steps.mirror.outputs.mirror_option_id }}
+        run: |
+          set -euo pipefail
+
+          for counterpart_id in $COUNTERPARTS; do
+            # Find the counterpart's item id in our project and its
+            # current Status. Read first so we can short-circuit when
+            # the target already matches (loop prevention — otherwise
+            # the mirror itself would fire this workflow in reverse).
+            resp=$(gh api graphql -f query='query($id: ID!) {
+                node(id: $id) {
+                  ... on PullRequest {
+                    projectItems(first: 20) {
+                      nodes {
+                        id
+                        project { number }
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                        }
+                      }
+                    }
+                  }
+                  ... on Issue {
+                    projectItems(first: 20) {
+                      nodes {
+                        id
+                        project { number }
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -F id="$counterpart_id")
+
+            item_id=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+              .data.node.projectItems.nodes[]?
+              | select(.project.number == ($n | tonumber))
+              | .id' | head -n1)
+            current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+              .data.node.projectItems.nodes[]?
+              | select(.project.number == ($n | tonumber))
+              | .fieldValueByName.optionId // ""' | head -n1)
+
+            if [ -z "$item_id" ]; then
+              echo "Counterpart $counterpart_id not on project #$PROJECT_NUMBER — skipping (let orchestrator add it later)."
+              continue
+            fi
+
+            if [ "$current_option" = "$MIRROR_OPTION_ID" ]; then
+              echo "Counterpart $counterpart_id Status already matches mirror ($MIRROR_OPTION_ID) — no write, loop averted."
+              continue
+            fi
+
+            echo "Mirroring: counterpart $counterpart_id Status $current_option → $MIRROR_OPTION_ID"
+            gh project item-edit \
+              --id "$item_id" \
+              --field-id "$STATUS_FIELD_ID" \
+              --single-select-option-id "$MIRROR_OPTION_ID" \
+              --project-id "$PROJECT_ID" > /dev/null
+          done

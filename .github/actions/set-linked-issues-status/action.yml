@@ -1,0 +1,127 @@
+name: Set linked-issue board Status
+description: >-
+  For the given PR, fetches all linked issues (via GraphQL
+  closingIssuesReferences — the `Closes #N` / `Fixes #N` graph) and
+  upserts each onto the Task Board with the given target Status.
+  Idempotent. Used by project-orchestrator.yml on every state transition
+  that needs to mirror PR status to the linked issues.
+
+inputs:
+  project-token:
+    description: PAT with project:write scope.
+    required: true
+  github-token:
+    description: Token with read access to the PR and its linked issues. GITHUB_TOKEN is fine.
+    required: true
+  repo:
+    description: "owner/repo"
+    required: true
+  pr-number:
+    description: PR number to read linked issues from.
+    required: true
+  project-owner:
+    description: Organization / user that owns the project.
+    required: true
+  project-number:
+    description: Project number.
+    required: true
+  project-id:
+    description: Global node ID of the project (PVT_*).
+    required: true
+  status-field-id:
+    description: Global node ID of the Status field (PVTSSF_*).
+    required: true
+  status-option-id:
+    description: Global node ID of the target Status option.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Iterate linked issues + upsert Status
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PROJECT_TOKEN: ${{ inputs.project-token }}
+        REPO: ${{ inputs.repo }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        PROJECT_OWNER: ${{ inputs.project-owner }}
+        PROJECT_NUMBER: ${{ inputs.project-number }}
+        PROJECT_ID: ${{ inputs.project-id }}
+        STATUS_FIELD_ID: ${{ inputs.status-field-id }}
+        STATUS_OPTION_ID: ${{ inputs.status-option-id }}
+      run: |
+        set -euo pipefail
+
+        owner="${REPO%%/*}"
+        repo_name="${REPO##*/}"
+
+        # Fetch linked issues via GraphQL. closingIssuesReferences
+        # captures the "Closes #N" / "Fixes #N" backlinks.
+        issue_numbers=$(gh api graphql \
+          -f query='query($owner:String!, $repo:String!, $num:Int!) {
+            repository(owner:$owner, name:$repo) {
+              pullRequest(number:$num) {
+                closingIssuesReferences(first: 10) { nodes { number } }
+              }
+            }
+          }' \
+          -F owner="$owner" -F repo="$repo_name" -F num="$PR_NUMBER" \
+          --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
+
+        if [ -z "$issue_numbers" ]; then
+          echo "No linked issues for PR #$PR_NUMBER."
+          exit 0
+        fi
+
+        echo "Linked issues: $issue_numbers"
+
+        for issue_num in $issue_numbers; do
+          issue_url="https://github.com/$REPO/issues/$issue_num"
+
+          # Use PROJECT_TOKEN for reading project-scoped data too —
+          # GITHUB_TOKEN typically lacks the org-project read scope on
+          # private projects.
+          resp=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
+              resource(url: $url) {
+                ... on Issue {
+                  projectItems(first: 20) {
+                    nodes {
+                      id
+                      project { number }
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -F url="$issue_url")
+
+          issue_item=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            .data.resource.projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber))
+            | .id' | head -n1)
+          current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            .data.resource.projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber))
+            | .fieldValueByName.optionId // ""' | head -n1)
+
+          if [ -z "$issue_item" ]; then
+            echo "Linked issue #$issue_num not on board — adding."
+            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" \
+              --owner "$PROJECT_OWNER" --url "$issue_url" --format json --jq '.id')
+            current_option=""
+          fi
+
+          if [ "$current_option" != "$STATUS_OPTION_ID" ]; then
+            echo "Issue #$issue_num Status: $current_option → $STATUS_OPTION_ID"
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
+              --id "$issue_item" \
+              --field-id "$STATUS_FIELD_ID" \
+              --single-select-option-id "$STATUS_OPTION_ID" \
+              --project-id "$PROJECT_ID" > /dev/null
+          else
+            echo "Issue #$issue_num Status already correct ($STATUS_OPTION_ID)."
+          fi
+        done

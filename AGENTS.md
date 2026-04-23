@@ -312,15 +312,26 @@ docs/                   → Project documentation
 
 ### Task Board state machine
 
-The Task Board (project #7) card position + assignee is the single source of truth for "who needs to look at this next." `project-orchestrator.yml` automates most of the flow:
+The Task Board (project #7) is the single source of truth for "who needs to look at this next." Each item has two axes:
 
-- **PR bot-clean** (required checks green + threads resolved): PR added to board, Status=`Ready`, assignee=non-author admin. Draft PRs flipped to ready-for-review at the same moment.
-- **Review submitted with `CHANGES_REQUESTED`**: PR card → `In review` (reviewer now waiting on coder), linked issue card → `Ready` (coder attention needed).
-- **Author re-requests review** (explicit "I've addressed feedback" signal via GitHub's re-request-review button): PR card → `Ready` (reviewer attention), linked issue card → `In review` (coder waiting).
-- **Review approved**: no workflow action; `admin-approval.yml` flips its status check to success, auto-merge takes over, GitHub's native project workflows transition PR+issue cards to `Done` after merge.
+- **Assignee** — _set once, per card_. The Issue card is assigned to the **implementer** (whoever's writing the code). The PR card is assigned to the **reviewer** (the non-author admin). Assignees do not rotate across state transitions — they represent "this card is your card." Use the card assignment to find what's in your queue; use the card Status to know what state the work is in.
+- **Status** — _rotates per state transition, mirrors between the PR and the linked Issue_. When the PR is `Ready` (reviewer's court), the Issue is `In review` (implementer's wait). When the PR is `In review` (reviewer waiting on implementer), the Issue is `Ready`. Merged → both `Done`.
 
-The **one manual step** intentionally NOT automated: when the reviewer starts reviewing, they move the PR card `Ready` → `In progress` themselves. GitHub doesn't emit a "review started" event we could hook, and making this automatic would misrepresent state.
+The mirroring means only one concept (status) moves per event, and the two cards encode "whose court is the ball in" by being in opposite states.
 
-Dependabot PRs skip the orchestrator entirely — they go through `dependabot-automerge.yml` and don't appear on the board.
+**Transitions driven by `project-orchestrator.yml`:**
+
+- **PR bot-clean** (required checks green + all review threads resolved): PR added to board, Status=`Ready`, assignee set to non-author admin **and** a GitHub review is requested from that admin (both happen together — the Task Board drives the `what's-next` queue, the review-request triggers GitHub's notification and dismiss-stale-reviews behavior). Linked Issue card → `In review`. Draft PRs flipped to ready-for-review at the same moment.
+- **Review submitted with `CHANGES_REQUESTED`**: PR card → `In review` (reviewer waiting on implementer), linked Issue card → `Ready`. Assignees unchanged.
+- **Author re-requests review**: PR card → `Ready`, linked Issue card → `In review`. Review is re-requested from the admin reviewer (so GitHub's "dismiss_stale_reviews_on_push" doesn't leave them out of the loop). Assignees unchanged.
+- **Review approved**: no workflow action; `admin-approval.yml` flips its required status check to success, GitHub's built-in project automation moves PR+Issue cards to `Done` on merge.
+
+**Bidirectional mirroring** via `board-state-sync.yml` on `projects_v2_item: edited`: if a human manually moves *either* card's Status, the workflow sets the linked card's Status to the opposite (Ready↔In review) or same (Done) value. The workflow guards against ping-pong loops by checking "target Status already matches expected mirror" before writing.
+
+**Manual step intentionally preserved**: when the reviewer starts reviewing, they move the PR card `Ready` → `In progress` themselves. GitHub doesn't emit a reliable "review started" event we could hook. (Future: infer from reviewer's first comment/review activity — low-priority.)
+
+**Dependabot PR handling** via `dependabot-automerge.yml`:
+- Patch/minor bumps: auto-approved + auto-merged hands-off; not added to the board (they're bot-managed, not human work).
+- Major-version bumps: held for human review, added to board with Status=`Ready`, both admins assigned (not author-vs-reviewer logic — Dependabot is the author, so either admin can pick it up), review requested from both.
 - **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
 - **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/pr-title.yml`. The PR-title linter validates squash-merge commit messages.
