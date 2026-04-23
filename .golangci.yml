@@ -16,6 +16,32 @@ linters:
     - noctx
     - errorlint
     - tparallel
+  settings:
+    revive:
+      # Opt in to specific rules only; skip the default set's noisy
+      # doc-comment and unused-parameter rules for internal packages.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
 
 formatters:
   enable:

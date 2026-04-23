@@ -22,7 +22,7 @@ func TestSchema_List(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/schema", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema", nil)
 	h.List(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -43,7 +43,7 @@ func TestSchema_Get_Exists(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/schema/clicks", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema/clicks", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("table", "clicks")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
@@ -64,7 +64,7 @@ func TestSchema_Get_NotFound(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/schema/nonexistent", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema/nonexistent", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("table", "nonexistent")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))

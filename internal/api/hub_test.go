@@ -39,8 +39,9 @@ func TestHub_SubscribeAndBroadcast(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assert.Contains(t, string(msg), "clicks")
-		assert.Contains(t, string(msg), "/home")
+		payload := unwrapTestMessage(t, msg)
+		assert.Contains(t, string(payload), "clicks")
+		assert.Contains(t, string(payload), "/home")
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for broadcast")
 	}
@@ -118,7 +119,8 @@ func TestHub_MultipleSubscribers(t *testing.T) {
 	for i, ch := range chs {
 		select {
 		case msg := <-ch:
-			assert.Contains(t, string(msg), "topic", "subscriber %d", i)
+			payload := unwrapTestMessage(t, msg)
+			assert.Contains(t, string(payload), "topic", "subscriber %d", i)
 		case <-time.After(time.Second):
 			t.Fatalf("subscriber %d did not receive", i)
 		}
@@ -224,7 +226,8 @@ func TestHub_WildcardGreaterThan(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assert.Contains(t, string(msg), "clicks")
+		payload := unwrapTestMessage(t, msg)
+		assert.Contains(t, string(payload), "clicks")
 	case <-time.After(time.Second):
 		t.Fatal("wildcard subscriber should have received ingest.clicks")
 	}
@@ -246,7 +249,8 @@ func TestHub_WildcardStar(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assert.Contains(t, string(msg), "clicks")
+		payload := unwrapTestMessage(t, msg)
+		assert.Contains(t, string(payload), "clicks")
 	case <-time.After(time.Second):
 		t.Fatal("star wildcard subscriber should have received")
 	}
@@ -261,9 +265,9 @@ func TestHub_WildcardStarNoMultiToken(t *testing.T) {
 	defer hub.Unsubscribe("ingest.*", ch)
 
 	// "ingest.*" should NOT match "ingest.clicks.subpath" (star = one token).
-	hub.Broadcast("ingest.clicks", &mq.Message{
+	hub.Broadcast("ingest.clicks.subpath", &mq.Message{
 		Ctx:     context.Background(),
-		Subject: "ingest.clicks",
+		Subject: "ingest.clicks.subpath",
 		Data:    []byte(`{"table_name":"clicks"}`),
 	})
 
@@ -284,15 +288,16 @@ func TestHub_WildcardGreaterThanMultiToken(t *testing.T) {
 	defer hub.Unsubscribe("ingest.>", ch)
 
 	// "ingest.>" should match multi-token subjects.
-	hub.Broadcast("ingest.clicks", &mq.Message{
+	hub.Broadcast("ingest.clicks.subpath", &mq.Message{
 		Ctx:     context.Background(),
-		Subject: "ingest.clicks",
+		Subject: "ingest.clicks.subpath",
 		Data:    []byte(`{"table_name":"clicks"}`),
 	})
 
 	select {
 	case msg := <-ch:
-		assert.Contains(t, string(msg), "clicks")
+		payload := unwrapTestMessage(t, msg)
+		assert.Contains(t, string(payload), "clicks")
 	case <-time.After(time.Second):
 		t.Fatal("> wildcard should match multi-token subjects")
 	}
@@ -307,10 +312,10 @@ func TestHub_WildcardDoesNotMatchExact(t *testing.T) {
 	defer hub.Unsubscribe("ingest.>", ch)
 
 	// "ingest.>" should NOT match "ingest" alone (> requires 1+ tokens after).
-	hub.Broadcast("ingest.clicks", &mq.Message{
+	hub.Broadcast("ingest", &mq.Message{
 		Ctx:     context.Background(),
-		Subject: "ingest.clicks",
-		Data:    []byte(`{"table_name":"clicks"}`),
+		Subject: "ingest",
+		Data:    []byte(`{"table_name":"ingest"}`),
 	})
 
 	select {

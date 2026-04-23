@@ -21,11 +21,11 @@ func (h *PolicyHandler) Get(w http.ResponseWriter, r *http.Request) {
 	p := h.Store.Get()
 	if p == nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"tables":{}}`))
+		_, _ = w.Write([]byte(`{"tables":{}}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(p)
+	_ = json.NewEncoder(w).Encode(p)
 }
 
 // Put replaces the current access control policy.
@@ -42,7 +42,7 @@ func (h *PolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // Validate checks a policy without saving it.
@@ -59,5 +59,5 @@ func (h *PolicyHandler) Validate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"valid": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"valid": true})
 }
