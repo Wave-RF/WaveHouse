@@ -102,10 +102,22 @@ jobs:
       github.event.workflow_run.event == 'pull_request'
     runs-on: [wave-rf-runners]
     steps:
-      - name: Checkout repo (composite actions live here)
+      - name: Checkout main (trusted composite-action source)
+        # Security: pull_request_target and workflow_run events would
+        # default to checking out the PR's merge/head SHA. If we then
+        # did `uses: ./.github/actions/...`, a malicious PR could
+        # modify the composite action in its branch and have that code
+        # execute with PROJECT_BOARD_TOKEN + write-scoped GITHUB_TOKEN
+        # in scope — the classic pull_request_target attack. Pinning
+        # the checkout ref to `main` always reads composite actions
+        # from trusted code regardless of event. persist-credentials:
+        # false further reduces exposure since we don't push from
+        # this workflow. (Copilot flagged.)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Guard — require PROJECT_BOARD_TOKEN
         env:
@@ -151,6 +163,8 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
         run: |
+          set -euo pipefail
+
           pr=$(gh pr view "$PR_NUM" -R "$REPO" \
             --json isDraft,author,statusCheckRollup,state)
           author=$(echo "$pr" | jq -r '.author.login')
@@ -225,6 +239,8 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
         run: |
+          set -euo pipefail
+
           # Admin approval is deliberately excluded — it opens only
           # after an admin reviews, which is the step this workflow
           # triggers. Including it here would self-reference.
@@ -309,11 +325,20 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
         run: |
+          set -euo pipefail
+
           # Reeval promotes to Ready only from empty/Backlog — don't
           # yank a card that's already In progress / In review / Done.
           # Compare against optionId rather than the Status option's
-          # display name (Copilot flagged this) so a rename on the
-          # project UI doesn't silently break the guard.
+          # display name (Copilot R3) so a rename on the project UI
+          # doesn't silently break the guard.
+          #
+          # Explicit GraphQL-error check (Copilot R8): without strict
+          # mode + this check, a failed gh api would yield an empty
+          # `current_option`, and the "[ -z ] || [ = Backlog ]" branch
+          # below would incorrectly mark promote=true — silently
+          # promoting a card we couldn't actually read. Now any
+          # .errors in the response fails this step loudly.
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
           resp=$(gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
@@ -330,6 +355,19 @@ jobs:
               }
             }' -F url="$pr_url")
 
+          graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
+          if [ -n "$graphql_errors" ]; then
+            echo "::error::GraphQL error querying PR card Status: $graphql_errors"
+            exit 1
+          fi
+
+          # Distinguish "card not on board" from "on board, empty
+          # Status" from "on board, Backlog" from "on board, other".
+          # Empty-card (no matching project item) is OK to promote —
+          # the subsequent Upsert step adds it + sets Ready. Only the
+          # "on board, other" case should short-circuit.
+          on_board=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            [.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber))] | length')
           current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
             .data.resource.projectItems.nodes[]?
             | select(.project.number == ($n | tonumber))
@@ -339,8 +377,8 @@ jobs:
             | select(.project.number == ($n | tonumber))
             | .fieldValueByName.name // ""' | head -n1)
 
-          if [ -z "$current_option" ] || [ "$current_option" = "$STATUS_BACKLOG" ]; then
-            echo "PR card Status is '${current_name:-<unset>}' (option $current_option) — ok to promote."
+          if [ "$on_board" = "0" ] || [ -z "$current_option" ] || [ "$current_option" = "$STATUS_BACKLOG" ]; then
+            echo "PR card Status is '${current_name:-<unset>}' (option '$current_option', on_board=$on_board) — ok to promote."
             echo "promote=true" >> "$GITHUB_OUTPUT"
           else
             echo "PR card Status is '$current_name' (option $current_option) — leaving alone."

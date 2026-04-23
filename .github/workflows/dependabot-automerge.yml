@@ -35,10 +35,19 @@ jobs:
     if: github.actor == 'dependabot[bot]'
     runs-on: [wave-rf-runners]
     steps:
-      - name: Checkout repo (composite actions live here)
+      - name: Checkout main (trusted composite-action source)
+        # Security: pin to the default branch, not the PR head.
+        # Dependabot PRs can modify .github/actions/** and since this
+        # workflow runs with write-scoped tokens (contents:write +
+        # pull-requests:write) a compromised upstream action could
+        # inject code via a bump PR. Defensive regardless of the
+        # actor being dependabot[bot]. (Copilot flagged the same
+        # pull_request_target pitfall on project-orchestrator.yml.)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Fetch Dependabot metadata
         id: meta
