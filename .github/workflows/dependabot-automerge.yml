@@ -59,15 +59,13 @@ jobs:
       # ───────────────────────────────────────────────────────────────
       # Major-bump path: hold for human review, but surface it on the
       # board so it doesn't vanish into the PR list.
+      #
+      # Order matters here: token guard + board-upsert + assign all
+      # run before the comment, so the comment's wording can honestly
+      # reflect whether board placement happened. Claude review
+      # flagged the earlier ordering (comment first) as posting a
+      # false claim when PROJECT_BOARD_TOKEN is missing.
       # ───────────────────────────────────────────────────────────────
-
-      - name: Comment on major bumps
-        if: steps.meta.outputs.update-type == 'version-update:semver-major'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          gh pr comment "$PR_URL" --body "Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Added to the Task Board (Status: Ready) and reviewers assigned. See dependency changelog / release notes before merging."
 
       - name: Guard — require PROJECT_BOARD_TOKEN for board ops
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
@@ -93,7 +91,8 @@ jobs:
 
       - name: Assign + request review from both admins (major bump)
         # Dependabot is the author — no author-vs-reviewer logic needed.
-        # Assign both so whoever picks it up first can action.
+        # Assign both so whoever picks it up first can action. Runs
+        # whether or not board placement succeeded (uses GITHUB_TOKEN).
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         uses: ./.github/actions/assign-and-request-review
         with:
@@ -101,3 +100,20 @@ jobs:
           repo: ${{ github.repository }}
           pr-number: ${{ github.event.pull_request.number }}
           reviewers: EricAndrechek taitelee
+
+      - name: Comment on major bumps
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          SKIP_BOARD: ${{ env.SKIP_BOARD }}
+        run: |
+          # Honest wording: only claim board placement when we actually
+          # did it. Reviewers were assigned regardless since that step
+          # doesn't depend on the board token.
+          if [[ "$SKIP_BOARD" == "true" ]]; then
+            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned; board placement was skipped (PROJECT_BOARD_TOKEN not configured). See dependency changelog / release notes before merging."
+          else
+            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Added to the Task Board (Status: Ready) and reviewers assigned. See dependency changelog / release notes before merging."
+          fi
+          gh pr comment "$PR_URL" --body "$body"

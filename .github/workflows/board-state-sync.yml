@@ -56,13 +56,20 @@ jobs:
         env:
           PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
         run: |
+          # `exit 0` only ends *this* step's shell — the job continues,
+          # so subsequent steps would run with an empty GH_TOKEN and
+          # error out on gh api calls. Emit a SKIP_BOARD marker to
+          # GITHUB_ENV instead; every later step guards on it. Matches
+          # the pattern already used in project-orchestrator.yml.
+          # (Claude review flagged this as Medium severity.)
           if [[ -z "$PROJECT_TOKEN" ]]; then
             echo "::warning::PROJECT_BOARD_TOKEN not configured; skipping."
-            exit 0
+            echo "SKIP_BOARD=true" >> "$GITHUB_ENV"
           fi
 
       - name: Inspect event + filter to Status-field changes
         id: event
+        if: env.SKIP_BOARD != 'true'
         run: |
           set -euo pipefail
 
@@ -109,7 +116,7 @@ jobs:
 
       - name: Resolve linked counterpart + compute mirror Status
         id: mirror
-        if: steps.event.outputs.run == 'true'
+        if: steps.event.outputs.run == 'true' && env.SKIP_BOARD != 'true'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           NEW_OPTION_ID: ${{ steps.event.outputs.new_option_id }}
@@ -144,7 +151,7 @@ jobs:
           # Resolve the linked counterpart(s). For a PR, the linked
           # issues come from `closingIssuesReferences`. For an Issue,
           # the "Development"-linked PRs come from
-          # `closingPullRequestsReferences` (the inverse edge).
+          # `closedByPullRequestsReferences` (the inverse edge).
           if [ "$CONTENT_TYPE" = "PullRequest" ]; then
             counterparts=$(gh api graphql -f query='query($id: ID!) {
                 node(id: $id) {
@@ -199,7 +206,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Mirror Status to linked counterpart(s)
-        if: steps.mirror.outputs.run == 'true'
+        if: steps.mirror.outputs.run == 'true' && env.SKIP_BOARD != 'true'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           COUNTERPARTS: ${{ steps.mirror.outputs.counterparts }}
