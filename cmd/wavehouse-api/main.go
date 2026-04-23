@@ -206,11 +206,11 @@ func run() int {
 	if err := remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			msg.Ack(context.Background()) // Safe standalone context
+			_ = msg.Ack(context.Background()) // Safe standalone context
 			return nil
 		}
 		hub.Broadcast(msg.Subject, msg)
-		msg.Ack(context.Background()) // Safe standalone context
+		_ = msg.Ack(context.Background()) // Safe standalone context
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge subscription failed", "error", err)

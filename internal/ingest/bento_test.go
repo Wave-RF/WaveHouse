@@ -57,7 +57,13 @@ func (m *bentoMockMsg) Nak() error           { m.naked = true; return nil }
 
 func (m *bentoMockMsg) DoubleAck(ctx context.Context) error {
 	m.doubleAcked = true
+	m.acked = true
 	return nil
+}
+
+func (m *bentoMockMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	// Return an empty, safe metadata object to prevent nil pointer panics
+	return &jetstream.MsgMetadata{}, nil
 }
 
 // bentoMockIter satisfies jetstream.MessagesContext for testing jsInput.

@@ -27,7 +27,7 @@ func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	// Attach Stack Trace for Errors
-	if r.Level >= slog.LevelError && h.Handler.Enabled(ctx, slog.LevelDebug) {
+	if r.Level >= slog.LevelError && h.Enabled(ctx, slog.LevelDebug) {
 		r.AddAttrs(slog.String("stacktrace", string(debug.Stack())))
 	}
 

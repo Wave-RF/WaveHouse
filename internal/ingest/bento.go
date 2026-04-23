@@ -301,7 +301,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		chSpan.RecordError(err)
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
