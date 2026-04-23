@@ -13,14 +13,13 @@ import (
 
 func TestRequireRole_AllowedRole(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin", "service")
+	mw := RequireRole(true, "admin", "service")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "admin")
-	req = req.WithContext(ctx)
+	ctx := context.WithValue(context.Background(), ContextKeyRole, "admin")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -29,14 +28,13 @@ func TestRequireRole_AllowedRole(t *testing.T) {
 
 func TestRequireRole_DeniedRole(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin", "service")
+	mw := RequireRole(true, "admin", "service")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "viewer")
-	req = req.WithContext(ctx)
+	ctx := context.WithValue(context.Background(), ContextKeyRole, "viewer")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -45,13 +43,13 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin")
+	mw := RequireRole(false, "admin")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	// No role in context — auth disabled scenario → passthrough.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -63,7 +61,7 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 		t.Fatal("should not reach handler on OPTIONS")
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/", nil)
 	req.Header.Set("Origin", "https://example.com")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -81,7 +79,7 @@ func TestCORSMiddleware_NormalRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://app.example.com")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -99,7 +97,7 @@ func TestCORSMiddleware_AllowListedOrigin(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://app.example.com")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -118,7 +116,7 @@ func TestCORSMiddleware_BlockedOrigin(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://evil.com")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -161,7 +159,8 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			t.Parallel()
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			assert.NotEqual(t, http.StatusNotFound, rec.Code, "route should exist")
@@ -192,13 +191,13 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	router := NewRouter(deps)
 
 	// Admin pipes route should 404 when pipes is nil.
-	req := httptest.NewRequest(http.MethodGet, "/v1/admin/pipes", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/admin/pipes", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
 	// DLQ stats should 404 when DLQ is nil.
-	req = httptest.NewRequest(http.MethodGet, "/v1/dlq/stats", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -210,10 +209,29 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://anything.example.com")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestRequireRole_NoRole_FailClosed(t *testing.T) {
+	t.Parallel()
+
+	// Empty context is REJECTED
+	mw := RequireRole(true, "admin")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("handler should not be called - security should have blocked this!")
+	}))
+
+	// Create a request with NO role in the context
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "unauthorized")
 }

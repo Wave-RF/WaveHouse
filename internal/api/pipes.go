@@ -30,7 +30,7 @@ func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache,
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.Store.List())
+	_ = json.NewEncoder(w).Encode(h.Store.List())
 }
 
 // Get returns a specific named query (admin endpoint).
@@ -42,7 +42,7 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(q)
+	_ = json.NewEncoder(w).Encode(q)
 }
 
 // Put creates or updates a named query (admin endpoint).
@@ -61,7 +61,7 @@ func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // Delete removes a named query (admin endpoint).
@@ -72,7 +72,7 @@ func (h *PipesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // Execute runs a named query with the provided parameters.
@@ -130,7 +130,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 	}
@@ -163,5 +163,5 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	w.Write(v.([]byte))
+	_, _ = w.Write(v.([]byte))
 }

@@ -7,6 +7,7 @@ name: Lint PR title
 # Required by the `main branch protection` ruleset as the `Validate`
 # check — must report on every PR or merge gets stuck at "pending."
 #
+<<<<<<< HEAD
 # Uses `pull_request` (not `pull_request_target`) because `pull_request_target`
 # only fires when the workflow file already exists on the default branch,
 # which creates a chicken-and-egg problem on the PR that first introduces
@@ -21,6 +22,26 @@ on:
 
 permissions:
   contents: read
+=======
+# Triggered by `pull_request_target` so the workflow runs from the
+# default branch with base-repo permissions — fork PRs get the sticky
+# comment too. (`pull_request` from the head ref is not used: it runs
+# without `issues: write` on forks, so the comment step would fail
+# and the dual-trigger duplicate run was wasted CI minutes.)
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  # `issues: write` is required for /repos/.../issues/{num}/comments
+  # (the sticky-comment endpoint) — PRs are issues at the REST layer
+  # for comments but `pull-requests: write` alone does NOT grant that
+  # scope. Without it, fork PR runs fail to post the comment even on
+  # `pull_request_target` with full base-repo permissions.
+  contents: read
+  issues: write
+>>>>>>> origin/main
   pull-requests: write
 
 concurrency:

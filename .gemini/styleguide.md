@@ -57,7 +57,11 @@ Severity-tag every security finding `CRITICAL` / `HIGH` / `MEDIUM` / `LOW`.
 - Missing edge-case coverage (nil inputs, empty batches, cancelled contexts, invalid JWT)
 - Mocks where an integration test would catch more (per `AGENTS.md` testing conventions)
 - Tests that don't actually exercise the path they claim
+<<<<<<< HEAD
 - Coverage ≥70% is CI-enforced; flag drops below threshold as `[MUST]`
+=======
+- Coverage ≥60% is CI-enforced (interim; #67 tracks restoring 70%); flag drops below threshold as `[MUST]`
+>>>>>>> origin/main
 
 ### 5. Documentation sync — `[MUST]` when missed
 

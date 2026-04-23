@@ -65,7 +65,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("query system.columns: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	tables := make(map[string]*TableSchema)
 	for rows.Next() {

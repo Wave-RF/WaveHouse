@@ -116,7 +116,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				select {
 				case <-ctx.Done():
 					ticker.Stop()
-					m.Nak()
+					if nakErr := m.Nak(); nakErr != nil {
+						slog.WarnContext(spanCtx, "nak failed during ctx cancellation", "error", nakErr)
+					}
 					return nil, nil, ctx.Err()
 				case <-ticker.C:
 				}
@@ -132,7 +134,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"id", raw.ID,
 					"error", err,
 				)
-				m.Nak()
+				if nakErr := m.Nak(); nakErr != nil {
+					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+				}
 			} else {
 				// Log the success with all context
 				slog.InfoContext(spanCtx, "successfully deleted record",
@@ -213,8 +217,11 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 			subject = "dlq." + tableName
 		}
 
-		_, _ = d.js.Publish(ctx, subject, data)
-		slog.WarnContext(msgCtx, "Sent failed message to DLQ", "subject", subject)
+		if _, err := d.js.Publish(ctx, subject, data); err != nil {
+			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
+		} else {
+			slog.WarnContext(msgCtx, "sent failed message to DLQ", "subject", subject)
+		}
 	}
 	return nil
 }
@@ -307,7 +314,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -323,7 +330,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 	setupCtx, setupCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer setupCancel()
 
-	cons, err := js.CreateOrUpdateConsumer(setupCtx, "WAVEHOUSE", jetstream.ConsumerConfig{
+	cons, err := js.CreateOrUpdateConsumer(setupCtx, streamName, jetstream.ConsumerConfig{
 		Durable:       "buffer-consumer",
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,

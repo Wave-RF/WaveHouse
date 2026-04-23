@@ -119,7 +119,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 	}
@@ -157,5 +157,5 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	w.Write(v.([]byte))
+	_, _ = w.Write(v.([]byte))
 }

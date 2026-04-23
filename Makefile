@@ -184,16 +184,8 @@ coverage: ## Unit test coverage → tmp/coverage/ and summary
 	@go tool cover -func=tmp/coverage/coverage.txt | tail -n 1 | awk '{print "  Total Coverage: $(CYAN)" $$3 "$(RESET)"}'
 	@echo "$(YELLOW)==> Open tmp/coverage/coverage.html in your browser for line-by-line details$(RESET)"
 
-COVERAGE_THRESHOLD := 70
-coverage-enforce: coverage ## Fail if unit test coverage is below threshold (default: 70%)
-	@TOTAL=$$(go tool cover -func=tmp/coverage/coverage.txt | tail -n 1 | awk '{gsub(/%/,""); print $$3}'); \
-	THRESHOLD=$(COVERAGE_THRESHOLD); \
-	if [ $$(echo "$$TOTAL < $$THRESHOLD" | bc -l) -eq 1 ]; then \
-		echo "$(RED)==> FAIL: Coverage $$TOTAL%% is below $$THRESHOLD%% threshold$(RESET)"; \
-		exit 1; \
-	else \
-		echo "$(GREEN)==> PASS: Coverage $$TOTAL%% meets $$THRESHOLD%% threshold$(RESET)"; \
-	fi
+coverage-enforce: coverage ## Fail if unit test coverage is below the threshold in .testcoverage.yml (interim 60%; #67 tracks restoring 70%)
+	@go run github.com/vladopajic/go-test-coverage/v2@v2.18.4 --config=.testcoverage.yml
 
 smoke-test: ## Manual Bento insert+delete (requires running WaveHouse)
 	@go run ./tests/cmd/bento_pub

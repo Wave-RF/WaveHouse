@@ -13,7 +13,7 @@ func TestLocalCache_GetMiss(t *testing.T) {
 	t.Parallel()
 	c, err := NewLocal(1 << 20) // 1 MB
 	require.NoError(t, err)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	val, ttl, err := c.Get(context.Background(), "missing")
 	assert.NoError(t, err)
@@ -25,7 +25,7 @@ func TestLocalCache_SetAndGet(t *testing.T) {
 	t.Parallel()
 	c, err := NewLocal(1 << 20)
 	require.NoError(t, err)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
 	err = c.Set(ctx, "key1", []byte("hello"), 10*time.Second)
@@ -44,7 +44,7 @@ func TestLocalCache_ExpiredKey(t *testing.T) {
 	t.Parallel()
 	c, err := NewLocal(1 << 20)
 	require.NoError(t, err)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
 	// Set with very short TTL.
@@ -64,7 +64,7 @@ func TestLocalCache_Overwrite(t *testing.T) {
 	t.Parallel()
 	c, err := NewLocal(1 << 20)
 	require.NoError(t, err)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
 	_ = c.Set(ctx, "key", []byte("v1"), 10*time.Second)
@@ -81,7 +81,7 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 	t.Parallel()
 	c, err := NewLocal(1 << 20)
 	require.NoError(t, err)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
 	err = c.Set(ctx, "notimed", []byte("data"), 0)

@@ -122,7 +122,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			if dup {
 				slog.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
+				_ = json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
 				return
 			}
 		}
@@ -156,5 +156,5 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	slog.InfoContext(ctx, "event successfully ingested", "table", table, "subject", subject)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }

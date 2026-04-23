@@ -5,6 +5,7 @@ name: Auto-label PR
 # current changed-file set, so removing a change also removes its
 # label.
 #
+<<<<<<< HEAD
 # Uses `pull_request` (not `pull_request_target`) so this workflow
 # fires the first time it's added on a PR. A future follow-up PR can
 # switch to `pull_request_target` once this workflow is on main, to
@@ -13,6 +14,16 @@ name: Auto-label PR
 
 on:
   pull_request:
+=======
+# Triggered by `pull_request_target` so the workflow runs from the
+# default branch with base-repo permissions — fork PRs get auto-labels
+# too. (`pull_request` from the head ref is not used: it lacks
+# `pull-requests: write` on forks, so the labeler step would fail and
+# the dual-trigger duplicate run was wasted CI minutes.)
+
+on:
+  pull_request_target:
+>>>>>>> origin/main
     types: [opened, synchronize, reopened]
 
 permissions:
