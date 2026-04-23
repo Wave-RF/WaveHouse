@@ -21,8 +21,13 @@ name: Board state sync
 # indefinitely.
 #
 # The workflow runs only when the token configured in
-# PROJECT_BOARD_TOKEN has project:write on Wave-RF's project #7. Fork
-# PRs, forks of this repo, and fresh installs silently no-op.
+# PROJECT_BOARD_TOKEN has project:write + repo:read on Wave-RF's
+# project #7. The repo:read scope is needed by the GraphQL queries
+# below that resolve linked PRs/Issues (closingIssuesReferences /
+# closedByPullRequestsReferences) — on private repos, project:write
+# alone isn't enough. Fine-grained PATs need both scopes selected
+# explicitly. Fork PRs, forks of this repo, and fresh installs
+# silently no-op.
 
 on:
   projects_v2_item:
@@ -58,8 +63,6 @@ jobs:
 
       - name: Inspect event + filter to Status-field changes
         id: event
-        env:
-          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
         run: |
           set -euo pipefail
 

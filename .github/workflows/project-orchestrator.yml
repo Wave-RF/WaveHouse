@@ -271,18 +271,35 @@ jobs:
           echo "PR is draft and bot-clean; flipping to ready-for-review."
           gh pr ready "$PR_NUM" -R "$REPO"
 
-      - name: Compute reviewer(s) — non-author admin(s)
+      - name: Compute reviewer — the non-author admin (single)
         id: reviewers
         if: (steps.botclean.outputs.clean == 'true') || (steps.action.outputs.action == 're_requested')
         env:
           PR_AUTHOR: ${{ steps.action.outputs.author }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
         run: |
-          admins="EricAndrechek taitelee"
-          picked=""
-          for admin in $admins; do
-            [[ "$admin" != "$PR_AUTHOR" ]] && picked+="$admin "
-          done
-          echo "reviewers=$(echo "$picked" | awk '{$1=$1};1')" >> "$GITHUB_OUTPUT"
+          # Per the state-machine spec (AGENTS.md §Task Board state
+          # machine), the PR card has *one* reviewer-assignee — "the
+          # non-author admin" (singular). Three cases:
+          #   - author is Eric → reviewer is Taite.
+          #   - author is Taite → reviewer is Eric.
+          #   - author is anyone else (external contributor, or future
+          #     non-admin committers) → pick one admin deterministically
+          #     by PR-number parity so load spreads evenly over time.
+          # Copilot flagged the prior "both admins" behaviour as
+          # inconsistent with the single-reviewer contract.
+          case "$PR_AUTHOR" in
+            EricAndrechek) picked="taitelee" ;;
+            taitelee)      picked="EricAndrechek" ;;
+            *)
+              if [ $((PR_NUM % 2)) -eq 0 ]; then
+                picked="EricAndrechek"
+              else
+                picked="taitelee"
+              fi
+              ;;
+          esac
+          echo "reviewers=$picked" >> "$GITHUB_OUTPUT"
 
       - name: Check current PR card Status (reeval guard)
         id: pr-status

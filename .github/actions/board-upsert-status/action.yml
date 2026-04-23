@@ -8,7 +8,12 @@ description: >-
 
 inputs:
   project-token:
-    description: PAT with project:write scope. Required — the default GITHUB_TOKEN lacks org-project scope.
+    description: >-
+      PAT with project:write AND repo:read scopes. Required — the
+      default GITHUB_TOKEN lacks org-project scope. The resource(url)
+      GraphQL call used below dereferences the PR/Issue URL, which on
+      private repos requires repo read in addition to the project
+      write. Fine-grained PATs need both scopes explicitly selected.
     required: true
   project-owner:
     description: Organization / user that owns the project.
