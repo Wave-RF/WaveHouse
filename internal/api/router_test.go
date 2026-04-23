@@ -18,9 +18,8 @@ func TestRequireRole_AllowedRole(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "admin")
-	req = req.WithContext(ctx)
+	ctx := context.WithValue(context.Background(), ContextKeyRole, "admin")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -34,9 +33,8 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "viewer")
-	req = req.WithContext(ctx)
+	ctx := context.WithValue(context.Background(), ContextKeyRole, "viewer")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -229,7 +227,7 @@ func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 	}))
 
 	// Create a request with NO role in the context
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
