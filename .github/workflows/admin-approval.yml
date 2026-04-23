@@ -107,18 +107,37 @@ jobs:
           # condition on the first attempt, short-circuiting before
           # a newly-submitted admin approval has propagated through
           # the reviews API (Copilot flagged this).
+          # Distinguish "API succeeded, no admin in approvers yet"
+          # (retry — propagation lag) from "API failed" (fail loud
+          # rather than silently passing an empty approvers list as
+          # 'no approval'). Copilot flagged the blanket `2>/dev/null
+          # || echo ""` as masking real regressions (rate limit,
+          # permissions lost, etc.) as "no one approved yet."
           attempts=0
           approvers=""
           admin_found=""
+          last_api_err=""
           while [ $attempts -lt 3 ]; do
-            approvers=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
+            set +e
+            api_out=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
               --jq '
                 group_by(.user.login)
                 | map(max_by(.submitted_at))
                 | .[]
                 | select(.state == "APPROVED")
                 | .user.login
-              ' 2>/dev/null || echo "")
+              ' 2>&1)
+            api_rc=$?
+            set -e
+
+            if [ "$api_rc" -ne 0 ]; then
+              last_api_err="$api_out"
+              echo "::warning::reviews API call failed on attempt $((attempts + 1)): $api_out"
+              approvers=""
+            else
+              approvers="$api_out"
+              last_api_err=""
+            fi
 
             for admin in "${admins[@]}"; do
               if printf '%s\n' "$approvers" | grep -Fxq "$admin"; then
@@ -131,6 +150,14 @@ jobs:
             attempts=$((attempts + 1))
             [ $attempts -lt 3 ] && sleep 2
           done
+
+          # If every attempt errored, fail hard rather than report
+          # "no admin approval" — which would be misleading when the
+          # reason is really a broken API call.
+          if [ -z "$admin_found" ] && [ -n "$last_api_err" ]; then
+            echo "::error::Unable to read PR reviews after 3 attempts. Last error: $last_api_err"
+            exit 1
+          fi
 
           if [ -n "$admin_found" ]; then
             echo "PR #$PR_NUM has admin approval from $admin_found (latest review state: APPROVED)."

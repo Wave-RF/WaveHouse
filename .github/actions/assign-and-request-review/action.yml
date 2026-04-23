@@ -50,15 +50,28 @@ runs:
         echo "Assigning [$assignee_csv] to PR #$PR_NUMBER"
         gh pr edit "$PR_NUMBER" -R "$REPO" --add-assignee "$assignee_csv" > /dev/null
 
-        # Request review. The REST endpoint accepts an array and is idempotent
-        # for already-pending requests. It returns 422 if the user has already
-        # approved on the current head SHA — that's expected when re-requesting
-        # after dismiss_stale_reviews_on_push fires, and we swallow it.
+        # Request review. The REST endpoint accepts an array and is
+        # idempotent for already-pending requests. It returns 422 when
+        # the user has already approved on the current head SHA — a
+        # known post-dismiss-stale outcome — so we log that as a
+        # notice. Other failures (rate limit, permissions regression,
+        # network) surface as warnings with the gh stderr attached so
+        # operators can actually debug, rather than being silently
+        # swallowed behind a generic line (Copilot flagged the blanket
+        # suppression as dangerous).
         reviewer_json=$(printf '%s\n' "${USERS[@]}" | jq -R . | jq -sc '{reviewers: .}')
 
-        if ! gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/requested_reviewers" \
-              --input - <<<"$reviewer_json" > /dev/null 2>&1; then
-          echo "::warning::Request-review API returned non-2xx. Likely a stale-but-approved state on the current SHA; assignees are still set."
-        else
+        set +e
+        api_out=$(gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/requested_reviewers" \
+          --input - <<<"$reviewer_json" 2>&1)
+        api_rc=$?
+        set -e
+
+        if [ "$api_rc" -eq 0 ]; then
           echo "Requested review from: ${USERS[*]}"
+        elif echo "$api_out" | grep -qE "(HTTP 422|422 Unprocessable)"; then
+          echo "::notice::Review request returned 422 — expected when the user already approved on this SHA post-dismiss-stale. Assignees are set."
+        else
+          echo "::warning::Request-review API failed (exit $api_rc). Assignees are still set, but GitHub won't send a notification. gh output:"
+          printf '  %s\n' "$api_out"
         fi

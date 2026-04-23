@@ -269,7 +269,17 @@ jobs:
               | .fieldValueByName.optionId // ""' | head -n1)
 
             if [ -z "$item_id" ]; then
-              echo "Counterpart $counterpart_id not on project #$PROJECT_NUMBER — skipping (let orchestrator add it later)."
+              # Loud warning: the orchestrator only runs on PR events,
+              # not on `projects_v2_item: edited`. If the linked
+              # counterpart isn't on the board yet, the mirror is
+              # silently dropped — which is *maybe* what we want for
+              # brand-new external-contributor PRs but confusing when
+              # it happens on an active PR because someone removed
+              # the card manually. Surface it prominently; the operator
+              # can re-add the counterpart to the board and re-trigger
+              # the mirror by nudging the Status field again. (Copilot
+              # flagged the silent-skip as a gap.)
+              echo "::warning::Counterpart $counterpart_id not on project #$PROJECT_NUMBER. Mirror dropped; add it manually (or on next relevant PR event the orchestrator will pick it up) and re-trigger by bumping its Status."
               continue
             fi
 
