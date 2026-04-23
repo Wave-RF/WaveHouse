@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -110,7 +111,11 @@ func NewRouter(deps Dependencies) http.Handler {
 					}
 
 					deps.LogLevel.Set(newLevel)
-					w.Write([]byte(`{"status":"success", "level":"` + levelStr + `"}`))
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"status": "success",
+						"level":  newLevel.String(),
+					})
 				})
 			}
 		})

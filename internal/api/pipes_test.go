@@ -20,9 +20,9 @@ func pipesRequest(t *testing.T, method, path, name string, body any) *http.Reque
 	var r *http.Request
 	if body != nil {
 		data, _ := json.Marshal(body)
-		r = httptest.NewRequest(method, path, bytes.NewReader(data))
+		r = httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader(data))
 	} else {
-		r = httptest.NewRequest(method, path, nil)
+		r = httptest.NewRequestWithContext(context.Background(), method, path, nil)
 	}
 	rctx := chi.NewRouteContext()
 	if name != "" {
@@ -40,7 +40,7 @@ func TestPipesHandler_List(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, 0)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/pipes", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes", nil)
 	h.List(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -199,7 +199,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, 0)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/pipes/by_page/execute?page=/home", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes/by_page/execute?page=/home", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("name", "by_page")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
@@ -217,8 +217,7 @@ func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, 0)
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPut, "/v1/pipes/test", "test", nil)
-	r = httptest.NewRequest(http.MethodPut, "/v1/pipes/test", bytes.NewReader([]byte(`{bad}`)))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/pipes/test", bytes.NewReader([]byte(`{bad}`)))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("name", "test")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
