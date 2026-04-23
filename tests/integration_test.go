@@ -94,11 +94,24 @@ func setupTestEnv(t *testing.T) *testEnv {
 	logger := slog.Default()
 
 	// Start ClickHouse container.
+	//
+	// ClickHouse opens 9000/tcp early in startup — before it's actually
+	// ready to accept native-protocol queries. Waiting only on the
+	// listening port produced flakes where the next chConn call hit
+	// "connection reset by peer" because the server hadn't finished
+	// initializing. Wait on /ping (HTTP, fully-initialized signal) too,
+	// then explicitly Ping the native connection before any queries
+	// run. Belt-and-suspenders against the same readiness race.
 	chReq := testcontainers.ContainerRequest{
 		Image:        "clickhouse/clickhouse-server:latest",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": "test"},
-		WaitingFor:   wait.ForListeningPort("9000/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("9000/tcp"),
+			wait.ForHTTP("/ping").WithPort("8123/tcp").WithStatusCodeMatcher(func(status int) bool {
+				return status == http.StatusOK
+			}),
+		).WithStartupTimeoutDefault(120 * time.Second),
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: chReq,
@@ -119,6 +132,21 @@ func setupTestEnv(t *testing.T) *testEnv {
 		Auth: clickhouse.Auth{Database: "default", Username: "default", Password: "test"},
 	})
 	require.NoError(t, err)
+
+	// `clickhouse.Open` is lazy — it doesn't dial until the first query.
+	// Force the dial here with retries so the first real Exec below
+	// can't be the one that meets a half-ready server.
+	pingCtx, pingCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer pingCancel()
+	for {
+		if err := chConn.Ping(pingCtx); err == nil {
+			break
+		}
+		if pingCtx.Err() != nil {
+			require.NoError(t, pingCtx.Err(), "ClickHouse never became reachable on native protocol")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	// Create test table.
 	err = chConn.Exec(ctx, `

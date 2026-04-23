@@ -42,13 +42,57 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      checks: read
       id-token: write
     steps:
+      - name: Wait for CI to settle, then skip if any required check failed
+        # Don't burn Claude review tokens on PRs whose required CI is
+        # already red — the human will just bounce them back as "fix CI
+        # first." `gh pr checks --watch` blocks until every non-skipped
+        # check on the PR head SHA reaches a terminal state, then exits
+        # non-zero if any failed. We want a *specific* skip on red CI
+        # (not a workflow failure), so swallow the exit code and look
+        # at the conclusions ourselves.
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # Required checks from the `main branch protection` ruleset.
+          # Keep in sync. If a check listed here doesn't exist on a PR
+          # (e.g. paths-filtered out), it's treated as "not failing."
+          REQUIRED_CHECKS: "Check Build Validate"
+        run: |
+          # Wait up to 15 minutes for the rest of CI to finish.
+          # `--watch` blocks until terminal; we don't care about its
+          # exit code, just the per-check conclusions afterward.
+          gh pr checks "$PR_NUMBER" --repo "$REPO" --watch --interval 30 || true
+
+          FAILED=""
+          for check in $REQUIRED_CHECKS; do
+            CONCLUSION=$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json name,state \
+              --jq ".[] | select(.name == \"$check\") | .state" | head -n1)
+            # Empty = check didn't run on this PR (paths-filtered) — not a failure.
+            if [[ "$CONCLUSION" == "FAILURE" || "$CONCLUSION" == "CANCELLED" || "$CONCLUSION" == "TIMED_OUT" ]]; then
+              FAILED="$FAILED $check"
+            fi
+          done
+
+          if [[ -n "$FAILED" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "failed_checks=$FAILED" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Claude review — required CI checks failing:$FAILED"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        if: steps.gate.outputs.skip != 'true'
         with:
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e  # v1.0.102
+        if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_sticky_comment: true
