@@ -245,6 +245,7 @@ func run() int {
 			RoleClaim: cfg.Auth.RoleClaim,
 			DevMode:   cfg.Auth.DevMode,
 		}),
+		AuthEnabled: cfg.Auth.Enabled,
 		JS:          remoteMQ.JetStream(),
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,
