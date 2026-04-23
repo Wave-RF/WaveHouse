@@ -146,7 +146,7 @@ jobs:
             counterparts=$(gh api graphql -f query='query($id: ID!) {
                 node(id: $id) {
                   ... on PullRequest {
-                    closingIssuesReferences(first: 10) { nodes { id } }
+                    closingIssuesReferences(first: 50) { nodes { id } }
                   }
                 }
               }' -F id="$CONTENT_NODE_ID" \
@@ -158,7 +158,7 @@ jobs:
             counterparts=$(gh api graphql -f query='query($id: ID!) {
                 node(id: $id) {
                   ... on Issue {
-                    closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { id } }
+                    closedByPullRequestsReferences(first: 50, includeClosedPrs: false) { nodes { id } }
                   }
                 }
               }' -F id="$CONTENT_NODE_ID" \

@@ -10,10 +10,13 @@ description: >-
 
 inputs:
   project-token:
-    description: PAT with project:write scope.
-    required: true
-  github-token:
-    description: Token with read access to the PR and its linked issues. GITHUB_TOKEN is fine.
+    description: >-
+      PAT with both project:write (for board writes) AND repo:read (to
+      read the PR and its linked issues via GraphQL). The combined
+      query reads through this single token — the older version had a
+      separate github-token input but the consolidated GraphQL call
+      uses project-token throughout, so we dropped the extra input
+      (Copilot flagged it as dead).
     required: true
   repo:
     description: "owner/repo"
@@ -43,7 +46,6 @@ runs:
     - name: Iterate linked issues + upsert Status
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github-token }}
         PROJECT_TOKEN: ${{ inputs.project-token }}
         REPO: ${{ inputs.repo }}
         PR_NUMBER: ${{ inputs.pr-number }}

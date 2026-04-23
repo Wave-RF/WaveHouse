@@ -91,6 +91,15 @@ env:
 
 jobs:
   orchestrate:
+    # workflow_run fires for *every* CI run — including CI runs on
+    # pushes to main (the CI workflow triggers on both `push: main`
+    # and `pull_request`). A main-push CI run has no associated PR,
+    # so the orchestrator would just early-exit below when resolving
+    # PR number. Short-circuit here so we don't even spin up a
+    # runner in that case (Copilot flagged).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.event == 'pull_request'
     runs-on: [wave-rf-runners]
     steps:
       - name: Checkout repo (composite actions live here)
@@ -334,7 +343,12 @@ jobs:
           url: https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.num }}
 
       - name: Assign + request review (reeval)
-        if: steps.botclean.outputs.clean == 'true' && steps.reviewers.outputs.reviewers != ''
+        # Gate on promote == 'true' in addition to bot-clean: when the
+        # PR card is already In progress / In review / Done, someone
+        # is actively handling and we shouldn't re-spam a review
+        # request (Copilot flagged this). The re_requested path still
+        # re-requests on demand.
+        if: steps.botclean.outputs.clean == 'true' && steps.pr-status.outputs.promote == 'true' && steps.reviewers.outputs.reviewers != ''
         uses: ./.github/actions/assign-and-request-review
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -347,7 +361,6 @@ jobs:
         uses: ./.github/actions/set-linked-issues-status
         with:
           project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr-number: ${{ steps.pr.outputs.num }}
           project-owner: ${{ env.PROJECT_OWNER }}
@@ -378,7 +391,6 @@ jobs:
         uses: ./.github/actions/set-linked-issues-status
         with:
           project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr-number: ${{ steps.pr.outputs.num }}
           project-owner: ${{ env.PROJECT_OWNER }}
@@ -418,7 +430,6 @@ jobs:
         uses: ./.github/actions/set-linked-issues-status
         with:
           project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr-number: ${{ steps.pr.outputs.num }}
           project-owner: ${{ env.PROJECT_OWNER }}

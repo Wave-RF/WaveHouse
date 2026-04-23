@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bidirectional board state sync** (`.github/workflows/board-state-sync.yml`): when a human manually moves a card's Status on the Task Board UI, mirrors the change to the linked PR/Issue. Uses the `projects_v2_item: edited` event + `changes.field_value` payload to detect Status changes specifically; guards against ping-pong loops by no-oping when the target counterpart is already in the expected mirrored state. Mapping: PR Ready ↔ Issue In review, PR In review ↔ Issue Ready, both Done together. In progress on one side doesn't clobber the other (manual mid-review state, preserved).
 - **Dependabot major-bump Task Board placement** (`.github/workflows/dependabot-automerge.yml`): on a held major-version bump, the workflow now adds the PR to the board with Status=Ready and assigns both admins + requests review — parity with the `reeval` path for non-Dependabot PRs, so major bumps don't vanish into the PR list.
 
+### Fixed
+
+- **`admin-approval.yml` required-check staying red after a valid admin approval** (`.github/workflows/admin-approval.yml`): two independent causes, both fixed.
+  - `concurrency.cancel-in-progress: true` was producing CANCELLED check runs when a second event (e.g., a bot comment) fired while the approval-triggered run was still executing. Cancelled check runs aren't SUCCESS or FAILURE; the ruleset treated them as not-passing. Changed to `cancel-in-progress: false` so runs queue and complete sequentially — an extra few seconds of latency is far cheaper than a stuck merge gate.
+  - Added a fast-path: when the triggering event *is* an admin's APPROVED review, trust `github.event.review.state == 'approved'` + `review.user.login` directly instead of round-tripping through `GET /pulls/{n}/reviews`. The reviews API has observable lag after `pull_request_review.submitted` — the API can take 1–2 seconds to reflect a new review, and the workflow was sometimes polling before that. The slow path (reviews API) retries up to 3× with 2-second backoff for events that aren't themselves a review submit.
+
 ### Changed
 
 - **`project-orchestrator.yml` refactored to the set-once-assignees + mirrored-status model.** Assignees are now treated as per-card identity (Issue = implementer, PR = reviewer) rather than rotated across state transitions; statuses mirror across linked PR↔Issue pairs. Specific changes:
