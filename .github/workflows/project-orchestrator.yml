@@ -57,7 +57,14 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
   pull_request_review:
     types: [submitted, dismissed]
-  check_suite:
+  # check_suite events are suppressed by GitHub when the check suite
+  # was created by a GITHUB_TOKEN-triggered workflow (the standard
+  # case for our CI). So we can't rely on check_suite as the "CI
+  # finished" signal. Use workflow_run instead — it fires regardless
+  # of GITHUB_TOKEN provenance, and it's the documented way to chain
+  # off another workflow completing.
+  workflow_run:
+    workflows: [CI]
     types: [completed]
 
 permissions:
@@ -68,7 +75,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: project-orchestrator-${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number || github.run_id }}
+  group: project-orchestrator-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -109,8 +116,13 @@ jobs:
             pull_request_target|pull_request_review)
               num="${{ github.event.pull_request.number }}"
               ;;
-            check_suite)
-              num=$(jq -r '.check_suite.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+            workflow_run)
+              # workflow_run payload exposes pull_requests associated
+              # with the head commit. Internal PRs populate this;
+              # fork PRs don't (their workflow_run has an empty list),
+              # which is fine — the pull_request_target trigger covers
+              # the fork case with different permissions anyway.
+              num=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
               ;;
           esac
           if [[ -z "$num" ]]; then
@@ -150,7 +162,18 @@ jobs:
           if [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "submitted" ]]; then
             case "$REVIEW_STATE" in
               changes_requested) action="changes_requested" ;;
-              approved|*)        action="none" ;;
+              # APPROVED is a no-op on the board side: admin-approval.yml
+              # flips its required check, merge proceeds, GitHub's
+              # project automation moves cards to Done on merge.
+              approved)          action="none" ;;
+              # COMMENTED reviews (bots: Gemini, Copilot; sometimes
+              # humans adding notes) are the main reliable "CI has
+              # probably finished" signal we get on internal PRs since
+              # check_suite is suppressed when GITHUB_TOKEN triggered
+              # the suite. Re-eval: if this comment resolved or
+              # unresolved threads, or if CI just finished, we want
+              # the board updated.
+              *)                 action="reeval" ;;
             esac
           elif [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "dismissed" ]]; then
             action="reeval"
@@ -171,7 +194,7 @@ jobs:
                 action="re_requested"
               fi
             fi
-          elif [[ "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "check_suite" ]]; then
+          elif [[ "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "workflow_run" ]]; then
             action="reeval"
           fi
 

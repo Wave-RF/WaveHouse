@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Lint`, `Test`, `Integration Tests`, `SDK Tests` joined `Check`/`Build`/`Validate` in the bot-clean required-checks set, matching the updated ruleset.
   - Promotion guard ("don't yank In progress / In review / Done back to Ready") preserved.
   - ~250 lines of duplicate GraphQL/item-edit shell collapsed into composite-action calls. Full state-machine spec in `AGENTS.md §Task Board state machine`.
+  - **Re-eval trigger set fixed.** The original `check_suite: completed` trigger silently never fired on internal PRs — GitHub suppresses `check_suite` events when the suite was created by a `GITHUB_TOKEN`-triggered workflow (standard case for our CI). Replaced with `workflow_run` watching the `CI` workflow, which is the documented chain-off-another-workflow mechanism and doesn't have the suppression gotcha. Also broadened the `pull_request_review: submitted` handler so `COMMENTED` reviews (which is what bots like Gemini post) also trigger a bot-clean re-eval — gives the state machine three independent paths (push, bot review, CI completion) to re-eval instead of effectively one.
 
 ### Fixed
 
