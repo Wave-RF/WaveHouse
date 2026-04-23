@@ -93,6 +93,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.Default()
+	testStream := "WAVEHOUSE"
 
 	// Start ClickHouse container.
 	//
@@ -176,13 +177,13 @@ func setupTestEnv(t *testing.T) *testEnv {
 	require.NoError(t, err)
 
 	// Start embedded NATS.
-	embeddedMQ, err := mq.NewEmbedded(t.TempDir(), 10*1024*1024, testutil.NopLogger()) // 10 MB
+	embeddedMQ, err := mq.NewEmbedded(t.TempDir(), testStream, 10*1024*1024, testutil.NopLogger()) // 10 MB
 	require.NoError(t, err)
 
 	js := embeddedMQ.JetStream()
 
 	// Create DLQ stream.
-	require.NoError(t, api.EnsureDLQStream(ctx, js, 1024*1024))
+	require.NoError(t, api.EnsureDLQStream(ctx, js, testStream, 1024*1024))
 
 	// Schema registry.
 	registry := discovery.NewSchemaRegistry(chConn, "default", time.Minute, logger)
@@ -192,6 +193,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	_, err = ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
+		testStream,
 		chConn,
 		chAddr,
 		httpPort.Port(),
@@ -214,7 +216,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	queryHandler := api.NewQueryHandler(chConn, tiered, 5*time.Second)
 	sseHandler := api.NewSSEHandler(hub, js)
 	wsHandler := api.NewWSHandler(hub, js, nil)
-	dlqHandler := api.NewDLQHandler(js, logger)
+	dlqHandler := api.NewDLQHandler(js, testStream, logger)
 
 	deps := api.Dependencies{
 		Ingest: ingestHandler,

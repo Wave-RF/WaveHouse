@@ -50,6 +50,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
+| `mq.stream_name` | `WH_MQ_STREAM_NAME` | `WAVEHOUSE` | The JetStream namespace to isolate environments (e.g., Staging vs Prod). |
 | `mq.embedded_dir` | `WH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server (standalone mode). |
 | `mq.url` | `WH_MQ_URL` | `nats://localhost:4222` | NATS server URL (clustered mode). |
 | `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE/WS gap-fill. The Active Sweeper will not purge messages newer than this window. |
