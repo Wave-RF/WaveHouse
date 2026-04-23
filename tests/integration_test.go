@@ -5,6 +5,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -135,20 +136,30 @@ func setupTestEnv(t *testing.T) *testEnv {
 
 	// `clickhouse.Open` is lazy — it doesn't dial until the first query.
 	// Force the dial here with retries so the first real Exec below
-	// can't be the one that meets a half-ready server. Capture the
-	// last Ping error so a timeout reports the real cause (e.g.
-	// "connection refused", DNS failure) instead of a generic
-	// context.DeadlineExceeded that doesn't help triage.
+	// can't be the one that meets a half-ready server. Report the last
+	// non-context error ("connection refused", DNS, TLS) on timeout
+	// rather than the generic `context.DeadlineExceeded` the final
+	// Ping will return — Copilot flagged that the naive "save last
+	// error" pattern overwrites the useful error with the context one.
 	pingCtx, pingCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer pingCancel()
-	var lastPingErr error
+	var lastRealErr error
 	for {
-		lastPingErr = chConn.Ping(pingCtx)
-		if lastPingErr == nil {
+		pingErr := chConn.Ping(pingCtx)
+		if pingErr == nil {
 			break
 		}
+		if !errors.Is(pingErr, context.DeadlineExceeded) && !errors.Is(pingErr, context.Canceled) {
+			lastRealErr = pingErr
+		}
 		if pingCtx.Err() != nil {
-			require.NoError(t, lastPingErr, "ClickHouse never became reachable on native protocol")
+			// Surface the last meaningful error if we captured one;
+			// fall back to the raw ping error otherwise.
+			reported := lastRealErr
+			if reported == nil {
+				reported = pingErr
+			}
+			require.NoError(t, reported, "ClickHouse never became reachable on native protocol")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
