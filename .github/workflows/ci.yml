@@ -55,6 +55,14 @@ jobs:
   test:
     name: Test
     runs-on: [self-hosted, Linux]
+    # Serialize across PRs/pushes on self-hosted: `make coverage` runs
+    # with `-race` and the embedded NATS uses `SyncAlways: true`, so
+    # parallel Test jobs on the shared 4-runner VM thrash disk I/O
+    # and flake JetStream stream creation + async-cache admission.
+    # Other jobs still parallelize; only Test queues.
+    concurrency:
+      group: ci-test-self-hosted
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
