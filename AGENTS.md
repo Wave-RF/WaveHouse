@@ -72,7 +72,7 @@ make test-integration  # Integration tests (needs Docker)
 make test-all          # Unit + integration tests
 make ci                # Full CI check: tidy + fmt + lint + vulncheck + build + tests
 make coverage          # Unit test coverage → tmp/coverage/
-make coverage-enforce  # Fail if coverage is below 60% threshold (interim; #67 tracks restoring 70%)
+make coverage-enforce  # Fail if coverage is below 70% threshold (see .testcoverage.yml)
 make mod-tidy-check    # Verify go.mod/go.sum are tidy
 make vulncheck         # Run govulncheck vulnerability scanner
 make security          # Combined scan: vulncheck + gosec via linter
@@ -108,7 +108,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
 - **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without NATS.
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
-- **Coverage target**: 60% interim minimum (CI enforced via `.testcoverage.yml`; #67 tracks restoring the 70% target). Aim for 80%+ on new code.
+- **Coverage target**: 70% minimum (CI enforced via `.testcoverage.yml`). Aim for 80%+ on new code.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
 
@@ -226,7 +226,7 @@ Before finishing any task, do a quick search across docs for the identifiers you
 4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
 5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
 6. Run `make test` to verify. Run `make coverage` to check coverage.
-7. Aim for 80%+ coverage on new code. 60% is the interim CI-enforced minimum (#67 tracks restoring the 70% target).
+7. Aim for 80%+ coverage on new code. 70% is the CI-enforced minimum.
 
 ## File Structure
 
