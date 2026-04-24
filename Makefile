@@ -178,7 +178,12 @@ test-all: ## Unit + integration tests
 
 coverage: ## Unit test coverage → tmp/coverage/ and summary
 	@mkdir -p tmp/coverage
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race -coverprofile=tmp/coverage/coverage.txt -covermode=atomic $(ARGS)
+	# -p 1 serializes package execution. CI runs this on a shared 4-runner
+	# VM where packages fsyncing embedded NATS (`SyncAlways: true`) in
+	# parallel saturates disk I/O and flakes JetStream stream creation.
+	# Serial execution costs ~2-3 min but eliminates the contention.
+	# Local runs pay the same cost; use `make test` for fast iteration.
+	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -p 1 -race -coverprofile=tmp/coverage/coverage.txt -covermode=atomic $(ARGS)
 	@go tool cover -html=tmp/coverage/coverage.txt -o tmp/coverage/coverage.html
 	@echo "$(GREEN)==> Coverage Summary:$(RESET)"
 	@go tool cover -func=tmp/coverage/coverage.txt | tail -n 1 | awk '{print "  Total Coverage: $(CYAN)" $$3 "$(RESET)"}'
