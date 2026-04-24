@@ -112,6 +112,37 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
 
+## Local-First Validation (MANDATORY)
+
+**Validate locally before pushing. Do not use CI as your first feedback loop.** The repo runs on a shared 4-runner self-hosted VM with finite throughput and bills AI-reviewer (Claude, Gemini, Copilot) credits on every push. A speculative "let's see what CI says" commit costs real minutes and real dollars and is visible to the entire team as churn. Every push should represent a change you have locally verified to pass the same gates CI will run.
+
+### Before every push
+
+Run the CI-equivalent locally:
+
+```bash
+make ci         # Full parity with CI: tidy + fmt + lint + vulncheck + build + tests
+make coverage   # Matches the CI `Test` job (race detector; -p 1 in CI for package serialization)
+```
+
+If `make ci` passes, your commit has crossed the same gates CI will run. If it fails, fix it before pushing — don't rely on CI to surface issues that took seconds to catch locally.
+
+For workflow-only changes where `make ci` isn't relevant, at minimum run `actionlint .github/workflows/*.yml` and read through your YAML diff line-by-line before pushing; CI's own billing makes "push and see" for workflow-file iteration especially wasteful.
+
+### If local passes but CI fails
+
+**Treat this as an environment mismatch, not a test bug, until proven otherwise.** Tests that pass on a dev machine in milliseconds but time out on the self-hosted VM point to runner-side problems (I/O pressure, zombie processes, disk contention, shared-VM fsync storms) — not to flaky test code. Investigate the runner before changing tests or production code. Masking environment issues with longer timeouts or retries tends to compound: today's 5s bump becomes tomorrow's 30s bump becomes next week's unbounded wait, and the underlying runner problem keeps slowly degrading.
+
+Order of operations before patching tests for "CI flakiness":
+
+1. **Reproduce the reported failure locally first.** `go test -race -run TestFoo ./...` on your machine. If it fails locally, you have a real test bug; fix it with deterministic primitives (use `c.Wait()` not `time.Sleep`, use `require.Eventually` not `time.Sleep` then assert, use channel sync not goroutine scheduling assumptions).
+2. **If it passes locally, try to reproduce under load.** Run 4 concurrent copies of `make coverage` to simulate the VM's shared-runner contention. If that still passes, the problem is the VM — not the test.
+3. **Only then touch the runner.** SSH in, check `iostat -x 2`, `pgrep -af nats-server`, `df -h`, `du -sh /opt/github/action-runner-*/_work`. Environment fixes (cleanup crons, tmpfs for test temp dirs, slower runner count, faster disk) stay scoped to the runner and don't pollute the codebase.
+
+### When delegating to another agent
+
+If you hand work to a subagent or another Claude session, tell them explicitly: *"Run locally first. Do not push to CI until `make ci` passes on your checkout."* Agents default to "commit and let CI run" because it looks like progress; in this repo that default is expensive. Override it at delegation time.
+
 ## Review Response (MANDATORY)
 
 **Every review comment on a PR gets a substantive reply, and every conversation gets resolved before merge. This applies equally to human reviewers and AI reviewers (Copilot, Gemini Code Assist, claude-review, future bots). The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads literally block merge.**
