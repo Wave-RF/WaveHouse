@@ -106,7 +106,7 @@ func NewRouter(deps Dependencies) http.Handler {
 
 					var newLevel slog.Level
 					if err := newLevel.UnmarshalText([]byte(levelStr)); err != nil {
-						http.Error(w, `{"error":"invalid or missing level (use debug, info, warn, error)"}`, http.StatusBadRequest)
+						writeJSONError(w, http.StatusBadRequest, "invalid or missing level (use debug, info, warn, error)")
 						return
 					}
 
@@ -140,7 +140,7 @@ func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Hand
 					return
 				}
 				// FAIL-CLOSED: Auth is enabled, but no role was found in the context.
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
 			for _, allowed := range roles {
@@ -149,7 +149,7 @@ func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Hand
 					return
 				}
 			}
-			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, "forbidden")
 		})
 	}
 }

@@ -39,6 +39,7 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
+	assertJSONErrorResponse(t, w)
 }
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
@@ -234,4 +235,5 @@ func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), "unauthorized")
+	assertJSONErrorResponse(t, w)
 }

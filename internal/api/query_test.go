@@ -31,6 +31,7 @@ func TestQueryHandler_MissingSQL(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing sql")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestQueryHandler_InvalidJSON(t *testing.T) {
@@ -42,6 +43,7 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestQueryHandler_PolicyForbidsRawSQL(t *testing.T) {
@@ -71,6 +73,7 @@ func TestQueryHandler_PolicyForbidsRawSQL(t *testing.T) {
 	h.Handle(w, r)
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "raw SQL queries require admin role")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestQueryHandler_PolicyAllowsAdmin(t *testing.T) {

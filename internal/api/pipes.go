@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -38,7 +37,7 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	q := h.Store.Get(name)
 	if q == nil {
-		http.Error(w, `{"error":"pipe not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -50,13 +49,13 @@ func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	var q pipes.NamedQuery
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	q.Name = name
 
 	if err := h.Store.Put(r.Context(), &q); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -68,7 +67,7 @@ func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 func (h *PipesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := h.Store.Delete(r.Context(), name); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -80,7 +79,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	q := h.Store.Get(name)
 	if q == nil {
-		http.Error(w, `{"error":"pipe not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
 	}
 
@@ -96,7 +95,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if !allowed {
-				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				writeJSONError(w, http.StatusForbidden, "forbidden")
 				return
 			}
 		}
@@ -120,7 +119,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	sql, params, err := pipes.BindParams(q, supplied)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -157,7 +156,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
