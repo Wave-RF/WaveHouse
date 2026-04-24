@@ -26,7 +26,7 @@ concurrency:
 jobs:
   classify:
     name: Classify and label
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
     # Skip re-triggering on our own label edits.
     if: github.actor != 'github-actions[bot]' && github.event.issue.pull_request == null
     steps:

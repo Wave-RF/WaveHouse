@@ -94,7 +94,7 @@ env:
 
 jobs:
   orchestrate:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
     steps:
       - name: Guard — require PROJECT_BOARD_TOKEN
         env:
