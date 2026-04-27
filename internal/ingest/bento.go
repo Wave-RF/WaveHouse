@@ -74,9 +74,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
-			Action    string `json:"action"`
-			TableName string `json:"table_name"`
-			ID        string `json:"id"`
+			Action    string          `json:"action"`
+			TableName string          `json:"table_name"`
+			ID        string          `json:"id"`
 			Data      json.RawMessage `json:"data"` // Handles lowercase
 			DataCap   json.RawMessage `json:"Data"`
 		}
