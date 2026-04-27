@@ -15,7 +15,7 @@ permissions:
 jobs:
   check:
     name: Check
-    runs-on: [self-hosted, Linux]
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -34,7 +34,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: [self-hosted, Linux]
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -54,15 +54,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: [self-hosted, Linux]
-    # Serialize across PRs/pushes on self-hosted: `make coverage` runs
-    # with `-race` and the embedded NATS uses `SyncAlways: true`, so
-    # parallel Test jobs on the shared 4-runner VM thrash disk I/O
-    # and flake JetStream stream creation + async-cache admission.
-    # Other jobs still parallelize; only Test queues.
-    concurrency:
-      group: ci-test-self-hosted
-      cancel-in-progress: false
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -91,7 +83,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: [self-hosted, Linux]
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -104,7 +96,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    runs-on: [self-hosted, Linux]
+    runs-on: [wave-rf-runners]
     needs: [test]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -121,7 +113,7 @@ jobs:
     # Vitest unit tests for the TypeScript SDK. Fast (~30s) and runs on
     # every PR — no path filter so a deps bump or workflow tweak still
     # exercises the suite.
-    runs-on: [self-hosted, Linux]
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -154,7 +146,7 @@ jobs:
     # Node to 22 which provides it — but keeping the flag while the
     # raw-SQL race is still unfixed). Drop once follow-up lands.
     if: github.event_name == 'push' || github.event.pull_request.draft == false
-    runs-on: [self-hosted, Linux]
+    runs-on: [wave-rf-runners]
     needs: [build]
     continue-on-error: true
     steps:
@@ -166,5 +158,20 @@ jobs:
           cache: "npm"
           cache-dependency-path: tests/sdk/package-lock.json
 
+      # Build the wavehouse image once via the shared remote BuildKit
+      # and `--load` it into the runner pod's Docker daemon (DinD
+      # sidecar) so the docker compose stack started by setup.ts uses
+      # the prebuilt image instead of re-building from source. The
+      # BUILDX_BUILDER env var is preset on the runner pod, so buildx
+      # transparently routes to the shared builder + cache.
+      - name: Build wavehouse image (remote BuildKit, --load)
+        run: docker buildx build --load -t wavehouse:e2e -f deployments/Dockerfile .
+
       - name: Run E2E tests
+        env:
+          # Setting WAVEHOUSE_IMAGE makes tests/compose.yaml use the
+          # prebuilt image (loaded by the previous step) instead of
+          # invoking its own `build:` directive. See header comment in
+          # tests/compose.yaml.
+          WAVEHOUSE_IMAGE: wavehouse:e2e
         run: make test-e2e
