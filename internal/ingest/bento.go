@@ -77,6 +77,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			Action    string `json:"action"`
 			TableName string `json:"table_name"`
 			ID        string `json:"id"`
+			Data      json.RawMessage `json:"data"` // Handles lowercase
+			DataCap   json.RawMessage `json:"Data"`
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.Error("rejecting message: invalid JSON", "error", err)
@@ -150,7 +152,17 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		// Insert case
-		msg := service.NewMessage(m.Data())
+		payload := raw.Data
+		if len(payload) == 0 {
+			payload = raw.DataCap
+		}
+		if len(payload) == 0 {
+			// Fallback to the whole message if it was flattened
+			payload = m.Data()
+		}
+
+		// Insert case
+		msg := service.NewMessage(payload)
 
 		msg = msg.WithContext(msgCtx)
 
@@ -400,8 +412,6 @@ output:
             - mapping: |
                 meta bento_start_time = meta("bento_start_time")
                 meta table_name = meta("table_name")
-                root = this.data
-                root.received_timestamp = deleted()
     - nats_dlq_bridge: {}
 `
 
