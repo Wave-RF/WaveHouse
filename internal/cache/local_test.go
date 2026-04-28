@@ -67,9 +67,9 @@ func TestLocalCache_Overwrite(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	_ = c.Set(ctx, "key", []byte("v1"), 10*time.Second)
+	require.NoError(t, c.Set(ctx, "key", []byte("v1"), 10*time.Second))
 	c.Wait()
-	_ = c.Set(ctx, "key", []byte("v2"), 10*time.Second)
+	require.NoError(t, c.Set(ctx, "key", []byte("v2"), 10*time.Second))
 	c.Wait()
 
 	val, _, err := c.Get(ctx, "key")

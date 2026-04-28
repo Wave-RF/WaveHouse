@@ -127,7 +127,7 @@ make coverage   # Matches the CI `Test` job (race detector; -p 1 in CI for packa
 
 If `make ci` passes, your commit has crossed the same gates CI will run. If it fails, fix it before pushing — don't rely on CI to surface issues that took seconds to catch locally.
 
-For workflow-only changes where `make ci` isn't relevant, at minimum run `actionlint .github/workflows/*.yml` and read through your YAML diff line-by-line before pushing; CI's own billing makes "push and see" for workflow-file iteration especially wasteful.
+For workflow-only changes where `make ci` isn't relevant, manually read through your YAML diff line-by-line before pushing. If you already have `actionlint` installed locally, also run `actionlint .github/workflows/*.yml`; CI's own billing makes "push and see" for workflow-file iteration especially wasteful.
 
 ### If local passes but CI fails
 
