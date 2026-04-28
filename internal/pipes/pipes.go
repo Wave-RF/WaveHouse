@@ -338,7 +338,7 @@ func (s *Store) Watch(ctx context.Context) {
 				s.mu.Unlock()
 
 				s.logger.Info("pipe updated via cluster sync", "name", entry.Key())
-				
+
 			case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
 				s.mu.Lock()
 				delete(s.cached, entry.Key())

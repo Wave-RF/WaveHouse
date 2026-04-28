@@ -2,9 +2,9 @@ package pipes
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
-    "encoding/json"
 	"testing"
 	"time"
 
@@ -281,8 +281,8 @@ type mockWatcher struct {
 
 func (m *mockWatcher) Updates() <-chan jetstream.KeyValueEntry {
 	return m.updates
-
 }
+
 func (m *mockWatcher) Stop() error {
 	return nil
 }
@@ -292,8 +292,8 @@ type mockKVEntry struct {
 	key   string
 	val   []byte
 	op    jetstream.KeyValueOp
-	rev   uint64					// Keeps track of any updates to a pipe (version number)
-	delta uint64					// Keeps track of how many more updates are waiting in the queue behind the current one
+	rev   uint64 // Keeps track of any updates to a pipe (version number)
+	delta uint64 // Keeps track of how many more updates are waiting in the queue behind the current one
 }
 
 func (m *mockKVEntry) Bucket() string {
@@ -336,7 +336,7 @@ func (m *mockKV) WatchAll(ctx context.Context, opts ...jetstream.WatchOpt) (jets
 
 func TestStore_Watch_SyncsCluster(t *testing.T) {
 	t.Parallel()
-	
+
 	// Setup the mock NATS watcher
 	updatesCh := make(chan jetstream.KeyValueEntry)
 	watcher := &mockWatcher{updates: updatesCh}
@@ -384,7 +384,7 @@ func TestStore_Watch_SyncsCluster(t *testing.T) {
 
 func TestStore_Watch_NilKV(t *testing.T) {
 	t.Parallel()
-	
+
 	// If the Store is purely in-memory (no NATS configured), Watch should exit cleanly.
 	store := NewMemoryStore()
 	ctx, cancel := context.WithCancel(context.Background())
