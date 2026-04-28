@@ -50,7 +50,7 @@ jobs:
   mirror:
     # Only on our project.
     if: github.event.projects_v2_item.project_node_id == 'PVT_kwDOCdKSOc4BUEKD'
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     steps:
       - name: Guard — require PROJECT_BOARD_TOKEN
         env:
