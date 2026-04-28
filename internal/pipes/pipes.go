@@ -325,21 +325,27 @@ func (s *Store) Watch(ctx context.Context) {
 				continue
 			}
 
-			s.mu.Lock()
 			switch entry.Operation() {
 			case jetstream.KeyValuePut:
 				var q NamedQuery
 				if err := json.Unmarshal(entry.Value(), &q); err != nil {
 					s.logger.Error("failed to unmarshal pipe from kv watch", "key", entry.Key(), "error", err)
-				} else {
-					s.cached[entry.Key()] = &q
-					s.logger.Info("pipe updated via cluster sync", "name", entry.Key())
+					continue
 				}
+
+				s.mu.Lock()
+				s.cached[entry.Key()] = &q
+				s.mu.Unlock()
+
+				s.logger.Info("pipe updated via cluster sync", "name", entry.Key())
+				
 			case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
+				s.mu.Lock()
 				delete(s.cached, entry.Key())
+				s.mu.Unlock()
+
 				s.logger.Info("pipe deleted via cluster sync", "name", entry.Key())
 			}
-			s.mu.Unlock()
 		}
 	}
 }

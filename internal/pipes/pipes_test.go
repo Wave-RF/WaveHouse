@@ -352,9 +352,6 @@ func TestStore_Watch_SyncsCluster(t *testing.T) {
 	// Start the watcher in the background
 	go store.Watch(ctx)
 
-	// Yield briefly to let the background goroutine start
-	time.Sleep(10 * time.Millisecond)
-
 	// Simulate NATS sending a "Put" (A new Pipe was created)
 	newPipe := NamedQuery{Name: "test_pipe", SQL: "SELECT 1"}
 	data, err := json.Marshal(newPipe)
@@ -366,12 +363,12 @@ func TestStore_Watch_SyncsCluster(t *testing.T) {
 		op:  jetstream.KeyValuePut,
 	}
 
-	// Wait for the background goroutine to process the channel
-	time.Sleep(10 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return store.Get("test_pipe") != nil
+	}, 1*time.Second, 10*time.Millisecond, "Pipe should have been added to cache by watcher")
 
 	// Verify the pipe is now in local memory
 	cached := store.Get("test_pipe")
-	require.NotNil(t, cached, "Pipe should have been added to cache by watcher")
 	assert.Equal(t, "SELECT 1", cached.SQL)
 
 	// Simulate NATS sending a "Delete" (A Pipe was removed)
@@ -380,10 +377,9 @@ func TestStore_Watch_SyncsCluster(t *testing.T) {
 		op:  jetstream.KeyValueDelete,
 	}
 
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify the pipe was removed from local memory
-	assert.Nil(t, store.Get("test_pipe"), "Pipe should have been removed from cache by watcher")
+	require.Eventually(t, func() bool {
+		return store.Get("test_pipe") == nil
+	}, 1*time.Second, 10*time.Millisecond, "Pipe should have been removed from cache by watcher")
 }
 
 func TestStore_Watch_NilKV(t *testing.T) {
