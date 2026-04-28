@@ -37,7 +37,7 @@ concurrency:
 jobs:
   label:
     name: Apply labels
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b  # v6.0.1
         with:

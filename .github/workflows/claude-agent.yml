@@ -36,7 +36,7 @@ concurrency:
 jobs:
   claude:
     name: Run Claude
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     # Gate: must be a trusted actor AND either mention @claude or apply
     # the `agent` label. The author_association path differs per event
     # so each branch is explicit.
