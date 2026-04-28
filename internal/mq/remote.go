@@ -69,7 +69,7 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-		msgCtx := observability.ExtractNATS(context.Background(), m)
+		msgCtx := observability.ExtractNATS(ctx, m)
 
 		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(),
 			// ACK

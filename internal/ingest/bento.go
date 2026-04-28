@@ -82,14 +82,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.Error("rejecting message: invalid JSON", "error", err)
-			_ = m.DoubleAck(ctx) // Drop — not retryable.
+			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+				slog.Warn("double ack failed for dropped message", "error", doubleAckErr)
+			}
 			continue
 		}
 
 		// Reject messages with no table name.
 		if raw.TableName == "" {
 			slog.Error("rejecting message: empty table_name")
-			_ = m.DoubleAck(ctx)
+			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+				slog.Warn("double ack failed for dropped message", "error", doubleAckErr)
+			}
 			continue
 		}
 
@@ -97,7 +101,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			_ = m.DoubleAck(ctx)
+			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+				slog.Warn("double ack failed for dropped message", "error", doubleAckErr)
+			}
 			continue
 		}
 
@@ -145,7 +151,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"table", raw.TableName,
 					"id", raw.ID,
 				)
-				_ = m.DoubleAck(ctx)
+				if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+					slog.Warn("double ack failed for processed delete message", "error", doubleAckErr)
+				}
 			}
 			span.End()
 			continue
@@ -273,7 +281,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		slog.Warn("Failed to parse bento_start_time int", "startStr", startStr, "error", err)
 	}
 	// 2. Extract original API trace context and setup Tracer
-	parentCtx := batch[0].Context()
+	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(batch[0].Context()))
 	tracer := otel.Tracer("wavehouse-worker")
 
 	// 3. RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
