@@ -423,7 +423,21 @@ jobs:
           # author has explicitly re-requested, defeating the
           # re_requested signal. Assignees still get reconciled either
           # way (gap-repair path). (Copilot R9 flagged.)
-          request-review: ${{ steps.pr-status.outputs.promote == 'true' }}
+          #
+          # On the SKIP_BOARD path (no PROJECT_BOARD_TOKEN — fork PRs,
+          # un-tokened environments) the pr-status step is skipped and
+          # its `promote` output is empty, so the equality check above
+          # collapses to false. Without the SKIP_BOARD escape hatch,
+          # `request-review` would be permanently false there:
+          # assignees set, but no GitHub review-request, so the
+          # reviewer never gets notified and `dismiss_stale_reviews_on_push`
+          # has nothing to dismiss. We have no way to distinguish
+          # first-bot-clean from re-eval in that environment, so
+          # default to "request" — the composite action no-ops if
+          # the reviewer already has an outstanding request, making
+          # re-spam after CHANGES_REQUESTED the only remaining risk.
+          # (Claude review flagged 2026-04-28.)
+          request-review: ${{ steps.pr-status.outputs.promote == 'true' || env.SKIP_BOARD == 'true' }}
 
       - name: Linked issues → In review (reeval)
         if: steps.botclean.outputs.clean == 'true' && env.SKIP_BOARD != 'true' && steps.pr-status.outputs.promote == 'true'

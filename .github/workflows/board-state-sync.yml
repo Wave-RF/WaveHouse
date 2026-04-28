@@ -153,14 +153,27 @@ jobs:
           # the "Development"-linked PRs come from
           # `closedByPullRequestsReferences` (the inverse edge).
           if [ "$CONTENT_TYPE" = "PullRequest" ]; then
-            counterparts=$(gh api graphql -f query='query($id: ID!) {
+            # Capture the full response first, then explicitly check
+            # `.errors`. Inline `--jq` would silently turn a GraphQL
+            # error into empty output — taking the "no linked
+            # counterpart" path and producing a silent no-op. Match
+            # the Issue-side pattern below for symmetry. (Claude
+            # review flagged 2026-04-28.)
+            pr_resp=$(gh api graphql -f query='query($id: ID!) {
                 node(id: $id) {
                   ... on PullRequest {
                     closingIssuesReferences(first: 50) { nodes { id } }
                   }
                 }
-              }' -F id="$CONTENT_NODE_ID" \
-              --jq '.data.node.closingIssuesReferences.nodes[].id')
+              }' -F id="$CONTENT_NODE_ID")
+
+            graphql_errors=$(echo "$pr_resp" | jq -c '.errors // empty')
+            if [ -n "$graphql_errors" ]; then
+              echo "::error::GraphQL error querying PR counterparts for $CONTENT_NODE_ID: $graphql_errors"
+              exit 1
+            fi
+
+            counterparts=$(echo "$pr_resp" | jq -r '.data.node.closingIssuesReferences.nodes[].id')
           elif [ "$CONTENT_TYPE" = "Issue" ]; then
             # `closedByPullRequestsReferences` is the inverse edge of
             # the PR's `closingIssuesReferences`. It returns the PRs
