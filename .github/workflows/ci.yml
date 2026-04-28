@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Default `pull_request` types are [opened, synchronize, reopened]
+    # which do NOT include `ready_for_review`. Without it, flipping a
+    # PR from draft → ready doesn't re-trigger CI, so the e2e job
+    # (gated on `draft == false`) silently skips on the existing run.
+    # Adding `ready_for_review` ensures the full suite runs at the
+    # moment the PR becomes review-ready.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
 permissions:
