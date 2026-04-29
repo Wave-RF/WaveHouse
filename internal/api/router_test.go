@@ -237,3 +237,99 @@ func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "unauthorized")
 	assertJSONErrorResponse(t, w)
 }
+
+func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
+	t.Parallel()
+
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+	deps := Dependencies{
+		Ingest: NewIngestHandler(reg, pub),
+		Query:  &QueryHandler{},
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
+		Health: &HealthHandler{},
+		Schema: NewSchemaHandler(reg),
+		AuthMW: func(next http.Handler) http.Handler { return next },
+	}
+	router := NewRouter(deps)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/no-such-path", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertJSONErrorResponse(t, rec)
+}
+
+func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
+	t.Parallel()
+
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+	deps := Dependencies{
+		Ingest: NewIngestHandler(reg, pub),
+		Query:  &QueryHandler{},
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
+		Health: &HealthHandler{},
+		Schema: NewSchemaHandler(reg),
+		AuthMW: func(next http.Handler) http.Handler { return next },
+	}
+	router := NewRouter(deps)
+
+	// /health is registered for GET only; POST should hit MethodNotAllowed.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/health", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assertJSONErrorResponse(t, rec)
+}
+
+func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
+	t.Parallel()
+
+	handler := jsonRecoverer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assertJSONErrorResponse(t, rec)
+	assert.Contains(t, rec.Body.String(), "internal server error")
+}
+
+func TestJSONRecoverer_NoPanicPassthrough(t *testing.T) {
+	t.Parallel()
+
+	handler := jsonRecoverer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusTeapot, rec.Code)
+}
+
+func TestJSONRecoverer_AbortHandlerRepanics(t *testing.T) {
+	t.Parallel()
+
+	handler := jsonRecoverer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		handler.ServeHTTP(rec, req)
+	}, "ErrAbortHandler must propagate so the server's serve loop can terminate the connection")
+}

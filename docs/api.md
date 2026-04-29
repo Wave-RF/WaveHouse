@@ -33,7 +33,7 @@ Policies support Hasura-style row-level and column-level permissions with JWT cl
 
 ### Error Responses
 
-Every error response from `/v1/*` endpoints carries a JSON body and the following headers:
+Error responses from WaveHouse carry a JSON body and the following headers:
 
 ```text
 Content-Type: application/json
@@ -46,9 +46,18 @@ The body is always an object with a single `error` field describing the failure:
 {"error": "invalid json"}
 ```
 
-This applies to validation errors (4xx), permission denials (403), not-found responses (404), and server errors (5xx). Strict clients can rely on the `Content-Type` to branch on response shape — historically some error paths defaulted to `text/plain` because they were emitted via `http.Error`; that has been corrected so every JSON body carries the matching media type.
+This contract holds for:
 
-The per-endpoint error tables below list the error bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
+- Handler-emitted errors — validation (4xx), permission denials (403), not-found (404), backend errors (5xx).
+- Router-level **404 Not Found** when the URL does not match any registered route.
+- Router-level **405 Method Not Allowed** when the URL matches a route but the method is not registered.
+- Server-level **500 Internal Server Error** when a handler panics — recovered, logged with stack, and reported to the client as JSON.
+
+Historically some error paths defaulted to `text/plain` because they were emitted via `http.Error` or chi's default handlers; those paths now route through a shared `writeJSONError` helper so strict clients can branch on `Content-Type` consistently.
+
+The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
+
+> **Caveat — WebSocket upgrade failures.** A failed WebSocket upgrade on `GET /v1/stream/ws` (e.g., wrong method, missing `Upgrade` header, rejected `Origin`) is rejected at the HTTP/1.1 → WebSocket negotiation layer by the `coder/websocket` library, which writes a `text/plain` body. This sits below the application's error contract — clients negotiating a WebSocket should branch on the upgrade-handshake outcome rather than the response body.
 
 ## Endpoints
 

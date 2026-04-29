@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -38,8 +40,19 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
+	r.Use(jsonRecoverer)
 	r.Use(corsMiddleware(deps.CORSOrigins))
+
+	// Route the chi router's own 404/405 paths through writeJSONError so
+	// hits to unknown URLs and unsupported methods carry the same JSON
+	// error contract as handler-emitted errors. Without this chi falls
+	// back to http.Error / empty bodies and the response is text/plain.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	})
 
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +135,38 @@ func NewRouter(deps Dependencies) http.Handler {
 	})
 
 	return r
+}
+
+// jsonRecoverer recovers from panics in downstream handlers and emits a
+// JSON 500 via writeJSONError instead of chi/middleware.Recoverer's
+// empty-bodied 500 (which leaves Content-Type at the stdlib default).
+// Panics are logged with stack and request metadata. http.ErrAbortHandler
+// is re-panicked per the chi convention so the server's serve loop still
+// terminates the connection cleanly.
+func jsonRecoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			rvr := recover()
+			if rvr == nil {
+				return
+			}
+			if err, ok := rvr.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				panic(rvr)
+			}
+			// slog uses structured key-value pairs and its TextHandler /
+			// JSONHandler escape control characters in string values, so
+			// path/method/err carry no log-injection risk despite gosec's
+			// taint heuristic.
+			slog.LogAttrs(r.Context(), slog.LevelError, "panic recovered in handler",
+				slog.Any("err", rvr),
+				slog.String("stack", string(debug.Stack())),
+				slog.String("path", r.URL.Path),
+				slog.String("method", r.Method),
+			)
+			writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // RequireRole returns middleware that restricts access to the given roles.
