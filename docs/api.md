@@ -40,11 +40,13 @@ Content-Type: application/json
 X-Content-Type-Options: nosniff
 ```
 
-The body is always an object with a single `error` field describing the failure:
+The body is always a JSON object that includes an `error` field describing the failure:
 
 ```json
 {"error": "invalid json"}
 ```
+
+Some endpoints (notably `/ready`) include additional fields like `status` alongside `error`; the guarantee is that an `error` field is always present and parseable.
 
 This contract holds for:
 

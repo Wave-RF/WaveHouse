@@ -20,6 +20,8 @@ func TestHealth_Liveness(t *testing.T) {
 	h.Liveness(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "ok", resp["status"])
@@ -34,6 +36,8 @@ func TestHealth_Readiness_NilConn(t *testing.T) {
 	h.Readiness(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "ready", resp["status"])

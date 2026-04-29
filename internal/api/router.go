@@ -143,8 +143,15 @@ func NewRouter(deps Dependencies) http.Handler {
 // Panics are logged with stack and request metadata. http.ErrAbortHandler
 // is re-panicked per the chi convention so the server's serve loop still
 // terminates the connection cleanly.
+//
+// If the handler had already written headers or body bytes before the
+// panic, the response is not patched: the headers are committed to the
+// wire and a JSON 500 appended after them would corrupt the partial
+// response. In that case the panic is still logged, but the connection
+// is left to terminate as-is.
 func jsonRecoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		defer func() {
 			rvr := recover()
 			if rvr == nil {
@@ -153,19 +160,21 @@ func jsonRecoverer(next http.Handler) http.Handler {
 			if err, ok := rvr.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				panic(rvr)
 			}
-			// slog uses structured key-value pairs and its TextHandler /
-			// JSONHandler escape control characters in string values, so
-			// path/method/err carry no log-injection risk despite gosec's
-			// taint heuristic.
+			// slog's structured key-value API and its built-in handlers
+			// escape control characters in string values, so path/method/
+			// err carry no log-injection risk despite the linter's taint
+			// heuristic on slog calls inside an *http.Request scope.
 			slog.LogAttrs(r.Context(), slog.LevelError, "panic recovered in handler",
 				slog.Any("err", rvr),
 				slog.String("stack", string(debug.Stack())),
 				slog.String("path", r.URL.Path),
 				slog.String("method", r.Method),
 			)
-			writeJSONError(w, http.StatusInternalServerError, "internal server error")
+			if ww.Status() == 0 && ww.BytesWritten() == 0 {
+				writeJSONError(ww, http.StatusInternalServerError, "internal server error")
+			}
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(ww, r)
 	})
 }
 
