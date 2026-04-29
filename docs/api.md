@@ -53,13 +53,15 @@ This contract holds for:
 - Handler-emitted errors — validation (4xx), permission denials (403), not-found (404), backend errors (5xx).
 - Router-level **404 Not Found** when the URL does not match any registered route.
 - Router-level **405 Method Not Allowed** when the URL matches a route but the method is not registered.
-- Server-level **500 Internal Server Error** when a handler panics — recovered, logged with stack, and reported to the client as JSON.
+- Server-level **500 Internal Server Error** when a handler panics — recovered, logged with stack, and reported to the client as JSON **when the handler has not yet committed any response headers or body bytes**.
 
 Historically some error paths defaulted to `text/plain` because they were emitted via `http.Error` or chi's default handlers; those paths now route through a shared `writeJSONError` helper so strict clients can branch on `Content-Type` consistently.
 
 The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
 
 > **Caveat — WebSocket upgrade failures.** A failed WebSocket upgrade on `GET /v1/stream/ws` (e.g., wrong method, missing `Upgrade` header, rejected `Origin`) is rejected at the HTTP/1.1 → WebSocket negotiation layer by the `coder/websocket` library, which writes a `text/plain` body. This sits below the application's error contract — clients negotiating a WebSocket should branch on the upgrade-handshake outcome rather than the response body.
+>
+> **Caveat — streaming / partial-write responses.** For SSE, streaming endpoints, WebSockets after upgrade, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
 
 ## Endpoints
 
