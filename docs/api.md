@@ -29,6 +29,27 @@ WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim
 
 Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
+## Response Format
+
+### Error Responses
+
+Every error response from `/v1/*` endpoints carries a JSON body and the following headers:
+
+```text
+Content-Type: application/json
+X-Content-Type-Options: nosniff
+```
+
+The body is always an object with a single `error` field describing the failure:
+
+```json
+{"error": "invalid json"}
+```
+
+This applies to validation errors (4xx), permission denials (403), not-found responses (404), and server errors (5xx). Strict clients can rely on the `Content-Type` to branch on response shape — historically some error paths defaulted to `text/plain` because they were emitted via `http.Error`; that has been corrected so every JSON body carries the matching media type.
+
+The per-endpoint error tables below list the error bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
+
 ## Endpoints
 
 ### `GET /health` — Liveness Probe
