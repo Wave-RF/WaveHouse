@@ -53,7 +53,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if !allowed {
-					http.Error(w, `{"error":"raw SQL queries require admin role"}`, http.StatusForbidden)
+					writeJSONError(w, http.StatusForbidden, "raw SQL queries require admin role")
 					return
 				}
 			}
@@ -62,11 +62,11 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	var req queryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if req.SQL == "" {
-		http.Error(w, `{"error":"missing sql"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing sql")
 		return
 	}
 
@@ -102,7 +102,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 

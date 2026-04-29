@@ -52,6 +52,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing table")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_UnknownTable(t *testing.T) {
@@ -63,6 +64,7 @@ func TestStructuredQuery_UnknownTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "unknown table")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_InvalidJSON(t *testing.T) {
@@ -77,6 +79,7 @@ func TestStructuredQuery_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_PolicyForbidden(t *testing.T) {
@@ -104,6 +107,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
@@ -133,6 +137,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "column")
 	assert.Contains(t, w.Body.String(), "not allowed")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
@@ -168,6 +173,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "aggregation")
 	assert.Contains(t, w.Body.String(), "not allowed")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {

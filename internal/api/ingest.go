@@ -51,27 +51,27 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	if table == "" {
 		slog.ErrorContext(ctx, "missing table parameter in request")
-		http.Error(w, `{"error":"missing table"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
 
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		slog.WarnContext(ctx, "unknown table requested", "table", table)
-		http.Error(w, fmt.Sprintf(`{"error":"unknown table: %s"}`, table), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
 		return
 	}
 
 	var data map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := discovery.Validate(schema, data); err != nil {
 		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -83,14 +83,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		perms := policy.Evaluate(p, role, table, "insert", claims)
 		if !perms.Allowed {
 			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, "forbidden")
 			return
 		}
 		// Check column permissions — reject disallowed columns.
 		for col := range data {
 			if !perms.IsColumnAllowed(col) {
 				slog.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
-				http.Error(w, fmt.Sprintf(`{"error":"column %q not allowed for insert"}`, col), http.StatusForbidden)
+				writeJSONError(w, http.StatusForbidden, fmt.Sprintf("column %q not allowed for insert", col))
 				return
 			}
 		}
@@ -99,7 +99,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			if actual, ok := data[col]; ok {
 				if fmt.Sprint(actual) != fmt.Sprint(requiredVal) {
 					slog.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
-					http.Error(w, fmt.Sprintf(`{"error":"check failed for column %q"}`, col), http.StatusForbidden)
+					writeJSONError(w, http.StatusForbidden, fmt.Sprintf("check failed for column %q", col))
 					return
 				}
 			} else {
@@ -116,7 +116,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			dup, err := h.Dedup.CheckAndMark(ctx, eventID)
 			if err != nil {
 				slog.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
-				http.Error(w, `{"error":"dedupe failed"}`, http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, "dedupe failed")
 				return
 			}
 			if dup {
@@ -137,7 +137,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
-		http.Error(w, `{"error":"marshal failed"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "marshal failed")
 		return
 	}
 
@@ -146,11 +146,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
 			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)
 			w.Header().Set("Retry-After", "30")
-			http.Error(w, `{"error":"service unavailable"}`, http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "service unavailable")
 			return
 		}
 		slog.ErrorContext(ctx, "failed to publish to NATS", "error", err, "subject", subject)
-		http.Error(w, `{"error":"publish failed"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "publish failed")
 		return
 	}
 

@@ -18,11 +18,13 @@ func NewHealthHandler(chConn driver.Conn) *HealthHandler {
 
 func (h *HealthHandler) Liveness(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	if h.CHConn != nil {
 		if err := h.CHConn.Ping(r.Context()); err != nil {
