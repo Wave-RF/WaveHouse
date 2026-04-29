@@ -37,7 +37,7 @@ jobs:
       github.event.pull_request.draft == false
       && github.actor != 'dependabot[bot]'
       && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     permissions:
       contents: read
       pull-requests: write

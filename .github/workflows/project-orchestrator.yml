@@ -94,7 +94,7 @@ env:
 
 jobs:
   orchestrate:
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     steps:
       - name: Guard — require PROJECT_BOARD_TOKEN
         env:

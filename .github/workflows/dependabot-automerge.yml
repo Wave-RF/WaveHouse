@@ -29,7 +29,7 @@ permissions:
 jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     steps:
       - name: Fetch Dependabot metadata
         id: meta
