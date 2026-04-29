@@ -12,6 +12,10 @@ on:
     # moment the PR becomes review-ready.
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
+  # Manual escape hatch for re-running CI on demand (e.g. when GitHub
+  # silently drops a `synchronize` event on a long-lived branch). Run
+  # via `gh workflow run CI --ref <branch>`.
+  workflow_dispatch:
 
 permissions:
   contents: write
