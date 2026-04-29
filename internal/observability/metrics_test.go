@@ -31,11 +31,18 @@ func TestRegisterSystemMetrics_NilInputs(t *testing.T) {
 	// They serialize against TestInitProvider_Shutdown (also non-parallel) for
 	// the same reason.
 
-	// Use an SDK meter provider so RegisterCallback actually runs.
+	// Use an SDK meter provider so RegisterCallback actually runs. Save and
+	// restore the prior global so this test doesn't leave the package's global
+	// pointing at a shut-down provider after cleanup. Same pattern as
+	// TestInitProvider_Shutdown in provider_test.go.
+	savedMP := otel.GetMeterProvider()
 	reader := metric.NewManualReader()
 	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		_ = mp.Shutdown(context.Background())
+		otel.SetMeterProvider(savedMP)
+	})
 
 	err := RegisterSystemMetrics(nil, nil)
 	require.NoError(t, err)
@@ -48,10 +55,14 @@ func TestRegisterSystemMetrics_NilInputs(t *testing.T) {
 
 func TestRegisterSystemMetrics_WithDedup(t *testing.T) {
 	// No t.Parallel(): see TestRegisterSystemMetrics_NilInputs.
+	savedMP := otel.GetMeterProvider()
 	reader := metric.NewManualReader()
 	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		_ = mp.Shutdown(context.Background())
+		otel.SetMeterProvider(savedMP)
+	})
 
 	dedup := &stubDeduplicator{stats: map[string]int64{
 		"pebble_wal_size":    1024,
@@ -75,10 +86,14 @@ func TestRegisterSystemMetrics_WithDedup(t *testing.T) {
 
 func TestRegisterSystemMetrics_NilDedupStats(t *testing.T) {
 	// No t.Parallel(): see TestRegisterSystemMetrics_NilInputs.
+	savedMP := otel.GetMeterProvider()
 	reader := metric.NewManualReader()
 	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		_ = mp.Shutdown(context.Background())
+		otel.SetMeterProvider(savedMP)
+	})
 
 	// Stats() returning nil must not panic inside the callback.
 	dedup := &stubDeduplicator{stats: nil}

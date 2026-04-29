@@ -152,7 +152,11 @@ func TestStore_Watch_PropagatesUpdates(t *testing.T) {
 	}, 3*time.Second, 20*time.Millisecond, "watcher never updated reader cache")
 
 	cancel()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not exit after context cancellation")
+	}
 }
 
 func TestStore_MemoryStore_Basics(t *testing.T) {
