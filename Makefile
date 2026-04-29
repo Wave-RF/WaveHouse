@@ -278,7 +278,7 @@ endif
 security: vulncheck ## Combined security scan (vulncheck + gosec via linter)
 	@echo "$(GREEN)==> Running gosec via golangci-lint...$(RESET)"
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)==> golangci-lint not found. Run 'make tools'.$(RESET)"; exit 1; }
-	@golangci-lint run --enable gosec --out-format colored-line-number ./...
+	@golangci-lint run --enable gosec ./...
 	@echo "$(GREEN)==> Security scan complete$(RESET)"
 
 deadcode: ## Find unreachable functions and unused code
@@ -309,7 +309,7 @@ size-report: build ## Show binary sizes for all targets
 size-tree: build-debug ## Top packages by size in the binary
 	@echo "$(GREEN)==> Binary size by package (debug build for DWARF accuracy):$(RESET)"
 	@echo ""
-	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
 		--format text --hide-sections bin/wavehouse 2>/dev/null
 
 size-treemap: build-debug ## Full binary size analysis → text + SVG + interactive HTML
@@ -317,13 +317,13 @@ size-treemap: build-debug ## Full binary size analysis → text + SVG + interact
 	@echo "  Note: debug builds add ~30%% DWARF metadata but package proportions match production."
 	@echo ""
 	@mkdir -p tmp/analysis
-	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
 		--format text --hide-sections bin/wavehouse 2>/dev/null
 	@echo ""
-	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
 		--format svg --output tmp/analysis/size-map.svg --hide-sections bin/wavehouse 2>/dev/null
 	@echo "  $(CYAN)SVG  → tmp/analysis/size-map.svg$(RESET)"
-	@go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
+	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
 		--format html --output tmp/analysis/size-map.html --hide-sections bin/wavehouse 2>/dev/null
 	@echo "  $(CYAN)HTML → tmp/analysis/size-map.html (interactive treemap)$(RESET)"
 	@if [ -z "$$CI" ]; then \

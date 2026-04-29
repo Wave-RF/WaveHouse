@@ -91,7 +91,7 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				params.Del("token")
 				r.URL.RawQuery = params.Encode()
 			} else {
-				http.Error(w, `{"error":"missing authorization"}`, http.StatusUnauthorized)
+				writeJSONError(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}
 
@@ -109,13 +109,13 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 			token, err := jwt.Parse(tokenStr, keyFunc)
 			if err != nil || !token.Valid {
-				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+				writeJSONError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
 
 			claims, ok := token.Claims.(jwt.MapClaims)
 			if !ok {
-				http.Error(w, `{"error":"invalid claims"}`, http.StatusUnauthorized)
+				writeJSONError(w, http.StatusUnauthorized, "invalid claims")
 				return
 			}
 

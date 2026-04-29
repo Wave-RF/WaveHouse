@@ -73,4 +73,5 @@ func TestSchema_Get_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "table not found")
+	assertJSONErrorResponse(t, w)
 }
