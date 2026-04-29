@@ -1,7 +1,6 @@
 package pipes
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -20,7 +19,7 @@ func silentLogger() *slog.Logger {
 func TestStore_NewStore_EmptyKV(t *testing.T) {
 	t.Parallel()
 	js := testutil.NewJetStream(t)
-	store, err := NewStore(context.Background(), js, "", silentLogger())
+	store, err := NewStore(t.Context(), js, "", silentLogger())
 	require.NoError(t, err)
 	assert.Empty(t, store.List())
 }
@@ -28,7 +27,7 @@ func TestStore_NewStore_EmptyKV(t *testing.T) {
 func TestStore_PutGet_BackedByKV(t *testing.T) {
 	t.Parallel()
 	js := testutil.NewJetStream(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	store, err := NewStore(ctx, js, "", silentLogger())
 	require.NoError(t, err)
@@ -49,7 +48,7 @@ func TestStore_PutGet_BackedByKV(t *testing.T) {
 func TestStore_Delete_BackedByKV(t *testing.T) {
 	t.Parallel()
 	js := testutil.NewJetStream(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	store, err := NewStore(ctx, js, "", silentLogger())
 	require.NoError(t, err)
@@ -70,7 +69,7 @@ func TestStore_Delete_BackedByKV(t *testing.T) {
 func TestStore_LoadFromDirectory_BootstrapsSQLFiles(t *testing.T) {
 	t.Parallel()
 	js := testutil.NewJetStream(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpha.sql"), []byte("SELECT 1"), 0o600))
@@ -91,7 +90,7 @@ func TestStore_LoadFromDirectory_BootstrapsSQLFiles(t *testing.T) {
 func TestStore_LoadFromDirectory_DoesNotOverwrite(t *testing.T) {
 	t.Parallel()
 	js := testutil.NewJetStream(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "q.sql"), []byte("SELECT from_file"), 0o600))

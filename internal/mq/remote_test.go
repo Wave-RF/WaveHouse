@@ -38,7 +38,7 @@ func TestRemoteNATS_PublishSubscribe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	var mu sync.Mutex

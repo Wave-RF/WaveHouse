@@ -28,7 +28,7 @@ func TestEmbeddedNATS_PublishSubscribe(t *testing.T) {
 	// but starting several in parallel still slows tests unnecessarily.
 	e := newTestEmbedded(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	var mu sync.Mutex
@@ -83,7 +83,7 @@ func TestEmbeddedNATS_SubscribeCancellation(t *testing.T) {
 	// cleanly without leaking goroutines or blocking.
 	e := newTestEmbedded(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	err := e.Subscribe(ctx, "ingest.cancel.x", "cancel-consumer", func(msg *Message) error {
 		msg.Ack()
 		return nil

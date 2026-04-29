@@ -1,7 +1,6 @@
 package mq
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -18,7 +17,7 @@ func TestMessage_AckNak(t *testing.T) {
 
 	var acked, naked int
 	msg := NewMessage(
-		context.Background(),
+		t.Context(),
 		"ingest.x",
 		[]byte("hi"),
 		time.Unix(1000, 0),
@@ -40,7 +39,7 @@ func TestMessage_NilCallbacks(t *testing.T) {
 	t.Parallel()
 
 	// Ack/Nak on a message with nil callbacks must be a no-op, not panic.
-	msg := NewMessage(context.Background(), "s", nil, time.Now(), nil, nil)
+	msg := NewMessage(t.Context(), "s", nil, time.Now(), nil, nil)
 	assert.NotPanics(t, msg.Ack)
 	assert.NotPanics(t, msg.Nak)
 }

@@ -62,8 +62,8 @@ func TestTraceHandler_AddsTraceIDs(t *testing.T) {
 
 	var buf bytes.Buffer
 	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	cap := &capturingHandler{Handler: base}
-	h := &TraceHandler{Handler: cap}
+	recorder := &capturingHandler{Handler: base}
+	h := &TraceHandler{Handler: recorder}
 
 	ctx, span := newTestTracer(t).Start(context.Background(), "op")
 	defer span.End()

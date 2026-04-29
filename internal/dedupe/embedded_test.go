@@ -57,7 +57,7 @@ func TestEmbeddedDeduplicator_OpenFailsOnInvalidPath(t *testing.T) {
 	// it needs a directory. This exercises the error branch of NewEmbedded.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "not-a-dir")
-	f, err := os.Create(path)
+	f, err := os.Create(path) //nolint:gosec // G304: path is rooted in t.TempDir()
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 

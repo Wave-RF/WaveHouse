@@ -14,10 +14,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// InjectNATS / ExtractNATS rely on the global text map propagator. The
+// production pipeline installs one via InitProvider; tests don't go through
+// that path, so install a standard composite propagator here.
+//
+// Safety: TestMain (or, here, package init) runs once before any test, so
+// this single write doesn't race with parallel test reads. The companion
+// risk — TestInitProvider_Shutdown overwriting the global mid-run — is
+// neutralised by that test's save/restore in provider_test.go.
 func init() {
-	// InjectNATS / ExtractNATS rely on the global text map propagator. The
-	// production pipeline installs one via InitProvider; tests don't go
-	// through that path, so install a standard composite propagator here.
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
 			propagation.TraceContext{},
