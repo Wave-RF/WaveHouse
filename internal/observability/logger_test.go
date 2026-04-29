@@ -46,24 +46,12 @@ func TestNewLogger_Text(t *testing.T) {
 	log.Warn("warn-msg")
 }
 
-// capturingHandler records the last slog.Record it saw for assertions.
-type capturingHandler struct {
-	slog.Handler
-	last slog.Record
-}
-
-func (c *capturingHandler) Handle(ctx context.Context, r slog.Record) error {
-	c.last = r
-	return c.Handler.Handle(ctx, r)
-}
-
 func TestTraceHandler_AddsTraceIDs(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	recorder := &capturingHandler{Handler: base}
-	h := &TraceHandler{Handler: recorder}
+	h := &TraceHandler{Handler: base}
 
 	ctx, span := newTestTracer(t).Start(context.Background(), "op")
 	defer span.End()

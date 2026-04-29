@@ -25,7 +25,11 @@ func (s *stubDeduplicator) Stats() map[string]int64                            {
 func (s *stubDeduplicator) Close() error                                       { return nil }
 
 func TestRegisterSystemMetrics_NilInputs(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): all three TestRegisterSystemMetrics_* tests mutate the
+	// global meter provider via otel.SetMeterProvider, and RegisterSystemMetrics
+	// reads it via otel.Meter — running them in parallel races on the global.
+	// They serialize against TestInitProvider_Shutdown (also non-parallel) for
+	// the same reason.
 
 	// Use an SDK meter provider so RegisterCallback actually runs.
 	reader := metric.NewManualReader()
@@ -43,8 +47,7 @@ func TestRegisterSystemMetrics_NilInputs(t *testing.T) {
 }
 
 func TestRegisterSystemMetrics_WithDedup(t *testing.T) {
-	t.Parallel()
-
+	// No t.Parallel(): see TestRegisterSystemMetrics_NilInputs.
 	reader := metric.NewManualReader()
 	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	otel.SetMeterProvider(mp)
@@ -71,8 +74,7 @@ func TestRegisterSystemMetrics_WithDedup(t *testing.T) {
 }
 
 func TestRegisterSystemMetrics_NilDedupStats(t *testing.T) {
-	t.Parallel()
-
+	// No t.Parallel(): see TestRegisterSystemMetrics_NilInputs.
 	reader := metric.NewManualReader()
 	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	otel.SetMeterProvider(mp)

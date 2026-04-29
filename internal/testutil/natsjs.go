@@ -13,9 +13,9 @@ import (
 // NewJetStream starts an in-process NATS server with JetStream and returns a
 // connected jetstream.JetStream handle. Cleanup is registered on t.
 //
-// Tests that need KV buckets (pipes.Store, policy.Store) should use this
-// helper — it avoids pulling the mq package into the test graph just to get
-// a working KV.
+// Lives in testutil so packages that need KV-backed tests (pipes.Store,
+// policy.Store) get one shared embedded-server setup instead of each
+// duplicating the natsserver / nats.Connect / jetstream.New dance.
 func NewJetStream(t *testing.T) jetstream.JetStream {
 	t.Helper()
 
