@@ -11,11 +11,11 @@ import (
 )
 
 // stubDeduplicator is a no-op dedupe.Deduplicator implementation for tests.
-// We can't import internal/dedupe here because that would create an import
-// cycle (dedupe already depends on nothing; observability depends on dedupe
-// via the Deduplicator interface it uses in RegisterSystemMetrics).
-// Actually dedupe doesn't import observability, so a direct dependency is
-// fine — but we keep this file free of dedupe-external behavior.
+// We use a local stub rather than testutil.MockDeduplicator because
+// testutil → mq → observability is an import cycle: observability cannot
+// pull in testutil even from test files (they live in package observability,
+// not observability_test). Keep the stub minimal — anything richer should
+// move into the dedupe package itself.
 type stubDeduplicator struct {
 	stats map[string]int64
 }

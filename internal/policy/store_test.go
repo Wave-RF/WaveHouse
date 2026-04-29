@@ -3,8 +3,6 @@ package policy
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,10 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func silentLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func simplePolicy() *Policy {
 	return &Policy{
@@ -38,7 +32,7 @@ func TestStore_NewStore_EmptyKV(t *testing.T) {
 	js := testutil.NewJetStream(t)
 	ctx := t.Context()
 
-	store, err := NewStore(ctx, js, "", silentLogger())
+	store, err := NewStore(ctx, js, "", testutil.NopLogger())
 	require.NoError(t, err)
 	assert.Nil(t, store.Get(), "policy should be nil when KV is empty and no bootstrap file")
 }
@@ -59,7 +53,7 @@ tables:
         allow_columns: [page, count]
 `), 0o600))
 
-	store, err := NewStore(t.Context(), js, path, silentLogger())
+	store, err := NewStore(t.Context(), js, path, testutil.NopLogger())
 	require.NoError(t, err)
 	p := store.Get()
 	require.NotNil(t, p)
@@ -73,7 +67,7 @@ func TestStore_NewStore_BootstrapMissingFileIsNotFatal(t *testing.T) {
 	js := testutil.NewJetStream(t)
 	// Non-existent bootstrap path should not error out — NewStore falls
 	// through with an empty cache.
-	store, err := NewStore(t.Context(), js, "/nonexistent/policy.yaml", silentLogger())
+	store, err := NewStore(t.Context(), js, "/nonexistent/policy.yaml", testutil.NopLogger())
 	require.NoError(t, err)
 	assert.Nil(t, store.Get())
 }
@@ -89,7 +83,7 @@ func TestStore_NewStore_BootstrapJSON(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0o600))
 
-	store, err := NewStore(t.Context(), js, path, silentLogger())
+	store, err := NewStore(t.Context(), js, path, testutil.NopLogger())
 	require.NoError(t, err)
 	require.NotNil(t, store.Get())
 	assert.Equal(t, "viewer", store.Get().DefaultRole)
@@ -99,7 +93,7 @@ func TestStore_PutGet_Roundtrip(t *testing.T) {
 	t.Parallel()
 
 	js := testutil.NewJetStream(t)
-	store, err := NewStore(t.Context(), js, "", silentLogger())
+	store, err := NewStore(t.Context(), js, "", testutil.NopLogger())
 	require.NoError(t, err)
 
 	require.NoError(t, store.Put(t.Context(), simplePolicy()))
@@ -108,7 +102,7 @@ func TestStore_PutGet_Roundtrip(t *testing.T) {
 	assert.Equal(t, "viewer", got.DefaultRole)
 
 	// A fresh store reading the same bucket should see the policy in KV.
-	store2, err := NewStore(t.Context(), js, "", silentLogger())
+	store2, err := NewStore(t.Context(), js, "", testutil.NopLogger())
 	require.NoError(t, err)
 	assert.NotNil(t, store2.Get())
 }
@@ -117,7 +111,7 @@ func TestStore_Put_ValidationError(t *testing.T) {
 	t.Parallel()
 
 	js := testutil.NewJetStream(t)
-	store, err := NewStore(t.Context(), js, "", silentLogger())
+	store, err := NewStore(t.Context(), js, "", testutil.NopLogger())
 	require.NoError(t, err)
 
 	// Invalid: negative max_rows.
@@ -137,9 +131,9 @@ func TestStore_Watch_PropagatesUpdates(t *testing.T) {
 	t.Parallel()
 
 	js := testutil.NewJetStream(t)
-	writer, err := NewStore(t.Context(), js, "", silentLogger())
+	writer, err := NewStore(t.Context(), js, "", testutil.NopLogger())
 	require.NoError(t, err)
-	reader, err := NewStore(t.Context(), js, "", silentLogger())
+	reader, err := NewStore(t.Context(), js, "", testutil.NopLogger())
 	require.NoError(t, err)
 
 	watchCtx, cancel := context.WithCancel(t.Context())
