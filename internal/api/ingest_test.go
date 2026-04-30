@@ -77,6 +77,7 @@ func TestIngest_MissingTable(t *testing.T) {
 	h.Handle(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing table")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestIngest_UnknownTable(t *testing.T) {
@@ -90,6 +91,7 @@ func TestIngest_UnknownTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "unknown table")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestIngest_InvalidJSON(t *testing.T) {
@@ -106,6 +108,7 @@ func TestIngest_InvalidJSON(t *testing.T) {
 	h.Handle(w, r)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestIngest_SchemaValidation_UnknownField(t *testing.T) {
@@ -175,6 +178,7 @@ func TestIngest_PublishError_503(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "30", w.Header().Get("Retry-After"))
+	assertJSONErrorResponse(t, w)
 }
 
 func TestIngest_PublishError_500(t *testing.T) {
@@ -188,6 +192,7 @@ func TestIngest_PublishError_500(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "publish failed")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_Forbidden(t *testing.T) {
@@ -214,6 +219,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_ColumnDenied(t *testing.T) {

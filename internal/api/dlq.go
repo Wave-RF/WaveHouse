@@ -40,7 +40,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 
 	info, err := stream.Info(r.Context(), jetstream.WithSubjectFilter(subjectFilter))
 	if err != nil {
-		http.Error(w, `{"error":"stream info failed"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "stream info failed")
 		return
 	}
 
