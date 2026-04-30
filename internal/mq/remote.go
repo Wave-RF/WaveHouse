@@ -76,7 +76,7 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 				return m.DoubleAck(ctx)
 			},
 			func() error {
-				return m.Ack() 
+				return m.Ack()
 			},
 			func(ctx context.Context) error {
 				return m.Nak()

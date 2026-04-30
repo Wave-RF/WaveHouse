@@ -7,13 +7,13 @@ import (
 
 // Message represents a message received from the queue.
 type Message struct {
-	Ctx       	context.Context
-	Subject   	string
-	Data      	[]byte
-	Timestamp 	time.Time
-	ack       	func(ctx context.Context) error
-	asyncAckFn 	func() error
-	nak       	func(ctx context.Context) error
+	Ctx        context.Context
+	Subject    string
+	Data       []byte
+	Timestamp  time.Time
+	ack        func(ctx context.Context) error
+	asyncAckFn func() error
+	nak        func(ctx context.Context) error
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
