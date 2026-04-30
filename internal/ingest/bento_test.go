@@ -612,21 +612,21 @@ func TestClickhouseOutput_WriteBatch_UnsafeTableName(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 	t.Parallel()
-	
+
 	// Mock an HTTP 200 OK response from ClickHouse
 	mockTransport := &mockRoundTripper{
 		roundTripFn: func(req *http.Request) (*http.Response, error) {
 			// Verify URL was constructed correctly
 			assert.Equal(t, "POST", req.Method)
 			assert.Contains(t, req.URL.String(), "database=test_db")
-			
+
 			// Verify URL encoding and backticks
 			assert.Contains(t, req.URL.String(), "INSERT+INTO+%60test_table%60")
-			
+
 			// Verify headers
 			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))
 			assert.Equal(t, "test_pass", req.Header.Get("X-ClickHouse-Key"))
-			
+
 			return &http.Response{
 				StatusCode: 200,
 				Body:       io.NopCloser(bytes.NewBufferString("OK")),
@@ -653,7 +653,7 @@ func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_HTTPErrorResponse(t *testing.T) {
 	t.Parallel()
-	
+
 	// Mock an HTTP 400 Bad Request response from ClickHouse
 	mockTransport := &mockRoundTripper{
 		roundTripFn: func(req *http.Request) (*http.Response, error) {
@@ -678,7 +678,7 @@ func TestClickhouseOutput_WriteBatch_HTTPErrorResponse(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_NetworkError(t *testing.T) {
 	t.Parallel()
-	
+
 	// Mock a hard network failure (e.g. connection refused)
 	mockTransport := &mockRoundTripper{
 		roundTripFn: func(req *http.Request) (*http.Response, error) {
