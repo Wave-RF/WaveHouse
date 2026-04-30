@@ -65,7 +65,7 @@ func (m *bentoMockMsg) DoubleAck(ctx context.Context) error {
 
 func (m *bentoMockMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	// Return an empty, safe metadata object to prevent nil pointer panics
-	return &jetstream.MsgMetadata{}, nil
+	return &jetstream.MsgMetadata{Timestamp: time.Now()}, nil
 }
 
 // bentoMockIter satisfies jetstream.MessagesContext for testing jsInput.

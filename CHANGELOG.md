@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 ### Added
+- Created custom `clickhouseOutput` for the Bento ingest pipeline to handle secure SQL interpolation and retroactive trace spanning.
+- Hub bridge uses new `AsyncAck()` (fire-and-forget) to reduce latency and overhead during fan-out.
+
+### Changed
+- **Breaking:** Changed `mq.Message` `Ack` and `Nak` signatures to accept `context.Context` to support graceful shutdowns during NATS consumer drains.
+- Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation before releasing memory buffers.
+
+### Added
 - Configurable NATS JetStream stream names via `WH_MQ_STREAM_NAME` to support multi-tenant deployments.
 - **Unit tests for previously-untested packages** (`internal/observability`, `internal/mq`, `internal/dedupe`) and new KV-backed tests for `internal/policy.Store` + `internal/pipes.Store`. Also adds `testutil.NewJetStream(t)` — a shared helper that spins up an in-process NATS + JetStream for tests that need a real `jetstream.JetStream` handle. Per-package coverage: observability 84%, mq 78%, policy 89.6%, pipes 85.2%, dedupe 61.2% (the ScyllaDB paths in `distributed.go` and `schema.go` remain integration-only).
 - **Composite actions for board operations** (`.github/actions/board-upsert-status`, `.github/actions/assign-and-request-review`, `.github/actions/set-linked-issues-status`): reusable building blocks for idempotent "upsert item on the Task Board + set Status," "assign PR reviewers + request their review as a pair," and "mirror status to all linked issues" across workflows. Replaces ~200 lines of duplicated GraphQL/gh-project bash between `project-orchestrator.yml` and `dependabot-automerge.yml`, and gives the new `board-state-sync.yml` a single place to debug board interactions.

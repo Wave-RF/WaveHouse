@@ -71,7 +71,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			return nil, nil, service.ErrNotConnected
 		}
 
-		msgCtx := observability.ExtractNATS(context.Background(), m)
+		msgCtx := observability.ExtractNATS(ctx, m)
 		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
@@ -170,7 +170,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			payload = m.Data()
 		}
 
-		// Insert case
 		msg := service.NewMessage(payload)
 
 		msg = msg.WithContext(msgCtx)
@@ -269,6 +268,10 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return fmt.Errorf("missing table_name in message metadata")
 	}
 
+	if !safeIdentifierRe.MatchString(tableName) {
+		return fmt.Errorf("invalid table name: %q", tableName)
+	}
+
 	// 1. Fetch the timestamp stamped during jsInput.Read
 	startStr, _ := firstMsg.MetaGet("bento_start_time")
 
@@ -302,10 +305,6 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		}
 		buf.Write(data)
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
-	}
-
-	if !safeIdentifierRe.MatchString(tableName) {
-		return fmt.Errorf("invalid table name: %q", tableName)
 	}
 
 	q := url.Values{}
