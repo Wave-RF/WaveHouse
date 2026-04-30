@@ -1,0 +1,128 @@
+name: Dependabot auto-merge
+
+# Auto-approves and enables auto-merge for Dependabot PRs on patch-
+# and minor-version bumps. Major bumps stay held for human review and
+# are added to the Task Board (project #7) with Status=Ready, assigned
+# to both admins, and get a review-request — same surface the
+# project-orchestrator.yml `reeval` path uses for non-Dependabot PRs,
+# via shared composite actions under .github/actions/.
+#
+# Admin-approval bypass: Dependabot PRs skip the `Admin approval`
+# required status check entirely (see `admin-approval.yml`). For patch
+# / minor: this workflow's bot-approval + CI passing + fetch-metadata
+# classification is the complete trust model. For major: a human admin
+# approves in GitHub as usual.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  # contents: write is needed for `gh pr merge` to perform an immediate
+  # squash when checks are already green at enablement time.
+  contents: write
+  pull-requests: write
+
+env:
+  PROJECT_OWNER: Wave-RF
+  PROJECT_NUMBER: "7"
+  PROJECT_ID: PVT_kwDOCdKSOc4BUEKD
+  STATUS_FIELD_ID: PVTSSF_lADOCdKSOc4BUEKDzhBO0l8
+  STATUS_READY: "61e4505c"
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: [wave-rf-runners]
+    steps:
+      - name: Checkout main (trusted composite-action source)
+        # Security: pin to the default branch, not the PR head.
+        # Dependabot PRs can modify .github/actions/** and since this
+        # workflow runs with write-scoped tokens (contents:write +
+        # pull-requests:write) a compromised upstream action could
+        # inject code via a bump PR. Defensive regardless of the
+        # actor being dependabot[bot]. (Copilot flagged the same
+        # pull_request_target pitfall on project-orchestrator.yml.)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
+
+      - name: Approve and enable auto-merge (patch / minor)
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL" \
+            --body "Auto-approved by dependabot-automerge workflow (${{ steps.meta.outputs.update-type }})."
+          gh pr merge --auto --squash "$PR_URL"
+
+      # ───────────────────────────────────────────────────────────────
+      # Major-bump path: hold for human review, but surface it on the
+      # board so it doesn't vanish into the PR list.
+      #
+      # Order matters here: token guard + board-upsert + assign all
+      # run before the comment, so the comment's wording can honestly
+      # reflect whether board placement happened. Claude review
+      # flagged the earlier ordering (comment first) as posting a
+      # false claim when PROJECT_BOARD_TOKEN is missing.
+      # ───────────────────────────────────────────────────────────────
+
+      - name: Guard — require PROJECT_BOARD_TOKEN for board ops
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+        run: |
+          if [[ -z "$PROJECT_TOKEN" ]]; then
+            echo "::warning::PROJECT_BOARD_TOKEN not configured; skipping board placement for this major bump."
+            echo "SKIP_BOARD=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Add PR card to board → Ready (major bump)
+        if: steps.meta.outputs.update-type == 'version-update:semver-major' && env.SKIP_BOARD != 'true'
+        uses: ./.github/actions/board-upsert-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_READY }}
+          url: ${{ github.event.pull_request.html_url }}
+
+      - name: Assign + request review from both admins (major bump)
+        # Dependabot is the author — no author-vs-reviewer logic needed.
+        # Assign both so whoever picks it up first can action. Runs
+        # whether or not board placement succeeded (uses GITHUB_TOKEN).
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        uses: ./.github/actions/assign-and-request-review
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ github.event.pull_request.number }}
+          reviewers: EricAndrechek taitelee
+
+      - name: Comment on major bumps
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          SKIP_BOARD: ${{ env.SKIP_BOARD }}
+        run: |
+          # Honest wording: only claim board placement when we actually
+          # did it. Reviewers were assigned regardless since that step
+          # doesn't depend on the board token.
+          if [[ "$SKIP_BOARD" == "true" ]]; then
+            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned; board placement was skipped (PROJECT_BOARD_TOKEN not configured). See dependency changelog / release notes before merging."
+          else
+            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Added to the Task Board (Status: Ready) and reviewers assigned. See dependency changelog / release notes before merging."
+          fi
+          gh pr comment "$PR_URL" --body "$body"

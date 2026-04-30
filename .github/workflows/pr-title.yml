@@ -1,0 +1,128 @@
+name: Lint PR title
+
+# When squash-merging, the PR title becomes the commit message on main.
+# This workflow enforces Conventional Commits on the PR title so history
+# stays parseable (changelog generation, `git log --oneline`, etc).
+#
+# Required by the `main branch protection` ruleset as the `Validate`
+# check — must report on every PR or merge gets stuck at "pending."
+#
+# Triggered by `pull_request_target` so the workflow runs from the
+# default branch with base-repo permissions — fork PRs get the sticky
+# comment too. (`pull_request` from the head ref is not used: it runs
+# without `issues: write` on forks, so the comment step would fail
+# and the dual-trigger duplicate run was wasted CI minutes.)
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  # `issues: write` is required for /repos/.../issues/{num}/comments
+  # (the sticky-comment endpoint) — PRs are issues at the REST layer
+  # for comments but `pull-requests: write` alone does NOT grant that
+  # scope. Without it, fork PR runs fail to post the comment even on
+  # `pull_request_target` with full base-repo permissions.
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: [wave-rf-runners]
+    steps:
+      - name: Check Conventional Commits format
+        id: check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Keep this type list in sync with CONTRIBUTING.md.
+          # Optional `!` before `:` marks a breaking change per
+          # Conventional Commits 1.0.0.
+          pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
+
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "PR title OK: $PR_TITLE"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"
+          fi
+
+      - name: Post / update sticky comment on failure
+        # continue-on-error because GITHUB_TOKEN is read-only for fork
+        # PRs, so the comment will fail there — that must not mask the
+        # final exit-1 below that drives the required-check status.
+        if: steps.check.outputs.passed == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- pr-title-lint-comment -->'
+          BODY=$(cat <<EOF
+          $MARKER
+          ## PR title doesn't match Conventional Commits
+
+          **Got:** \`$PR_TITLE\`
+
+          **Expected format:** \`<type>(optional-scope)(optional-!): <lowercase subject, no trailing period>\`
+
+          **Allowed types:** \`feat\`, \`fix\`, \`docs\`, \`refactor\`, \`test\`, \`chore\`, \`ci\`, \`deps\`, \`build\`, \`perf\`, \`revert\`, \`style\`.
+
+          The optional \`!\` before the colon marks a breaking change per [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+
+          **Examples:**
+          - \`feat: add dedupe cache\`
+          - \`fix(ingest): drop duplicate events\`
+          - \`feat(api)!: remove deprecated endpoint\`
+          - \`chore(deps): bump clickhouse-go to v2.30\`
+
+          ---
+
+          This check is required by the \`main branch protection\` ruleset — merge is blocked until the title matches. Edit the PR title to trigger a re-check automatically. I'll clean up this comment once the title is valid.
+          EOF
+          )
+
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f "body=$BODY" > /dev/null
+            echo "Updated existing pr-title-lint comment ($EXISTING)"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f "body=$BODY" > /dev/null
+            echo "Posted new pr-title-lint comment"
+          fi
+
+      - name: Clean up sticky comment on pass
+        if: steps.check.outputs.passed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- pr-title-lint-comment -->'
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X DELETE "repos/$REPO/issues/comments/$EXISTING"
+            echo "Removed stale pr-title-lint comment ($EXISTING)"
+          fi
+
+      - name: Fail the check if title was invalid
+        # Final step owns the exit code so the check's red-X reliably
+        # reflects the regex result, independent of comment-step I/O.
+        if: steps.check.outputs.passed == 'false'
+        run: exit 1

@@ -72,7 +72,7 @@ make test-integration  # Integration tests (needs Docker)
 make test-all          # Unit + integration tests
 make ci                # Full CI check: tidy + fmt + lint + vulncheck + build + tests
 make coverage          # Unit test coverage → tmp/coverage/
-make coverage-enforce  # Fail if coverage is below 70% threshold
+make coverage-enforce  # Fail if coverage is below 70% threshold (see .testcoverage.yml)
 make mod-tidy-check    # Verify go.mod/go.sum are tidy
 make vulncheck         # Run govulncheck vulnerability scanner
 make security          # Combined scan: vulncheck + gosec via linter
@@ -108,9 +108,75 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
 - **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without NATS.
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
-- **Coverage target**: 70% minimum (CI enforced). Aim for 80%+.
+- **Coverage target**: 70% minimum (CI enforced via `.testcoverage.yml`). Aim for 80%+ on new code.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
+
+## Local-First Validation (MANDATORY)
+
+**Validate locally before pushing. Do not use CI as your first feedback loop.** The repo runs on a shared 4-runner self-hosted VM with finite throughput and bills AI-reviewer (Claude, Gemini, Copilot) credits on every push. A speculative "let's see what CI says" commit costs real minutes and real dollars and is visible to the entire team as churn. Every push should represent a change you have locally verified to pass the same gates CI will run.
+
+### Before every push
+
+Run the CI-equivalent locally:
+
+```bash
+make ci         # Full parity with CI: tidy + fmt + lint + vulncheck + build + tests
+make coverage   # Matches the CI `Test` job (race detector; -p 1 in CI for package serialization)
+```
+
+If `make ci` passes, your commit has crossed the same gates CI will run. If it fails, fix it before pushing — don't rely on CI to surface issues that took seconds to catch locally.
+
+For workflow-only changes where `make ci` isn't relevant, manually read through your YAML diff line-by-line before pushing. If you already have `actionlint` installed locally, also run `actionlint .github/workflows/*.yml`; CI's own billing makes "push and see" for workflow-file iteration especially wasteful.
+
+### If local passes but CI fails
+
+**Treat this as an environment mismatch, not a test bug, until proven otherwise.** Tests that pass on a dev machine in milliseconds but time out on the self-hosted VM point to runner-side problems (I/O pressure, zombie processes, disk contention, shared-VM fsync storms) — not to flaky test code. Investigate the runner before changing tests or production code. Masking environment issues with longer timeouts or retries tends to compound: today's 5s bump becomes tomorrow's 30s bump becomes next week's unbounded wait, and the underlying runner problem keeps slowly degrading.
+
+Order of operations before patching tests for "CI flakiness":
+
+1. **Reproduce the reported failure locally first.** `go test -race -run TestFoo ./...` on your machine. If it fails locally, you have a real test bug; fix it with deterministic primitives (use `c.Wait()` not `time.Sleep`, use `require.Eventually` not `time.Sleep` then assert, use channel sync not goroutine scheduling assumptions).
+2. **If it passes locally, try to reproduce under load.** Run 4 concurrent copies of `make coverage` to simulate the VM's shared-runner contention. If that still passes, the problem is the VM — not the test.
+3. **Only then touch the runner.** SSH in, check `iostat -x 2`, `pgrep -af nats-server`, `df -h`, `du -sh /opt/github/action-runner-*/_work`. Environment fixes (cleanup crons, tmpfs for test temp dirs, slower runner count, faster disk) stay scoped to the runner and don't pollute the codebase.
+
+### When delegating to another agent
+
+If you hand work to a subagent or another Claude session, tell them explicitly: *"Run locally first. Do not push to CI until `make ci` passes on your checkout."* Agents default to "commit and let CI run" because it looks like progress; in this repo that default is expensive. Override it at delegation time.
+
+## Review Response (MANDATORY)
+
+**Every review comment on a PR gets a substantive reply, and every conversation gets resolved before merge. This applies equally to human reviewers and AI reviewers (Copilot, Gemini Code Assist, claude-review, future bots). The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads literally block merge.**
+
+### What to do on every review comment
+
+1. **Read it, decide**: accept (it's right), push back (it's wrong or out-of-scope), or defer (it's right but deserves its own PR).
+2. **Reply substantively** — not "fixed" alone. Say *what* was changed and in which commit SHA, or *why* you're pushing back. For cross-reviewer disagreements (one bot contradicts another, or a bot contradicts a human), argue with code references or spec citations — don't just assert.
+3. **Always @mention the bot you're replying to** (except Copilot). Without the mention the bot never sees your reply and the dialog silently terminates. Put the mention *below* the signature trailer, on its own line:
+   - **Claude**: end with `@claude` to re-invoke `claude-agent.yml` (gated to OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR)
+   - **Gemini**: end with `@gemini-code-assist` to re-invoke Gemini, or open with `/gemini review` / `/gemini <question>`
+   - **Copilot**: no mention works — add a parenthetical noting the re-request-review button instead
+   
+   Mention on **every** bot reply, not just pushback cases. If you accept and fix, the bot may still want to verify; if you push back, the bot may have a counter-argument. Silent termination defeats the dialog design.
+4. **Fix in the PR when the suggestion is clearly right and in scope.** If it's right but out-of-scope, reply with a tracking link (issue or planned follow-up PR) before resolving.
+5. **Resolve the thread** once the reply fully addresses the concern AND no counter-reply is pending. Don't resolve threads a human reviewer is still engaging with; wait. Bot threads can be resolved after a substantive reply since bots only re-engage when mentioned — if the reply doesn't mention the bot, it's accepted as terminal.
+6. **Re-request review** from humans after substantive code changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via an explicit re-request button (Copilot).
+
+### What not to do
+
+- No empty acknowledgements (`LGTM`, `fixed`, `good catch`). Always include detail so the reply makes sense standalone.
+- Don't argue in circles. If a reviewer comes back with the same point after your reply, escalate to a human maintainer rather than looping.
+- Don't resolve a thread that has an open child comment from the reviewer you haven't addressed.
+
+### Review tooling reference
+
+| Reviewer | How it runs | Re-runs on new commits | Blocks merge |
+| -------- | ----------- | ---------------------- | ------------ |
+| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: synchronize` trigger | Yes, auto — **updates the same sticky comment** rather than posting new ones | No (advisory) unless added to required checks |
+| Gemini Code Assist | Marketplace App at repo level | Yes on synchronize, **but silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — so Gemini reviews rarely see infra PRs | No (advisory) |
+| Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
+| Human admins (Eric / Taite) | Auto-assigned to the **PR** by `.github/workflows/project-orchestrator.yml` **only once** the PR is bot-clean: required checks (Check / Build / Validate / Lint / Test / Integration Tests / SDK Tests) green AND all review threads resolved. Both the `assignees` field AND a GitHub review-request are set together — the board's single-reviewer assignee is the queue signal, the review-request drives GitHub's native notification + dismiss-stale-reviews-on-push interaction (the two must stay in sync; an assignee without a review request would leave the reviewer uninformed mid-iteration). Draft PRs flip to ready at the same moment, PR card goes on Task Board (project #7) with Status=Ready, linked issues move to Status=In review. Reviewer selection (single admin): PR author == Eric → Taite; author == Taite → Eric; any other author → picked by PR-number parity (even → Eric, odd → Taite) to spread load. | Workflow re-checks on every push (`pull_request_target: synchronize`), review (`pull_request_review: submitted` — including `COMMENTED` reviews from bots like Gemini), and CI completion (`workflow_run: [CI completed]`). `check_suite` is **not** used: GitHub suppresses `check_suite` events when the suite was created by a `GITHUB_TOKEN`-triggered workflow (our CI), so the `workflow_run` trigger is the reliable chain-off signal. Idempotent across re-fires. `pull_request_review_thread` would be the natural trigger for thread-resolution events but GitHub Actions' parser rejects it; re-evaluation after thread resolution happens implicitly via the next push, bot review, or CI completion. | Yes — `.github/workflows/admin-approval.yml` is a required status check that fails unless Eric or Taite has an `APPROVED` review (Dependabot PRs bypass). |
+
+> **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
 ## Documentation & Consistency Sync (MANDATORY)
 
@@ -180,6 +246,8 @@ Before finishing any task, do a quick search across docs for the identifiers you
 2. Define an interface if there will be multiple implementations.
 3. Wire it into the appropriate `cmd/*/main.go`.
 4. Document in `docs/architecture.md`.
+5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it.
+6. **Update the area enumeration** in `.github/workflows/triage.yml` (the `system-prompt:` block lists every legal area the LLM is allowed to return). Without this, the triager can't categorize issues about the new package.
 
 ### Writing tests
 
@@ -224,3 +292,46 @@ docs/                   → Project documentation
 - Input JSON is validated against ClickHouse schemas before processing
 - ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself
 - **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.
+- **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. `pr-title.yml` is an inline check rather than a third-party action).
+
+## Repository Automation (three tiers)
+
+1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
+2. **Tier 2 — Code review** (two reviewers, both advisory; the `Admin approval` required status check + the ruleset are the actual merge-gate):
+   - **Gemini Code Assist App** configured via `.gemini/styleguide.md` — Marketplace App attached at the repo/org level, no workflow file.
+   - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs automatically on PR open/push/ready-for-review, but only when the PR author is already OWNER/MEMBER/COLLABORATOR to bound token cost. Dependabot PRs are skipped. Fork PRs from first-time contributors aren't auto-reviewed here; a maintainer can invoke Claude on them via `@claude` (Tier 3).
+3. **Tier 3 — Agentic execution** (`.github/workflows/claude-agent.yml`): same action in a different mode. Runs when an OWNER, MEMBER, or COLLABORATOR mentions `@claude` in an issue, PR, review, or comment, or applies the `agent` label to an issue. Can make code changes and open PRs. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
+
+### Dependabot automation
+
+`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Dependabot PRs **bypass the `Admin approval` required status check** (see `admin-approval.yml`) — the auto-approval from the workflow + CI passing is the trust model for patch/minor bumps.
+
+## Governance Files
+
+- **No `CODEOWNERS` file**: Removed 2026-04-21 in favor of workflow-driven reviewer assignment and approval enforcement. `CODEOWNERS`'s one-ping-on-open behavior conflicted with the "don't notify reviewers until bots are clean" design goal. Admin approval is now enforced by `.github/workflows/admin-approval.yml` (required status check that fails unless Eric or Taite has an `APPROVED` review, Dependabot PRs bypass). Reviewer assignment + Task Board orchestration is handled by `.github/workflows/project-orchestrator.yml` (adds PR to board, assigns the non-author admin, transitions card state on review events).
+
+### Task Board state machine
+
+The Task Board (project #7) is the single source of truth for "who needs to look at this next." Each item has two axes:
+
+- **Assignee** — _set once, per card_. The Issue card is assigned to the **implementer** (whoever's writing the code). The PR card is assigned to the **reviewer** (the non-author admin). Assignees do not rotate across state transitions — they represent "this card is your card." Use the card assignment to find what's in your queue; use the card Status to know what state the work is in.
+- **Status** — _rotates per state transition, mirrors between the PR and the linked Issue_. When the PR is `Ready` (reviewer's court), the Issue is `In review` (implementer's wait). When the PR is `In review` (reviewer waiting on implementer), the Issue is `Ready`. Merged → both `Done`.
+
+The mirroring means only one concept (status) moves per event, and the two cards encode "whose court is the ball in" by being in opposite states.
+
+**Transitions driven by `project-orchestrator.yml`:**
+
+- **PR bot-clean** (required checks green + all review threads resolved): PR added to board, Status=`Ready`, assignee set to non-author admin **and** a GitHub review is requested from that admin (both happen together — the Task Board drives the `what's-next` queue, the review-request triggers GitHub's notification and dismiss-stale-reviews behavior). Linked Issue card → `In review`. Draft PRs flipped to ready-for-review at the same moment.
+- **Review submitted with `CHANGES_REQUESTED`**: PR card → `In review` (reviewer waiting on implementer), linked Issue card → `Ready`. Assignees unchanged.
+- **Author re-requests review**: PR card → `Ready`, linked Issue card → `In review`. Review is re-requested from the admin reviewer (so GitHub's "dismiss_stale_reviews_on_push" doesn't leave them out of the loop). Assignees unchanged.
+- **Review approved**: no workflow action; `admin-approval.yml` flips its required status check to success, GitHub's built-in project automation moves PR+Issue cards to `Done` on merge.
+
+**Bidirectional mirroring** via `board-state-sync.yml` on `projects_v2_item: edited`: if a human manually moves *either* card's Status, the workflow sets the linked card's Status to the opposite (Ready↔In review) or same (Done) value. The workflow guards against ping-pong loops by checking "target Status already matches expected mirror" before writing.
+
+**Manual step intentionally preserved**: when the reviewer starts reviewing, they move the PR card `Ready` → `In progress` themselves. GitHub doesn't emit a reliable "review started" event we could hook. (Future: infer from reviewer's first comment/review activity — low-priority.)
+
+**Dependabot PR handling** via `dependabot-automerge.yml`:
+- Patch/minor bumps: auto-approved + auto-merged hands-off; not added to the board (they're bot-managed, not human work).
+- Major-version bumps: held for human review, added to board with Status=`Ready`, both admins assigned (not author-vs-reviewer logic — Dependabot is the author, so either admin can pick it up), review requested from both.
+- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
+- **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/pr-title.yml`. The PR-title linter validates squash-merge commit messages.

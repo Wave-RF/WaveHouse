@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,14 +41,18 @@ func (m *bentoMockJS) Publish(_ context.Context, subject string, payload []byte,
 // bentoMockMsg satisfies jetstream.Msg for testing jsInput.Read.
 type bentoMockMsg struct {
 	jetstream.Msg
-	data  []byte
-	acked bool
-	naked bool
+	data    []byte
+	subject string
+	headers nats.Header
+	acked   bool
+	naked   bool
 }
 
-func (m *bentoMockMsg) Data() []byte { return m.data }
-func (m *bentoMockMsg) Ack() error   { m.acked = true; return nil }
-func (m *bentoMockMsg) Nak() error   { m.naked = true; return nil }
+func (m *bentoMockMsg) Data() []byte         { return m.data }
+func (m *bentoMockMsg) Subject() string      { return m.subject }
+func (m *bentoMockMsg) Headers() nats.Header { return m.headers }
+func (m *bentoMockMsg) Ack() error           { m.acked = true; return nil }
+func (m *bentoMockMsg) Nak() error           { m.naked = true; return nil }
 
 // bentoMockIter satisfies jetstream.MessagesContext for testing jsInput.
 type bentoMockIter struct {

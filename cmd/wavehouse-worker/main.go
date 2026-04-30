@@ -26,28 +26,33 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run executes the clustered worker binary and returns a process exit code.
+// Using a separate function (rather than os.Exit directly in main) ensures
+// deferred cleanups — especially OTEL flush — still run before the process exits.
+func run() int {
 	var level slog.Level
-    switch os.Getenv("WH_LOG_LEVEL") {
-    case "DEBUG":
-        level = slog.LevelDebug
-    case "WARN":
-        level = slog.LevelWarn
-    case "ERROR":
-        level = slog.LevelError
-    default:
-        level = slog.LevelInfo 
-    }
+	switch os.Getenv("WH_LOG_LEVEL") {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
 
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
-	
-	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
-	
-	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary,)
-	
-	slog.SetDefault(logger)
-		logger.Info("starting WaveHouse worker", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
+	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
+	slog.SetDefault(logger)
+
+	logger.Info("starting WaveHouse worker", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
@@ -57,7 +62,7 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	ctx := context.Background()
@@ -95,32 +100,32 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("clickhouse open", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer chConn.Close()
+	defer func() { _ = chConn.Close() }()
 
 	// Schema discovery.
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
 	if err := registry.Refresh(context.Background()); err != nil {
 		logger.Error("schema discovery failed on boot", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Remote MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, maxBytes)
+	remoteMQ, err := mq.NewRemote(cfg.MQ.URL, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer remoteMQ.Close()
+	defer func() { _ = remoteMQ.Close() }()
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(context.Background(), remoteMQ.JetStream(), cfg.MQ.StreamName, maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -134,6 +139,7 @@ func main() {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		remoteMQ.NatsConn(),
+		cfg.MQ.StreamName,
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
@@ -143,7 +149,7 @@ func main() {
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Active sweeper — purges processed + expired messages every minute.
@@ -159,9 +165,10 @@ func main() {
 
 	logger.Info("shutting down worker")
 	cancel()
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 	defer shutCancel()
 	if err := ingestStream.Stop(shutCtx); err != nil {
 		logger.Error("ingest worker drain error", "error", err)
 	}
+	return 0
 }

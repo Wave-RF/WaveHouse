@@ -1,8 +1,11 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -25,6 +28,7 @@ type Dependencies struct {
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
 	AuthMW          func(http.Handler) http.Handler
+	AuthEnabled     bool
 	JS              jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel        *slog.LevelVar
@@ -36,8 +40,19 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
+	r.Use(jsonRecoverer)
 	r.Use(corsMiddleware(deps.CORSOrigins))
+
+	// Route the chi router's own 404/405 paths through writeJSONError so
+	// hits to unknown URLs and unsupported methods carry the same JSON
+	// error contract as handler-emitted errors. Without this chi falls
+	// back to http.Error / empty bodies and the response is text/plain.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	})
 
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +101,7 @@ func NewRouter(deps Dependencies) http.Handler {
 
 		// Admin routes (require admin or service role).
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(RequireRole("admin", "service"))
+			r.Use(RequireRole(deps.AuthEnabled, "admin", "service"))
 			if deps.Policy != nil {
 				r.Get("/policy", deps.Policy.Get)
 				r.Put("/policy", deps.Policy.Put)
@@ -104,12 +119,16 @@ func NewRouter(deps Dependencies) http.Handler {
 
 					var newLevel slog.Level
 					if err := newLevel.UnmarshalText([]byte(levelStr)); err != nil {
-						http.Error(w, `{"error":"invalid or missing level (use debug, info, warn, error)"}`, http.StatusBadRequest)
+						writeJSONError(w, http.StatusBadRequest, "invalid or missing level (use debug, info, warn, error)")
 						return
 					}
 
 					deps.LogLevel.Set(newLevel)
-					w.Write([]byte(`{"status":"success", "level":"` + levelStr + `"}`))
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"status": "success",
+						"level":  newLevel.String(),
+					})
 				})
 			}
 		})
@@ -118,18 +137,64 @@ func NewRouter(deps Dependencies) http.Handler {
 	return r
 }
 
+// jsonRecoverer recovers from panics in downstream handlers and emits a
+// JSON 500 via writeJSONError instead of chi/middleware.Recoverer's
+// empty-bodied 500 (which leaves Content-Type at the stdlib default).
+// Panics are logged with stack and request metadata. http.ErrAbortHandler
+// is re-panicked per the chi convention so the server's serve loop still
+// terminates the connection cleanly.
+//
+// If the handler had already written headers or body bytes before the
+// panic, the response is not patched: the headers are committed to the
+// wire and a JSON 500 appended after them would corrupt the partial
+// response. In that case the panic is still logged, but the connection
+// is left to terminate as-is.
+func jsonRecoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		defer func() {
+			rvr := recover()
+			if rvr == nil {
+				return
+			}
+			if err, ok := rvr.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				panic(rvr)
+			}
+			// slog's structured key-value API and its built-in handlers
+			// escape control characters in string values, so path/method/
+			// err carry no log-injection risk despite the linter's taint
+			// heuristic on slog calls inside an *http.Request scope.
+			slog.LogAttrs(r.Context(), slog.LevelError, "panic recovered in handler",
+				slog.Any("err", rvr),
+				slog.String("stack", string(debug.Stack())),
+				slog.String("path", r.URL.Path),
+				slog.String("method", r.Method),
+			)
+			if ww.Status() == 0 && ww.BytesWritten() == 0 {
+				writeJSONError(ww, http.StatusInternalServerError, "internal server error")
+			}
+		}()
+		next.ServeHTTP(ww, r)
+	})
+}
+
 // RequireRole returns middleware that restricts access to the given roles.
-// When auth is disabled (no role in context), access is allowed.
-func RequireRole(roles ...string) func(http.Handler) http.Handler {
+// When no role is present in the request context, access is allowed only if
+// authEnabled is false. If authEnabled is true, the request is denied (fail-closed)
+// with a 401 Unauthorized response.
+func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := RoleFromContext(r.Context())
-			// Allow if no role is set (auth disabled).
-			// TODO: Make this behavior configurable (e.g., default to denying
-			// 	access, make auth disabled a specific config) in order to
-			//	prevent role extraction error from granting unintended access.
+			// Fail-closed: if auth is explicitly enabled, an empty role is a security failure.
 			if role == "" {
-				next.ServeHTTP(w, r)
+				if !authEnabled {
+					// Auth is disabled globally; allow for dev/testing.
+					next.ServeHTTP(w, r)
+					return
+				}
+				// FAIL-CLOSED: Auth is enabled, but no role was found in the context.
+				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
 			for _, allowed := range roles {
@@ -138,7 +203,7 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 					return
 				}
 			}
-			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, "forbidden")
 		})
 	}
 }

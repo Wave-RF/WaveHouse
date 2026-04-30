@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -30,7 +29,7 @@ func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache,
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.Store.List())
+	_ = json.NewEncoder(w).Encode(h.Store.List())
 }
 
 // Get returns a specific named query (admin endpoint).
@@ -38,11 +37,11 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	q := h.Store.Get(name)
 	if q == nil {
-		http.Error(w, `{"error":"pipe not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(q)
+	_ = json.NewEncoder(w).Encode(q)
 }
 
 // Put creates or updates a named query (admin endpoint).
@@ -50,29 +49,29 @@ func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	var q pipes.NamedQuery
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	q.Name = name
 
 	if err := h.Store.Put(r.Context(), &q); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // Delete removes a named query (admin endpoint).
 func (h *PipesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := h.Store.Delete(r.Context(), name); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // Execute runs a named query with the provided parameters.
@@ -80,7 +79,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	q := h.Store.Get(name)
 	if q == nil {
-		http.Error(w, `{"error":"pipe not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "pipe not found")
 		return
 	}
 
@@ -96,7 +95,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if !allowed {
-				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				writeJSONError(w, http.StatusForbidden, "forbidden")
 				return
 			}
 		}
@@ -120,7 +119,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	sql, params, err := pipes.BindParams(q, supplied)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -130,7 +129,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 	}
@@ -157,11 +156,11 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	w.Write(v.([]byte))
+	_, _ = w.Write(v.([]byte))
 }

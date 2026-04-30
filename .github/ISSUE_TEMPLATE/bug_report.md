@@ -1,9 +1,10 @@
 ---
 name: Bug Report
 about: Report a bug to help us improve WaveHouse
-title: "bug: "
+title: 'bug: '
 labels: bug
-assignees: ""
+assignees: ''
+
 ---
 
 ## Description

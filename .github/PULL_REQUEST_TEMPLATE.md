@@ -1,29 +1,25 @@
-# Pull Request
+## Summary
 
-## Description
+What changed and why. One or two paragraphs, or a short bulleted list for multi-part PRs.
 
-Brief description of the changes.
+## Test plan
 
-## Type of Change
-
-- [ ] Bug fix (non-breaking change that fixes an issue)
-- [ ] New feature (non-breaking change that adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] Documentation update
-
-## Checklist
-
-- [ ] My code follows the project's code style (`make lint` passes)
-- [ ] I have added tests that prove my fix/feature works
-- [ ] All existing tests pass (`make test`)
-- [ ] All binaries compile (`make build`)
-- [ ] I have updated the documentation accordingly
-- [ ] I have updated the CHANGELOG.md (if applicable)
+- [ ] ...
 
 ## Related Issues
 
 Closes #
 
-## Screenshots / Logs
+<!--
+Checklist for the author (not kept in the squash commit message):
 
-If applicable, add screenshots or log output to help explain the change.
+- `make ci` passes locally
+- Docs updated per AGENTS.md "Documentation & Consistency Sync" rules
+- CHANGELOG.md [Unreleased] entry added
+- Tests cover new / changed behavior (70 % minimum, 80 %+ preferred)
+
+The PR title is the squash commit subject — use Conventional Commits
+(`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`, `ci:`,
+`deps:`, `build:`, `perf:`, `revert:`, `style:`). The PR body below is
+the squash commit message, so keep it tight.
+-->

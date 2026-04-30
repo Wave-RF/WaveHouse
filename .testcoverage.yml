@@ -1,0 +1,15 @@
+# Configuration for the vladopajic/go-test-coverage CI action.
+# Docs: https://github.com/vladopajic/go-test-coverage
+
+profile: tmp/coverage/coverage.txt
+local-prefix: github.com/Wave-RF/WaveHouse
+
+threshold:
+  total: 70
+
+exclude:
+  paths:
+    # internal/testutil/ contains shared test helpers (mocks, JWT builders,
+    # HTTP assertions). It is imported only from *_test.go files, never from
+    # production code, so there's nothing meaningful to cover.
+    - ^internal/testutil/

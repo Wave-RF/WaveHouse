@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,27 +34,33 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run executes the standalone binary and returns a process exit code. Using a
+// separate function (rather than os.Exit directly in main) ensures deferred
+// cleanups — especially OTEL flush — still run before the process exits.
+func run() int {
 	var level slog.Level
-    switch os.Getenv("WH_LOG_LEVEL") {
-    case "DEBUG":
-        level = slog.LevelDebug
-    case "WARN":
-        level = slog.LevelWarn
-    case "ERROR":
-        level = slog.LevelError
-    default:
-        level = slog.LevelInfo 
-    }
+	switch os.Getenv("WH_LOG_LEVEL") {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
 
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
-	
-	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
 
-	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary,)
-	
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel, AddSource: true}))
+	logger := baseLogger.With("version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 	slog.SetDefault(logger)
-	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
+
+	logger.Info("starting WaveHouse standalone", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
@@ -63,7 +70,7 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Error("load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Validate auth config.
@@ -71,7 +78,7 @@ func main() {
 		switch cfg.Auth.JWTSecret {
 		case "":
 			logger.Error("FATAL: WH_AUTH_JWT_SECRET is required when auth is enabled")
-			os.Exit(1)
+			return 1
 		case "change-me-in-production":
 			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
 		}
@@ -114,16 +121,16 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("clickhouse open", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer chConn.Close()
+	defer func() { _ = chConn.Close() }()
 
 	// Schema discovery — discover ClickHouse table schemas on boot.
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
 	if err := registry.Refresh(context.Background()); err != nil {
 		logger.Error("schema discovery failed on boot", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Optional embedded dedupe (Pebble).
@@ -132,19 +139,19 @@ func main() {
 		dedup, err = dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
 		if err != nil {
 			logger.Error("dedupe init", "error", err)
-			os.Exit(1)
+			return 1
 		}
-		defer dedup.Close()
+		defer func() { _ = dedup.Close() }()
 	}
 
 	// Embedded MQ (NATS).
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, maxBytes)
+	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	defer embeddedMQ.Close()
+	defer func() { _ = embeddedMQ.Close() }()
 
 	if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
 		logger.Error("failed to register system metrics", "error", err)
@@ -152,9 +159,9 @@ func main() {
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), cfg.MQ.StreamName, maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -162,23 +169,23 @@ func main() {
 	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
 	if err != nil {
 		logger.Error("cache init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	tiered := cache.NewTiered(l1, nil)
-	defer tiered.Close()
+	defer func() { _ = tiered.Close() }()
 
 	// Policy store (NATS KV + optional file bootstrap).
 	policyStore, err := policy.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
 	if err != nil {
 		logger.Error("policy store init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Pipes store (NATS KV + optional SQL file directory).
 	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Directory, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Active sweeper — purges messages that are both written to CH and
@@ -202,6 +209,7 @@ func main() {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
+		cfg.MQ.StreamName,
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
@@ -211,7 +219,7 @@ func main() {
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	// Start active sweeper.
 	go sweeper.Start(ctx)
@@ -228,7 +236,7 @@ func main() {
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge start", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Build handlers.
@@ -242,7 +250,7 @@ func main() {
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
-		dlqHandler = api.NewDLQHandler(js, logger)
+		dlqHandler = api.NewDLQHandler(js, cfg.MQ.StreamName, logger)
 	}
 
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
@@ -272,6 +280,7 @@ func main() {
 			RoleClaim: cfg.Auth.RoleClaim,
 			DevMode:   cfg.Auth.DevMode,
 		}),
+		AuthEnabled: cfg.Auth.Enabled,
 		JS:          js,
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,
@@ -279,8 +288,9 @@ func main() {
 	router := api.NewRouter(deps)
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Graceful shutdown.
@@ -293,12 +303,15 @@ func main() {
 		defer shutCancel()
 		cancel()
 		_ = ingestStream.Stop(shutCtx)
-		srv.Shutdown(shutCtx)
+		if err := srv.Shutdown(shutCtx); err != nil {
+			logger.Error("server shutdown error", "error", err)
+		}
 	}()
 
 	logger.Info("starting server", "port", cfg.Server.Port, "mode", "standalone")
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server error", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

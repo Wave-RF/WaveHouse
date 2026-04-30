@@ -80,14 +80,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.Error("rejecting message: invalid JSON", "error", err)
-			m.Ack() // Drop — not retryable.
+			if ackErr := m.Ack(); ackErr != nil { // Drop — not retryable.
+				slog.Warn("ack failed for invalid JSON message", "error", ackErr)
+			}
 			continue
 		}
 
 		// Reject messages with no table name.
 		if raw.TableName == "" {
 			slog.Error("rejecting message: empty table_name")
-			m.Ack()
+			if ackErr := m.Ack(); ackErr != nil {
+				slog.Warn("ack failed for empty-table message", "error", ackErr)
+			}
 			continue
 		}
 
@@ -95,7 +99,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			m.Ack() // Drop malformed messages.
+			if ackErr := m.Ack(); ackErr != nil { // Drop malformed messages.
+				slog.Warn("ack failed for unsafe-table message", "error", ackErr)
+			}
 			continue
 		}
 
@@ -116,7 +122,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				select {
 				case <-ctx.Done():
 					ticker.Stop()
-					m.Nak()
+					if nakErr := m.Nak(); nakErr != nil {
+						slog.WarnContext(spanCtx, "nak failed during ctx cancellation", "error", nakErr)
+					}
 					return nil, nil, ctx.Err()
 				case <-ticker.C:
 				}
@@ -132,14 +140,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"id", raw.ID,
 					"error", err,
 				)
-				m.Nak()
+				if nakErr := m.Nak(); nakErr != nil {
+					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+				}
 			} else {
 				// Log the success with all context
 				slog.InfoContext(spanCtx, "successfully deleted record",
 					"table", raw.TableName,
 					"id", raw.ID,
 				)
-				m.Ack()
+				if ackErr := m.Ack(); ackErr != nil {
+					slog.WarnContext(spanCtx, "ack failed after delete", "error", ackErr)
+				}
 			}
 			span.End()
 			continue
@@ -213,8 +225,11 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 			subject = "dlq." + tableName
 		}
 
-		_, _ = d.js.Publish(ctx, subject, data)
-		slog.WarnContext(msgCtx, "Sent failed message to DLQ", "subject", subject)
+		if _, err := d.js.Publish(ctx, subject, data); err != nil {
+			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
+		} else {
+			slog.WarnContext(msgCtx, "sent failed message to DLQ", "subject", subject)
+		}
 	}
 	return nil
 }
@@ -307,7 +322,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -323,7 +338,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 	setupCtx, setupCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer setupCancel()
 
-	cons, err := js.CreateOrUpdateConsumer(setupCtx, "WAVEHOUSE", jetstream.ConsumerConfig{
+	cons, err := js.CreateOrUpdateConsumer(setupCtx, streamName, jetstream.ConsumerConfig{
 		Durable:       "buffer-consumer",
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,

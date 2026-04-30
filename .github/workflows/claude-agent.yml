@@ -1,0 +1,133 @@
+name: Claude agent
+
+# Tier-3 agentic automation. Invoked when an OWNER, MEMBER, or
+# COLLABORATOR mentions `@claude` in an issue, PR, review, or comment,
+# OR when one of those trusted actors applies the `agent` label to an
+# issue.
+#
+# Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret, generated locally by
+# running `claude setup-token` on a machine authenticated to Claude Code
+# and then storing the output as a repo (or org) Actions secret.
+#
+# Safety posture:
+# - Author-association gating blocks drive-by invocations from
+#   first-time contributors. No `@claude` ping from a fork PR by a
+#   random user will trigger the agent.
+# - Uses `pull_request` (not `pull_request_target`) when on a PR so the
+#   agent only ever sees fork-head code with a GITHUB_TOKEN scoped to
+#   that PR's permissions.
+# - The agent's write scope is broad (contents: write, pull-requests:
+#   write) because that's the point; gating is the defense in depth.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, labeled]
+
+concurrency:
+  group: claude-agent-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    name: Run Claude
+    runs-on: [wave-rf-runners]
+    # Gate: must be a trusted actor AND either mention @claude or apply
+    # the `agent` label. The author_association path differs per event
+    # so each branch is explicit.
+    # CONTRIBUTOR is included because webhook payloads report users
+    # with *private* org membership as CONTRIBUTOR (not MEMBER). Org
+    # members who want MEMBER-level gating can set their org
+    # membership visibility to public.
+    #
+    # The labeled-trigger branch cannot check author_association
+    # (the `sender` object on `issues.labeled` webhooks has no such
+    # field), so permission verification happens in the first step
+    # of the job via a `gh api` collaborators/permission call.
+    if: |
+      (
+        (
+          github.event_name == 'issue_comment' &&
+          contains(github.event.comment.body, '@claude') &&
+          (github.event.comment.author_association == 'OWNER' ||
+           github.event.comment.author_association == 'MEMBER' ||
+           github.event.comment.author_association == 'COLLABORATOR' ||
+           github.event.comment.author_association == 'CONTRIBUTOR')
+        ) ||
+        (
+          github.event_name == 'pull_request_review_comment' &&
+          contains(github.event.comment.body, '@claude') &&
+          (github.event.comment.author_association == 'OWNER' ||
+           github.event.comment.author_association == 'MEMBER' ||
+           github.event.comment.author_association == 'COLLABORATOR' ||
+           github.event.comment.author_association == 'CONTRIBUTOR')
+        ) ||
+        (
+          github.event_name == 'pull_request_review' &&
+          contains(github.event.review.body, '@claude') &&
+          (github.event.review.author_association == 'OWNER' ||
+           github.event.review.author_association == 'MEMBER' ||
+           github.event.review.author_association == 'COLLABORATOR' ||
+           github.event.review.author_association == 'CONTRIBUTOR')
+        ) ||
+        (
+          github.event_name == 'issues' &&
+          github.event.action == 'opened' &&
+          contains(github.event.issue.body, '@claude') &&
+          (github.event.issue.author_association == 'OWNER' ||
+           github.event.issue.author_association == 'MEMBER' ||
+           github.event.issue.author_association == 'COLLABORATOR' ||
+           github.event.issue.author_association == 'CONTRIBUTOR')
+        ) ||
+        (
+          github.event_name == 'issues' &&
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'agent'
+        )
+      )
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Verify sender has write+ for label-triggered invocations
+        # The agent has broad write scope, so the agent-label path
+        # needs a verified-permissions check even though GitHub
+        # already restricts label writes to Triage+. A Triage-role
+        # contributor could apply the `agent` label; we want the
+        # trigger gated at COLLABORATOR/write-or-higher to match the
+        # policy documented in AGENTS.md §"Repository Automation".
+        if: github.event_name == 'issues' && github.event.action == 'labeled'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$SENDER/permission" --jq '.permission' 2>/dev/null || echo "")
+          case "$perm" in
+            admin|maintain|write)
+              echo "sender $SENDER has $perm — proceeding"
+              ;;
+            *)
+              echo "::error::sender $SENDER has '${perm:-unknown}' permission; agent label trigger requires write+."
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e  # v1.0.102
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          trigger_phrase: "@claude"
+          # Max wall-clock for a single invocation. Raise if agent tasks
+          # routinely need longer; lower to cap runaway cost.
+          timeout_minutes: "30"
