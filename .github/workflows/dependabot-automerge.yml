@@ -7,35 +7,22 @@ name: Dependabot auto-merge
 # auto-merge actually squashes — this just opts the PR into the
 # merge queue.
 #
-<<<<<<< HEAD
-# CODEOWNERS note: Dependabot PRs that touch `.github/workflows/`
-# (GitHub Actions ecosystem bumps, including the SHA-pinned updates
-# that Dependabot opens as patch-level bumps) still require a human
-# codeowner's approval per the ruleset's `require_code_owner_review`.
-# The bot approval here satisfies the 1-approval count but not the
-# codeowner gate; those land only after a maintainer also approves.
-# Non-workflow bumps (gomod, npm) merge fully hands-off.
-=======
 # Admin-approval bypass: Dependabot PRs skip the `Admin approval`
 # required status check entirely (see `admin-approval.yml`). This
 # workflow's bot-approval + CI passing + `dependabot/fetch-metadata`
 # classification is the complete trust model for patch / minor bumps.
 # Major bumps still get a comment from this workflow and stay open
 # for a human to review manually. CODEOWNERS is no longer used.
->>>>>>> origin/main
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
-<<<<<<< HEAD
-=======
   # contents: write is needed for `gh pr merge` to actually perform
   # the squash merge when checks are already green at the time of
   # auto-merge enablement. `gh pr merge --auto` schedules otherwise,
   # but the edge-case immediate merge requires tree-write.
->>>>>>> origin/main
   contents: write
   pull-requests: write
 

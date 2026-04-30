@@ -43,20 +43,12 @@ jobs:
     # CONTRIBUTOR is included because webhook payloads report users
     # with *private* org membership as CONTRIBUTOR (not MEMBER). Org
     # members who want MEMBER-level gating can set their org
-<<<<<<< HEAD
-    # membership visibility to public. Since the agent has write
-    # access, the agent label path restricts label-apply authority to
-    # people who already have repo-write — which GitHub enforces at
-    # the label level — so the label trigger doesn't need a per-event
-    # author_association check.
-=======
     # membership visibility to public.
     #
     # The labeled-trigger branch cannot check author_association
     # (the `sender` object on `issues.labeled` webhooks has no such
     # field), so permission verification happens in the first step
     # of the job via a `gh api` collaborators/permission call.
->>>>>>> origin/main
     if: |
       (
         (
@@ -95,15 +87,7 @@ jobs:
         (
           github.event_name == 'issues' &&
           github.event.action == 'labeled' &&
-<<<<<<< HEAD
-          github.event.label.name == 'agent' &&
-          (github.event.sender.author_association == 'OWNER' ||
-           github.event.sender.author_association == 'MEMBER' ||
-           github.event.sender.author_association == 'COLLABORATOR' ||
-           github.event.sender.author_association == 'CONTRIBUTOR')
-=======
           github.event.label.name == 'agent'
->>>>>>> origin/main
         )
       )
     permissions:
@@ -112,8 +96,6 @@ jobs:
       issues: write
       id-token: write
     steps:
-<<<<<<< HEAD
-=======
       - name: Verify sender has write+ for label-triggered invocations
         # The agent has broad write scope, so the agent-label path
         # needs a verified-permissions check even though GitHub
@@ -138,7 +120,6 @@ jobs:
               ;;
           esac
 
->>>>>>> origin/main
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 1

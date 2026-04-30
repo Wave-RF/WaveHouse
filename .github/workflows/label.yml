@@ -5,16 +5,6 @@ name: Auto-label PR
 # current changed-file set, so removing a change also removes its
 # label.
 #
-<<<<<<< HEAD
-# Uses `pull_request` (not `pull_request_target`) so this workflow
-# fires the first time it's added on a PR. A future follow-up PR can
-# switch to `pull_request_target` once this workflow is on main, to
-# also cover labeling on fork PRs — GITHUB_TOKEN is read-only for
-# fork PRs under `pull_request` so labeling will silently skip there.
-
-on:
-  pull_request:
-=======
 # Triggered by `pull_request_target` so the workflow runs from the
 # default branch with base-repo permissions — fork PRs get auto-labels
 # too. (`pull_request` from the head ref is not used: it lacks
@@ -23,7 +13,6 @@ on:
 
 on:
   pull_request_target:
->>>>>>> origin/main
     types: [opened, synchronize, reopened]
 
 permissions:
