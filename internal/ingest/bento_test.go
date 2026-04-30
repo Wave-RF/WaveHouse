@@ -1,11 +1,13 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -552,4 +554,187 @@ func TestDLQOutput_NoOps(t *testing.T) {
 	assert.NoError(t, d.Connect(context.Background()))
 	assert.NoError(t, d.Wait(context.Background()))
 	assert.NoError(t, d.Close(context.Background()))
+}
+
+// ---------------------------------------------------------------------------
+// Mock HTTP Transport for clickhouseOutput tests
+// ---------------------------------------------------------------------------
+
+// mockRoundTripper allows us to intercept and mock http.Client responses.
+type mockRoundTripper struct {
+	roundTripFn func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if m.roundTripFn != nil {
+		return m.roundTripFn(req)
+	}
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+}
+
+// ---------------------------------------------------------------------------
+// clickhouseOutput tests
+// ---------------------------------------------------------------------------
+
+func TestClickhouseOutput_ConnectClose(t *testing.T) {
+	t.Parallel()
+	c := &clickhouseOutput{}
+	assert.NoError(t, c.Connect(context.Background()))
+	assert.NoError(t, c.Close(context.Background()))
+}
+
+func TestClickhouseOutput_WriteBatch_EmptyBatch(t *testing.T) {
+	t.Parallel()
+	c := &clickhouseOutput{}
+	err := c.WriteBatch(context.Background(), service.MessageBatch{})
+	assert.NoError(t, err, "empty batch should return nil immediately")
+}
+
+func TestClickhouseOutput_WriteBatch_MissingTableName(t *testing.T) {
+	t.Parallel()
+	c := &clickhouseOutput{}
+	msg := service.NewMessage([]byte(`{"x": 1}`))
+	// Intentionally omitting table_name metadata
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+	assert.ErrorContains(t, err, "missing table_name in message metadata")
+}
+
+func TestClickhouseOutput_WriteBatch_UnsafeTableName(t *testing.T) {
+	t.Parallel()
+	c := &clickhouseOutput{}
+	msg := service.NewMessage([]byte(`{"x": 1}`))
+	msg.MetaSet("table_name", "users; DROP TABLE users;") // Malicious table name
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+	assert.ErrorContains(t, err, "invalid table name")
+}
+
+func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
+	t.Parallel()
+	
+	// Mock an HTTP 200 OK response from ClickHouse
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			// Verify URL was constructed correctly
+			assert.Equal(t, "POST", req.Method)
+			assert.Contains(t, req.URL.String(), "database=test_db")
+			
+			// Verify URL encoding and backticks
+			assert.Contains(t, req.URL.String(), "INSERT+INTO+%60test_table%60")
+			
+			// Verify headers
+			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))
+			assert.Equal(t, "test_pass", req.Header.Get("X-ClickHouse-Key"))
+			
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(bytes.NewBufferString("OK")),
+			}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+		host:       "localhost",
+		port:       "8123",
+		user:       "test_user",
+		password:   "test_pass",
+		db:         "test_db",
+	}
+
+	msg := service.NewMessage([]byte(`{"metric": 99}`))
+	msg.MetaSet("table_name", "test_table")
+	msg.MetaSet("bento_start_time", "1700000000000") // Valid unix milli
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+	assert.NoError(t, err)
+}
+
+func TestClickhouseOutput_WriteBatch_HTTPErrorResponse(t *testing.T) {
+	t.Parallel()
+	
+	// Mock an HTTP 400 Bad Request response from ClickHouse
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Body:       io.NopCloser(bytes.NewBufferString("Code: 117. DB::Exception: Unknown table.")),
+			}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+	}
+
+	msg := service.NewMessage([]byte(`{"metric": 99}`))
+	msg.MetaSet("table_name", "missing_table")
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+	assert.ErrorContains(t, err, "clickhouse error 400")
+	assert.ErrorContains(t, err, "Unknown table")
+}
+
+func TestClickhouseOutput_WriteBatch_NetworkError(t *testing.T) {
+	t.Parallel()
+	
+	// Mock a hard network failure (e.g. connection refused)
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+	}
+
+	msg := service.NewMessage([]byte(`{"metric": 99}`))
+	msg.MetaSet("table_name", "events")
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+	assert.ErrorContains(t, err, "execute clickhouse request")
+	assert.ErrorContains(t, err, "connection refused")
+}
+
+// ---------------------------------------------------------------------------
+// jsInput payload extraction fallbacks
+// ---------------------------------------------------------------------------
+
+func TestJsInput_Read_DataCapFallback(t *testing.T) {
+	t.Parallel()
+	// Message with empty "data" (lowercase) but populated "Data" (uppercase)
+	evtData := []byte(`{"table_name": "events", "Data": {"source": "DataCap fallback"}}`)
+	natsMsg := &bentoMockMsg{data: evtData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
+	iter.msgs <- natsMsg
+
+	input := &jsInput{iter: iter}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	payload, err := msg.AsBytes()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"source": "DataCap fallback"}`, string(payload))
+}
+
+func TestJsInput_Read_RawMessageFallback(t *testing.T) {
+	t.Parallel()
+	// Message with BOTH "data" and "Data" empty/missing. Should fall back to the entire raw message.
+	evtData := []byte(`{"table_name": "flattened_events", "some_key": "some_value"}`)
+	natsMsg := &bentoMockMsg{data: evtData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
+	iter.msgs <- natsMsg
+
+	input := &jsInput{iter: iter}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	payload, err := msg.AsBytes()
+	require.NoError(t, err)
+	// It should contain the exact original message
+	assert.JSONEq(t, `{"table_name": "flattened_events", "some_key": "some_value"}`, string(payload))
 }
