@@ -41,11 +41,12 @@ func (m *bentoMockJS) Publish(_ context.Context, subject string, payload []byte,
 // bentoMockMsg satisfies jetstream.Msg for testing jsInput.Read.
 type bentoMockMsg struct {
 	jetstream.Msg
-	data    []byte
-	subject string
-	headers nats.Header
-	acked   bool
-	naked   bool
+	data        []byte
+	subject     string
+	headers     nats.Header
+	acked       bool
+	naked       bool
+	doubleAcked bool
 }
 
 func (m *bentoMockMsg) Data() []byte         { return m.data }
@@ -53,6 +54,17 @@ func (m *bentoMockMsg) Subject() string      { return m.subject }
 func (m *bentoMockMsg) Headers() nats.Header { return m.headers }
 func (m *bentoMockMsg) Ack() error           { m.acked = true; return nil }
 func (m *bentoMockMsg) Nak() error           { m.naked = true; return nil }
+
+func (m *bentoMockMsg) DoubleAck(ctx context.Context) error {
+	m.doubleAcked = true
+	m.acked = true
+	return nil
+}
+
+func (m *bentoMockMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	// Return an empty, safe metadata object to prevent nil pointer panics
+	return &jetstream.MsgMetadata{}, nil
+}
 
 // bentoMockIter satisfies jetstream.MessagesContext for testing jsInput.
 type bentoMockIter struct {

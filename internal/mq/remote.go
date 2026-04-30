@@ -69,9 +69,18 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 	}
 
 	cctx, err := cons.Consume(func(m jetstream.Msg) {
-		msgCtx := observability.ExtractNATS(context.Background(), m)
+		msgCtx := observability.ExtractNATS(ctx, m)
 
-		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(), func() { _ = m.Ack() }, func() { _ = m.Nak() })
+		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(),
+			// ACK
+			func(ctx context.Context) error {
+				return m.DoubleAck(ctx)
+			},
+			// NAK
+			func(ctx context.Context) error {
+				return m.Nak()
+			},
+		)
 
 		if err := handler(msg); err != nil {
 			_ = m.Nak()

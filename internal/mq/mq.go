@@ -11,27 +11,29 @@ type Message struct {
 	Subject   string
 	Data      []byte
 	Timestamp time.Time
-	ack       func()
-	nak       func()
+	ack       func(ctx context.Context) error
+	nak       func(ctx context.Context) error
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, ack, nak func()) *Message {
+func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, ack, nak func(ctx context.Context) error) *Message {
 	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, ack: ack, nak: nak}
 }
 
 // Ack acknowledges successful processing.
-func (m *Message) Ack() {
+func (m *Message) Ack(ctx context.Context) error {
 	if m.ack != nil {
-		m.ack()
+		return m.ack(ctx)
 	}
+	return nil
 }
 
 // Nak signals processing failure for redelivery.
-func (m *Message) Nak() {
+func (m *Message) Nak(ctx context.Context) error {
 	if m.nak != nil {
-		m.nak()
+		return m.nak(ctx)
 	}
+	return nil
 }
 
 // Publisher publishes messages to a subject.

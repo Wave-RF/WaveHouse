@@ -49,7 +49,7 @@ func TestRemoteNATS_PublishSubscribe(t *testing.T) {
 		mu.Lock()
 		payload = msg.Data
 		mu.Unlock()
-		msg.Ack()
+		msg.Ack(ctx)
 		select {
 		case done <- struct{}{}:
 		default:

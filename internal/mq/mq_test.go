@@ -1,6 +1,7 @@
 package mq
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -21,16 +22,16 @@ func TestMessage_AckNak(t *testing.T) {
 		"ingest.x",
 		[]byte("hi"),
 		time.Unix(1000, 0),
-		func() { acked++ },
-		func() { naked++ },
+		func(ctx context.Context) error { acked++; return nil },
+		func(ctx context.Context) error { acked++; return nil },
 	)
 
 	assert.Equal(t, "ingest.x", msg.Subject)
 	assert.Equal(t, []byte("hi"), msg.Data)
 	assert.Equal(t, int64(1000), msg.Timestamp.Unix())
 
-	msg.Ack()
-	msg.Nak()
+	_ = msg.Ack(t.Context())
+	_ = msg.Nak(t.Context())
 	assert.Equal(t, 1, acked)
 	assert.Equal(t, 1, naked)
 }
@@ -40,6 +41,6 @@ func TestMessage_NilCallbacks(t *testing.T) {
 
 	// Ack/Nak on a message with nil callbacks must be a no-op, not panic.
 	msg := NewMessage(t.Context(), "s", nil, time.Now(), nil, nil)
-	assert.NotPanics(t, msg.Ack)
-	assert.NotPanics(t, msg.Nak)
+	assert.NotPanics(t, func() { _ = msg.Ack(t.Context()) })
+	assert.NotPanics(t, func() { _ = msg.Nak(t.Context()) })
 }
