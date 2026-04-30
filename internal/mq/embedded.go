@@ -133,6 +133,9 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 			func(ctx context.Context) error {
 				return m.DoubleAck(ctx)
 			},
+			func() error {
+				return m.Ack() 
+			},
 			func(ctx context.Context) error {
 				return m.Nak()
 			},

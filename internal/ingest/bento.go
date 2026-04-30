@@ -191,10 +191,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			j.inFlight.Add(-1)
 
 			if err != nil {
-				// Replaced bufferCtx with msgCtx and removed RecordError
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
 			} else {
-				// Replaced bufferCtx with msgCtx
 				slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
 
 				bentoEventsProcessed.Add(ctx, 1, metric.WithAttributes(
@@ -433,7 +431,7 @@ output:
           period: 5s
           processors:
             - group_by_value:
-                value: '${! json("table_name") }'
+                value: '${! meta("table_name") }'
             - mapping: |
                 meta bento_start_time = meta("bento_start_time")
                 meta table_name = meta("table_name")

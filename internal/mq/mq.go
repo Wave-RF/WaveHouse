@@ -7,17 +7,25 @@ import (
 
 // Message represents a message received from the queue.
 type Message struct {
-	Ctx       context.Context
-	Subject   string
-	Data      []byte
-	Timestamp time.Time
-	ack       func(ctx context.Context) error
-	nak       func(ctx context.Context) error
+	Ctx       	context.Context
+	Subject   	string
+	Data      	[]byte
+	Timestamp 	time.Time
+	ack       	func(ctx context.Context) error
+	asyncAckFn 	func() error
+	nak       	func(ctx context.Context) error
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, ack, nak func(ctx context.Context) error) *Message {
-	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, ack: ack, nak: nak}
+func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, ack func(context.Context) error, asyncAckFn func() error, nak func(ctx context.Context) error) *Message {
+	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, ack: ack, asyncAckFn: asyncAckFn, nak: nak}
+}
+
+func (m *Message) AsyncAck() error {
+	if m.asyncAckFn != nil {
+		return m.asyncAckFn()
+	}
+	return nil
 }
 
 // Ack acknowledges successful processing.

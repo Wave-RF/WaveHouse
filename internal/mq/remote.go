@@ -72,11 +72,12 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 		msgCtx := observability.ExtractNATS(ctx, m)
 
 		msg := NewMessage(msgCtx, m.Subject(), m.Data(), time.Now(),
-			// ACK
 			func(ctx context.Context) error {
 				return m.DoubleAck(ctx)
 			},
-			// NAK
+			func() error {
+				return m.Ack() 
+			},
 			func(ctx context.Context) error {
 				return m.Nak()
 			},
