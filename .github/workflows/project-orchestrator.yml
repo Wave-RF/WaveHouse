@@ -1,76 +1,73 @@
 name: Project orchestrator
 
-# Drives the Task Board (project #7) as the primary signal for who
-# needs to look at a PR next. Replaces the CODEOWNERS auto-request
-# path and the earlier auto-assign-reviewer.yml. The board's card
-# position + assignee is the source of truth; GitHub review-request
-# notifications are treated as noise.
+# Drives the Task Board (project #7) as the single source of truth for
+# "who needs to look at what, next." Each item has two axes:
 #
-# State machine:
+#   Assignee — set once per card. The Issue's assignee is the
+#     implementer; the PR's assignee is the reviewer (non-author admin).
+#     Assignees DO NOT rotate across state transitions. Use them to see
+#     what's in your queue.
 #
-#   PR bot-clean (required checks green + threads resolved):
-#     → add PR to board (idempotent)
-#     → if board Status is empty or Backlog: set to Ready and assign
-#       the non-author admin. If Status is already In progress / In
-#       review / Done, leave it alone — a reviewer is actively
-#       handling it and we don't want to yank them back (Copilot's
-#       concern on the earlier unconditional-Ready logic).
-#     → flip draft → ready if draft
+#   Status — rotates per state transition, mirrored between PR and
+#     linked Issue (opposite semantics). PR Ready ↔ Issue In review;
+#     PR In review ↔ Issue Ready; both Done on merge.
+#
+# Transitions:
+#
+#   PR becomes bot-clean (required checks green + all threads resolved):
+#     → upsert PR card on board
+#     → if PR Status is empty/Backlog: set to Ready
+#       (preserve In progress / In review / Done — reviewer/author is
+#        actively handling; don't yank)
+#     → flip draft → ready-for-review if draft
+#     → assign non-author admin + request their review (one GitHub
+#       notification + one board-queue entry, in sync)
+#     → linked issues → In review
 #
 #   Review CHANGES_REQUESTED:
-#     → PR card Status = In review (reviewer waiting on coder)
-#     → linked issue card Status = Ready (coder's attention needed)
+#     → PR card → In review (reviewer waiting on implementer)
+#     → linked issue → Ready (implementer attention needed)
 #
-#   Author re-requests review (explicit "I've addressed feedback"):
-#     → PR card Status = Ready
-#     → linked issue card Status = In review
+#   Author re-requests review:
+#     → PR card → Ready
+#     → linked issue → In review
+#     → re-request review from admin (dismiss_stale_reviews_on_push
+#       typically cleared the prior request)
 #
 #   Review APPROVED / PR merged:
-#     → no-op; admin-approval.yml + auto-merge + project's
-#       "pull request merged" workflow close the loop
+#     → no orchestrator action. admin-approval.yml + a manual squash
+#       (or auto-merge if enabled) close the loop. GitHub's built-in
+#       project automation moves PR + issue to Done on merge.
 #
 #   Review dismissed:
-#     → re-evaluate bot-clean state (dismissal can invalidate
-#       a prior admin approval — board should reflect reality)
+#     → re-evaluate (prior admin approval may now be invalid).
 #
-# Manual step intentionally NOT automated: when the reviewer starts
+# Bidirectional manual-move sync lives in board-state-sync.yml.
+#
+# Dependabot PRs skip this workflow — they go through
+# dependabot-automerge.yml. Major-version Dependabot bumps get their
+# own board placement there using the same composite actions.
+#
+# Manual step intentionally preserved: when the reviewer starts
 # reviewing, they move the PR card Ready → In progress themselves
-# (GitHub doesn't emit a "review started" event we could hook).
-#
-# Dependabot PRs skip this workflow entirely. They go through
-# dependabot-automerge.yml and don't appear on the board.
-#
-# Uses pull_request_target (not pull_request) because the job
-# consumes PROJECT_BOARD_TOKEN and never checks out PR code — the
-# safe `pull_request_target` pattern. The workflow also exits cleanly
-# with a warning if PROJECT_BOARD_TOKEN isn't configured, so fork PRs
-# and fresh forks don't produce failing runs.
+# (no reliable GitHub event to hook).
 
 on:
-  # Note: despite being documented in GitHub's event-list docs,
-  # `pull_request_review_thread` is rejected by the Actions parser
-  # (observed 2026-04-22 on this repo). Including it marks the whole
-  # workflow as "Invalid workflow file" and suppresses ALL triggers.
-  # Caveat Copilot flagged: when a reviewer ONLY resolves threads
-  # without any push or new check_suite following, orchestration
-  # won't re-eval immediately. In practice the next push from the
-  # coder (addressing feedback) or check_suite (CI completion from
-  # that push) always follows thread resolution closely, so the
-  # gap is small. If it becomes a real pain point, consider adding
-  # a `schedule:` cron re-eval or a `workflow_dispatch:` manual
-  # re-eval path.
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
   pull_request_review:
     types: [submitted, dismissed]
-  check_suite:
+  # check_suite events are suppressed by GitHub when the check suite
+  # was created by a GITHUB_TOKEN-triggered workflow (the standard
+  # case for our CI). So we can't rely on check_suite as the "CI
+  # finished" signal. Use workflow_run instead — it fires regardless
+  # of GITHUB_TOKEN provenance, and it's the documented way to chain
+  # off another workflow completing.
+  workflow_run:
+    workflows: [CI]
     types: [completed]
 
 permissions:
-  # Only the scopes the workflow actually uses. `issues: write` is
-  # intentionally omitted — the orchestrator doesn't write issues,
-  # it only updates their project-board items (which go through
-  # PROJECT_TOKEN on the GraphQL mutations).
   contents: read
   pull-requests: write
   checks: read
@@ -78,7 +75,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: project-orchestrator-${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number || github.run_id }}
+  group: project-orchestrator-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -94,16 +91,40 @@ env:
 
 jobs:
   orchestrate:
+    # workflow_run fires for *every* CI run — including CI runs on
+    # pushes to main (the CI workflow triggers on both `push: main`
+    # and `pull_request`). A main-push CI run has no associated PR,
+    # so the orchestrator would just early-exit below when resolving
+    # PR number. Short-circuit here so we don't even spin up a
+    # runner in that case (Copilot flagged).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.event == 'pull_request'
     runs-on: [wave-rf-runners]
     steps:
+      - name: Checkout main (trusted composite-action source)
+        # Security: pull_request_target and workflow_run events would
+        # default to checking out the PR's merge/head SHA. If we then
+        # did `uses: ./.github/actions/...`, a malicious PR could
+        # modify the composite action in its branch and have that code
+        # execute with PROJECT_BOARD_TOKEN + write-scoped GITHUB_TOKEN
+        # in scope — the classic pull_request_target attack. Pinning
+        # the checkout ref to `main` always reads composite actions
+        # from trusted code regardless of event. persist-credentials:
+        # false further reduces exposure since we don't push from
+        # this workflow. (Copilot flagged.)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Guard — require PROJECT_BOARD_TOKEN
         env:
           PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
         run: |
           if [[ -z "$PROJECT_TOKEN" ]]; then
-            echo "::warning::PROJECT_BOARD_TOKEN not configured; project-board operations will be skipped. Set the secret on the repo to enable board orchestration."
-            # Emit a marker the later steps key off, rather than exit
-            # 0 here (which would skip PR-side operations too).
+            echo "::warning::PROJECT_BOARD_TOKEN not configured; board operations will be skipped."
             echo "SKIP_BOARD=true" >> "$GITHUB_ENV"
           fi
 
@@ -116,8 +137,13 @@ jobs:
             pull_request_target|pull_request_review)
               num="${{ github.event.pull_request.number }}"
               ;;
-            check_suite)
-              num=$(jq -r '.check_suite.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+            workflow_run)
+              # workflow_run payload exposes pull_requests associated
+              # with the head commit. Internal PRs populate this;
+              # fork PRs don't (their workflow_run has an empty list),
+              # which is fine — the pull_request_target trigger covers
+              # the fork case with different permissions anyway.
+              num=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
               ;;
           esac
           if [[ -z "$num" ]]; then
@@ -137,20 +163,19 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
         run: |
+          set -euo pipefail
+
           pr=$(gh pr view "$PR_NUM" -R "$REPO" \
             --json isDraft,author,statusCheckRollup,state)
           author=$(echo "$pr" | jq -r '.author.login')
           is_draft=$(echo "$pr" | jq -r '.isDraft')
           pr_state=$(echo "$pr" | jq -r '.state')
 
-          # Skip Dependabot — goes through dependabot-automerge.yml.
-          # Check both possible login shapes (user and app contexts).
           if [[ "$author" == "dependabot[bot]" || "$author" == "app/dependabot" ]]; then
-            echo "Dependabot PR — skipping project orchestration."
+            echo "Dependabot PR — handled by dependabot-automerge.yml."
             exit 0
           fi
 
-          # Skip non-OPEN PRs.
           if [[ "$pr_state" != "OPEN" ]]; then
             echo "PR is not OPEN ($pr_state) — skipping."
             exit 0
@@ -160,47 +185,39 @@ jobs:
           if [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "submitted" ]]; then
             case "$REVIEW_STATE" in
               changes_requested) action="changes_requested" ;;
-              # APPROVED intentionally falls through to no-op: admin-
-              # approval.yml flips its required-check to success and
-              # auto-merge + the project's "pull request merged"
-              # automation close the loop. No orchestrator state
-              # change is needed on approval submission.
+              # APPROVED is a no-op on the board side: admin-approval.yml
+              # flips its required check, merge proceeds, GitHub's
+              # project automation moves cards to Done on merge.
               approved)          action="none" ;;
-              *)                 action="none" ;;
+              # COMMENTED reviews (bots: Gemini, Copilot; sometimes
+              # humans adding notes) are the main reliable "CI has
+              # probably finished" signal we get on internal PRs since
+              # check_suite is suppressed when GITHUB_TOKEN triggered
+              # the suite. Re-eval: if this comment resolved or
+              # unresolved threads, or if CI just finished, we want
+              # the board updated.
+              *)                 action="reeval" ;;
             esac
           elif [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "dismissed" ]]; then
-            # A review was dismissed — re-evaluate so the board
-            # reflects the invalidated-approval state.
             action="reeval"
           elif [[ "$EVENT_NAME" == "pull_request_target" && "$EVENT_ACTION" == "review_requested" ]]; then
-            # `review_requested` fires on every reviewer-add, including
-            # the initial one when the PR opens with pre-populated
-            # reviewers. Copilot flagged that sender == author alone
-            # isn't enough — that's true for BOTH the initial request
-            # (author opened PR with reviewers sidebar populated) AND
-            # a re-request. The distinguishing signal is whether the
-            # newly-requested reviewer has a *prior* review on this PR
-            # — if yes, this must be a re-request. If no, it's a
-            # first-time request and we shouldn't flip cards.
+            # Distinguish initial request (author opened with reviewer
+            # pre-populated) from re-request (author re-asked a
+            # reviewer who'd already reviewed). Only the latter is
+            # "I've addressed feedback."
             sender="${{ github.event.sender.login }}"
             pr_author="${{ github.event.pull_request.user.login }}"
             requested_reviewer="${{ github.event.requested_reviewer.login }}"
-            if [[ "$sender" != "$pr_author" ]]; then
-              action="none"
-            elif [[ -z "$requested_reviewer" ]]; then
-              # No `requested_reviewer` (e.g., team request or stale
-              # payload) — can't verify prior review. Safe default: no-op.
+            if [[ "$sender" != "$pr_author" || -z "$requested_reviewer" ]]; then
               action="none"
             else
               has_prior_review=$(gh api "repos/$REPO/pulls/$PR_NUM/reviews?per_page=100" \
                 | jq -r --arg u "$requested_reviewer" 'any(.[]; .user.login == $u)' 2>/dev/null || echo "false")
               if [[ "$has_prior_review" == "true" ]]; then
                 action="re_requested"
-              else
-                action="none"
               fi
             fi
-          elif [[ "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "check_suite" ]]; then
+          elif [[ "$EVENT_NAME" == "pull_request_target" || "$EVENT_NAME" == "workflow_run" ]]; then
             action="reeval"
           fi
 
@@ -209,39 +226,42 @@ jobs:
           echo "is_draft=$is_draft" >> "$GITHUB_OUTPUT"
           echo "Event: $EVENT_NAME / $EVENT_ACTION → action: $action"
 
-      - name: Apply ready-state transition (bot-clean → assign + Ready)
+      # ────────────────────────────────────────────────────────────────
+      # reeval path: bot-clean → add to board, promote Status=Ready,
+      # assign + request review, mirror linked issues to In review.
+      # ────────────────────────────────────────────────────────────────
+
+      - name: Check bot-clean (required checks green + threads resolved)
+        id: botclean
         if: steps.action.outputs.action == 'reeval'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
-          PR_AUTHOR: ${{ steps.action.outputs.author }}
-          IS_DRAFT: ${{ steps.action.outputs.is_draft }}
         run: |
-          # Required checks green? (Admin approval deliberately excluded
-          # — it self-references: opens when an admin approves, which
-          # requires assignment, which requires clean state.)
+          set -euo pipefail
+
+          # Admin approval is deliberately excluded — it opens only
+          # after an admin reviews, which is the step this workflow
+          # triggers. Including it here would self-reference.
           pr=$(gh pr view "$PR_NUM" -R "$REPO" --json statusCheckRollup)
-          for check in Check Build Validate; do
+          for check in Check Build Validate Lint Test "Integration Tests" "SDK Tests"; do
             state=$(echo "$pr" | jq -r --arg n "$check" \
               '[.statusCheckRollup[] | select(.name == $n)] | .[0].conclusion // "MISSING"')
             if [[ "$state" != "SUCCESS" ]]; then
-              echo "Required check '$check' is '$state'; waiting."
+              echo "Required check '$check' is '$state'; not bot-clean yet."
+              echo "clean=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           done
 
-          # All review threads resolved?
           owner="${REPO%%/*}"
           repo_name="${REPO##*/}"
           unresolved=$(gh api graphql \
             -f query='query($owner:String!, $repo:String!, $num:Int!) {
               repository(owner:$owner, name:$repo) {
                 pullRequest(number:$num) {
-                  reviewThreads(first: 100) {
-                    nodes { isResolved }
-                  }
+                  reviewThreads(first: 100) { nodes { isResolved } }
                 }
               }
             }' \
@@ -249,57 +269,82 @@ jobs:
             --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
 
           if [[ "$unresolved" != "0" ]]; then
-            echo "$unresolved unresolved review thread(s); waiting."
+            echo "$unresolved unresolved review thread(s); not bot-clean yet."
+            echo "clean=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Flip draft → ready if draft.
-          if [[ "$IS_DRAFT" == "true" ]]; then
-            echo "PR is draft and bot-clean; flipping to ready-for-review."
-            gh pr ready "$PR_NUM" -R "$REPO"
-          fi
+          echo "PR is bot-clean."
+          echo "clean=true" >> "$GITHUB_OUTPUT"
 
-          # Assign non-author admin(s). PR assignee (not review-requested).
-          admins=("EricAndrechek" "taitelee")
-          candidates=()
-          for admin in "${admins[@]}"; do
-            [[ "$admin" != "$PR_AUTHOR" ]] && candidates+=("$admin")
-          done
+      - name: Flip draft → ready-for-review
+        if: steps.botclean.outputs.clean == 'true' && steps.action.outputs.is_draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
+        run: |
+          echo "PR is draft and bot-clean; flipping to ready-for-review."
+          gh pr ready "$PR_NUM" -R "$REPO"
 
-          current_assignees=$(gh pr view "$PR_NUM" -R "$REPO" --json assignees \
-            --jq '[.assignees[].login] | .[]' 2>/dev/null || true)
-          to_add=()
-          for cand in "${candidates[@]}"; do
-            if printf '%s\n' "$current_assignees" | grep -Fxq "$cand"; then
-              echo "$cand already assigned; skipping."
-              continue
-            fi
-            to_add+=("$cand")
-          done
-          for cand in "${to_add[@]}"; do
-            echo "Assigning $cand to PR #$PR_NUM"
-            gh pr edit "$PR_NUM" -R "$REPO" --add-assignee "$cand"
-          done
+      - name: Compute reviewer — the non-author admin (single)
+        id: reviewers
+        if: (steps.botclean.outputs.clean == 'true') || (steps.action.outputs.action == 're_requested')
+        env:
+          PR_AUTHOR: ${{ steps.action.outputs.author }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
+        run: |
+          # Per the state-machine spec (AGENTS.md §Task Board state
+          # machine), the PR card has *one* reviewer-assignee — "the
+          # non-author admin" (singular). Three cases:
+          #   - author is Eric → reviewer is Taite.
+          #   - author is Taite → reviewer is Eric.
+          #   - author is anyone else (external contributor, or future
+          #     non-admin committers) → pick one admin deterministically
+          #     by PR-number parity so load spreads evenly over time.
+          # Copilot flagged the prior "both admins" behaviour as
+          # inconsistent with the single-reviewer contract.
+          case "$PR_AUTHOR" in
+            EricAndrechek) picked="taitelee" ;;
+            taitelee)      picked="EricAndrechek" ;;
+            *)
+              if [ $((PR_NUM % 2)) -eq 0 ]; then
+                picked="EricAndrechek"
+              else
+                picked="taitelee"
+              fi
+              ;;
+          esac
+          echo "reviewers=$picked" >> "$GITHUB_OUTPUT"
 
-          # Board operations — skip if PROJECT_BOARD_TOKEN missing.
-          if [[ "${SKIP_BOARD:-false}" == "true" ]]; then
-            echo "SKIP_BOARD set; not touching board."
-            exit 0
-          fi
+      - name: Check current PR card Status (reeval guard)
+        id: pr-status
+        if: steps.botclean.outputs.clean == 'true' && env.SKIP_BOARD != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
+        run: |
+          set -euo pipefail
 
+          # Reeval promotes to Ready only from empty/Backlog — don't
+          # yank a card that's already In progress / In review / Done.
+          # Compare against optionId rather than the Status option's
+          # display name (Copilot R3) so a rename on the project UI
+          # doesn't silently break the guard.
+          #
+          # Explicit GraphQL-error check (Copilot R8): without strict
+          # mode + this check, a failed gh api would yield an empty
+          # `current_option`, and the "[ -z ] || [ = Backlog ]" branch
+          # below would incorrectly mark promote=true — silently
+          # promoting a card we couldn't actually read. Now any
+          # .errors in the response fails this step loudly.
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
-
-          # Look up board item via GraphQL resource(url). O(1) —
-          # replaces the old gh-project-item-list full-board scan.
-          # `gh api --jq` takes a single jq expression and can't pass
-          # `--arg`; pipe to `jq` directly when we need variable
-          # injection.
-          item_info=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
+          resp=$(gh api graphql -f query='query($url: URI!) {
               resource(url: $url) {
                 ... on PullRequest {
                   projectItems(first: 20) {
                     nodes {
-                      id
                       project { number }
                       fieldValueByName(name: "Status") {
                         ... on ProjectV2ItemFieldSingleSelectValue { optionId name }
@@ -308,168 +353,170 @@ jobs:
                   }
                 }
               }
-            }' -F url="$pr_url" \
-            | jq --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber))')
-          item_id=$(echo "$item_info" | jq -r '.id // empty' | head -n1)
-          current_status=$(echo "$item_info" | jq -r '.fieldValueByName.name // empty' | head -n1)
+            }' -F url="$pr_url")
 
-          if [[ -z "$item_id" ]]; then
-            echo "PR not on board — adding."
-            item_id=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$pr_url" --format json --jq '.id')
-            current_status=""
+          graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
+          if [ -n "$graphql_errors" ]; then
+            echo "::error::GraphQL error querying PR card Status: $graphql_errors"
+            exit 1
           fi
 
-          # Only set Status=Ready when the card is fresh or Backlog.
-          # Don't yank a reviewer's "In progress" back to Ready (Copilot
-          # flagged this), and don't reset "In review" (which means
-          # reviewer is waiting on coder) — that's the re_requested
-          # path's job.
-          if [[ -z "$current_status" || "$current_status" == "Backlog" ]]; then
-            echo "Setting PR card ($item_id) Status = Ready (was: '${current_status:-<unset>}')"
-            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-              --id "$item_id" \
-              --field-id "$STATUS_FIELD_ID" \
-              --single-select-option-id "$STATUS_READY" \
-              --project-id "$PROJECT_ID" > /dev/null
+          # Distinguish "card not on board" from "on board, empty
+          # Status" from "on board, Backlog" from "on board, other".
+          # Empty-card (no matching project item) is OK to promote —
+          # the subsequent Upsert step adds it + sets Ready. Only the
+          # "on board, other" case should short-circuit.
+          on_board=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            [.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber))] | length')
+          current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            .data.resource.projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber))
+            | .fieldValueByName.optionId // ""' | head -n1)
+          current_name=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+            .data.resource.projectItems.nodes[]?
+            | select(.project.number == ($n | tonumber))
+            | .fieldValueByName.name // ""' | head -n1)
+
+          if [ "$on_board" = "0" ] || [ -z "$current_option" ] || [ "$current_option" = "$STATUS_BACKLOG" ]; then
+            echo "PR card Status is '${current_name:-<unset>}' (option '$current_option', on_board=$on_board) — ok to promote."
+            echo "promote=true" >> "$GITHUB_OUTPUT"
           else
-            echo "PR card Status already set to '$current_status'; leaving it alone."
+            echo "PR card Status is '$current_name' (option $current_option) — leaving alone."
+            echo "promote=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Apply changes-requested transition
+      - name: Upsert PR card → Ready (reeval)
+        if: steps.botclean.outputs.clean == 'true' && env.SKIP_BOARD != 'true' && steps.pr-status.outputs.promote == 'true'
+        uses: ./.github/actions/board-upsert-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_READY }}
+          url: https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.num }}
+
+      - name: Assign + request review (reeval)
+        # No board-status gate here — the composite action checks
+        # current assignees + requested reviewers and skips if the
+        # desired reviewer is already present. That correctly handles
+        # both directions:
+        #   - PR card already In progress/In review with reviewer set:
+        #     composite no-ops (no re-spam).
+        #   - PR card already In progress but reviewer NEVER assigned
+        #     (e.g., manually moved before first bot-clean): composite
+        #     sets the missing reviewer.
+        # Copilot's R6 feedback flagged the prior `promote`-based
+        # gating as creating the second gap.
+        if: steps.botclean.outputs.clean == 'true' && steps.reviewers.outputs.reviewers != ''
+        uses: ./.github/actions/assign-and-request-review
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ steps.pr.outputs.num }}
+          reviewers: ${{ steps.reviewers.outputs.reviewers }}
+          # Only request review on the first bot-clean → Ready
+          # transition. After a CHANGES_REQUESTED review GitHub
+          # legitimately clears the review-request; re-firing it on a
+          # subsequent re-eval would re-notify the reviewer before the
+          # author has explicitly re-requested, defeating the
+          # re_requested signal. Assignees still get reconciled either
+          # way (gap-repair path). (Copilot R9 flagged.)
+          #
+          # On the SKIP_BOARD path (no PROJECT_BOARD_TOKEN — fork PRs,
+          # un-tokened environments) the pr-status step is skipped and
+          # its `promote` output is empty, so the equality check above
+          # collapses to false. Without the SKIP_BOARD escape hatch,
+          # `request-review` would be permanently false there:
+          # assignees set, but no GitHub review-request, so the
+          # reviewer never gets notified and `dismiss_stale_reviews_on_push`
+          # has nothing to dismiss. We have no way to distinguish
+          # first-bot-clean from re-eval in that environment, so
+          # default to "request" — the composite action no-ops if
+          # the reviewer already has an outstanding request, making
+          # re-spam after CHANGES_REQUESTED the only remaining risk.
+          # (Claude review flagged 2026-04-28.)
+          request-review: ${{ steps.pr-status.outputs.promote == 'true' || env.SKIP_BOARD == 'true' }}
+
+      - name: Linked issues → In review (reeval)
+        if: steps.botclean.outputs.clean == 'true' && env.SKIP_BOARD != 'true' && steps.pr-status.outputs.promote == 'true'
+        uses: ./.github/actions/set-linked-issues-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ steps.pr.outputs.num }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_IN_REVIEW }}
+
+      # ────────────────────────────────────────────────────────────────
+      # changes_requested path: reviewer pushed back.
+      # PR → In review, linked issues → Ready.
+      # ────────────────────────────────────────────────────────────────
+
+      - name: Upsert PR card → In review (changes_requested)
         if: steps.action.outputs.action == 'changes_requested' && env.SKIP_BOARD != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUM: ${{ steps.pr.outputs.num }}
-        run: |
-          pr_url="https://github.com/$REPO/pull/$PR_NUM"
+        uses: ./.github/actions/board-upsert-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_IN_REVIEW }}
+          url: https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.num }}
 
-          # O(1) board-item lookup via GraphQL resource.
-          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
-              resource(url: $url) {
-                ... on PullRequest {
-                  projectItems(first: 20) { nodes { id project { number } } }
-                }
-              }
-            }' -F url="$pr_url" \
-            | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
+      - name: Linked issues → Ready (changes_requested)
+        if: steps.action.outputs.action == 'changes_requested' && env.SKIP_BOARD != 'true'
+        uses: ./.github/actions/set-linked-issues-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ steps.pr.outputs.num }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_READY }}
 
-          if [[ -n "$pr_item" ]]; then
-            echo "Moving PR card → In review"
-            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-              --id "$pr_item" \
-              --field-id "$STATUS_FIELD_ID" \
-              --single-select-option-id "$STATUS_IN_REVIEW" \
-              --project-id "$PROJECT_ID" > /dev/null
-          fi
+      # ────────────────────────────────────────────────────────────────
+      # re_requested path: author re-asked for review.
+      # PR → Ready, linked issues → In review, re-request reviewer.
+      # ────────────────────────────────────────────────────────────────
 
-          # Linked issue(s) → Ready (coder attention).
-          owner="${REPO%%/*}"
-          repo_name="${REPO##*/}"
-          issue_numbers=$(gh api graphql \
-            -f query='query($owner:String!, $repo:String!, $num:Int!) {
-              repository(owner:$owner, name:$repo) {
-                pullRequest(number:$num) {
-                  closingIssuesReferences(first: 10) { nodes { number } }
-                }
-              }
-            }' \
-            -F owner="$owner" -F repo="$repo_name" -F num="$PR_NUM" \
-            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
-
-          for issue_num in $issue_numbers; do
-            issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
-                resource(url: $url) {
-                  ... on Issue { projectItems(first: 20) { nodes { id project { number } } } }
-                }
-              }' -F url="$issue_url" \
-              | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
-            # Add the issue to the board if it's not already there —
-            # ensures the state-machine transition applies even on
-            # issues that somehow bypassed the project's own auto-add
-            # workflow (Copilot's concern about silent skips).
-            if [[ -z "$issue_item" ]]; then
-              echo "Linked issue #$issue_num not on board — adding."
-              issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$issue_url" --format json --jq '.id')
-            fi
-            echo "Moving linked issue #$issue_num → Ready"
-            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-              --id "$issue_item" \
-              --field-id "$STATUS_FIELD_ID" \
-              --single-select-option-id "$STATUS_READY" \
-              --project-id "$PROJECT_ID" > /dev/null
-          done
-
-      - name: Apply review-re-requested transition
+      - name: Upsert PR card → Ready (re_requested)
         if: steps.action.outputs.action == 're_requested' && env.SKIP_BOARD != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUM: ${{ steps.pr.outputs.num }}
-        run: |
-          pr_url="https://github.com/$REPO/pull/$PR_NUM"
+        uses: ./.github/actions/board-upsert-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_READY }}
+          url: https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.num }}
 
-          pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
-              resource(url: $url) {
-                ... on PullRequest {
-                  projectItems(first: 20) { nodes { id project { number } } }
-                }
-              }
-            }' -F url="$pr_url" \
-            | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
+      - name: Re-request review (re_requested)
+        if: steps.action.outputs.action == 're_requested' && steps.reviewers.outputs.reviewers != ''
+        uses: ./.github/actions/assign-and-request-review
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ steps.pr.outputs.num }}
+          reviewers: ${{ steps.reviewers.outputs.reviewers }}
 
-          # Add the PR to the board if it's somehow fallen off (manual
-          # removal, etc.) — mirrors the changes-requested path's
-          # behavior so the state machine self-heals. Claude flagged
-          # this asymmetry — previously re_requested silently no-op'd
-          # if the PR card was missing.
-          if [[ -z "$pr_item" ]]; then
-            echo "PR #$PR_NUM not on board — adding."
-            pr_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$pr_url" --format json --jq '.id')
-          fi
-
-          echo "Moving PR card → Ready (coder re-requested review)"
-          GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-            --id "$pr_item" \
-            --field-id "$STATUS_FIELD_ID" \
-            --single-select-option-id "$STATUS_READY" \
-            --project-id "$PROJECT_ID" > /dev/null
-
-          owner="${REPO%%/*}"
-          repo_name="${REPO##*/}"
-          issue_numbers=$(gh api graphql \
-            -f query='query($owner:String!, $repo:String!, $num:Int!) {
-              repository(owner:$owner, name:$repo) {
-                pullRequest(number:$num) {
-                  closingIssuesReferences(first: 10) { nodes { number } }
-                }
-              }
-            }' \
-            -F owner="$owner" -F repo="$repo_name" -F num="$PR_NUM" \
-            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
-
-          for issue_num in $issue_numbers; do
-            issue_url="https://github.com/$REPO/issues/$issue_num"
-            issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh api graphql -f query='query($url: URI!) {
-                resource(url: $url) {
-                  ... on Issue { projectItems(first: 20) { nodes { id project { number } } } }
-                }
-              }' -F url="$issue_url" \
-              | jq -r --arg n "$PROJECT_NUMBER" '.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber)) | .id' | head -n1)
-            # Add the issue to the board if it's not already there —
-            # matches the changes-requested path's behavior so the
-            # state-machine transition always applies.
-            if [[ -z "$issue_item" ]]; then
-              echo "Linked issue #$issue_num not on board — adding."
-              issue_item=$(GH_TOKEN="$PROJECT_TOKEN" gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$issue_url" --format json --jq '.id')
-            fi
-            echo "Moving linked issue #$issue_num → In review"
-            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit \
-              --id "$issue_item" \
-              --field-id "$STATUS_FIELD_ID" \
-              --single-select-option-id "$STATUS_IN_REVIEW" \
-              --project-id "$PROJECT_ID" > /dev/null
-          done
+      - name: Linked issues → In review (re_requested)
+        if: steps.action.outputs.action == 're_requested' && env.SKIP_BOARD != 'true'
+        uses: ./.github/actions/set-linked-issues-status
+        with:
+          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ steps.pr.outputs.num }}
+          project-owner: ${{ env.PROJECT_OWNER }}
+          project-number: ${{ env.PROJECT_NUMBER }}
+          project-id: ${{ env.PROJECT_ID }}
+          status-field-id: ${{ env.STATUS_FIELD_ID }}
+          status-option-id: ${{ env.STATUS_IN_REVIEW }}

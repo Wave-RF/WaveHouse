@@ -32,12 +32,12 @@ func (h *PolicyHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *PolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
 	var p policy.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := h.Store.Put(r.Context(), &p); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -49,12 +49,12 @@ func (h *PolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
 func (h *PolicyHandler) Validate(w http.ResponseWriter, r *http.Request) {
 	var p policy.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := policy.Validate(&p); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
