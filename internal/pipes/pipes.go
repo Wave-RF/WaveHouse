@@ -314,7 +314,11 @@ func (s *Store) Watch(ctx context.Context) {
 		s.logger.Error("failed to start kv watcher for pipes", "error", err)
 		return
 	}
-	defer watcher.Stop()
+	defer func() {
+		if err := watcher.Stop(); err != nil {
+			s.logger.Error("failed to stop watcher", "error", err)
+		}
+	}()
 
 	for {
 		select {
