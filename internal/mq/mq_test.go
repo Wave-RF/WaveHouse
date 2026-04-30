@@ -23,7 +23,7 @@ func TestMessage_AckNak(t *testing.T) {
 		[]byte("hi"),
 		time.Unix(1000, 0),
 		func(ctx context.Context) error { acked++; return nil },
-		func(ctx context.Context) error { acked++; return nil },
+		func(ctx context.Context) error { naked++; return nil },
 	)
 
 	assert.Equal(t, "ingest.x", msg.Subject)

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"sync"
@@ -303,15 +304,29 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
 	}
 
-	// Building the HTTP request
-	url := fmt.Sprintf("http://%s:%s/?database=%s&query=INSERT+INTO+%s+FORMAT+JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort",
-		c.host, c.port, c.db, tableName)
+	if !safeIdentifierRe.MatchString(tableName) {
+		return fmt.Errorf("invalid table name: %q", tableName)
+	}
 
-	req, err := http.NewRequestWithContext(reqCtx, "POST", url, &buf)
+	q := url.Values{}
+	q.Set("database", c.db)
+
+	q.Set("query", fmt.Sprintf("INSERT INTO `%s` FORMAT JSONEachRow", tableName))
+	q.Set("input_format_skip_unknown_fields", "1")
+	q.Set("date_time_input_format", "best_effort")
+
+	u := &url.URL{
+		Scheme:   "http",
+		Host:     net.JoinHostPort(c.host, c.port), // Safely joins host and port, adding IPv6 brackets if needed
+		RawQuery: q.Encode(),                       // Safely URL-encodes all parameters
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", u.String(), &buf)
 	if err != nil {
 		chSpan.RecordError(err)
-		return err
+		return fmt.Errorf("create clickhouse request: %w", err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-ClickHouse-User", c.user)
 	req.Header.Set("X-ClickHouse-Key", c.password)
@@ -319,7 +334,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		chSpan.RecordError(err)
-		return err
+		return fmt.Errorf("execute clickhouse request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

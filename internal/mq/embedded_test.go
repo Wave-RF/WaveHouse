@@ -39,7 +39,7 @@ func TestEmbeddedNATS_PublishSubscribe(t *testing.T) {
 		mu.Lock()
 		received[msg.Subject] = msg.Data
 		mu.Unlock()
-		msg.Ack(ctx)
+		_ = msg.Ack(ctx)
 		select {
 		case done <- struct{}{}:
 		default:
@@ -85,7 +85,7 @@ func TestEmbeddedNATS_SubscribeCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	err := e.Subscribe(ctx, "ingest.cancel.x", "cancel-consumer", func(msg *Message) error {
-		msg.Ack(ctx)
+		_ = msg.Ack(ctx)
 		return nil
 	})
 	require.NoError(t, err)
