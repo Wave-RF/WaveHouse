@@ -12,6 +12,10 @@ on:
     # moment the PR becomes review-ready.
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
+  # Manual escape hatch for re-running CI on demand (e.g. when GitHub
+  # silently drops a `synchronize` event on a long-lived branch). Run
+  # via `gh workflow run CI --ref <branch>`.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -75,8 +79,7 @@ jobs:
       - name: Enforce coverage threshold & generate badge
         uses: vladopajic/go-test-coverage@8cfd056d3bc5cc2bc64a840ded0c907aaae3dc46  # v2.18.7
         with:
-          # Thresholds + exclude.paths live in .testcoverage.yml.
-          # Restoring the 70% target is tracked in #67.
+          # Threshold + exclude.paths live in .testcoverage.yml (70% total).
           config: ./.testcoverage.yml
           git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
           git-branch: badges
