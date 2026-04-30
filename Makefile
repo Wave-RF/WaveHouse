@@ -18,7 +18,7 @@ LIMIT ?= 30
 LDFLAGS := -s -w
 
 # Define the targets
-BINARIES := wavehouse wavehouse-api wavehouse-worker
+BINARIES := wavehouse
 
 # Verbose test output: V=1 make test
 ifdef V
@@ -39,7 +39,7 @@ RESET  := \033[0m
         test test-integration test-all ci coverage coverage-enforce \
         test-sdk test-e2e test-e2e-dev test-e2e-setup test-everything \
         smoke-test mod-tidy-check \
-        docker compose-standalone compose-clustered compose-deps deps-wipe \
+        docker compose-standalone compose-deps deps-wipe \
         clean release-test \
         vulncheck security deadcode audit-cgo \
         size-report size-tree size-treemap dep-graph dep-why dep-cut binary-analysis
@@ -246,9 +246,6 @@ docker: ## Build Docker image for your local machine's architecture
 
 compose-standalone: ## Start standalone via Docker Compose
 	docker compose -f deployments/compose/standalone.yaml up -d
-
-compose-clustered: ## Start clustered via Docker Compose
-	docker compose -f deployments/compose/clustered.yaml up -d
 
 compose-deps: ## Start infrastructure dependencies
 	docker compose -f deployments/compose/dependencies.yaml up -d

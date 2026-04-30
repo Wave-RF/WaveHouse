@@ -14,7 +14,7 @@ Thank you for your interest in contributing to WaveHouse! This guide will help y
 
 Open a [bug report issue](https://github.com/Wave-RF/WaveHouse/issues/new?template=bug_report.md) with:
 
-- WaveHouse version and deployment mode (standalone/clustered)
+- WaveHouse version
 - Steps to reproduce
 - Expected vs. actual behavior
 - Relevant logs or error messages
@@ -80,7 +80,7 @@ Examples:
 
 ```text
 feat(api): add rate limiting middleware
-fix(dedupe): handle ScyllaDB timeout gracefully
+fix(dedupe): handle external DB timeout gracefully
 docs(api): add WebSocket authentication example
 test(cache): add tiered cache stampede test
 ```

@@ -2,16 +2,16 @@
 
 ## Prerequisites
 
-- **Go 1.25+** — [Install Go](https://go.dev/dl/)
+- **Go 1.26+** — [Install Go](https://go.dev/dl/)
 - **Docker** — For running dependencies and integration tests
 - **golangci-lint v2** — [Install golangci-lint](https://golangci-lint.run/welcome/install/) (binary install recommended; not in `go.mod` due to dependency tree size)
 - **air** — For hot-reload during development: [Install air](https://github.com/air-verse/air) (`brew install air` on macOS)
 
-Other dev tools (`gotestsum`, `gofumpt`, `goimports`) are **pinned in `go.mod`** via native `tool` directives (Go 1.24+) and run automatically through the Makefile — no manual installation needed.
+Other dev tools (`gotestsum`, `gofumpt`, `goimports`) are **pinned in `go.mod`** via native `tool` directives (Go 1.26+) and run automatically through the Makefile — no manual installation needed.
 
 > **Note**: Both `golangci-lint` and `air` are installed as external binaries (not in `go.mod`) because their large dependency trees cause conflicts. If missing, `make lint` and `make dev` print install instructions.
 
-## Quick Start (Standalone Mode)
+## Quick Start
 
 This is the fastest way to get a fully functional local environment:
 
@@ -21,7 +21,7 @@ git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
 go mod download
 
-# 2. Start ClickHouse (the only external dependency for standalone mode)
+# 2. Start ClickHouse (the only external dependency)
 make compose-deps
 
 # 3. Create a table in ClickHouse
@@ -43,7 +43,7 @@ make dev
 WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no Redis needed
+- **L1 cache only** (Ristretto) — no external cache needed
 - **Auth disabled** by default — no JWT needed
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
@@ -125,64 +125,28 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # → {"duplicate":true}
 ```
 
-## Quick Start (Clustered Mode)
-
-To develop against the full clustered infrastructure locally:
-
-```bash
-# 1. Start all dependencies (ClickHouse, NATS, Redis, ScyllaDB)
-make compose-deps
-
-# 2. Create your tables in ClickHouse
-docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
-  clickhouse-client --query "
-    CREATE TABLE IF NOT EXISTS clicks (
-      page String, button String, score Float64,
-      received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
-    ) ENGINE = MergeTree() ORDER BY (page)
-  "
-
-# 3. Run the API server in one terminal
-WH_MODE=clustered \
-WH_MQ_URL=nats://localhost:4222 \
-WH_CACHE_REDIS_URL=redis://localhost:6379 \
-go run ./cmd/wavehouse-api
-
-# 4. Run the worker in another terminal
-WH_MODE=clustered \
-WH_MQ_URL=nats://localhost:4222 \
-WH_CH_ADDR=localhost:9000 \
-go run ./cmd/wavehouse-worker
-```
-
 ### Using an .env File
 
 ```bash
-# .env.clustered
-export WH_MODE=clustered
+# .env
 export WH_CH_ADDR=localhost:9000
-export WH_MQ_URL=nats://localhost:4222
-export WH_CACHE_REDIS_URL=redis://localhost:6379
 ```
 
 Then:
 
 ```bash
-source .env.clustered
-go run ./cmd/wavehouse-api    # terminal 1
-go run ./cmd/wavehouse-worker # terminal 2
+source .env
+go run ./cmd/wavehouse
 ```
 
 ## Building
 
 ```bash
-# Build all three binaries to bin/
+# Build the binary to bin/
 make build
 
 # Build individual binaries
 go build -o bin/wavehouse ./cmd/wavehouse
-go build -o bin/wavehouse-api ./cmd/wavehouse-api
-go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 ```
 
 ## Running Modes at a Glance
@@ -192,9 +156,6 @@ go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 | Hot-reload standalone dev server | `make dev` |
 | Standalone binary (default config) | `./bin/wavehouse` |
 | Standalone via Docker Compose | `make compose-standalone` |
-| Clustered API server (local deps) | `source .env.clustered && go run ./cmd/wavehouse-api` |
-| Clustered worker (local deps) | `source .env.clustered && go run ./cmd/wavehouse-worker` |
-| Full clustered stack via Docker | `make compose-clustered` |
 | Infrastructure deps only | `make compose-deps` |
 
 ## Testing
@@ -307,14 +268,12 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 ```text
 WaveHouse/
 ├── cmd/                    # Binary entry points
-│   ├── wavehouse/          # Standalone all-in-one binary
-│   ├── wavehouse-api/      # Clustered API server
-│   └── wavehouse-worker/   # Clustered background worker
+│   └── wavehouse/          # Standalone all-in-one binary
 ├── internal/               # Private application packages
 │   ├── api/                # HTTP handlers, router, middleware
-│   ├── cache/              # L1 (Ristretto) + L2 (Redis) caching
+│   ├── cache/              # L1 (Ristretto) + L2 caching
 │   ├── config/             # YAML + env var configuration
-│   ├── dedupe/             # Optional deduplication (Pebble or ScyllaDB)
+│   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
@@ -340,7 +299,7 @@ WaveHouse/
 ## Code Conventions
 
 - **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
-- **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and clustered modes.
+- **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and (future) clustered modes.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging.
 - **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
@@ -355,7 +314,7 @@ Run `make help` to see all targets. Key ones:
 | `make setup` | Download Go modules and cache tools |
 | `make tools` | Install external dev tools (golangci-lint, air, goreleaser) |
 | `make check-tools` | Verify all required tools are installed |
-| `make build` | Compile all three binaries to `bin/` |
+| `make build` | Compile all the binary to `bin/` |
 | `make build-debug` | Compile with debug symbols (for delve/profiling) |
 | `make dev` | Hot-reload development server (requires air) |
 | `make fmt` | Format code (`gofumpt` + `goimports`) |
@@ -388,7 +347,6 @@ Run `make help` to see all targets. Key ones:
 | `make binary-analysis` | Combined: sizes + dead code + CGO audit |
 | `make docker` | Build Docker image |
 | `make compose-standalone` | Start standalone mode via Docker Compose |
-| `make compose-clustered` | Start clustered mode via Docker Compose |
 | `make compose-deps` | Start infrastructure dependencies only |
 | `make deps-wipe` | Destroy and recreate dependency containers |
 | `make release-test` | Test cross-compilation via GoReleaser |

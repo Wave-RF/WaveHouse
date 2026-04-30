@@ -7,17 +7,8 @@ import (
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
-// Mode determines standalone (embedded) vs clustered (distributed) deployment.
-type Mode string
-
-const (
-	ModeStandalone Mode = "standalone"
-	ModeClustered  Mode = "clustered"
-)
-
 // Config is the top-level application configuration.
 type Config struct {
-	Mode       Mode       `yaml:"mode" env:"WH_MODE" env-default:"standalone"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	MQ         MQ         `yaml:"mq"`
@@ -47,24 +38,20 @@ type ClickHouse struct {
 type MQ struct {
 	StreamName       string `yaml:"stream_name" env:"WH_MQ_STREAM_NAME" env-default:"WAVEHOUSE"`
 	EmbeddedDir      string `yaml:"embedded_dir" env:"WH_MQ_EMBEDDED_DIR" env-default:"./data/nats"`
-	URL              string `yaml:"url" env:"WH_MQ_URL" env-default:"nats://localhost:4222"`
 	GapWindowMinutes int    `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
 	MaxBytesGB       int    `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
 type Dedupe struct {
-	Enabled        bool     `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
-	IDField        string   `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
-	EmbeddedDir    string   `yaml:"embedded_dir" env:"WH_DEDUPE_EMBEDDED_DIR" env-default:"./data/pebble"`
-	ScyllaHosts    []string `yaml:"scylla_hosts" env:"WH_DEDUPE_SCYLLA_HOSTS" env-default:"localhost:9042"`
-	ScyllaKeyspace string   `yaml:"scylla_keyspace" env:"WH_DEDUPE_SCYLLA_KEYSPACE" env-default:"wavehouse"`
+	Enabled     bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
+	IDField     string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
+	EmbeddedDir string `yaml:"embedded_dir" env:"WH_DEDUPE_EMBEDDED_DIR" env-default:"./data/pebble"`
 }
 
 type Cache struct {
-	L1MaxCost              int64  `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-	RedisURL               string `yaml:"redis_url" env:"WH_CACHE_REDIS_URL" env-default:"redis://localhost:6379"`
-	DefaultTTL             int    `yaml:"default_ttl" env:"WH_CACHE_DEFAULT_TTL" env-default:"300"`
-	TimestampBucketSeconds int    `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
+	L1MaxCost              int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
+	DefaultTTL             int   `yaml:"default_ttl" env:"WH_CACHE_DEFAULT_TTL" env-default:"300"`
+	TimestampBucketSeconds int   `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
 }
 
 type Auth struct {
@@ -97,9 +84,6 @@ type DLQ struct {
 
 // Validate checks the loaded configuration for logical consistency.
 func (c *Config) Validate() error {
-	if c.Mode != ModeStandalone && c.Mode != ModeClustered {
-		return fmt.Errorf("invalid mode %q: must be %q or %q", c.Mode, ModeStandalone, ModeClustered)
-	}
 
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d out of range 1-65535", c.Server.Port)

@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// TODO: is this being used while clustered mode is marked (future) and not supported? Or is it used for mocking/NATS testing?
 // RemoteNATS connects to an external NATS cluster.
 type RemoteNATS struct {
 	conn       *nats.Conn

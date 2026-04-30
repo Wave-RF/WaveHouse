@@ -20,7 +20,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `mode` | `WH_MODE` | `standalone` | Deployment mode: `standalone` or `clustered`. |
 
 ### Server
 
@@ -51,8 +50,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `mq.stream_name` | `WH_MQ_STREAM_NAME` | `WAVEHOUSE` | The JetStream namespace to isolate environments (e.g., Staging vs Prod). |
-| `mq.embedded_dir` | `WH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server (standalone mode). |
-| `mq.url` | `WH_MQ_URL` | `nats://localhost:4222` | NATS server URL (clustered mode). |
+| `mq.embedded_dir` | `WH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server. |
 | `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE/WS gap-fill. The Active Sweeper will not purge messages newer than this window. |
 | `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
@@ -62,16 +60,13 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | -------- | ------- | ------- | ----------- |
 | `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
 | `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
-| `dedupe.embedded_dir` | `WH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store (standalone mode). |
-| `dedupe.scylla_hosts` | `WH_DEDUPE_SCYLLA_HOSTS` | `localhost:9042` | ScyllaDB contact points (clustered mode). Comma-separated. |
-| `dedupe.scylla_keyspace` | `WH_DEDUPE_SCYLLA_KEYSPACE` | `wavehouse` | ScyllaDB keyspace name. |
+| `dedupe.embedded_dir` | `WH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store. |
 
 ### Cache
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). |
-| `cache.redis_url` | `WH_CACHE_REDIS_URL` | `redis://localhost:6379` | Redis URL for L2 cache (clustered mode). |
 | `cache.default_ttl` | `WH_CACHE_DEFAULT_TTL` | `300` | Default cache TTL in seconds (5 minutes). |
 | `cache.timestamp_bucket_seconds` | `WH_CACHE_TIMESTAMP_BUCKET_SECONDS` | `60` | Bucket size (seconds) for time-range truncation in structured queries. Improves cache hit rate by normalizing timestamps. |
 
@@ -106,7 +101,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 ## Example Config File
 
 ```yaml
-mode: standalone
 
 server:
   port: 8080
@@ -121,7 +115,6 @@ clickhouse:
 
 mq:
   embedded_dir: ./data/nats
-  url: nats://localhost:4222
   gap_window_minutes: 15
   max_bytes_gb: 50
 
@@ -129,13 +122,9 @@ dedupe:
   enabled: false
   id_field: event_id
   embedded_dir: ./data/pebble
-  scylla_hosts:
-    - localhost:9042
-  scylla_keyspace: wavehouse
 
 cache:
   l1_max_cost: 67108864
-  redis_url: redis://localhost:6379
   default_ttl: 300
   timestamp_bucket_seconds: 60
 
@@ -158,33 +147,3 @@ policy:
 pipes:
   directory: ./pipes
 ```
-
-## Mode-Specific Settings
-
-### Standalone Mode (`mode: standalone`)
-
-Uses embedded components. Relevant settings:
-
-- `mq.embedded_dir` — Where embedded NATS stores its data.
-- `mq.gap_window_minutes` — Gap-fill window for SSE/WS replay via NATS history.
-- `mq.max_bytes_gb` — Maximum disk usage for the embedded NATS JetStream store.
-- `schema.refresh_interval` — How often to re-discover ClickHouse schemas.
-- `dedupe.enabled` / `dedupe.id_field` / `dedupe.embedded_dir` — Optional dedup with Pebble.
-- `cache.l1_max_cost` — L1 cache size (no L2 in standalone).
-- `dlq.enabled` — DLQ for failed inserts.
-- ClickHouse settings are always required.
-
-Settings ignored: `mq.url`, `dedupe.scylla_*`, `cache.redis_url`.
-
-### Clustered Mode (`mode: clustered`)
-
-Uses distributed components. Relevant settings:
-
-- `mq.url` — External NATS cluster URL.
-- `schema.refresh_interval` — How often to re-discover ClickHouse schemas.
-- `dedupe.enabled` / `dedupe.id_field` / `dedupe.scylla_*` — Optional dedup with ScyllaDB.
-- `cache.redis_url` — Redis for L2 shared cache.
-- `dlq.enabled` — DLQ for failed inserts.
-- All ClickHouse and cache L1 settings still apply.
-
-Settings ignored: `mq.embedded_dir`, `dedupe.embedded_dir`.

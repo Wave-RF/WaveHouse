@@ -24,7 +24,11 @@ services:
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1",
+        ]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -38,7 +42,6 @@ services:
     ports:
       - "8080:8080"
     environment:
-      WH_MODE: standalone
       WH_CH_ADDR: clickhouse:9000
       WH_MQ_EMBEDDED_DIR: /data/nats
       WH_MQ_MAX_BYTES_GB: "1"

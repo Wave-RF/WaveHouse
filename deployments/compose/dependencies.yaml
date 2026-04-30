@@ -10,28 +10,5 @@ services:
     volumes:
       - clickhouse-data:/var/lib/clickhouse
 
-  nats:
-    image: nats:latest
-    command: ["--jetstream", "--store_dir", "/data"]
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    volumes:
-      - nats-data:/data
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-  scylladb:
-    image: scylladb/scylla:latest
-    ports:
-      - "9042:9042"
-    volumes:
-      - scylla-data:/var/lib/scylla
-
 volumes:
   clickhouse-data:
-  nats-data:
-  scylla-data:

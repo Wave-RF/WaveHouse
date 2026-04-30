@@ -10,35 +10,6 @@ builds:
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
-      - -X main.Binary=standalone
-      - -X main.Version={{.Version}}
-      - -X main.BuildTime={{.Date}}
-      - -X main.GitCommit={{.ShortCommit}}
-
-  - id: wavehouse-api
-    main: ./cmd/wavehouse-api
-    binary: wavehouse-api
-    env:
-      - CGO_ENABLED=0
-    goos: [linux, darwin, windows, freebsd]
-    goarch: [amd64, arm64]
-    ldflags:
-      - -s -w
-      - -X main.Binary=clustered-api
-      - -X main.Version={{.Version}}
-      - -X main.BuildTime={{.Date}}
-      - -X main.GitCommit={{.ShortCommit}}
-
-  - id: wavehouse-worker
-    main: ./cmd/wavehouse-worker
-    binary: wavehouse-worker
-    env:
-      - CGO_ENABLED=0
-    goos: [linux, darwin, windows, freebsd]
-    goarch: [amd64, arm64]
-    ldflags:
-      - -s -w
-      - -X main.Binary=clustered-worker
       - -X main.Version={{.Version}}
       - -X main.BuildTime={{.Date}}
       - -X main.GitCommit={{.ShortCommit}}
@@ -53,8 +24,6 @@ dockers_v2:
   - dockerfile: deployments/Dockerfile.goreleaser
     ids:
       - wavehouse
-      - wavehouse-api
-      - wavehouse-worker
     images:
       - "ghcr.io/wave-rf/wavehouse"
     tags:
@@ -77,5 +46,5 @@ changelog:
   use: git
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
+      - "^docs:"
+      - "^test:"

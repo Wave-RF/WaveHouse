@@ -26,16 +26,7 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
 * **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
 
-## 🚀 Deployment Modes
-
-WaveHouse is designed using a clean architecture that allows it to run anywhere, from a laptop to a multi-region cloud.
-
-| Mode | Binaries | External Dependencies | Use Case |
-| ---- | -------- | --------------------- | -------- |
-| **Standalone** | `wavehouse` | ClickHouse only | Local dev, single-server |
-| **Clustered** | `wavehouse-api` + `wavehouse-worker` | ClickHouse, NATS, Redis, ScyllaDB | Horizontal scaling, production |
-
-## 🛠️ Quick Start (Standalone)
+## 🛠️ Quick Start
 
 The easiest way to see WaveHouse in action. Requires Docker.
 
@@ -79,20 +70,6 @@ curl -N http://localhost:8080/v1/stream/sse
 
 WaveHouse is now accepting API requests on `http://localhost:8080`.
 
-## 🚀 Quick Start (Clustered)
-
-The full distributed stack with load balancing, NATS, Redis, and ScyllaDB:
-
-```bash
-# Start everything: Caddy LB, ClickHouse, NATS, Redis, ScyllaDB, 2x API, 2x worker
-docker compose -f deployments/compose/cluster.yaml up -d
-
-# Create your tables in ClickHouse, then WaveHouse discovers them automatically.
-# See docs/deployment.md for full setup instructions.
-```
-
-The API is available behind Caddy at `http://localhost` (port 80).
-
 ## 💻 Local Development
 
 For building and testing WaveHouse locally with hot-reload:
@@ -101,7 +78,7 @@ For building and testing WaveHouse locally with hot-reload:
 # Install dependencies
 go mod download
 
-# Start ClickHouse (standalone mode needs nothing else)
+# Start ClickHouse
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 
 # Create your tables in ClickHouse, then:
@@ -109,8 +86,6 @@ make dev
 ```
 
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
-
-For clustered local development (run API + worker against external deps), see [docs/development.md](docs/development.md).
 
 ## 🤝 Contributing
 
@@ -121,7 +96,7 @@ We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md]
 * [Architecture](docs/architecture.md) — System design, data flows, and package overview
 * [API Reference](docs/api.md) — All endpoints, authentication, request/response formats
 * [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/deployment.md) — Standalone, clustered, Docker, and release guide
+* [Deployment](docs/deployment.md) — Standalone, (future) clustered, Docker, and release guide
 * [Development](docs/development.md) — Building, testing, linting, and project structure
 * [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
 

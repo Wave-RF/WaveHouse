@@ -9,12 +9,12 @@ WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Clients                                 │
-│              (REST API, SSE, WebSocket)                          │
+│              (REST API, SSE, WebSocket)                         │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    WaveHouse API Layer                         │
+│                    WaveHouse API Layer                          │
 │  ┌──────────┐   ┌──────────┐ ┌──────────┐  ┌──────────────┐     │
 │  │  Ingest  │   │  Query   │ │   SSE    │  │  WebSocket   │     │
 │  │  Handler │   │  Handler │ │  Handler │  │   Handler    │     │
@@ -25,10 +25,10 @@ WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the 
 │  │Registry │    │ (Tiered)│   └───┬───┘                         │
 │  └────┬────┘    └────┬────┘       │                             │
 │       │              │            │                             │
-│  ┌────▼────┐         │                                          │
-│  │ Dedupe  │         │       (NATS JetStream retains messages   │
+│  ┌────▼─────┐        │                                          │
+│  │ Dedupe   │        │       (NATS JetStream retains messages   │
 │  │(optional)│        │        for SSE/WS gap-fill via           │
-│  └────┬────┘         │        DeliverByStartTime)               │
+│  └────┬─────┘        │        DeliverByStartTime)               │
 │       │              │                                          │
 │       ▼              │                                          │
 │  ┌─────────┐         │                                          │
@@ -43,39 +43,37 @@ WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the 
 │  └────┬──────────┘   │       └───────────┘                      │
 │       │              │                                          │
 │  ┌────▼──────┐       │                                          │
-│  │   DLQ     │       │       (failed inserts → WAVEHOUSE_DLQ)  │
+│  │   DLQ     │       │       (failed inserts → WAVEHOUSE_DLQ)   │
 │  └───────────┘       │                                          │
 │                      │                                          │
 └───────┼──────────────┼──────────────────────────────────────────┘
         │              │
         ▼              ▼
-┌─────────────────────────────┐   ┌───────────┐
-│        ClickHouse           │   │   Redis   │  (L2 cache,
-│   (analytics storage)       │   │           │   clustered only)
-└─────────────────────────────┘   └───────────┘
+┌─────────────────────────────┐
+│        ClickHouse           │
+│   (analytics storage)       │
+└─────────────────────────────┘
 ```
 
 ## Binaries
 
-WaveHouse ships three binaries for different deployment modes:
+WaveHouse ships one binary for deployment:
 
 | Binary | Mode | Purpose |
 | ------ | ---- | ------- |
 | `wavehouse` | Standalone | All-in-one: API + worker + embedded NATS + optional embedded Pebble dedup. Zero external deps beyond ClickHouse. |
-| `wavehouse-api` | Clustered | Stateless API server. Handles ingest/query/streaming. Connects to external NATS, Redis, optional ScyllaDB. Horizontally scalable. |
-| `wavehouse-worker` | Clustered | Background worker. Consumes from NATS, batch-flushes to ClickHouse, runs Active Sweeper for message lifecycle. |
 
 ## Internal Packages
 
 ```text
 internal/
 ├── api/         HTTP layer (Chi router, handlers, middleware, Hub)
-├── cache/       Two-tier caching (L1 Ristretto + L2 Redis)
+├── cache/       Two-tier caching (L1 Ristretto)
 ├── config/      YAML + env var configuration loading
-├── dedupe/      Optional deduplication (Pebble or ScyllaDB)
+├── dedupe/      Optional deduplication (Pebble)
 ├── discovery/   ClickHouse schema introspection and validation
 ├── ingest/      Batch buffering, DLQ, and Active Sweeper
-├── mq/          Message queue abstraction (embedded or remote NATS)
+├── mq/          Message queue abstraction (embedded NATS)
 ├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
 ├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
 └── query/       Structured query AST, SQL builder, and timestamp bucketing
@@ -103,7 +101,6 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 - **cache.go** — `Cache` interface: `Get`, `Set`, `Close`.
 - **local.go** — L1 in-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
-- **shared.go** — L2 distributed cache backed by Redis.
 - **tiered.go** — Combines L1 + L2 with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses.
 
 ### `config/` — Configuration
@@ -113,9 +110,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 ### `dedupe/` — Deduplication (Optional)
 
 - **dedupe.go** — `Deduplicator` interface: `CheckAndMark(ctx, eventID) (bool, error)`.
-- **embedded.go** — Standalone mode: uses [Pebble](https://github.com/cockroachdb/pebble) (embedded key-value store). Key = event ID.
-- **distributed.go** — Clustered mode: uses ScyllaDB with `INSERT IF NOT EXISTS` for atomic check-and-mark.
-- **schema.go** — ScyllaDB DDL for the dedup table (`PRIMARY KEY (event_hash)`).
+- **embedded.go** — Uses [Pebble](https://github.com/cockroachdb/pebble) (embedded key-value store). Key = event ID.
 
 ### `discovery/` — Schema Discovery & Validation
 
@@ -132,19 +127,18 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 ### `mq/` — Message Queue
 
 - **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `Ack()`/`Nak()`.
-- **embedded.go** — Standalone mode: in-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
-- **remote.go** — Clustered mode: connects to an external NATS cluster with the same stream/subject configuration.
+- **embedded.go** — In-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
 
-### `policy/` — Access Control (New)
+### `policy/` — Access Control
 
 - **policy.go** — Hasura-style policy types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`), `Evaluate()` function that resolves permissions against JWT claims (including `{{ jwt.claim.path }}` template resolution), `IsColumnAllowed()`, `IsAggregationAllowed()`, `Validate()`.
 - **store.go** — `Store` backed by NATS KV bucket `WAVEHOUSE_POLICY`. Supports file-based bootstrap (YAML/JSON), cluster-wide sync via KV Watch, local caching.
 
-### `pipes/` — Named Query Pipes (New)
+### `pipes/` — Named Query Pipes
 
 - **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` replaces `{{param}}` placeholders with positional parameters.
 
-### `query/` — Structured Query Engine (New)
+### `query/` — Structured Query Engine
 
 - **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
 - **builder.go** — `Build()` converts AST to parameterized SQL. Validates all identifiers against schema (SQL injection prevention). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
@@ -204,32 +198,30 @@ Client GET /v1/stream/sse or /v1/stream/ws
   → Stream live events as they arrive via MQ → Hub → client
 ```
 
-## Standalone vs. Clustered
+## Standalone vs. (future) Clustered
 
-| Aspect | Standalone | Clustered |
+| Aspect | Standalone | (future) Clustered |
 | ------ | ---------- | --------- |
 | Binaries | Single `wavehouse` binary | `wavehouse-api` + `wavehouse-worker` |
 | Message Queue | Embedded NATS (in-process) | External NATS cluster |
-| Deduplication | Optional — Pebble (embedded KV) | Optional — ScyllaDB (distributed) |
-| Cache | L1 only (Ristretto) | L1 (Ristretto) + L2 (Redis) |
+| Deduplication | Optional — Pebble (embedded KV) | Optional — TBD (distributed) |
+| Cache | L1 only (Ristretto) | L1 (Ristretto) + L2 |
 | Schema Discovery | On boot + periodic refresh | On boot + periodic refresh |
 | DLQ | NATS stream `WAVEHOUSE_DLQ` | NATS stream `WAVEHOUSE_DLQ` |
 | Scaling | Vertical only | Horizontal (add API/worker nodes) |
-| External Dependencies | ClickHouse only | ClickHouse, NATS, Redis, (ScyllaDB if dedup enabled) |
+| External Dependencies | ClickHouse only | ClickHouse, NATS, L1 Cache, (TBD dedup DB if enabled) |
 
 ## Technology Stack
 
 | Component | Technology | Purpose |
 | --------- | ---------- | ------- |
-| Language | Go 1.25 | Core runtime |
+| Language | Go 1.26 | Core runtime |
 | HTTP Router | Chi v5 | Request routing and middleware |
 | Authentication | golang-jwt v5 + keyfunc v3 | JWT (HMAC + JWKS) parsing and validation |
 | Analytics DB | ClickHouse | Primary data store + schema source of truth |
 | Message Queue | NATS + JetStream | Durable event streaming |
 | L1 Cache | Ristretto v2 | In-process memory cache |
-| L2 Cache | Redis 7 | Distributed shared cache |
 | Embedded KV | Pebble | Optional standalone deduplication |
-| Distributed KV | ScyllaDB | Optional clustered deduplication |
 | WebSocket | coder/websocket | WebSocket protocol support |
 | Config | cleanenv | YAML + env var config loading |
 | Release | GoReleaser | Cross-platform binary builds |

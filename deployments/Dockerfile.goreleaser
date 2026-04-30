@@ -5,7 +5,5 @@ ARG TARGETPLATFORM
 
 # Copy the binaries from the platform-specific subdirectories GoReleaser creates
 COPY $TARGETPLATFORM/wavehouse /usr/local/bin/wavehouse
-COPY $TARGETPLATFORM/wavehouse-api /usr/local/bin/wavehouse-api
-COPY $TARGETPLATFORM/wavehouse-worker /usr/local/bin/wavehouse-worker
 
 ENTRYPOINT ["/usr/local/bin/wavehouse"]

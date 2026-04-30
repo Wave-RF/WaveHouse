@@ -30,21 +30,20 @@ var (
 	Version   = "dev"
 	BuildTime = time.Now().Format(time.RFC3339)
 	GitCommit = "unknown"
-	Binary    = "standalone"
 )
 
 func main() {
 	os.Exit(run())
 }
 
-// run executes the standalone binary and returns a process exit code. Using a
+// run executes the binary and returns a process exit code. Using a
 // separate function (rather than os.Exit directly in main) ensures deferred
 // cleanups — especially OTEL flush — still run before the process exits.
 func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
+	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit)
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
@@ -69,7 +68,7 @@ func run() int {
 	}
 
 	ctx := context.Background()
-	serviceName := "wavehouse-" + Binary
+	serviceName := "wavehouse"
 	otelAddr := os.Getenv("WH_OTEL_ADDR")
 	if otelAddr == "" {
 		otelAddr = "127.0.0.1:4317"
@@ -290,7 +289,7 @@ func run() int {
 		}
 	}()
 
-	logger.Info("starting server", "port", cfg.Server.Port, "mode", "standalone")
+	logger.Info("starting server", "port", cfg.Server.Port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server error", "error", err)
 		return 1
