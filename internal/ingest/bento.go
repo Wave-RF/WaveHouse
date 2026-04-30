@@ -264,13 +264,15 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return nil
 	}
 
-	tableName, ok := batch[0].MetaGet("table_name")
+	firstMsg := batch[0]
+
+	tableName, ok := firstMsg.MetaGet("table_name")
 	if !ok || tableName == "" {
 		return fmt.Errorf("missing table_name in message metadata")
 	}
 
 	// 1. Fetch the timestamp stamped during jsInput.Read
-	startStr, _ := batch[0].MetaGet("bento_start_time")
+	startStr, _ := firstMsg.MetaGet("bento_start_time")
 
 	bentoStartTime := time.Now() // Default fallback
 
@@ -282,7 +284,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		slog.Warn("Failed to parse bento_start_time int", "startStr", startStr, "error", err)
 	}
 	// 2. Extract original API trace context and setup Tracer
-	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(batch[0].Context()))
+	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(firstMsg.Context()))
 	tracer := otel.Tracer("wavehouse-worker")
 
 	// 3. RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
