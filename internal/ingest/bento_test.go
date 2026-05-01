@@ -302,7 +302,7 @@ func TestJsInput_Read_DeleteMessage(t *testing.T) {
 
 	// Delete should have been executed.
 	assert.True(t, execCalled)
-	assert.Equal(t, "DELETE FROM clicks WHERE id = ?", execQuery)
+	assert.Equal(t, "DELETE FROM `clicks` WHERE id = ?", execQuery)
 	require.Len(t, execArgs, 1)
 	assert.Equal(t, "abc123", execArgs[0])
 	assert.True(t, delMsg.acked, "delete message should be acked on success")
