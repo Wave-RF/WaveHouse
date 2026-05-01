@@ -83,7 +83,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.Error("rejecting message: invalid JSON", "error", err)
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
-				slog.Warn("double ack failed for dropped message", "error", doubleAckErr)
+				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
 		}
@@ -92,7 +92,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.TableName == "" {
 			slog.Error("rejecting message: empty table_name")
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
-				slog.Warn("double ack failed for dropped message", "error", doubleAckErr)
+				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
 		}
@@ -102,7 +102,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
-				slog.Warn("double ack failed for dropped message", "error", doubleAckErr)
+				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
 		}
@@ -111,7 +111,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.Action == "delete" {
 			tracer := otel.Tracer("wavehouse-worker")
 			spanCtx, span := tracer.Start(msgCtx, "clickhouse_delete") // Use the extracted msgCtx
-			defer span.End()
 
 			slog.InfoContext(spanCtx, "DELETE DETECTED: Flushing buffer...", "table", raw.TableName)
 
@@ -124,6 +123,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			for j.inFlight.Load() > 0 {
 				select {
 				case <-ctx.Done():
+					span.End()
 					ticker.Stop()
 					return nil, nil, ctx.Err()
 				case <-ticker.C:
@@ -151,6 +151,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					}
 				}
 
+				span.End()
 				return nil, nil, fmt.Errorf("execute delete: %w", err)
 			}
 			// Log the success with all context
@@ -159,9 +160,10 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				"id", raw.ID,
 			)
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
-				slog.Warn("double ack failed for processed delete message", "error", doubleAckErr)
+				slog.WarnContext(spanCtx, "double ack failed for processed delete message", "error", doubleAckErr)
 			}
 
+			span.End()
 			continue
 		}
 
