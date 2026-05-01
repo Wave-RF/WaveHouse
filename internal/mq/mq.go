@@ -21,6 +21,9 @@ func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, 
 	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, ack: ack, asyncAckFn: asyncAckFn, nak: nak}
 }
 
+// AsyncAck fires a non-blocking Ack without waiting for server confirmation.
+// Use for low-criticality consumers (e.g. SSE fan-out hub bridge) where
+// DoubleAck latency is not worth the guarantee. Use Ack(ctx) for ingest paths.
 func (m *Message) AsyncAck() error {
 	if m.asyncAckFn != nil {
 		return m.asyncAckFn()

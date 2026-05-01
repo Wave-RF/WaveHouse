@@ -307,7 +307,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	}
 
 	if buf.Len() == 0 {
-		return nil
+		return fmt.Errorf("all %d messages in batch failed AsBytes", len(batch))
 	}
 
 	q := url.Values{}
