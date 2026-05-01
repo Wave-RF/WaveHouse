@@ -306,6 +306,7 @@ func TestJsInput_Read_DeleteMessage(t *testing.T) {
 	require.Len(t, execArgs, 1)
 	assert.Equal(t, "abc123", execArgs[0])
 	assert.True(t, delMsg.acked, "delete message should be acked on success")
+	assert.True(t, delMsg.doubleAcked, "delete should use DoubleAck")
 
 	// Returned message should be the insert.
 	table, _ := msg.MetaGet("table_name")

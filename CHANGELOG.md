@@ -7,21 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 ### Added
-- [Pre-existing added features...]
+- [Put whatever the older PR's added bullet points were right here]
 - Created custom `clickhouseOutput` for the Bento ingest pipeline to handle secure SQL interpolation and retroactive trace spanning.
 - Hub bridge uses new `AsyncAck()` (fire-and-forget) to reduce latency and overhead during fan-out.
 
 ### Changed
+- [Put whatever the older PR's changed bullet points were right here]
 - **Breaking:** Changed `mq.Message` `Ack` and `Nak` signatures to accept `context.Context` to support graceful shutdowns.
 - Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation.
-
-### Added
-- Created custom `clickhouseOutput` for the Bento ingest pipeline to handle secure SQL interpolation and retroactive trace spanning.
-- Hub bridge uses new `AsyncAck()` (fire-and-forget) to reduce latency and overhead during fan-out.
-
-### Changed
-- **Breaking:** Changed `mq.Message` `Ack` and `Nak` signatures to accept `context.Context` to support graceful shutdowns during NATS consumer drains.
-- Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation before releasing memory buffers.
 
 ### Added
 - Configurable NATS JetStream stream names via `WH_MQ_STREAM_NAME` to support multi-tenant deployments.

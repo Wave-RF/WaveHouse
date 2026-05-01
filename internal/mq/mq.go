@@ -37,8 +37,11 @@ func (m *Message) Ack(ctx context.Context) error {
 }
 
 // Nak signals processing failure for redelivery.
-// Note: The underlying NATS implementation for Nak is a fire-and-forget
-// network call. It does not actively block or honor the provided context cancellation.
+//
+// NOTE: While the underlying NATS Nak is fire-and-forget, this wrapper
+// honors context cancellation. If the provided context is cancelled
+// (e.g., during graceful shutdown), the network call is suppressed and
+// the message will silently wait for AckWait to expire before redelivery.
 func (m *Message) Nak(ctx context.Context) error {
 	if m.nak != nil {
 		return m.nak(ctx)

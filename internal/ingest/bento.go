@@ -307,6 +307,10 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
 	}
 
+	if buf.Len() == 0 {
+		return nil
+	}
+
 	q := url.Values{}
 	q.Set("database", c.db)
 
