@@ -111,6 +111,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if raw.Action == "delete" {
 			tracer := otel.Tracer("wavehouse-worker")
 			spanCtx, span := tracer.Start(msgCtx, "clickhouse_delete") // Use the extracted msgCtx
+			defer span.End()
 
 			slog.InfoContext(spanCtx, "DELETE DETECTED: Flushing buffer...", "table", raw.TableName)
 
@@ -161,7 +162,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				slog.Warn("double ack failed for processed delete message", "error", doubleAckErr)
 			}
 
-			span.End()
 			continue
 		}
 
@@ -191,7 +191,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		j.inFlight.Add(1)
 
-		ackFn := func(_ context.Context, err error) error {
+		ackFn := func(ackCtx context.Context, err error) error {
 			j.inFlight.Add(-1)
 
 			if err != nil {
@@ -199,7 +199,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			} else {
 				slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
 
-				bentoEventsProcessed.Add(ctx, 1, metric.WithAttributes(
+				bentoEventsProcessed.Add(ackCtx, 1, metric.WithAttributes(
 					attribute.String("table", raw.TableName),
 				))
 			}
@@ -207,7 +207,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			if err != nil {
 				return m.Nak()
 			}
-			return m.DoubleAck(ctx)
+			return m.DoubleAck(ackCtx)
 		}
 		return msg, ackFn, nil
 	}

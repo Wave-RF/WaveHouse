@@ -510,11 +510,7 @@ func TestJsInput_Read_DeleteCancelledCtx(t *testing.T) {
 	input.inFlight.Store(1)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel after a short delay to unblock the flush-wait.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+	cancel() // Cancel instantly to deterministically trigger the shutdown path
 
 	_, _, err := input.Read(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
