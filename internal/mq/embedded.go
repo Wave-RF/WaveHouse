@@ -147,7 +147,7 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 		)
 
 		if err := handler(msg); err != nil {
-			_ = m.Nak()
+			_ = msg.Nak(ctx)
 		}
 	})
 	if err != nil {

@@ -22,7 +22,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	// Bento component imports: only pure (processors) and io (http_client output).
-	_ "github.com/warpstreamlabs/bento/public/components/io"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 

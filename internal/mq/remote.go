@@ -89,7 +89,7 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 		)
 
 		if err := handler(msg); err != nil {
-			_ = m.Nak()
+			_ = msg.Nak(ctx)
 		}
 	})
 	if err != nil {
