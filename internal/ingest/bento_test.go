@@ -735,6 +735,9 @@ func TestJsInput_Read_RawMessageFallback(t *testing.T) {
 
 	payload, err := msg.AsBytes()
 	require.NoError(t, err)
-	// It should contain the exact original message
+	// Note: The payload includes the full envelope (including "table_name").
+	// This is safe because ClickHouse HTTP insertion uses
+	// `input_format_skip_unknown_fields=1`, which will silently ignore the
+	// envelope fields that don't match the destination table schema.
 	assert.JSONEq(t, `{"table_name": "flattened_events", "some_key": "some_value"}`, string(payload))
 }

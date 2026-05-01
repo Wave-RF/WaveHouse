@@ -29,7 +29,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"go.opentelemetry.io/otel"
 
-	"go.opentelemetry.io/otel/attribute" // ADD THIS
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -134,7 +134,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			}
 			ticker.Stop()
 
-			delQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ?", raw.TableName)
+			delQuery := fmt.Sprintf("DELETE FROM `%s` WHERE id = ?", raw.TableName)
 
 			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
 				span.RecordError(err)
@@ -282,7 +282,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		// Convert the integer back into a real Go time.Time object
 		bentoStartTime = time.UnixMilli(startMilli)
 	} else {
-		slog.Warn("Failed to parse bento_start_time int", "startStr", startStr, "error", err)
+		slog.WarnContext(ctx, "failed to parse bento_start_time int", "startStr", startStr, "error", err)
 	}
 	// 2. Extract original API trace context and setup Tracer
 	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(firstMsg.Context()))
@@ -338,7 +338,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		err := fmt.Errorf("clickhouse error %d: %s", resp.StatusCode, string(body))
 		chSpan.RecordError(err)
 		return err

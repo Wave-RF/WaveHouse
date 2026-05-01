@@ -37,6 +37,8 @@ func (m *Message) Ack(ctx context.Context) error {
 }
 
 // Nak signals processing failure for redelivery.
+// Note: The underlying NATS implementation for Nak is a fire-and-forget
+// network call. It does not actively block or honor the provided context cancellation.
 func (m *Message) Nak(ctx context.Context) error {
 	if m.nak != nil {
 		return m.nak(ctx)
@@ -52,6 +54,9 @@ type Publisher interface {
 
 // Subscriber subscribes to messages on a subject.
 type Subscriber interface {
+	// Subscribe registers a handler for incoming messages.
+	// CONTRACT: If the handler intends to return an error to trigger automatic
+	// redelivery (Nak), it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.
 	Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error
 	Close() error
 }
