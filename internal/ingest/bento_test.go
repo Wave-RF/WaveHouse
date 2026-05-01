@@ -332,8 +332,10 @@ func TestJsInput_Read_DeleteExecError(t *testing.T) {
 	iter.msgs <- insertMsg
 
 	input := &jsInput{iter: iter, chConn: conn}
-	_, _, err := input.Read(context.Background())
-	require.NoError(t, err)
+	msg, _, err := input.Read(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execute delete: db error")
+	assert.Nil(t, msg)
 
 	// On exec error, message should be Nak'd for retry.
 	assert.True(t, delMsg.naked, "delete message should be nak'd on exec error")
@@ -516,7 +518,7 @@ func TestJsInput_Read_DeleteCancelledCtx(t *testing.T) {
 
 	_, _, err := input.Read(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
-	assert.True(t, delMsg.naked, "delete should be Nak'd when context is cancelled")
+	assert.False(t, delMsg.naked, "delete should NOT be Nak'd when context is cancelled (relies on AckWait)")
 }
 
 // ---------------------------------------------------------------------------

@@ -139,7 +139,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"id", raw.ID,
 					"error", err,
 				)
-				
+
 				// Context-aware Nak wrapper
 				select {
 				case <-ctx.Done():
@@ -149,18 +149,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 						slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
 					}
 				}
-				
+
 				return nil, nil, fmt.Errorf("execute delete: %w", err)
-			} else {
-				// Log the success with all context
-				slog.InfoContext(spanCtx, "successfully deleted record",
-					"table", raw.TableName,
-					"id", raw.ID,
-				)
-				if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
-					slog.Warn("double ack failed for processed delete message", "error", doubleAckErr)
-				}
 			}
+			// Log the success with all context
+			slog.InfoContext(spanCtx, "successfully deleted record",
+				"table", raw.TableName,
+				"id", raw.ID,
+			)
+			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+				slog.Warn("double ack failed for processed delete message", "error", doubleAckErr)
+			}
+
 			span.End()
 			continue
 		}
@@ -306,8 +306,8 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		data, err := msg.AsBytes()
 		if err != nil {
 			chSpan.RecordError(err)
-			slog.ErrorContext(ctx, "failed to read message bytes", 
-				"table", tableName, 
+			slog.ErrorContext(ctx, "failed to read message bytes",
+				"table", tableName,
 				"error", err,
 			)
 			return fmt.Errorf("failed to read message bytes for table %s: %w", tableName, err)
