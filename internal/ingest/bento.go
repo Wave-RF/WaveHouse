@@ -124,9 +124,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				select {
 				case <-ctx.Done():
 					ticker.Stop()
-					if nakErr := m.Nak(); nakErr != nil {
-						slog.WarnContext(spanCtx, "nak failed during ctx cancellation", "error", nakErr)
-					}
 					return nil, nil, ctx.Err()
 				case <-ticker.C:
 				}
@@ -142,9 +139,18 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"id", raw.ID,
 					"error", err,
 				)
-				if nakErr := m.Nak(); nakErr != nil {
-					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+				
+				// Context-aware Nak wrapper
+				select {
+				case <-ctx.Done():
+					// Suppress Nak during shutdown
+				default:
+					if nakErr := m.Nak(); nakErr != nil {
+						slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+					}
 				}
+				
+				return nil, nil, fmt.Errorf("execute delete: %w", err)
 			} else {
 				// Log the success with all context
 				slog.InfoContext(spanCtx, "successfully deleted record",
@@ -185,7 +191,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		j.inFlight.Add(1)
 
-		ackFn := func(ctx context.Context, err error) error {
+		ackFn := func(_ context.Context, err error) error {
 			j.inFlight.Add(-1)
 
 			if err != nil {
@@ -300,14 +306,14 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		data, err := msg.AsBytes()
 		if err != nil {
 			chSpan.RecordError(err)
-			continue
+			slog.ErrorContext(ctx, "failed to read message bytes", 
+				"table", tableName, 
+				"error", err,
+			)
+			return fmt.Errorf("failed to read message bytes for table %s: %w", tableName, err)
 		}
 		buf.Write(data)
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
-	}
-
-	if buf.Len() == 0 {
-		return fmt.Errorf("all %d messages in batch failed AsBytes", len(batch))
 	}
 
 	q := url.Values{}
