@@ -162,10 +162,10 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Insert case
 		payload := raw.Data
-		if len(payload) == 0 {
+		if len(payload) == 0 || string(payload) == "null" {
 			payload = raw.DataCap
 		}
-		if len(payload) == 0 {
+		if len(payload) == 0 || string(payload) == "null" {
 			// Fallback to the whole message if it was flattened
 			payload = m.Data()
 		}
@@ -431,9 +431,6 @@ output:
           processors:
             - group_by_value:
                 value: '${! meta("table_name") }'
-            - mapping: |
-                meta bento_start_time = meta("bento_start_time")
-                meta table_name = meta("table_name")
     - nats_dlq_bridge: {}
 `
 

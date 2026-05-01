@@ -618,10 +618,10 @@ func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 		roundTripFn: func(req *http.Request) (*http.Response, error) {
 			// Verify URL was constructed correctly
 			assert.Equal(t, "POST", req.Method)
-			assert.Contains(t, req.URL.String(), "database=test_db")
+			assert.Equal(t, "test_db", req.URL.Query().Get("database"))
 
-			// Verify URL encoding and backticks
-			assert.Contains(t, req.URL.String(), "INSERT+INTO+%60test_table%60")
+			// Use Query().Get() to verify the un-encoded SQL string safely
+			assert.Equal(t, "INSERT INTO `test_table` FORMAT JSONEachRow", req.URL.Query().Get("query"))
 
 			// Verify headers
 			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))

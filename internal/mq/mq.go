@@ -57,6 +57,7 @@ type Subscriber interface {
 	// Subscribe registers a handler for incoming messages.
 	// CONTRACT: If the handler intends to return an error to trigger automatic
 	// redelivery (Nak), it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.
+	// CONTRACT: Context cancellation applies to Ack() only; Nak() is fire-and-forget.
 	Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error
 	Close() error
 }
