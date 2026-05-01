@@ -99,7 +99,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		// Validate table name to prevent SQL injection.
-		if raw.TableName != "" && !safeIdentifierRe.MatchString(raw.TableName) {
+		if !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {

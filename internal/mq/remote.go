@@ -79,6 +79,11 @@ func (r *RemoteNATS) Subscribe(ctx context.Context, subject, consumerName string
 				return m.Ack()
 			},
 			func(ctx context.Context) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
 				return m.Nak()
 			},
 		)
