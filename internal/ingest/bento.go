@@ -119,18 +119,26 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			slog.InfoContext(spanCtx, "DELETE DETECTED: Flushing buffer...", "table", raw.TableName)
 
-			// Wait for in-flight insert messages to be acked by Bento's pipeline.
-			// The inFlight counter is decremented when the http_client output
-			// receives a 200 from ClickHouse, so inFlight==0 means all prior
-			// inserts have been committed to ClickHouse. This requires Bento's
-			// default max_in_flight > 1 so acks can flow back while Read blocks.
+			// Wait for in-flight insert messages to be finalized by Bento's pipeline.
+			// The inFlight counter is decremented in the ackFn callback once the
+			// message batch is fully processed (either successfully committed to
+			// ClickHouse or routed to the DLQ). This drain ensures that pending
+			// writes are finished before executing a delete operation.
+			//
+			// NOTE: This relies on Bento having max_in_flight > 1. If set to 1,
+			// Read() would block indefinitely on the counter, creating a deadlock
+			// where ackFn can never be called to decrement the counter.
+			flushCtx, flushCancel := context.WithTimeout(ctx, 60*time.Second)
+			defer flushCancel()
+
 			ticker := time.NewTicker(10 * time.Millisecond)
 			for j.inFlight.Load() > 0 {
 				select {
-				case <-ctx.Done():
-					span.End()
+				case <-flushCtx.Done():
 					ticker.Stop()
-					return nil, nil, ctx.Err()
+					span.End()
+					// If it was the 60s timeout, ctx.Err() will be nil, so we return flushCtx.Err()
+					return nil, nil, fmt.Errorf("timeout or cancellation waiting for in-flight inserts to drain: %w", flushCtx.Err())
 				case <-ticker.C:
 				}
 			}
@@ -288,19 +296,26 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return fmt.Errorf("invalid table name: %q", tableName)
 	}
 
-	// 1. Fetch the timestamp stamped during jsInput.Read
-	startStr, _ := firstMsg.MetaGet("bento_start_time")
+	bentoStartTime := time.Now()
+	var oldestMilli int64 = -1
 
-	bentoStartTime := time.Now() // Default fallback
-
-	// Parse the string into an int64 integer
-	if startMilli, err := strconv.ParseInt(startStr, 10, 64); err == nil {
-		// Convert the integer back into a real Go time.Time object
-		bentoStartTime = time.UnixMilli(startMilli)
-	} else {
-		slog.WarnContext(ctx, "failed to parse bento_start_time int", "startStr", startStr, "error", err)
+	for _, m := range batch {
+		if startStr, ok := m.MetaGet("bento_start_time"); ok {
+			if milli, err := strconv.ParseInt(startStr, 10, 64); err == nil {
+				if oldestMilli == -1 || milli < oldestMilli {
+					oldestMilli = milli
+				}
+			}
+		}
 	}
-	// 2. Extract original API trace context and setup Tracer
+
+	if oldestMilli != -1 {
+		bentoStartTime = time.UnixMilli(oldestMilli)
+	} else {
+		slog.WarnContext(ctx, "failed to parse any bento_start_time in batch, falling back to time.Now()")
+	}
+
+	// Extract original API trace context and setup Tracer
 	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(firstMsg.Context()))
 	tracer := otel.Tracer("wavehouse-worker")
 
@@ -312,15 +327,15 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		}
 	}
 
-	// 3. RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
+	// RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
 	_, bentoSpan := tracer.Start(parentCtx, "bento_queue_wait",
 		trace.WithTimestamp(bentoStartTime),
 		trace.WithLinks(links...),
-		trace.WithAttributes(attribute.Int("batch_size", len(batch))), // <-- ADD THIS
+		trace.WithAttributes(attribute.Int("batch_size", len(batch))),
 	)
 	bentoSpan.End(trace.WithTimestamp(time.Now()))
 
-	// 4. START THE CLICKHOUSE SPAN (Sibling to Bento span)
+	// START THE CLICKHOUSE SPAN (Sibling to Bento span)
 	reqCtx, chSpan := tracer.Start(parentCtx, "clickhouse_insert")
 	defer chSpan.End()
 
@@ -386,6 +401,11 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
+//
+// NOTE: Bento components are registered globally. The ClickHouse and NATS
+// configurations passed to this function are frozen during the first call per
+// process. Subsequent calls in the same process will silently use the original
+// configuration for the output plugins.
 func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {

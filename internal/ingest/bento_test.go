@@ -343,6 +343,52 @@ func TestJsInput_Read_DeleteExecError(t *testing.T) {
 	assert.True(t, delMsg.naked, "delete message should be nak'd on exec error")
 }
 
+func TestJsInput_Read_DeleteDrainSuccess(t *testing.T) {
+	t.Parallel()
+	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "drain123"}
+	delData, _ := json.Marshal(del)
+	delMsg := &bentoMockMsg{data: delData}
+
+	// Queue an insert message behind the delete so Read() eventually returns
+	insert := EventMessage{TableName: "events", Data: map[string]any{"x": "1"}}
+	insertData, _ := json.Marshal(insert)
+	insertMsg := &bentoMockMsg{data: insertData}
+
+	var execCalled bool
+	conn := &bentoMockConn{
+		execFn: func(_ context.Context, query string, args ...any) error {
+			execCalled = true
+			return nil
+		},
+	}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- delMsg
+	iter.msgs <- insertMsg
+
+	input := &jsInput{iter: iter, chConn: conn}
+
+	// Pre-warm the in-flight counter to force the delete block to wait
+	input.inFlight.Store(2)
+
+	// Simulate Bento pipeline acking in-flight messages asynchronously
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		input.inFlight.Add(-1)
+		time.Sleep(15 * time.Millisecond)
+		input.inFlight.Add(-1)
+	}()
+
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, execCalled, "delete should be executed after drain")
+	assert.True(t, delMsg.doubleAcked, "delete message should use DoubleAck")
+
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table, "should return the insert message after delete finishes")
+}
+
 func TestJsInput_Read_IteratorError(t *testing.T) {
 	t.Parallel()
 	iter := &bentoMockIter{msgs: make(chan jetstream.Msg)}
