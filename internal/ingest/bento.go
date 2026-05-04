@@ -42,6 +42,10 @@ var (
 		"wavehouse_bento_events_processed",
 		metric.WithDescription("Total number of events successfully processed by Bento"),
 	)
+	bentoDLQDropped, _ = bentoMeter.Int64Counter(
+		"wavehouse_bento_dlq_dropped",
+		metric.WithDescription("Total number of messages permanently dropped from DLQ due to NATS failure"),
+	)
 
 	registerOnce sync.Once
 	registerErr  error
@@ -246,6 +250,7 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
 			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
+			bentoDLQDropped.Add(ctx, 1, metric.WithAttributes(attribute.String("table", tableName)))
 		} else {
 			slog.WarnContext(msgCtx, "sent failed message to DLQ", "subject", subject)
 		}
@@ -255,6 +260,7 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 type clickhouseOutput struct {
 	httpClient *http.Client
+	scheme     string
 	host       string
 	port       string
 	user       string
@@ -297,8 +303,16 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(firstMsg.Context()))
 	tracer := otel.Tracer("wavehouse-worker")
 
+	var links []trace.Link
+	for i := 1; i < len(batch); i++ {
+		spanCtx := trace.SpanContextFromContext(batch[i].Context())
+		if spanCtx.IsValid() {
+			links = append(links, trace.Link{SpanContext: spanCtx})
+		}
+	}
+
 	// 3. RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
-	_, bentoSpan := tracer.Start(parentCtx, "bento_queue_wait", trace.WithTimestamp(bentoStartTime))
+	_, bentoSpan := tracer.Start(parentCtx, "bento_queue_wait", trace.WithTimestamp(bentoStartTime), trace.WithLinks(links...))
 	bentoSpan.End(trace.WithTimestamp(time.Now()))
 
 	// 4. START THE CLICKHOUSE SPAN (Sibling to Bento span)
@@ -328,7 +342,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	q.Set("date_time_input_format", "best_effort")
 
 	u := &url.URL{
-		Scheme:   "http",
+		Scheme:   c.scheme,
 		Host:     net.JoinHostPort(c.host, c.port), // Safely joins host and port, adding IPv6 brackets if needed
 		RawQuery: q.Encode(),                       // Safely URL-encodes all parameters
 	}
@@ -364,7 +378,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chUser, chPassword, chDB string) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -415,8 +429,13 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, ch
 
 		if err := service.RegisterBatchOutput("clickhouse_json_bridge", service.NewConfigSpec(),
 			func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
+				scheme := chHTTPScheme
+				if scheme == "" {
+					scheme = "http" // Default fallback
+				}
 				return &clickhouseOutput{
 					httpClient: &http.Client{Timeout: 15 * time.Second},
+					scheme:     scheme,
 					host:       host,
 					port:       chHTTPPort,
 					user:       chUser,

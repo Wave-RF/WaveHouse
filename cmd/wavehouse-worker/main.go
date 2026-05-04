@@ -132,6 +132,7 @@ func run() int {
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
+		cfg.ClickHouse.HTTPScheme,
 		cfg.ClickHouse.Username,
 		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,

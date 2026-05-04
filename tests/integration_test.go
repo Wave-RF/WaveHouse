@@ -197,6 +197,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		chConn,
 		chAddr,
 		httpPort.Port(),
+		"http",
 		"default",
 		"test",
 		"default",

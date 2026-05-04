@@ -490,6 +490,7 @@ func TestJsInput_Read_DeleteUnsafeTableName(t *testing.T) {
 
 	// Delete with unsafe table name should be dropped, NOT executed.
 	assert.True(t, delMsg.acked, "unsafe delete should be acked and dropped")
+	assert.True(t, delMsg.doubleAcked, "unsafe delete table name should use DoubleAck, not Ack")
 	assert.False(t, execCalled, "delete should not be executed for unsafe table name")
 
 	table, _ := msg.MetaGet("table_name")
