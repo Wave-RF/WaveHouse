@@ -140,20 +140,19 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 						flushCancel() // Explicit cancel
 						return nil, nil, ctx.Err()
 
-					case <-flushCtx.Done(): // 60-second drain timeout hit
+					case <-flushCtx.Done(): // 60-second drain timeout hit or context cancelled
 						ticker.Stop()
 
-						// Log the failure explicitly
-						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
-							"table", raw.TableName,
-							"id", raw.ID,
-						)
+						// Only log the error and Nak if the parent context is NOT cancelled.
+						// If ctx.Err() != nil, this is a clean shutdown, so we skip the alarm.
+						if ctx.Err() == nil {
+							// Log the failure explicitly
+							slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
+								"table", raw.TableName,
+								"id", raw.ID,
+							)
 
-						// Nak the message so it doesn't sit in limbo
-						select {
-						case <-ctx.Done():
-							// Suppress Nak during shutdown
-						default:
+							// Nak the message so it doesn't sit in limbo
 							if nakErr := m.Nak(); nakErr != nil {
 								slog.WarnContext(spanCtx, "nak failed after drain timeout", "error", nakErr)
 							}
@@ -161,7 +160,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 						span.End()
 						flushCancel()
-						return nil, nil, fmt.Errorf("timeout waiting for in-flight inserts to drain: %w", flushCtx.Err())
+						return nil, nil, fmt.Errorf("drain wait aborted: %w", flushCtx.Err())
 
 					case <-ticker.C:
 						// Keep waiting
