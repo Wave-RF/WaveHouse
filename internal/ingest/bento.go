@@ -207,7 +207,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			}
 
 			if err != nil {
-				// NATS jetstream.Msg.Nak() is a non-blocking, fire-and-forget network call 
+				// NATS jetstream.Msg.Nak() is a non-blocking, fire-and-forget network call
 				// that does not accept a context. The lack of context here is intentional.
 				return m.Nak()
 			}

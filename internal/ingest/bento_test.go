@@ -721,7 +721,7 @@ func TestClickhouseOutput_WriteBatch_MalformedStartTime(t *testing.T) {
 	msg.MetaSet("bento_start_time", "not-a-unix-timestamp") // Malformed
 
 	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
-	
+
 	// Should succeed without crashing, falling back to time.Now() for the trace span
 	assert.NoError(t, err, "WriteBatch should succeed even if start time is malformed")
 }
