@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -432,7 +431,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // configurations passed to this function are frozen during the first call per
 // process. Subsequent calls in the same process will silently use the original
 // configuration for the output plugins.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -536,8 +535,10 @@ output:
 		logger.InfoContext(ctx, "ingest worker started")
 		if err := stream.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.ErrorContext(ctx, "ingest worker stopped unexpectedly", "error", err)
-			// Force a container restart so the API doesn't become a zombie
-			os.Exit(1)
+
+			if onFatal != nil {
+				onFatal(err)
+			}
 		}
 	}()
 

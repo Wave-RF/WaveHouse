@@ -199,6 +199,10 @@ func run() int {
 		cfg.ClickHouse.Username,
 		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,
+		func(fatalErr error) {
+			slog.Error("ingest worker died, initiating graceful shutdown", "error", fatalErr)
+			cancel()
+		},
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)

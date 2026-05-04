@@ -201,6 +201,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		"default",
 		"test",
 		"default",
+		nil,
 	)
 	require.NoError(t, err)
 
