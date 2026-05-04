@@ -62,10 +62,12 @@ type Publisher interface {
 type Subscriber interface {
 	// Subscribe registers a handler for incoming messages.
 	// CONTRACT: If the handler intends to return an error to trigger automatic
-	// redelivery (Nak), it MUST NOT manually call msg.Ack() or msg.Nak() beforehand.
-	// CONTRACT: Symmetrically, if you explicitly call msg.Nak(), do NOT also return
-	// an error — the consume loop will call m.Nak() again on any non-nil error return.
-	// Double-Nak is harmless in NATS JetStream but indicates a logic error in the handler.
+	// redelivery (Nak), it MUST NOT manually call msg.Ack(ctx), msg.AsyncAck(),
+	// or msg.Nak(ctx) beforehand.
+	// CONTRACT: Symmetrically, if you explicitly call msg.Nak(ctx), do NOT also
+	// return an error — the consume loop will call m.Nak(ctx) again on any
+	// non-nil error return. Double-Nak is harmless in NATS JetStream but
+	// indicates a logic error in the handler.
 	Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error
 	Close() error
 }
