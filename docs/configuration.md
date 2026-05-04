@@ -36,6 +36,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | -------- | ------- | ------- | ----------- |
 | `clickhouse.addr` | `WH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
 | `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by schema discovery to query `system.columns`. |
+| `clickhouse.http_scheme` | `WH_CH_HTTP_SCHEME` | `http` | HTTP scheme for the ClickHouse HTTP interface (`http` or `https`). Set to `https` for TLS-encrypted ClickHouse connections. |
 | `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |

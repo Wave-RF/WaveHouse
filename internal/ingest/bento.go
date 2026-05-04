@@ -312,7 +312,11 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	}
 
 	// 3. RETROACTIVELY DRAW BENTO SPAN (Starts in past, ends exactly NOW)
-	_, bentoSpan := tracer.Start(parentCtx, "bento_queue_wait", trace.WithTimestamp(bentoStartTime), trace.WithLinks(links...))
+	_, bentoSpan := tracer.Start(parentCtx, "bento_queue_wait",
+		trace.WithTimestamp(bentoStartTime),
+		trace.WithLinks(links...),
+		trace.WithAttributes(attribute.Int("batch_size", len(batch))), // <-- ADD THIS
+	)
 	bentoSpan.End(trace.WithTimestamp(time.Now()))
 
 	// 4. START THE CLICKHOUSE SPAN (Sibling to Bento span)

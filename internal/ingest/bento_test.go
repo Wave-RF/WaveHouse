@@ -727,6 +727,44 @@ func TestClickhouseOutput_WriteBatch_MalformedStartTime(t *testing.T) {
 	assert.NoError(t, err, "WriteBatch should succeed even if start time is malformed")
 }
 
+func TestClickhouseOutput_WriteBatch_MultiMessage(t *testing.T) {
+	t.Parallel()
+
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			bodyBytes, err := io.ReadAll(req.Body)
+			assert.NoError(t, err)
+
+			// Verify newline-separated JSONEachRow format
+			expectedBody := `{"id":1}` + "\n" + `{"id":2}` + "\n"
+			assert.Equal(t, expectedBody, string(bodyBytes))
+
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(bytes.NewBufferString("OK")),
+			}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
+		host:       "localhost",
+		port:       "8123",
+	}
+
+	msg1 := service.NewMessage([]byte(`{"id":1}`))
+	msg1.MetaSet("table_name", "multi_table")
+	msg1.MetaSet("bento_start_time", "1700000000000") // Valid timestamp
+
+	msg2 := service.NewMessage([]byte(`{"id":2}`))
+	msg2.MetaSet("table_name", "multi_table")
+	// Second message doesn't need bento_start_time, but this exercises the trace.Link loop!
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg1, msg2})
+	assert.NoError(t, err, "WriteBatch should succeed with multi-message batch")
+}
+
 // ---------------------------------------------------------------------------
 // jsInput payload extraction fallbacks
 // ---------------------------------------------------------------------------
