@@ -375,7 +375,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 				"table", tableName,
 				"error", err,
 			)
-			return fmt.Errorf("failed to read message bytes for table %s: %w", tableName, err)
+			return fmt.Errorf("read message bytes: %w", err)
 		}
 		buf.Write(data)
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation

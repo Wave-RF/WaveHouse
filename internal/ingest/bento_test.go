@@ -349,7 +349,6 @@ func TestJsInput_Read_DeleteDrainSuccess(t *testing.T) {
 	delData, _ := json.Marshal(del)
 	delMsg := &bentoMockMsg{data: delData}
 
-	// Queue an insert message behind the delete so Read() eventually returns
 	insert := EventMessage{TableName: "events", Data: map[string]any{"x": "1"}}
 	insertData, _ := json.Marshal(insert)
 	insertMsg := &bentoMockMsg{data: insertData}
@@ -371,21 +370,37 @@ func TestJsInput_Read_DeleteDrainSuccess(t *testing.T) {
 	// Pre-warm the in-flight counter to force the delete block to wait
 	input.inFlight.Store(2)
 
-	// Simulate Bento pipeline acking in-flight messages asynchronously
+	// Run Read in a goroutine so we can deterministically unblock it
+	type readResult struct {
+		msg *service.Message
+		err error
+	}
+	resCh := make(chan readResult, 1)
+
 	go func() {
-		time.Sleep(15 * time.Millisecond)
-		input.inFlight.Add(-1)
-		time.Sleep(15 * time.Millisecond)
-		input.inFlight.Add(-1)
+		msg, _, err := input.Read(context.Background())
+		resCh <- readResult{msg: msg, err: err}
 	}()
 
-	msg, _, err := input.Read(context.Background())
-	require.NoError(t, err)
+	// Decrement the counter to unblock Read()
+	input.inFlight.Add(-2)
 
+	// Use require.Eventually as the assertion fence (no time.Sleep)
+	var res readResult
+	require.Eventually(t, func() bool {
+		select {
+		case res = <-resCh:
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 10*time.Millisecond, "Read() should unblock and return after inFlight drains")
+
+	require.NoError(t, res.err)
 	assert.True(t, execCalled, "delete should be executed after drain")
 	assert.True(t, delMsg.doubleAcked, "delete message should use DoubleAck")
 
-	table, _ := msg.MetaGet("table_name")
+	table, _ := res.msg.MetaGet("table_name")
 	assert.Equal(t, "events", table, "should return the insert message after delete finishes")
 }
 
