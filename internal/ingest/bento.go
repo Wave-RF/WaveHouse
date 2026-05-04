@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -366,7 +367,10 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		chSpan.RecordError(err)
 		return fmt.Errorf("execute clickhouse request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -483,9 +487,11 @@ output:
 	}
 
 	go func() {
-		logger.Info("ingest worker started")
+		logger.InfoContext(ctx, "ingest worker started")
 		if err := stream.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.ErrorContext(ctx, "ingest worker stopped", "error", err)
+			logger.ErrorContext(ctx, "ingest worker stopped unexpectedly", "error", err)
+			// Force a container restart so the API doesn't become a zombie
+			os.Exit(1)
 		}
 	}()
 

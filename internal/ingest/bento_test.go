@@ -640,6 +640,7 @@ func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 
 	c := &clickhouseOutput{
 		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
 		host:       "localhost",
 		port:       "8123",
 		user:       "test_user",
@@ -670,6 +671,7 @@ func TestClickhouseOutput_WriteBatch_HTTPErrorResponse(t *testing.T) {
 
 	c := &clickhouseOutput{
 		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
 	}
 
 	msg := service.NewMessage([]byte(`{"metric": 99}`))
@@ -692,6 +694,7 @@ func TestClickhouseOutput_WriteBatch_NetworkError(t *testing.T) {
 
 	c := &clickhouseOutput{
 		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
 	}
 
 	msg := service.NewMessage([]byte(`{"metric": 99}`))
@@ -713,6 +716,7 @@ func TestClickhouseOutput_WriteBatch_MalformedStartTime(t *testing.T) {
 
 	c := &clickhouseOutput{
 		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
 		host:       "localhost",
 		port:       "8123",
 	}

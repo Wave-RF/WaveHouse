@@ -9,18 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Created custom `clickhouseOutput` for the Bento ingest pipeline to handle secure SQL interpolation and retroactive trace spanning.
 - Hub bridge uses new `AsyncAck()` (fire-and-forget) to reduce latency and overhead during fan-out.
-
-### Changed
-- **Breaking:** Changed `mq.Message` `Ack` and `Nak` signatures to accept `context.Context` to support graceful shutdowns.
-- Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation.
-
-### Added
 - Configurable NATS JetStream stream names via `WH_MQ_STREAM_NAME` to support multi-tenant deployments.
 - **Unit tests for previously-untested packages** (`internal/observability`, `internal/mq`, `internal/dedupe`) and new KV-backed tests for `internal/policy.Store` + `internal/pipes.Store`. Also adds `testutil.NewJetStream(t)` — a shared helper that spins up an in-process NATS + JetStream for tests that need a real `jetstream.JetStream` handle. Per-package coverage: observability 84%, mq 78%, policy 89.6%, pipes 85.2%, dedupe 61.2% (the ScyllaDB paths in `distributed.go` and `schema.go` remain integration-only).
 - **Composite actions for board operations** (`.github/actions/board-upsert-status`, `.github/actions/assign-and-request-review`, `.github/actions/set-linked-issues-status`): reusable building blocks for idempotent "upsert item on the Task Board + set Status," "assign PR reviewers + request their review as a pair," and "mirror status to all linked issues" across workflows. Replaces ~200 lines of duplicated GraphQL/gh-project bash between `project-orchestrator.yml` and `dependabot-automerge.yml`, and gives the new `board-state-sync.yml` a single place to debug board interactions.
 - **Bidirectional board state sync** (`.github/workflows/board-state-sync.yml`): when a human manually moves a card's Status on the Task Board UI, mirrors the change to the linked PR/Issue. Uses the `projects_v2_item: edited` event + `changes.field_value` payload to detect Status changes specifically; guards against ping-pong loops by no-oping when the target counterpart is already in the expected mirrored state. Mapping: PR Ready ↔ Issue In review, PR In review ↔ Issue Ready, both Done together. In progress on one side doesn't clobber the other (manual mid-review state, preserved).
 - **Dependabot major-bump Task Board placement** (`.github/workflows/dependabot-automerge.yml`): on a held major-version bump, the workflow now adds the PR to the board with Status=Ready and assigns both admins + requests review — parity with the `reeval` path for non-Dependabot PRs, so major bumps don't vanish into the PR list.
-- **`workflow_dispatch` manual trigger on `ci.yml`**: lets us re-run CI on demand for any branch via `gh workflow run CI --ref <branch>`. Added after PR #79 hit a GitHub-side anomaly where `pull_request` events stopped firing for a single PR's branch (the rest of the repo was unaffected); merging from main re-engaged event delivery, but the manual trigger is a useful escape hatch in general.
+- **`workflow_dispatch` manual trigger on `ci.yml`**: lets us re-run CI on demand for any branch via `gh workflow run CI --ref <branch>`. Added after PR #79 hit a GitHub-side anomaly where `pull_request` events stopped firing for a single PR's branch.
+
+### Changed
+- **Breaking:** Changed `mq.Message` `Ack` and `Nak` signatures to accept `context.Context` to support graceful shutdowns.
+- Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation.
 
 ### Fixed
 
