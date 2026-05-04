@@ -84,7 +84,6 @@ type DLQ struct {
 
 // Validate checks the loaded configuration for logical consistency.
 func (c *Config) Validate() error {
-
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d out of range 1-65535", c.Server.Port)
 	}

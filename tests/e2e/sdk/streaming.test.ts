@@ -1,14 +1,23 @@
-import { describe, it, expect } from 'vitest';
-import { dataClient, adminClient, viewerClient, testId, waitForCondition, isDevMode } from './helpers.js';
+import { describe, it, expect } from "vitest";
+import {
+  dataClient,
+  adminClient,
+  viewerClient,
+  testId,
+  waitForCondition,
+  isDevMode,
+} from "./helpers.js";
 
-describe('Streaming', () => {
-  describe('SSE', () => {
-    it('receives events after insert', async () => {
+describe("Streaming", () => {
+  describe("SSE", () => {
+    it("receives events after insert", async () => {
       // SSE transport uses EventSource which cannot set Authorization headers.
       // In full mode (auth enabled), SSE would need ?token= support in the SDK.
       // For now, this test only runs in dev mode where auth is not enforced.
       if (!isDevMode()) {
-        console.log('    ⏭  Skipped: SSE test (EventSource cannot send auth headers in full mode)');
+        console.log(
+          "    ⏭  Skipped: SSE test (EventSource cannot send auth headers in full mode)",
+        );
         return;
       }
 
@@ -16,7 +25,7 @@ describe('Streaming', () => {
       const receivedEvents: any[] = [];
       const id = testId();
 
-      const stream = wh.from('clicks').stream({ transport: 'sse' });
+      const stream = wh.from("clicks").stream({ transport: "sse" });
       const unsub = stream.subscribe({
         next: (event) => receivedEvents.push(event),
         status: () => {},
@@ -26,12 +35,12 @@ describe('Streaming', () => {
       await new Promise((r) => setTimeout(r, 1000));
 
       // Insert a row while streaming
-      await wh.from('clicks').insert({
+      await wh.from("clicks").insert({
         event_id: id,
-        page: '/sse-test',
-        user_id: 'sse-user',
-        session_id: 'sse-sess',
-        country: 'US',
+        page: "/sse-test",
+        user_id: "sse-user",
+        session_id: "sse-sess",
+        country: "US",
         duration_ms: 99,
       });
 
@@ -55,13 +64,13 @@ describe('Streaming', () => {
     });
   });
 
-  describe('WebSocket (authenticated)', () => {
-    it('receives events after insert', async () => {
+  describe("WebSocket (authenticated)", () => {
+    it("receives events after insert", async () => {
       const wh = dataClient();
       const receivedEvents: any[] = [];
       const id = testId();
 
-      const stream = wh.from('events').stream({ transport: 'ws' });
+      const stream = wh.from("events").stream({ transport: "ws" });
       const unsub = stream.subscribe({
         next: (event) => receivedEvents.push(event),
         status: () => {},
@@ -71,11 +80,11 @@ describe('Streaming', () => {
       await new Promise((r) => setTimeout(r, 1000));
 
       // Insert while streaming
-      await wh.from('events').insert({
+      await wh.from("events").insert({
         event_id: id,
-        type: 'ws_test',
-        user_id: 'ws-user',
-        source: 'test',
+        type: "ws_test",
+        user_id: "ws-user",
+        source: "test",
       });
 
       // Wait for the event to arrive

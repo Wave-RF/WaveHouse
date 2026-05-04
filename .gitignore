@@ -1,5 +1,4 @@
 # Binaries
-bin/
 *.exe
 *.exe~
 *.dll
@@ -10,12 +9,24 @@ bin/
 tmp/
 dist/
 
+# Build directories
+build/
+bin/
+
 # Data directories (runtime)
 data/
 
 # Test artifacts
 *.test
 *.out
+
+# Go Coverage
+coverage.txt
+coverage.out
+
+# Local Tooling directory
+tools/
+.bin/
 
 # Dependency directories
 vendor/

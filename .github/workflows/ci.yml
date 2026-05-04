@@ -20,12 +20,22 @@ on:
 permissions:
   contents: write
 
+# Cancel in-flight runs when a new push lands on the same PR. Keep main runs
+# independent so every commit on main produces a clean coverage badge.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 # All jobs run in parallel by default. Only integration tests gate on
 # unit tests passing (no point running slow integration suite if units fail).
 
 jobs:
-  check:
-    name: Check
+  lint:
+    # Bundles all the lightweight static checks (tidy, fmt, vulncheck, lint)
+    # into one runner pod. Each step uses `if: ${{ !cancelled() }}` so a fmt
+    # failure doesn't mask a separate lint failure — you see every problem
+    # in one CI run instead of fix-push-wait-fix-push.
+    name: Lint & Checks
     runs-on: [wave-rf-runners]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -35,25 +45,25 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Check module tidiness
-        run: make mod-tidy-check
+        if: ${{ !cancelled() }}
+        run: make tidy
 
       - name: Check formatting
-        run: make fmt-check
+        # `make fmt` auto-detects CI=true (set by GHA) and runs as check-only,
+        # failing if any files would be reformatted. Locally, the same target
+        # prompts to apply fixes interactively.
+        if: ${{ !cancelled() }}
+        run: make fmt
 
       - name: Vulnerability check
+        if: ${{ !cancelled() }}
         run: make vulncheck
 
-  lint:
-    name: Lint
-    runs-on: [wave-rf-runners]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
-        with:
-          go-version-file: "go.mod"
-
       - name: Run golangci-lint
+        # Uses golangci-lint-action directly (rather than `make lint`) for its
+        # tuned analysis cache — keyed on Go cache + lint config — which is
+        # significantly faster than a cold run on every CI invocation.
+        if: ${{ !cancelled() }}
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
         with:
           version: v2.11.4

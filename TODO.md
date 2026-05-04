@@ -60,4 +60,4 @@
 - [ ] Add support for graceful handling of NATS server restarts or connectivity issues, including automatic reconnection and backoff strategies, to improve the robustness of the system in production environments where network issues can occur.
 - [ ] Add support for batching and retrying failed events in the worker, with exponential backoff and a dead letter queue for events that fail repeatedly, to improve reliability and ensure that transient issues do not result in data loss.
 - [ ] Fuzzing and security testing, especially around the API endpoints, to identify and fix potential vulnerabilities before they can be exploited in production. This could include testing for SQL injection, authentication bypass, and other common web vulnerabilities.
-- [ ] 
+- [ ]

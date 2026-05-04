@@ -7,7 +7,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@wavehouse/sdk": "file:../../clients/ts"
+    "@wavehouse/sdk": "file:../../../clients/ts"
   },
   "devDependencies": {
     "eventsource": "^4.1.0",

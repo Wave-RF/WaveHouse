@@ -13,3 +13,4 @@ exclude:
     # HTTP assertions). It is imported only from *_test.go files, never from
     # production code, so there's nothing meaningful to cover.
     - ^internal/testutil/
+    - ^tests/
