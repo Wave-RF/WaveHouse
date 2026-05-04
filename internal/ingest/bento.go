@@ -128,21 +128,48 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			// NOTE: This relies on Bento having max_in_flight > 1. If set to 1,
 			// Read() would block indefinitely on the counter, creating a deadlock
 			// where ackFn can never be called to decrement the counter.
-			flushCtx, flushCancel := context.WithTimeout(ctx, 60*time.Second)
-			defer flushCancel()
+			if j.inFlight.Load() > 0 {
+				flushCtx, flushCancel := context.WithTimeout(ctx, 60*time.Second)
+				ticker := time.NewTicker(10 * time.Millisecond)
 
-			ticker := time.NewTicker(10 * time.Millisecond)
-			for j.inFlight.Load() > 0 {
-				select {
-				case <-flushCtx.Done():
-					ticker.Stop()
-					span.End()
-					// If it was the 60s timeout, ctx.Err() will be nil, so we return flushCtx.Err()
-					return nil, nil, fmt.Errorf("timeout or cancellation waiting for in-flight inserts to drain: %w", flushCtx.Err())
-				case <-ticker.C:
+				for j.inFlight.Load() > 0 {
+					select {
+					case <-ctx.Done(): // Main context cancelled (shutdown)
+						ticker.Stop()
+						span.End()
+						flushCancel() // Explicit cancel
+						return nil, nil, ctx.Err()
+
+					case <-flushCtx.Done(): // 60-second drain timeout hit
+						ticker.Stop()
+
+						// Log the failure explicitly
+						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
+							"table", raw.TableName,
+							"id", raw.ID,
+						)
+
+						// Nak the message so it doesn't sit in limbo
+						select {
+						case <-ctx.Done():
+							// Suppress Nak during shutdown
+						default:
+							if nakErr := m.Nak(); nakErr != nil {
+								slog.WarnContext(spanCtx, "nak failed after drain timeout", "error", nakErr)
+							}
+						}
+
+						span.End()
+						flushCancel()
+						return nil, nil, fmt.Errorf("timeout waiting for in-flight inserts to drain: %w", flushCtx.Err())
+
+					case <-ticker.C:
+						// Keep waiting
+					}
 				}
+				ticker.Stop()
+				flushCancel() // Explicit cancel on successful drain
 			}
-			ticker.Stop()
 
 			delQuery := fmt.Sprintf("DELETE FROM `%s` WHERE id = ?", raw.TableName)
 
