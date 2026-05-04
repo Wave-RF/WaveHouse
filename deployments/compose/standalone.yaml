@@ -19,6 +19,7 @@ services:
     environment:
       WH_MODE: standalone
       WH_CH_ADDR: clickhouse:9000
+      WH_CH_HTTP_SCHEME: http
       WH_MQ_EMBEDDED_DIR: /data/nats
       WH_AUTH_ENABLED: "false"
       WH_DEDUPE_ENABLED: "false"

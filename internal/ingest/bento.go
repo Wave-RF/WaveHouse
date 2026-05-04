@@ -116,7 +116,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			tracer := otel.Tracer("wavehouse-worker")
 			spanCtx, span := tracer.Start(msgCtx, "clickhouse_delete") // Use the extracted msgCtx
 
-			slog.InfoContext(spanCtx, "DELETE DETECTED: Flushing buffer...", "table", raw.TableName)
+			slog.InfoContext(spanCtx, "delete received, waiting for in-flight inserts to drain", "table", raw.TableName)
 
 			// Wait for in-flight insert messages to be finalized by Bento's pipeline.
 			// The inFlight counter is decremented in the ackFn callback once the
