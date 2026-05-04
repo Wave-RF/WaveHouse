@@ -81,7 +81,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			DataCap   json.RawMessage `json:"Data"`
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
-			slog.Error("rejecting message: invalid JSON", "error", err)
+			slog.ErrorContext(msgCtx, "rejecting message: invalid JSON", "error", err)
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
@@ -90,7 +90,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		// Reject messages with no table name.
 		if raw.TableName == "" {
-			slog.Error("rejecting message: empty table_name")
+			slog.ErrorContext(msgCtx, "rejecting message: empty table_name")
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
@@ -207,6 +207,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			}
 
 			if err != nil {
+				// NATS jetstream.Msg.Nak() is a non-blocking, fire-and-forget network call 
+				// that does not accept a context. The lack of context here is intentional.
 				return m.Nak()
 			}
 			return m.DoubleAck(ackCtx)
@@ -460,7 +462,7 @@ output:
 	go func() {
 		logger.Info("ingest worker started")
 		if err := stream.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("ingest worker stopped", "error", err)
+			logger.ErrorContext(ctx, "ingest worker stopped", "error", err)
 		}
 	}()
 

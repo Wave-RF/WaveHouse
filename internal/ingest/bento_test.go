@@ -222,6 +222,7 @@ func TestJsInput_Read_InsertMessage(t *testing.T) {
 	// Ack with nil error — should increment Ack on NATS msg.
 	require.NoError(t, ackFn(context.Background(), nil))
 	assert.True(t, natsMsg.acked)
+	assert.True(t, natsMsg.doubleAcked, "insert message should use DoubleAck, not Ack")
 	assert.Equal(t, int32(0), input.inFlight.Load())
 }
 
@@ -264,6 +265,7 @@ func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
 
 	// Bad message should have been acked (dropped).
 	assert.True(t, badMsg.acked, "unsafe message should be acked and dropped")
+	assert.True(t, badMsg.doubleAcked, "unsafe message should use DoubleAck, not Ack")
 
 	// Returned message should be the safe one.
 	table, _ := msg.MetaGet("table_name")
@@ -421,6 +423,7 @@ func TestJsInput_Read_MalformedJSON(t *testing.T) {
 
 	// Bad message should be acked and dropped.
 	assert.True(t, badMsg.acked, "malformed JSON message should be acked and dropped")
+	assert.True(t, badMsg.doubleAcked, "malformed JSON should use DoubleAck, not Ack")
 
 	// Returned message should be the valid one.
 	table, _ := msg.MetaGet("table_name")
@@ -449,6 +452,7 @@ func TestJsInput_Read_EmptyTableName(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, emptyMsg.acked, "empty table_name message should be acked and dropped")
+	assert.True(t, emptyMsg.doubleAcked, "empty table name should use DoubleAck, not Ack")
 
 	table, _ := msg.MetaGet("table_name")
 	assert.Equal(t, "events", table)
@@ -695,6 +699,31 @@ func TestClickhouseOutput_WriteBatch_NetworkError(t *testing.T) {
 	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
 	assert.ErrorContains(t, err, "execute clickhouse request")
 	assert.ErrorContains(t, err, "connection refused")
+}
+
+func TestClickhouseOutput_WriteBatch_MalformedStartTime(t *testing.T) {
+	t.Parallel()
+
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+		host:       "localhost",
+		port:       "8123",
+	}
+
+	msg := service.NewMessage([]byte(`{"metric": 99}`))
+	msg.MetaSet("table_name", "test_table")
+	msg.MetaSet("bento_start_time", "not-a-unix-timestamp") // Malformed
+
+	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+	
+	// Should succeed without crashing, falling back to time.Now() for the trace span
+	assert.NoError(t, err, "WriteBatch should succeed even if start time is malformed")
 }
 
 // ---------------------------------------------------------------------------
