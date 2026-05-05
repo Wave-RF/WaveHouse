@@ -29,14 +29,11 @@ fi
 
 mkdir -p "$OUT_DIR"
 
-# Compute total bytes for both binaries via the Go script. binary-overhead.go
-# emits `total_bytes=N` and `dwarf_bytes=N`; we only use total_bytes here.
-total_bytes=0
-eval "$(go run scripts/binary-overhead.go "$DEBUG_BIN")"
-debug_total=$total_bytes
+# Portable size in bytes — `wc -c` is in POSIX, `stat`'s flags aren't.
+size_bytes() { wc -c <"$1" | tr -d ' '; }
 
-eval "$(go run scripts/binary-overhead.go "$RELEASE_BIN")"
-release_total=$total_bytes
+debug_total=$(size_bytes "$DEBUG_BIN")
+release_total=$(size_bytes "$RELEASE_BIN")
 
 human() {
 	awk -v b="$1" 'BEGIN {
@@ -47,31 +44,12 @@ human() {
 	}'
 }
 
-# ── Reading-the-output guide (printed at the start so it's visible at runtime,
-#    not buried in source-code comments). The gsa table that follows uses some
-#    labels that look alarming or cryptic; this preamble explains them.
-cat <<EOF
-${CYAN}==> Reading the gsa output:${RESET}
-
-  ${YELLOW}"CGO" label is misleading on this binary.${RESET} The build is
-  CGO_ENABLED=0 (verify: ${CYAN}go version -m bin/wavehouse | grep CGO${RESET}).
-  gsa heuristically labels symbols whose names start with ${CYAN}_${RESET} as
-  CGO — that's the C ABI convention on darwin — but Go emits ${CYAN}_type:*${RESET}
-  symbols for reflection type descriptors that also start with underscore.
-  The bulk of the bytes under "CGO" here are Go type metadata, not C code.
-
-  ${YELLOW}Common unattributed sections you'll see:${RESET}
-    ${CYAN}__text${RESET}        executable code
-    ${CYAN}__gopclntab${RESET}   Go PC-line table — stack traces, panic recovery, profiling
-    ${CYAN}__rodata${RESET}      string constants, type info, error messages
-    ${CYAN}__zdebug_*${RESET}    DWARF debug info (kept in debug build, stripped via -s -w)
-    ${CYAN}__typelink${RESET}    pointer fixups for Go's runtime type system
-
-  ${YELLOW}Signal vs noise:${RESET} focus on the large NAMED packages
-  (vendor / std). Treat "CGO" and "Unknown" rows as noise unless you're
-  specifically investigating reflection or generic-instantiation bloat.
-
-EOF
+# Heads-up on a single common point of confusion in the gsa output.
+# Section-name reference lives in docs/, not reprinted every run.
+printf '%s==> Reading the gsa output:%s\n' "$CYAN" "$RESET"
+printf '  %s"CGO" rows are mostly Go reflection metadata, not C code%s — this build is CGO_ENABLED=0.\n' \
+	"$YELLOW" "$RESET"
+printf '  Focus on large NAMED packages (vendor / std); treat CGO/Unknown rows as noise.\n\n'
 
 # ── Side-by-side debug / release comparison.
 debug_overhead=$((debug_total - release_total))

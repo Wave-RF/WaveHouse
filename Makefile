@@ -3,14 +3,11 @@
 # ==============================================================================
 
 # --- Make Configuration -------------------------------------------------------
-# Strict-mode bash for every recipe (errexit, nounset, pipefail).
-#
-# NOTE: .SHELLFLAGS was added in GNU Make 4.0. macOS ships Make 3.81 by
-# default, which silently ignores this — `brew install make` and run `gmake`
-# (or put it on PATH) for strict mode. The Makefile is written defensively to
-# work either way; this is a belt-and-braces upgrade for those who have it.
-SHELL       := /usr/bin/env bash
-.SHELLFLAGS := -euo pipefail -c
+# Pin recipes to bash. /bin/sh is dash on Debian/Ubuntu and a thin bash on
+# macOS — pinning avoids subtle portability bugs (arrays, $'...', [[ ]], etc.).
+# Recipes that need strict-mode safety set it themselves; the scripts under
+# scripts/ all start with `set -euo pipefail`.
+SHELL := /usr/bin/env bash
 
 # Warn on undefined variables — catches typos like $(BINAIRES) silently expanding to empty.
 MAKEFLAGS += --warn-undefined-variables
@@ -35,8 +32,8 @@ MAKEFLAGS += --warn-undefined-variables
 # is invisible. See `test-unit` and `build-debug` near the end for examples.
 
 # --- Environment Detection ----------------------------------------------------
-# CI=true is set by GitHub Actions, GitLab, CircleCI, Buildkite, etc.
-# We use it to skip interactive prompts (e.g. clean-all confirm).
+# NO_COLOR is read by the colors block below; CI is read by scripts/size.sh
+# to suppress the browser auto-open. Both are set by GitHub Actions et al.
 CI       ?=
 NO_COLOR ?=
 
@@ -69,11 +66,15 @@ ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 
 # --- Build Variables ----------------------------------------------------------
 # Tunables (override via env or `make VAR=value target`):
-#   V=1                set for verbose test output
-#   TAGS="foo bar"     Go build/test tags (space-separated)
-#   ARGS="-run TestX"  extra flags passed to `go test`
-#   NO_COLOR=1         disable colored output
-#   VERSION=v1.2.3     override version string embedded in binary
+#   V=1                          verbose test output
+#   TAGS="foo bar"               Go build/test tags (space-separated)
+#   ARGS="-run TestX"            extra flags passed to `go test`
+#   NO_COLOR=1                   disable colored output
+#   VERSION=v1.2.3               override version string embedded in binary
+#   LDFLAGS="-s -w"              extra ldflags (e.g. force-strip a local build)
+#   LIMIT=50                     top-N for `make dep-cut`
+#   COV_THRESHOLD_<SUITE>=NN     per-suite coverage gate; see Coverage Thresholds
+#                                section below for defaults and full list
 #
 # Add binaries here as the project grows (e.g., wavehouse-api, wavehouse-worker).
 BINARIES := wavehouse
@@ -137,14 +138,21 @@ COV_TOTAL := tmp/coverage/total
 # Per-suite + total thresholds enforced after each test suite runs (and by
 # `make cov` for the merged total). Override via env or CLI:
 #   COV_THRESHOLD_UNIT=80 make test
-COV_THRESHOLD_UNIT  ?= 70
-COV_THRESHOLD_INT   ?= 30
-COV_THRESHOLD_E2E   ?= 10
-COV_THRESHOLD_TOTAL ?= 70
+COV_THRESHOLD_UNIT        ?= 70
+COV_THRESHOLD_INTEGRATION ?= 30
+COV_THRESHOLD_E2E         ?= 10
+COV_THRESHOLD_TOTAL       ?= 70
 
 # Derived: coverage-instrumented and release-stripped binaries.
 COVER_BINARIES   := $(addsuffix -cov,$(BINARIES))
 RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
+
+# --- Exported to recipes ------------------------------------------------------
+# All variables consumed by scripts/* live here. `export` in Make is global —
+# applying these per-section would imply scoping that doesn't exist.
+export VERSION_LDFLAGS LDFLAGS TAGS
+export GOTESTSUM_FMT
+export COV_THRESHOLD_UNIT COV_THRESHOLD_INTEGRATION COV_THRESHOLD_E2E COV_THRESHOLD_TOTAL
 
 # ==============================================================================
 # Targets
@@ -173,7 +181,10 @@ dev: ## Start dev environment (ClickHouse + hot-reload)
 
 .PHONY: fmt
 fmt: ## Check formatting (run `make fix` to apply)
-	@OUT=$$($(GOFUMPT) -l .); \
+	@if ! OUT=$$($(GOFUMPT) -l .); then \
+		echo "$(RED)==> gofumpt failed$(RESET)"; \
+		exit 1; \
+	fi; \
 	if [ -n "$$OUT" ]; then \
 		echo "$(RED)==> Files not formatted:$(RESET)"; \
 		echo "$$OUT"; \
@@ -236,8 +247,7 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 # $(RELEASE_BINARIES) / $(COVER_BINARIES) target lists — `make -j build`
 # would dispatch them concurrently if BINARIES grows.
 #
-# Export so the script picks them up without per-recipe env passing.
-export VERSION_LDFLAGS LDFLAGS TAGS
+# VERSION_LDFLAGS / LDFLAGS / TAGS are exported to recipes near the top.
 
 .PHONY: $(BINARIES)
 $(BINARIES):
@@ -272,14 +282,10 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 ##@ Test
 
 # Each test target hands off to scripts/test-suite.sh, which runs the suite,
-# filters /testutil at `go list` time, writes covdata to tmp/coverage/<suite>/data/,
-# and gates against COV_THRESHOLD_<SUITE> via scripts/coverage.sh. Per-suite
-# specifics (build tags, package globs, gotestsum format) live in test-suite.sh.
-
-# Threshold + format env vars are exported so test-suite.sh and coverage.sh
-# pick them up without a long per-recipe env soup.
-export TAGS GOTESTSUM_FMT
-export COV_THRESHOLD_UNIT COV_THRESHOLD_INT COV_THRESHOLD_E2E COV_THRESHOLD_TOTAL
+# writes covdata to tmp/coverage/<suite>/data/, and gates against
+# COV_THRESHOLD_<SUITE> via scripts/coverage.sh. Per-suite specifics (build
+# tags, package globs, gotestsum format) live in test-suite.sh. Threshold +
+# format env vars are exported to recipes near the top.
 
 .PHONY: test
 test: ## Run unit tests + render coverage + gate threshold
@@ -319,12 +325,17 @@ cov: ## Merge all available covdata + gate against total threshold
 
 ##@ CI
 
-# ci: local approximation of the GHA pipeline (lint / test / build /
-# integration jobs). Use before opening a PR.
+# ci: local approximation of the GHA pipeline. Mirrors the structure of
+# .github/workflows/ci.yml, which runs the same suites as separate jobs
+# (lint / test / build / integration / e2e). Use before opening a PR.
 #
-# TODO: switch the test phases to `$(MAKE) test-all` once the e2e refactor
-# (Go test-containers harness in tests/e2e) lands. test-all already merges
-# coverage and gates the total — that closer matches what GHA runs.
+# Recipe-based with $(MAKE) calls (not prereqs) so each stage's banner
+# prints in order and a failure halts the pipeline at that stage. Re-parsing
+# the Makefile per call costs ~ms — cheap for the readability win.
+#
+# TODO: add `$(MAKE) test-e2e` and switch to `$(MAKE) cov` for a merged
+# total once the e2e refactor (Go test-containers harness in tests/e2e)
+# lands and the suite is fast enough for a pre-push gate.
 .PHONY: ci
 ci: ## Full pipeline: verify + build + unit + integration tests
 	@printf "\n$(BOLD)$(YELLOW)━━━ 1/4  Static checks ━━━$(RESET)\n"
@@ -354,7 +365,7 @@ audit-cgo: ## Audit dependency tree for CGO files (informational)
 	@printf "  WaveHouse builds with %sCGO_ENABLED=0%s — listed packages have pure-Go fallbacks\n" "$(YELLOW)" "$(RESET)"
 	@echo  "  and their C code is never compiled. This audit catches new CGO deps."
 	@echo
-	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/... 2>/dev/null || true
+	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/...
 	@echo
 	@echo "$(GREEN)==> CGO audit complete$(RESET)"
 
@@ -373,8 +384,7 @@ deadcode: ## Find unreachable functions
 # the gsa output's quirks (the "CGO" label is mislabeled type metadata, etc.).
 .PHONY: size
 size: build ## Binary size analysis → text + SVG + interactive HTML
-	@CYAN='$(CYAN)' GREEN='$(GREEN)' YELLOW='$(YELLOW)' RED='$(RED)' RESET='$(RESET)' \
-		scripts/size.sh
+	@scripts/size.sh
 
 # dep-cut: surfaces packages with few dependents (low InDegree) that drag in
 # heavy transitive weight — i.e. the best candidates to remove or replace.
@@ -382,8 +392,7 @@ size: build ## Binary size analysis → text + SVG + interactive HTML
 LIMIT ?= 30
 .PHONY: dep-cut
 dep-cut: ## Top cuttable dependencies by transitive weight (LIMIT=N to override)
-	@CYAN='$(CYAN)' YELLOW='$(YELLOW)' RESET='$(RESET)' \
-		LIMIT='$(LIMIT)' scripts/dep-cut.sh
+	@LIMIT='$(LIMIT)' scripts/dep-cut.sh
 
 # binary-analysis: one command for "what's in my binary, and what's wrong with
 # it." Runs in dep-order: build → size → audit-cgo → deadcode.
@@ -401,21 +410,26 @@ clean: ## Remove build artifacts (bin/, tmp/, dist/)
 	@rm -rf bin/ tmp/ dist/
 
 .PHONY: clean-all
-clean-all: clean ## Remove everything: bin/, tmp/, dist/, .bin/ tools, data/
-	@echo "$(YELLOW)==> Cleaning tools and data...$(RESET)"
-	@rm -rf .bin/ data/
+clean-all: ## Full reset — also wipes .bin/ tools AND data/ dev state
+	@echo "$(YELLOW)==> Full reset (build artifacts + tools + dev data)...$(RESET)"
+	@rm -rf bin/ tmp/ dist/ .bin/ data/
 
 ##@ Tooling
 
-# tools: bootstrap a fresh clone. Pre-fetches Go modules and installs pinned
-# external binaries to .bin/. Optional — individual targets auto-install what
-# they need lazily via the file-target rules below — but useful when you want
-# everything ready up front (offline prep, CI image baking, etc.).
+# tools: bootstrap a fresh clone.
+#   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
+#   - Downloads Go modules so go.mod tool deps are available offline.
+#
+# Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by
+# `go mod download` but compile lazily on first `go tool <name>` invocation.
+# Go's build cache makes subsequent invocations near-instant. If you need
+# them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
 tools: $(GOLANGCI_LINT) ## Install pinned tools and download Go modules
 	@echo "$(CYAN)==> Downloading Go modules...$(RESET)"
 	@go mod download
-	@echo "$(GREEN)==> Tools in $(LOCAL_BIN); modules cached$(RESET)"
+	@echo "$(GREEN)==> Modules cached; tool binaries in $(LOCAL_BIN)$(RESET)"
+	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
 # File-target rules: only run when the versioned binary is missing. Bumping
 # the *_VERSION variable changes the path and re-triggers the install.

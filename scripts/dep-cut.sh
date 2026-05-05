@@ -8,9 +8,8 @@
 
 set -euo pipefail
 
-: "${CYAN:=}"
-: "${YELLOW:=}"
-: "${RESET:=}"
+# shellcheck source=scripts/_colors.sh
+. "$(dirname "$0")/_colors.sh"
 
 limit=${LIMIT:-30}
 

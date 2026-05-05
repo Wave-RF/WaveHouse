@@ -25,7 +25,7 @@ DATA_DIR="$ROOT/$suite/data"
 # does this when COV_THRESHOLD_<SUITE> is set).
 case "$suite" in
 unit)         threshold=${COV_THRESHOLD_UNIT:-70} ;;
-integration)  threshold=${COV_THRESHOLD_INT:-30} ;;
+integration)  threshold=${COV_THRESHOLD_INTEGRATION:-30} ;;
 e2e)          threshold=${COV_THRESHOLD_E2E:-10} ;;
 *)
 	printf '%sUnknown suite: %s%s\n' "$RED" "$suite" "$RESET" >&2
@@ -33,30 +33,39 @@ e2e)          threshold=${COV_THRESHOLD_E2E:-10} ;;
 	;;
 esac
 
-# Per-suite go-test invocation. The /testutil package is filtered out at
-# `go list` time — it has no tests of its own, only serves as helpers for
-# other packages' tests.
+# Per-suite go-test invocation. Coverage exclusions (e.g. internal/testutil/)
+# live in .testcoverage.yml — the single source for "what doesn't count."
+#
+# Coverage scope intentionally differs by suite:
+#   unit:         -cover (per-package — each test covers its own package).
+#                 No -coverpkg because unit tests should map 1:1 to the
+#                 package under test.
+#   integration:  -cover -coverpkg=./... (cross-package — integration tests
+#                 drive end-to-end paths and should attribute coverage to
+#                 every package those paths touch, not just the test pkg).
+#   e2e:          coverage comes from running the cover-instrumented binary;
+#                 the process flushes covdata on SIGINT, capturing whatever
+#                 the binary actually executed.
+#
+# `make cov` merges all three into tmp/coverage/total/ and gates against
+# COV_THRESHOLD_TOTAL.
 case "$suite" in
 unit)
 	printf "%s==> Running Unit Tests...%s\n" "$CYAN" "$RESET"
 	rm -rf "$DATA_DIR" && mkdir -p "$DATA_DIR"
-	pkgs=$(go list ./internal/... | grep -v /testutil)
-	# shellcheck disable=SC2086  # $pkgs is intentionally word-split into args
 	GOCOVERDIR="$PWD/$DATA_DIR" go tool gotestsum \
 		--format "${GOTESTSUM_FMT:-pkgname-and-test-fails}" -- \
-		-tags="${TAGS:-}" -cover -race $pkgs "${extra_args[@]}" \
+		-tags="${TAGS:-}" -cover -race ./internal/... "${extra_args[@]}" \
 		-args -test.gocoverdir="$PWD/$DATA_DIR"
 	;;
 
 integration)
 	printf "%s==> Running Integration Tests...%s\n" "$CYAN" "$RESET"
 	rm -rf "$DATA_DIR" && mkdir -p "$DATA_DIR"
-	pkgs=$(go list ./tests/integration/... | grep -v /testutil)
-	# shellcheck disable=SC2086  # $pkgs is intentionally word-split into args
 	GOCOVERDIR="$PWD/$DATA_DIR" go tool gotestsum \
 		--format "${GOTESTSUM_FMT:-pkgname-and-test-fails}" -- \
 		-tags="integration ${TAGS:-}" -timeout 120s -coverpkg=./... -race -count=1 \
-		$pkgs "${extra_args[@]}" \
+		./tests/integration/... "${extra_args[@]}" \
 		-args -test.gocoverdir="$PWD/$DATA_DIR"
 	;;
 

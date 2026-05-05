@@ -66,8 +66,13 @@ CGO_ENABLED=0 go build \
 	"./cmd/$name"
 end=$(date +%s)
 
-# shellcheck disable=SC2012  # filename is controlled; `ls -lh` is portable for size formatting
-size=$(ls -lh "$output" | awk '{print $5}')
+bytes=$(wc -c <"$output" | tr -d ' ')
+size=$(awk -v b="$bytes" 'BEGIN {
+	if (b > 1024*1024*1024) printf "%.1fG", b/(1024*1024*1024)
+	else if (b > 1024*1024)  printf "%.1fM", b/(1024*1024)
+	else if (b > 1024)       printf "%.1fK", b/1024
+	else                     printf "%dB", b
+}')
 elapsed=$((end - start))
 printf '%s✔%s %s (%s%ds%s, %s%s%s)\n' \
 	"$GREEN" "$RESET" "$output" "$YELLOW" "$elapsed" "$RESET" "$YELLOW" "$size" "$RESET"
