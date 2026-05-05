@@ -58,6 +58,17 @@ func (t *TieredCache) Set(ctx context.Context, key string, value []byte, ttl tim
 	return nil
 }
 
+// InvalidateByPrefix clears matching keys from all active tiers.
+func (t *TieredCache) InvalidateByPrefix(ctx context.Context, prefix string) error {
+	if err := t.l1.InvalidateByPrefix(ctx, prefix); err != nil {
+		return err
+	}
+	if t.l2 != nil {
+		return t.l2.InvalidateByPrefix(ctx, prefix)
+	}
+	return nil
+}
+
 func (t *TieredCache) Close() error {
 	_ = t.l1.Close()
 	if t.l2 != nil {

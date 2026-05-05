@@ -13,6 +13,9 @@ type Cache interface {
 	// Set stores a value with the given TTL.
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 
+	// InvalidateByPrefix drops all keys that start with the given string.
+	InvalidateByPrefix(ctx context.Context, prefix string) error
+
 	// Close releases resources.
 	Close() error
 }

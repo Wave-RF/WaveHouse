@@ -96,3 +96,37 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 		assert.Zero(t, ttl, "expected zero remaining TTL for key without TTL")
 	}
 }
+
+func TestLocalCache_InvalidateByPrefix(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	// Set two keys matching the prefix (one with TTL, one without)
+	require.NoError(t, c.Set(ctx, "query:clicks:123", []byte("val1"), 10*time.Second))
+	require.NoError(t, c.Set(ctx, "query:clicks:456", []byte("val2"), 0))
+	
+	// Set a key that SHOULD NOT be affected
+	require.NoError(t, c.Set(ctx, "query:users:789", []byte("val3"), 10*time.Second))
+
+	// Wait for async admission
+	c.Wait()
+	time.Sleep(10 * time.Millisecond)
+
+	// Wipe out the clicks table cache
+	err = c.InvalidateByPrefix(ctx, "query:clicks:")
+	assert.NoError(t, err)
+
+	// Verify the target keys are gone
+	val1, _, _ := c.Get(ctx, "query:clicks:123")
+	assert.Nil(t, val1)
+	
+	val2, _, _ := c.Get(ctx, "query:clicks:456")
+	assert.Nil(t, val2)
+
+	// Verify the innocent key is still there
+	val3, _, _ := c.Get(ctx, "query:users:789")
+	assert.Equal(t, []byte("val3"), val3)
+}

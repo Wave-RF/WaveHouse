@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,6 +38,17 @@ func (m *memCache) Set(_ context.Context, key string, value []byte, ttl time.Dur
 	m.mu.Lock()
 	m.store[key] = cacheEntry{data: value, ttl: ttl}
 	m.mu.Unlock()
+	return nil
+}
+
+func (m *memCache) InvalidateByPrefix(_ context.Context, prefix string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.store {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.store, k)
+		}
+	}
 	return nil
 }
 
@@ -141,6 +153,30 @@ func TestTieredCache_SingleflightDedup(t *testing.T) {
 	assert.Equal(t, int32(1), count, "expected singleflight to coalesce L2 Gets to 1")
 }
 
+func TestTieredCache_InvalidateByPrefix(t *testing.T) {
+	t.Parallel()
+	l1 := newMemCache()
+	l2 := newMemCache()
+	tc := NewTiered(l1, l2)
+	ctx := context.Background()
+
+	require.NoError(t, tc.Set(ctx, "match:1", []byte("val"), time.Minute))
+	require.NoError(t, tc.Set(ctx, "keep:1", []byte("val"), time.Minute))
+
+	// Invalidate should cascade to both mocks
+	require.NoError(t, tc.InvalidateByPrefix(ctx, "match:"))
+
+	v1, _, _ := tc.Get(ctx, "match:1")
+	assert.Nil(t, v1)
+	
+	v2, _, _ := tc.Get(ctx, "keep:1")
+	assert.NotNil(t, v2)
+	
+	// Double check underlying L2 specifically
+	v1L2, _, _ := l2.Get(ctx, "match:1")
+	assert.Nil(t, v1L2)
+}
+
 // slowCache wraps memCache with a delay and an atomic access counter for singleflight testing.
 type slowCache struct {
 	inner    *memCache
@@ -156,6 +192,10 @@ func (s *slowCache) Get(ctx context.Context, key string) ([]byte, time.Duration,
 
 func (s *slowCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	return s.inner.Set(ctx, key, value, ttl)
+}
+
+func (s *slowCache) InvalidateByPrefix(ctx context.Context, prefix string) error {
+	return s.inner.InvalidateByPrefix(ctx, prefix)
 }
 
 func (s *slowCache) Close() error { return nil }
