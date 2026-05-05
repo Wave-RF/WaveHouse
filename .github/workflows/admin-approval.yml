@@ -41,7 +41,18 @@ jobs:
   admin-approval:
     name: Admin approval
     runs-on: [wave-rf-runners]
+    timeout-minutes: 5
     steps:
+      - name: Checkout main (trusted board-config source)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Load board config
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
+
       - name: Check for admin approval
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,7 +74,9 @@ jobs:
             exit 0
           fi
 
-          admins=("EricAndrechek" "taitelee")
+          # Admin list comes from .github/board-config.env (loaded into
+          # $GITHUB_ENV at the start of this job).
+          IFS=',' read -ra admins <<< "$ADMINS"
 
           # Fast-path: if the triggering event IS an admin's APPROVED
           # review, trust the event payload directly and don't round-

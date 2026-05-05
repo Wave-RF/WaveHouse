@@ -20,8 +20,10 @@ on:
 permissions:
   contents: write
 
-# Cancel in-flight runs when a new push lands on the same PR. Keep main runs
-# independent so every commit on main produces a clean coverage badge.
+# PR pushes: cancel any in-flight run for the same PR (only the latest commit
+# matters). Main pushes: don't cancel — let runs queue serially in the same
+# group so every commit on main produces a clean coverage badge instead of
+# losing a mid-flight run to a follow-up commit.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -37,6 +39,7 @@ jobs:
     # in one CI run instead of fix-push-wait-fix-push.
     name: Lint & Checks
     runs-on: [wave-rf-runners]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -49,9 +52,9 @@ jobs:
         run: make tidy
 
       - name: Check formatting
-        # `make fmt` auto-detects CI=true (set by GHA) and runs as check-only,
-        # failing if any files would be reformatted. Locally, the same target
-        # prompts to apply fixes interactively.
+        # `make fmt` is unconditional check-only — it lists any files that
+        # gofumpt would rewrite and exits non-zero if the list is non-empty.
+        # Run `make fix` locally to apply the rewrites.
         if: ${{ !cancelled() }}
         run: make fmt
 
@@ -76,6 +79,7 @@ jobs:
   test:
     name: Test
     runs-on: [wave-rf-runners]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -93,6 +97,11 @@ jobs:
         with:
           # Threshold + exclude.paths live in .testcoverage.yml (70% total).
           config: ./.testcoverage.yml
+          # Empty git-token on PRs disables the badge push (the action
+          # treats "" as "skip pushing"); only main runs publish to the
+          # badges branch. Keep this conditional intact when bumping the
+          # action — versions before v2.0 didn't honor empty token and
+          # would attempt the push, then fail.
           git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
           git-branch: badges
 
@@ -106,6 +115,7 @@ jobs:
   build:
     name: Build
     runs-on: [wave-rf-runners]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -119,6 +129,7 @@ jobs:
   integration:
     name: Integration Tests
     runs-on: [wave-rf-runners]
+    timeout-minutes: 30
     needs: [test]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -136,6 +147,7 @@ jobs:
     # every PR — no path filter so a deps bump or workflow tweak still
     # exercises the suite.
     runs-on: [wave-rf-runners]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -169,6 +181,7 @@ jobs:
     # raw-SQL race is still unfixed). Drop once follow-up lands.
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: [wave-rf-runners]
+    timeout-minutes: 30
     needs: [build]
     continue-on-error: true
     steps:

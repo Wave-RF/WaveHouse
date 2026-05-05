@@ -27,9 +27,20 @@ jobs:
   classify:
     name: Classify and label
     runs-on: [wave-rf-runners]
+    timeout-minutes: 10
     # Skip re-triggering on our own label edits.
     if: github.actor != 'github-actions[bot]' && github.event.issue.pull_request == null
     steps:
+      - name: Checkout main (trusted board-config source)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Load board config
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
+
       - name: Fetch current area labels
         id: areas
         env:
@@ -59,7 +70,9 @@ jobs:
         uses: actions/ai-inference@af6ad2c4ac4edf01884054fc3a6caa6d2567c13a # v2.0.8
         with:
           model: openai/gpt-4o-mini
-          max-tokens: 200
+          # 400 leaves headroom for multi-area classifications + flags
+          # without truncating mid-JSON. Cost difference is rounding error.
+          max-tokens: 400
           system-prompt: |
             You are an issue-triage assistant for the WaveHouse project — a
             schema-aware real-time API gateway for ClickHouse written in Go.
@@ -114,7 +127,17 @@ jobs:
           ' 2>/dev/null || echo "")
 
           if [[ -z "$labels" ]]; then
-            echo "::notice::No labels suggested or classifier output unparseable."
+            # Distinguish "no labels suggested" (valid empty result, fine)
+            # from "JSON parse failure" (likely max-tokens truncation or
+            # the model going off-script — needs visibility). Echo the
+            # raw response at warning level so the action log surfaces
+            # what we actually got back.
+            if ! echo "$json" | jq -e . >/dev/null 2>&1; then
+              echo "::warning::Classifier output is not valid JSON. Raw response below:"
+              printf '%s\n' "$RESPONSE" | sed 's/^/  /'
+            else
+              echo "::notice::Classifier returned valid JSON but no labels (empty .area, no flags)."
+            fi
             exit 0
           fi
 
@@ -141,19 +164,17 @@ jobs:
             exit 0
           fi
 
-          # Field + option IDs discovered via `gh project field-list 7 --owner Wave-RF`
-          # on 2026-04-21. These are stable unless the board is recreated.
-          PROJECT_ID="PVT_kwDOCdKSOc4BUEKD"
-          FIELD_ID="PVTSSF_lADOCdKSOc4BUEKDzhBO0vI"
+          # Project IDs come from .github/board-config.env (loaded into
+          # $GITHUB_ENV at the start of this job).
           case "$priority" in
-            P0) OPTION_ID="79628723" ;;
-            P1) OPTION_ID="0a877460" ;;
-            P2) OPTION_ID="da944a9c" ;;
-            P3) OPTION_ID="e141a9e0" ;;
+            P0) OPTION_ID="$PRIORITY_P0" ;;
+            P1) OPTION_ID="$PRIORITY_P1" ;;
+            P2) OPTION_ID="$PRIORITY_P2" ;;
+            P3) OPTION_ID="$PRIORITY_P3" ;;
             *)  echo "Unknown priority '$priority'; skipping."; exit 0 ;;
           esac
 
-          item_id=$(gh project item-list 7 --owner Wave-RF --format json --limit 200 \
+          item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 200 \
             | jq -r --argjson n "$ISSUE_NUMBER" --arg repo "$REPO" '
                 .items[]
                 | select(.content.number == $n)
@@ -169,6 +190,6 @@ jobs:
           echo "Setting Priority=$priority on board item $item_id"
           gh project item-edit \
             --id "$item_id" \
-            --field-id "$FIELD_ID" \
+            --field-id "$PRIORITY_FIELD_ID" \
             --single-select-option-id "$OPTION_ID" \
             --project-id "$PROJECT_ID"

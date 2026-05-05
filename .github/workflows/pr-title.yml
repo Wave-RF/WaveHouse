@@ -35,18 +35,32 @@ jobs:
   validate:
     name: Validate
     runs-on: [wave-rf-runners]
+    timeout-minutes: 5
     steps:
       - name: Check Conventional Commits format
         id: check
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          # Max length matches the conventional 72-char git subject cap;
+          # PR titles become the squash-merge subject on main, and longer
+          # subjects mangle `git log --oneline`, GitHub's PR list, and
+          # most commit-graph viewers.
+          MAX_LEN: "72"
         run: |
-          # Keep this type list in sync with CONTRIBUTING.md.
+          # Type list — keep in sync with CONTRIBUTING.md.
           # Optional `!` before `:` marks a breaking change per
           # Conventional Commits 1.0.0.
+          #
+          # The `[^A-Z]` after `: ` enforces a lowercase first character
+          # — this is *house style* (consistency in the squashed commit
+          # log), NOT a Conventional Commits requirement. The spec is
+          # silent on subject capitalization.
           pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
-          if [[ "$PR_TITLE" =~ $pattern ]]; then
+          if [[ ${#PR_TITLE} -gt $MAX_LEN ]]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::PR title is ${#PR_TITLE} chars (max $MAX_LEN): $PR_TITLE"
+          elif [[ "$PR_TITLE" =~ $pattern ]]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
             echo "PR title OK: $PR_TITLE"
           else
@@ -69,15 +83,15 @@ jobs:
           MARKER='<!-- pr-title-lint-comment -->'
           BODY=$(cat <<EOF
           $MARKER
-          ## PR title doesn't match Conventional Commits
+          ## PR title doesn't match the required format
 
-          **Got:** \`$PR_TITLE\`
+          **Got:** \`$PR_TITLE\` (length: ${#PR_TITLE})
 
-          **Expected format:** \`<type>(optional-scope)(optional-!): <lowercase subject, no trailing period>\`
+          **Expected format:** \`<type>(optional-scope)(optional-!): <lowercase subject, no trailing period>\` (max 72 chars — the title becomes the squash-merge commit subject)
 
           **Allowed types:** \`feat\`, \`fix\`, \`docs\`, \`refactor\`, \`test\`, \`chore\`, \`ci\`, \`deps\`, \`build\`, \`perf\`, \`revert\`, \`style\`.
 
-          The optional \`!\` before the colon marks a breaking change per [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+          The optional \`!\` before the colon marks a breaking change per [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/). The lowercase-first-letter rule is house style for log readability, not part of the spec.
 
           **Examples:**
           - \`feat: add dedupe cache\`

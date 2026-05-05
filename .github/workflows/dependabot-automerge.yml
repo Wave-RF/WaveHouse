@@ -8,10 +8,12 @@ name: Dependabot auto-merge
 # via shared composite actions under .github/actions/.
 #
 # Admin-approval bypass: Dependabot PRs skip the `Admin approval`
-# required status check entirely (see `admin-approval.yml`). For patch
-# / minor: this workflow's bot-approval + CI passing + fetch-metadata
-# classification is the complete trust model. For major: a human admin
-# approves in GitHub as usual.
+# required status check entirely (see `admin-approval.yml`). For patch /
+# minor, the trust model is: this workflow's bot-approval + classification
+# (via fetch-metadata) gates *enabling* auto-merge; the actual merge is
+# gated by required-checks on the ruleset (CI passing). So CI failures
+# still block merges — this workflow doesn't bypass them. For major
+# bumps: a human admin approves in GitHub as usual.
 
 on:
   pull_request:
@@ -23,19 +25,16 @@ permissions:
   contents: write
   pull-requests: write
 
-env:
-  PROJECT_OWNER: Wave-RF
-  PROJECT_NUMBER: "7"
-  PROJECT_ID: PVT_kwDOCdKSOc4BUEKD
-  STATUS_FIELD_ID: PVTSSF_lADOCdKSOc4BUEKDzhBO0l8
-  STATUS_READY: "61e4505c"
+# Project IDs live in .github/board-config.env — loaded by the first
+# step of the auto-merge job below.
 
 jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]'
     runs-on: [wave-rf-runners]
+    timeout-minutes: 10
     steps:
-      - name: Checkout main (trusted composite-action source)
+      - name: Checkout main (trusted composite-action + board-config source)
         # Security: pin to the default branch, not the PR head.
         # Dependabot PRs can modify .github/actions/** and since this
         # workflow runs with write-scoped tokens (contents:write +
@@ -48,6 +47,9 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Load board config
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
       - name: Fetch Dependabot metadata
         id: meta

@@ -37,9 +37,13 @@ jobs:
   claude:
     name: Run Claude
     runs-on: [wave-rf-runners]
+    # Slightly above the action's timeout_minutes so the wrapper has room
+    # to clean up gracefully when the inner agent hits its own cap.
+    timeout-minutes: 35
     # Gate: must be a trusted actor AND either mention @claude or apply
-    # the `agent` label. The author_association path differs per event
-    # so each branch is explicit.
+    # the `agent` label. Each event type carries its own author_association
+    # path; we use the same trusted set across all of them.
+    #
     # CONTRIBUTOR is included because webhook payloads report users
     # with *private* org membership as CONTRIBUTOR (not MEMBER). Org
     # members who want MEMBER-level gating can set their org
@@ -51,44 +55,26 @@ jobs:
     # of the job via a `gh api` collaborators/permission call.
     if: |
       (
-        (
-          github.event_name == 'issue_comment' &&
-          contains(github.event.comment.body, '@claude') &&
-          (github.event.comment.author_association == 'OWNER' ||
-           github.event.comment.author_association == 'MEMBER' ||
-           github.event.comment.author_association == 'COLLABORATOR' ||
-           github.event.comment.author_association == 'CONTRIBUTOR')
-        ) ||
-        (
-          github.event_name == 'pull_request_review_comment' &&
-          contains(github.event.comment.body, '@claude') &&
-          (github.event.comment.author_association == 'OWNER' ||
-           github.event.comment.author_association == 'MEMBER' ||
-           github.event.comment.author_association == 'COLLABORATOR' ||
-           github.event.comment.author_association == 'CONTRIBUTOR')
-        ) ||
-        (
-          github.event_name == 'pull_request_review' &&
-          contains(github.event.review.body, '@claude') &&
-          (github.event.review.author_association == 'OWNER' ||
-           github.event.review.author_association == 'MEMBER' ||
-           github.event.review.author_association == 'COLLABORATOR' ||
-           github.event.review.author_association == 'CONTRIBUTOR')
-        ) ||
-        (
-          github.event_name == 'issues' &&
-          github.event.action == 'opened' &&
-          contains(github.event.issue.body, '@claude') &&
-          (github.event.issue.author_association == 'OWNER' ||
-           github.event.issue.author_association == 'MEMBER' ||
-           github.event.issue.author_association == 'COLLABORATOR' ||
-           github.event.issue.author_association == 'CONTRIBUTOR')
-        ) ||
-        (
-          github.event_name == 'issues' &&
-          github.event.action == 'labeled' &&
-          github.event.label.name == 'agent'
-        )
+        github.event_name == 'issue_comment'
+          && contains(github.event.comment.body, '@claude')
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, '@claude')
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'pull_request_review'
+          && contains(github.event.review.body, '@claude')
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.review.author_association)
+      ) || (
+        github.event_name == 'issues'
+          && github.event.action == 'opened'
+          && contains(github.event.issue.body, '@claude')
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.issue.author_association)
+      ) || (
+        github.event_name == 'issues'
+          && github.event.action == 'labeled'
+          && github.event.label.name == 'agent'
       )
     permissions:
       contents: write

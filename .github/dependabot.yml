@@ -18,6 +18,12 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    groups:
+      # One PR per Monday for all action bumps. With SHA pinning,
+      # ungrouped meant 5+ PRs each Monday that all needed identical
+      # review (verify SHA, verify version comment, merge).
+      actions-deps:
+        patterns: ["*"]
     commit-message:
       prefix: "ci"
 
