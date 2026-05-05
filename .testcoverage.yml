@@ -1,7 +1,7 @@
 # Configuration for the vladopajic/go-test-coverage CI action.
 # Docs: https://github.com/vladopajic/go-test-coverage
 
-profile: tmp/coverage/coverage.txt
+profile: tmp/coverage/unit/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
 threshold:

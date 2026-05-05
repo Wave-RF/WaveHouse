@@ -84,7 +84,9 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Run unit tests with coverage
-        run: make coverage
+        # `make test` writes covdata + renders text/HTML to tmp/coverage/unit/
+        # which the go-test-coverage action below consumes for gate + badge.
+        run: make test
 
       - name: Enforce coverage threshold & generate badge
         uses: vladopajic/go-test-coverage@8cfd056d3bc5cc2bc64a840ded0c907aaae3dc46  # v2.18.7
@@ -98,7 +100,7 @@ jobs:
         run: |
           echo '## Test Coverage' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          go tool cover -func=tmp/coverage/coverage.txt >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=tmp/coverage/unit/coverage.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   build:

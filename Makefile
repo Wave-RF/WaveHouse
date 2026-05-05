@@ -94,6 +94,12 @@ GOFUMPT     := go tool gofumpt
 GOIMPORTS   := go tool goimports
 GOCOVER     := go tool go-test-coverage
 GOVULNCHECK := go tool govulncheck
+DEADCODE    := go tool deadcode
+GODA        := go tool goda
+# gsa imports encoding/json/v2 which is still gated behind a build experiment;
+# the env var is required at every invocation because Go's build cache keys on
+# experiment flags.
+GSA         := GOEXPERIMENT=jsonv2 go tool gsa
 
 # Externally-installed tools — version is encoded in the path so bumping the
 # version invalidates the file rule and triggers a reinstall.
@@ -101,11 +107,26 @@ GOLANGCI_LINT_VERSION := v2.11.4
 GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 # --- Coverage Directories -----------------------------------------------------
-# Go 1.20+ binary coverage data dirs. Merged by `coverage-report`.
-COV_UNIT := tmp/covdata/unit
-COV_INT  := tmp/covdata/integration
-COV_E2E  := tmp/covdata/e2e
-COV_OUT  := tmp/coverage
+# Binary covdata dirs (one per test suite) → text + HTML rendered into
+# matching output dirs. The `cov` target merges all available covdata into
+# tmp/coverage/total/.
+COV_UNIT  := tmp/covdata/unit
+COV_INT   := tmp/covdata/integration
+COV_E2E   := tmp/covdata/e2e
+
+COV_OUT_UNIT  := tmp/coverage/unit
+COV_OUT_INT   := tmp/coverage/integration
+COV_OUT_E2E   := tmp/coverage/e2e
+COV_OUT_TOTAL := tmp/coverage/total
+
+# --- Coverage Thresholds ------------------------------------------------------
+# Per-suite + total thresholds enforced after each test suite runs (and by
+# `make cov` for the merged total). Override via env or CLI:
+#   COV_THRESHOLD_UNIT=80 make test
+COV_THRESHOLD_UNIT  ?= 70
+COV_THRESHOLD_INT   ?= 30
+COV_THRESHOLD_E2E   ?= 10
+COV_THRESHOLD_TOTAL ?= 70
 
 # Derived: coverage-instrumented binaries (e.g., wavehouse-cov).
 COVER_BINARIES := $(addsuffix -cov,$(BINARIES))
@@ -194,7 +215,7 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 
 ##@ Build
 
-# Pattern rule: knows how to build any binary in $(BINARIES) from ./cmd/<name>.
+# Static rule: knows how to build any binary in $(BINARIES) from ./cmd/<name>.
 # `$@` expands to the target name. Adding a binary is just appending to BINARIES.
 # Default build keeps debug symbols; `make build-release` strips them.
 .PHONY: $(BINARIES)
@@ -213,7 +234,7 @@ build: $(BINARIES) ## Compile all binaries (use `make -j build` for parallel)
 build-release: LDFLAGS := -s -w
 build-release: build ## Compile with stripped symbols (release-style)
 
-# Static pattern rule for coverage-instrumented variants:
+# Static rule for coverage-instrumented variants:
 # `wavehouse-cov` → builds ./cmd/wavehouse with -cover into bin/wavehouse-cov.
 .PHONY: $(COVER_BINARIES)
 $(COVER_BINARIES): %-cov:
@@ -229,22 +250,42 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 
 ##@ Test
 
+# Each test target runs its suite, writes covdata, renders text + HTML to its
+# own coverage output dir, and gates against its per-suite threshold. The
+# /testutil package is filtered out at `go list` time — it has no tests of
+# its own and only serves as a helper for other packages' tests.
+
+# Color + path env vars piped to scripts/coverage.sh's render-suite subcommand.
+COVERAGE_ENV := \
+	CYAN='$(CYAN)' GREEN='$(GREEN)' YELLOW='$(YELLOW)' RED='$(RED)' RESET='$(RESET)' \
+	COV_UNIT='$(COV_UNIT)' COV_INT='$(COV_INT)' COV_E2E='$(COV_E2E)' \
+	COV_OUT_UNIT='$(COV_OUT_UNIT)' COV_OUT_INT='$(COV_OUT_INT)' \
+	COV_OUT_E2E='$(COV_OUT_E2E)' COV_OUT_TOTAL='$(COV_OUT_TOTAL)' \
+	COV_THRESHOLD_UNIT='$(COV_THRESHOLD_UNIT)' \
+	COV_THRESHOLD_INT='$(COV_THRESHOLD_INT)' \
+	COV_THRESHOLD_E2E='$(COV_THRESHOLD_E2E)' \
+	COV_THRESHOLD_TOTAL='$(COV_THRESHOLD_TOTAL)'
+
 .PHONY: test
-test: ## Run fast unit tests with race detector
+test: ## Run unit tests + render coverage + gate threshold
 	@echo "$(CYAN)==> Running Unit Tests...$(RESET)"
 	@rm -rf $(COV_UNIT) && mkdir -p $(COV_UNIT)
-	@GOCOVERDIR=$(CURDIR)/$(COV_UNIT) $(GOTESTSUM) --format $(GOTESTSUM_FMT) -- \
-		-tags="$(TAGS)" -cover -race ./internal/... $(ARGS) \
+	@PKGS=$$(go list ./internal/... | grep -v /testutil); \
+	GOCOVERDIR=$(CURDIR)/$(COV_UNIT) $(GOTESTSUM) --format $(GOTESTSUM_FMT) -- \
+		-tags="$(TAGS)" -cover -race $$PKGS $(ARGS) \
 		-args -test.gocoverdir=$(CURDIR)/$(COV_UNIT)
+	@$(COVERAGE_ENV) scripts/coverage.sh render-suite unit
 
 .PHONY: test-integration
-test-integration: ## Run Go integration tests in ./tests/integration/ (requires Docker)
+test-integration: ## Run integration tests + render coverage + gate threshold (requires Docker)
 	@echo "$(CYAN)==> Running Integration Tests...$(RESET)"
 	@rm -rf $(COV_INT) && mkdir -p $(COV_INT)
-	@GOCOVERDIR=$(CURDIR)/$(COV_INT) $(GOTESTSUM) --format $(GOTESTSUM_FMT) -- \
+	@PKGS=$$(go list ./tests/integration/... | grep -v /testutil); \
+	GOCOVERDIR=$(CURDIR)/$(COV_INT) $(GOTESTSUM) --format $(GOTESTSUM_FMT) -- \
 		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
-		./tests/integration/... $(ARGS) \
+		$$PKGS $(ARGS) \
 		-args -test.gocoverdir=$(CURDIR)/$(COV_INT)
+	@$(COVERAGE_ENV) scripts/coverage.sh render-suite integration
 
 # E2E: starts a coverage-instrumented binary, runs the SDK suite, then SIGINTs
 # the binary so Go flushes coverage data to GOCOVERDIR.
@@ -264,31 +305,27 @@ test-e2e: build-cover ## Run E2E SDK suite (./tests/e2e/sdk) against instrumente
 	@kill -SIGINT $$(cat tmp/wavehouse.pid) 2>/dev/null || true
 	@wait $$(cat tmp/wavehouse.pid) 2>/dev/null || true
 	@rm -f tmp/wavehouse.pid
+	@$(COVERAGE_ENV) scripts/coverage.sh render-suite e2e
 
+# test-all is intentionally a recipe-based aggregator (not declared prereqs)
+# so the suites run sequentially even under `make -j N`. The suites are NOT
+# parallel-safe — each binds ports / spins testcontainers / starts the binary.
 .PHONY: test-all
-test-all: test test-integration test-e2e coverage-report ## Run unit + integration + e2e + coverage report
+test-all: ## Run all suites sequentially + merged total coverage + gate
+	@$(MAKE) test
+	@$(MAKE) test-integration
+	@$(MAKE) test-e2e
+	@$(MAKE) cov
 
 ##@ Coverage
 
-# Pass color + path config into scripts/coverage.sh so the script doesn't
-# duplicate NO_COLOR detection or the COV_* path constants.
-COVERAGE_ENV := \
-	CYAN='$(CYAN)' GREEN='$(GREEN)' YELLOW='$(YELLOW)' RED='$(RED)' RESET='$(RESET)' \
-	COV_UNIT='$(COV_UNIT)' COV_INT='$(COV_INT)' COV_E2E='$(COV_E2E)' COV_OUT='$(COV_OUT)' \
-	GOCOVER='$(GOCOVER)'
-
-# coverage: unit-only profile + report. Used by CI's go-test-coverage action,
-# which expects $(COV_OUT)/coverage.txt.
-.PHONY: coverage
-coverage: test ## Run unit tests; emit profile + HTML to tmp/coverage/
-	@$(COVERAGE_ENV) scripts/coverage.sh unit
-
-# coverage-report: merged coverage from whichever test buckets ran. Per-type
-# percentages are informational (not gated). The threshold check runs against
-# the merged profile — that's the real ship gate.
-.PHONY: coverage-report
-coverage-report: ## Merge unit/integration/e2e coverage and enforce thresholds
-	@$(COVERAGE_ENV) scripts/coverage.sh report
+# cov: aggregates whichever covdata exists across unit/integration/e2e,
+# renders merged text + HTML to tmp/coverage/total/, prints per-suite
+# breakdown, gates against COV_THRESHOLD_TOTAL. Does NOT run tests — call
+# the test targets first (or run `make test-all` for the full pipeline).
+.PHONY: cov
+cov: ## Merge all available covdata + gate against total threshold
+	@$(COVERAGE_ENV) scripts/coverage.sh merge-total
 
 ##@ CI
 
@@ -305,6 +342,62 @@ ci: ## Full pipeline: verify + build + unit + integration tests
 	@printf "\n$(BOLD)$(YELLOW)━━━ 4/4  Integration tests ━━━$(RESET)\n"
 	@$(MAKE) test-integration
 	@printf "\n$(BOLD)$(GREEN)✔ All CI checks passed$(RESET)\n"
+
+##@ Analysis
+
+# Analysis tools are exploratory utilities run by humans investigating binary
+# size, dependency weight, or unused code. They are intentionally not part of
+# `verify` or `ci` — `deadcode` has false positives on reflection / HTTP
+# routers, and the size/dep tools are too slow for a pre-push gate.
+
+# audit-cgo: WaveHouse builds with CGO_ENABLED=0. Listed packages have pure-Go
+# fallbacks today, but a new dep could quietly break that constraint — this
+# audit surfaces every transitively-reachable package with C files so the drift
+# is visible before a release-time cross-compile breaks.
+.PHONY: audit-cgo
+audit-cgo: ## Audit dependency tree for CGO files (informational)
+	@echo "$(CYAN)==> Scanning dependency tree for packages with C files...$(RESET)"
+	@printf "  WaveHouse builds with %sCGO_ENABLED=0%s — listed packages have pure-Go fallbacks\n" "$(YELLOW)" "$(RESET)"
+	@echo  "  and their C code is never compiled. This audit catches new CGO deps."
+	@echo
+	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/... 2>/dev/null || true
+	@echo
+	@echo "$(GREEN)==> CGO audit complete$(RESET)"
+
+# deadcode: whole-program reachability analysis, complementary to
+# golangci-lint's `unused` (which is locally scoped). False positives are
+# common for HTTP routers, reflection-based dispatch, and init() registration
+# — treat the output as a starting point, not a verdict.
+.PHONY: deadcode
+deadcode: ## Find unreachable functions
+	@echo "$(CYAN)==> Searching for dead code...$(RESET)"
+	@$(DEADCODE) -test ./...
+
+# size: binary size analysis. Default `make build` keeps DWARF symbols, which
+# gsa needs for accurate per-package attribution. The script also reports the
+# strip-equivalent size (what `make build-release` would produce) and explains
+# the gsa output's quirks (the "CGO" label is mislabeled type metadata, etc.).
+.PHONY: size
+size: build ## Binary size analysis → text + SVG + interactive HTML
+	@CYAN='$(CYAN)' GREEN='$(GREEN)' YELLOW='$(YELLOW)' RED='$(RED)' RESET='$(RESET)' \
+		scripts/size.sh
+
+# dep-cut: surfaces packages with few dependents (low InDegree) that drag in
+# heavy transitive weight — i.e. the best candidates to remove or replace.
+# Override the default top-N with `make dep-cut LIMIT=50`.
+LIMIT ?= 30
+.PHONY: dep-cut
+dep-cut: ## Top cuttable dependencies by transitive weight (LIMIT=N to override)
+	@CYAN='$(CYAN)' YELLOW='$(YELLOW)' RESET='$(RESET)' \
+		LIMIT='$(LIMIT)' scripts/dep-cut.sh
+
+# binary-analysis: one command for "what's in my binary, and what's wrong with
+# it." Runs in dep-order: build → size → audit-cgo → deadcode.
+.PHONY: binary-analysis
+binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcode
+	@echo
+	@echo "$(GREEN)==> Binary analysis complete$(RESET)"
+	@printf "  Cuttable dependencies: %smake dep-cut%s\n" "$(CYAN)" "$(RESET)"
 
 ##@ Cleanup
 
