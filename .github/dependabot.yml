@@ -35,7 +35,7 @@ updates:
 
   # E2E test harness (runs against the SDK)
   - package-ecosystem: npm
-    directory: /tests/sdk
+    directory: /tests/e2e/sdk
     schedule:
       interval: weekly
       day: monday

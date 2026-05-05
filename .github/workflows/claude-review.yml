@@ -143,12 +143,12 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.skip != 'true'
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e  # v1.0.102
+      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e # v1.0.102
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

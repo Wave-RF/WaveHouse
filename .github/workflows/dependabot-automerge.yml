@@ -43,7 +43,7 @@ jobs:
         # inject code via a bump PR. Defensive regardless of the
         # actor being dependabot[bot]. (Copilot flagged the same
         # pull_request_target pitfall on project-orchestrator.yml.)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -51,7 +51,7 @@ jobs:
 
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       - name: Approve and enable auto-merge (patch / minor)
         if: |

@@ -20,6 +20,7 @@ package main
 import (
 	"debug/elf"
 	"debug/macho"
+	"debug/pe"
 	"fmt"
 	"os"
 	"strings"
@@ -70,7 +71,17 @@ func dwarfBytes(path string) (int64, error) {
 		}
 		return sum, nil
 	}
-	return 0, fmt.Errorf("unsupported binary format (not Mach-O or ELF)")
+	if pf, err := pe.Open(path); err == nil {
+		defer pf.Close()
+		var sum int64
+		for _, s := range pf.Sections {
+			if isDebug(s.Name) {
+				sum += int64(s.Size)
+			}
+		}
+		return sum, nil
+	}
+	return 0, fmt.Errorf("unsupported binary format (not Mach-O, ELF, or PE)")
 }
 
 func isDebug(name string) bool {

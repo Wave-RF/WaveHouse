@@ -17,6 +17,23 @@ MAKEFLAGS += --warn-undefined-variables
 
 .DEFAULT_GOAL := help
 
+# --- Conventions used in this Makefile ----------------------------------------
+# Parallelization — two patterns, picked per target by what the work needs:
+#
+#   1. Declared prereqs (`target: prereq1 prereq2 …`) → parallel-safe under
+#      `make -j N`. Used by aggregators whose sub-steps are read-only and
+#      independent (e.g. `verify`, `binary-analysis`).
+#
+#   2. Recipe-based `$(MAKE) X` calls → strictly sequential regardless of -j.
+#      Used by aggregators that need ordered output (banners) or whose steps
+#      are stateful / share resources (e.g. `ci`, `test-all` where suites
+#      bind ports or spin testcontainers).
+#
+# Hidden aliases — convenience targets that forward to the canonical name
+# without showing up in `make help`. The help-menu awk filter only picks up
+# lines with a `## ` doc comment, so an alias defined as `foo: bar` (no ##)
+# is invisible. See `test-unit` and `build-debug` near the end for examples.
+
 # --- Environment Detection ----------------------------------------------------
 # CI=true is set by GitHub Actions, GitLab, CircleCI, Buildkite, etc.
 # We use it to skip interactive prompts (e.g. clean-all confirm).
@@ -107,17 +124,14 @@ GOLANGCI_LINT_VERSION := v2.11.4
 GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 # --- Coverage Directories -----------------------------------------------------
-# Binary covdata dirs (one per test suite) → text + HTML rendered into
-# matching output dirs. The `cov` target merges all available covdata into
-# tmp/coverage/total/.
-COV_UNIT  := tmp/covdata/unit
-COV_INT   := tmp/covdata/integration
-COV_E2E   := tmp/covdata/e2e
-
-COV_OUT_UNIT  := tmp/coverage/unit
-COV_OUT_INT   := tmp/coverage/integration
-COV_OUT_E2E   := tmp/coverage/e2e
-COV_OUT_TOTAL := tmp/coverage/total
+# One path per suite. Internal layout (managed by scripts/coverage.sh):
+#   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
+#   $(COV_X)/coverage.txt  rendered textfmt profile
+#   $(COV_X)/coverage.html rendered HTML report
+COV_UNIT  := tmp/coverage/unit
+COV_INT   := tmp/coverage/integration
+COV_E2E   := tmp/coverage/e2e
+COV_TOTAL := tmp/coverage/total
 
 # --- Coverage Thresholds ------------------------------------------------------
 # Per-suite + total thresholds enforced after each test suite runs (and by
@@ -128,8 +142,9 @@ COV_THRESHOLD_INT   ?= 30
 COV_THRESHOLD_E2E   ?= 10
 COV_THRESHOLD_TOTAL ?= 70
 
-# Derived: coverage-instrumented binaries (e.g., wavehouse-cov).
-COVER_BINARIES := $(addsuffix -cov,$(BINARIES))
+# Derived: coverage-instrumented and release-stripped binaries.
+COVER_BINARIES   := $(addsuffix -cov,$(BINARIES))
+RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
 
 # ==============================================================================
 # Targets
@@ -215,101 +230,76 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 
 ##@ Build
 
-# Static rule: knows how to build any binary in $(BINARIES) from ./cmd/<name>.
-# `$@` expands to the target name. Adding a binary is just appending to BINARIES.
-# Default build keeps debug symbols; `make build-release` strips them.
+# All three variants dispatch to scripts/build.sh, which knows how to handle
+# debug / release / cover and prints a uniform "✔ <output> (<time>s, <size>)"
+# status line. Per-binary parallelism is preserved via the $(BINARIES) /
+# $(RELEASE_BINARIES) / $(COVER_BINARIES) target lists — `make -j build`
+# would dispatch them concurrently if BINARIES grows.
+#
+# Export so the script picks them up without per-recipe env passing.
+export VERSION_LDFLAGS LDFLAGS TAGS
+
 .PHONY: $(BINARIES)
 $(BINARIES):
-	@echo "$(CYAN)==> Building $@...$(RESET)"
-	@START=$$(date +%s); \
-	CGO_ENABLED=0 go build -tags="$(TAGS)" -ldflags="$(LDFLAGS) $(VERSION_LDFLAGS)" -o bin/$@ ./cmd/$@; \
-	END=$$(date +%s); \
-	SIZE=$$(ls -lh bin/$@ | awk '{print $$5}'); \
-	printf "$(GREEN)✔$(RESET) bin/$@ ($(YELLOW)%ss$(RESET), $(YELLOW)%s$(RESET))\n" "$$((END - START))" "$$SIZE"
+	@scripts/build.sh $@ debug
 
 .PHONY: build
-build: $(BINARIES) ## Compile all binaries (use `make -j build` for parallel)
+build: $(BINARIES) ## Compile all binaries with debug symbols → bin/<name>
+
+# Hidden alias — `build` is debug by default, but `build-debug` reads more
+# obviously when paired with `build-release` in scripts or contributor docs.
+.PHONY: build-debug
+build-debug: build
+
+# Release variants build alongside (not overwriting) the debug binaries, so
+# `make size` can compare the two without recompiling between targets.
+.PHONY: $(RELEASE_BINARIES)
+$(RELEASE_BINARIES): %-release:
+	@scripts/build.sh $* release
 
 .PHONY: build-release
-build-release: LDFLAGS := -s -w
-build-release: build ## Compile with stripped symbols (release-style)
+build-release: $(RELEASE_BINARIES) ## Compile all binaries stripped → bin/<name>-release
 
-# Static rule for coverage-instrumented variants:
-# `wavehouse-cov` → builds ./cmd/wavehouse with -cover into bin/wavehouse-cov.
+# Coverage-instrumented variants (`wavehouse-cov`): used by E2E to capture
+# coverage from the running binary.
 .PHONY: $(COVER_BINARIES)
 $(COVER_BINARIES): %-cov:
-	@echo "$(CYAN)==> Building $* (coverage instrumented)...$(RESET)"
-	@START=$$(date +%s); \
-	CGO_ENABLED=0 go build -cover -tags="$(TAGS)" -ldflags="$(LDFLAGS) $(VERSION_LDFLAGS)" -o bin/$@ ./cmd/$*; \
-	END=$$(date +%s); \
-	SIZE=$$(ls -lh bin/$@ | awk '{print $$5}'); \
-	printf "$(GREEN)✔$(RESET) bin/$@ ($(YELLOW)%ss$(RESET), $(YELLOW)%s$(RESET))\n" "$$((END - START))" "$$SIZE"
+	@scripts/build.sh $* cover
 
 .PHONY: build-cover
-build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation
+build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation → bin/<name>-cov
 
 ##@ Test
 
-# Each test target runs its suite, writes covdata, renders text + HTML to its
-# own coverage output dir, and gates against its per-suite threshold. The
-# /testutil package is filtered out at `go list` time — it has no tests of
-# its own and only serves as a helper for other packages' tests.
+# Each test target hands off to scripts/test-suite.sh, which runs the suite,
+# filters /testutil at `go list` time, writes covdata to tmp/coverage/<suite>/data/,
+# and gates against COV_THRESHOLD_<SUITE> via scripts/coverage.sh. Per-suite
+# specifics (build tags, package globs, gotestsum format) live in test-suite.sh.
 
-# Color + path env vars piped to scripts/coverage.sh's render-suite subcommand.
-COVERAGE_ENV := \
-	CYAN='$(CYAN)' GREEN='$(GREEN)' YELLOW='$(YELLOW)' RED='$(RED)' RESET='$(RESET)' \
-	COV_UNIT='$(COV_UNIT)' COV_INT='$(COV_INT)' COV_E2E='$(COV_E2E)' \
-	COV_OUT_UNIT='$(COV_OUT_UNIT)' COV_OUT_INT='$(COV_OUT_INT)' \
-	COV_OUT_E2E='$(COV_OUT_E2E)' COV_OUT_TOTAL='$(COV_OUT_TOTAL)' \
-	COV_THRESHOLD_UNIT='$(COV_THRESHOLD_UNIT)' \
-	COV_THRESHOLD_INT='$(COV_THRESHOLD_INT)' \
-	COV_THRESHOLD_E2E='$(COV_THRESHOLD_E2E)' \
-	COV_THRESHOLD_TOTAL='$(COV_THRESHOLD_TOTAL)'
+# Threshold + format env vars are exported so test-suite.sh and coverage.sh
+# pick them up without a long per-recipe env soup.
+export TAGS GOTESTSUM_FMT
+export COV_THRESHOLD_UNIT COV_THRESHOLD_INT COV_THRESHOLD_E2E COV_THRESHOLD_TOTAL
 
 .PHONY: test
 test: ## Run unit tests + render coverage + gate threshold
-	@echo "$(CYAN)==> Running Unit Tests...$(RESET)"
-	@rm -rf $(COV_UNIT) && mkdir -p $(COV_UNIT)
-	@PKGS=$$(go list ./internal/... | grep -v /testutil); \
-	GOCOVERDIR=$(CURDIR)/$(COV_UNIT) $(GOTESTSUM) --format $(GOTESTSUM_FMT) -- \
-		-tags="$(TAGS)" -cover -race $$PKGS $(ARGS) \
-		-args -test.gocoverdir=$(CURDIR)/$(COV_UNIT)
-	@$(COVERAGE_ENV) scripts/coverage.sh render-suite unit
+	@scripts/test-suite.sh unit $(ARGS)
+
+# Hidden alias — symmetry with test-integration / test-e2e for muscle memory.
+.PHONY: test-unit
+test-unit: test
 
 .PHONY: test-integration
 test-integration: ## Run integration tests + render coverage + gate threshold (requires Docker)
-	@echo "$(CYAN)==> Running Integration Tests...$(RESET)"
-	@rm -rf $(COV_INT) && mkdir -p $(COV_INT)
-	@PKGS=$$(go list ./tests/integration/... | grep -v /testutil); \
-	GOCOVERDIR=$(CURDIR)/$(COV_INT) $(GOTESTSUM) --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
-		$$PKGS $(ARGS) \
-		-args -test.gocoverdir=$(CURDIR)/$(COV_INT)
-	@$(COVERAGE_ENV) scripts/coverage.sh render-suite integration
+	@scripts/test-suite.sh integration $(ARGS)
 
-# E2E: starts a coverage-instrumented binary, runs the SDK suite, then SIGINTs
-# the binary so Go flushes coverage data to GOCOVERDIR.
 .PHONY: test-e2e
-test-e2e: build-cover ## Run E2E SDK suite (./tests/e2e/sdk) against instrumented binary
-	# TODO: need to refactor this into go script in `tests/` like integration tests do
-	@echo "$(CYAN)==> Running E2E Tests...$(RESET)"
-	@rm -rf $(COV_E2E) && mkdir -p $(COV_E2E) tmp
-	@echo "$(YELLOW)==> Starting instrumented binary...$(RESET)"
-	@GOCOVERDIR=$(CURDIR)/$(COV_E2E) bin/wavehouse-cov & echo $$! > tmp/wavehouse.pid
-	@sleep 2
-	@echo "$(YELLOW)==> Running SDK E2E suite...$(RESET)"
-	@cd tests/e2e/sdk && npm install --silent && npx vitest run \
-		|| { kill -SIGINT $$(cat tmp/wavehouse.pid) 2>/dev/null || true; \
-		     rm -f tmp/wavehouse.pid; exit 1; }
-	@echo "$(YELLOW)==> Stopping binary (flushes coverage)...$(RESET)"
-	@kill -SIGINT $$(cat tmp/wavehouse.pid) 2>/dev/null || true
-	@wait $$(cat tmp/wavehouse.pid) 2>/dev/null || true
-	@rm -f tmp/wavehouse.pid
-	@$(COVERAGE_ENV) scripts/coverage.sh render-suite e2e
+test-e2e: ## Run E2E SDK suite against instrumented binary + render coverage + gate
+	@scripts/test-suite.sh e2e $(ARGS)
 
-# test-all is intentionally a recipe-based aggregator (not declared prereqs)
-# so the suites run sequentially even under `make -j N`. The suites are NOT
-# parallel-safe — each binds ports / spins testcontainers / starts the binary.
+# Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
+# under `make -j N`. The suites bind ports / spin testcontainers / start the
+# release binary, so concurrent execution is unsafe.
 .PHONY: test-all
 test-all: ## Run all suites sequentially + merged total coverage + gate
 	@$(MAKE) test
@@ -325,12 +315,16 @@ test-all: ## Run all suites sequentially + merged total coverage + gate
 # the test targets first (or run `make test-all` for the full pipeline).
 .PHONY: cov
 cov: ## Merge all available covdata + gate against total threshold
-	@$(COVERAGE_ENV) scripts/coverage.sh merge-total
+	@scripts/coverage.sh merge $(COV_THRESHOLD_TOTAL)
 
 ##@ CI
 
-# ci: full local approximation of the pipeline. Use before opening a PR
-# when you want to catch what CI would catch end-to-end.
+# ci: local approximation of the GHA pipeline (lint / test / build /
+# integration jobs). Use before opening a PR.
+#
+# TODO: switch the test phases to `$(MAKE) test-all` once the e2e refactor
+# (Go test-containers harness in tests/e2e) lands. test-all already merges
+# coverage and gates the total — that closer matches what GHA runs.
 .PHONY: ci
 ci: ## Full pipeline: verify + build + unit + integration tests
 	@printf "\n$(BOLD)$(YELLOW)━━━ 1/4  Static checks ━━━$(RESET)\n"

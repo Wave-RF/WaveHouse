@@ -56,7 +56,7 @@ jobs:
 
       - name: Classify with GitHub Models
         id: classify
-        uses: actions/ai-inference@af6ad2c4ac4edf01884054fc3a6caa6d2567c13a  # v2.0.8
+        uses: actions/ai-inference@af6ad2c4ac4edf01884054fc3a6caa6d2567c13a # v2.0.8
         with:
           model: openai/gpt-4o-mini
           max-tokens: 200
