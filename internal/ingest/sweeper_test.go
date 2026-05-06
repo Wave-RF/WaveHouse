@@ -116,7 +116,7 @@ func TestSweep_GapSeqIsBottleneck(t *testing.T) {
 		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
 	}
 
-	s := NewSweeper(js, gapWindow, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", gapWindow, nopLogger())
 	s.sweep(context.Background())
 
 	// gapSeq ~101, ackFloor+1 = 151 → target = min(151, 101) = 101
@@ -152,7 +152,7 @@ func TestSweep_AckFloorIsBottleneck(t *testing.T) {
 		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
 	}
 
-	s := NewSweeper(js, gapWindow, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", gapWindow, nopLogger())
 	s.sweep(context.Background())
 
 	// gapSeq ~51, ackFloor+1 = 31 → target = min(31, 51) = 31
@@ -184,7 +184,7 @@ func TestSweep_AllWithinWindow_NoPurge(t *testing.T) {
 		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
 	}
 
-	s := NewSweeper(js, gapWindow, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", gapWindow, nopLogger())
 	s.sweep(context.Background())
 
 	assert.Empty(t, ms.purged, "no purge when all messages within gap window")
@@ -205,7 +205,7 @@ func TestSweep_ConsumerNotFound_NoPurge(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	s.sweep(context.Background())
 
 	assert.Empty(t, ms.purged, "no purge when consumer not found")
@@ -219,7 +219,7 @@ func TestSweep_StreamError_NoPurge(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	// Should not panic.
 	s.sweep(context.Background())
 }
@@ -249,7 +249,7 @@ func TestSweep_TargetLessOrEqualOne_NoPurge(t *testing.T) {
 		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
 	}
 
-	s := NewSweeper(js, gapWindow, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", gapWindow, nopLogger())
 	s.sweep(context.Background())
 
 	// ackFloor+1 = 1, gapSeq = some large number → target = min(1, X) = 1 → skip
@@ -271,7 +271,7 @@ func TestSweep_ConsumerInfoError_NoPurge(t *testing.T) {
 		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
 	}
 
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	s.sweep(context.Background())
 
 	assert.Empty(t, ms.purged, "no purge when consumer info fails")
@@ -307,7 +307,7 @@ func TestSweep_PurgeError_Logged(t *testing.T) {
 		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
 	}
 
-	s := NewSweeper(js, gapWindow, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", gapWindow, nopLogger())
 	// Should not panic even when purge fails.
 	s.sweep(context.Background())
 }
@@ -324,7 +324,7 @@ func TestFindGapSequence_EmptyStream(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	seq, err := s.findGapSequence(context.Background(), ms)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(0), seq)
@@ -338,7 +338,7 @@ func TestFindGapSequence_FirstSeqGTLastSeq(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	seq, err := s.findGapSequence(context.Background(), ms)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(0), seq)
@@ -356,7 +356,7 @@ func TestFindGapSequence_AllWithinWindow(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(nil, 10*time.Minute, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", 10*time.Minute, nopLogger())
 	seq, err := s.findGapSequence(context.Background(), ms)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(0), seq, "all messages within window → 0")
@@ -374,7 +374,7 @@ func TestFindGapSequence_AllExpired(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	seq, err := s.findGapSequence(context.Background(), ms)
 	assert.NoError(t, err)
 	// All expired → result should be last+1 = 101 (binary search default)
@@ -400,7 +400,7 @@ func TestFindGapSequence_BoundaryDetection(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(nil, gapWindow, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", gapWindow, nopLogger())
 	seq, err := s.findGapSequence(context.Background(), ms)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(61), seq, "first seq within gap window should be 61")
@@ -428,7 +428,7 @@ func TestFindGapSequence_SparseSequences(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(nil, gapWindow, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", gapWindow, nopLogger())
 	seq, err := s.findGapSequence(context.Background(), ms)
 	assert.NoError(t, err)
 	// With sparse seqs, binary search skips missing seqs.
@@ -440,7 +440,7 @@ func TestFindGapSequence_StreamInfoError(t *testing.T) {
 	t.Parallel()
 	ms := &mockStream{infoErr: errors.New("stream info unavailable")}
 
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
+	s := NewSweeper(nil, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	_, err := s.findGapSequence(context.Background(), ms)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "stream info")
@@ -458,7 +458,7 @@ func TestStart_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
+	s := NewSweeper(js, "WAVEHOUSE", 5*time.Minute, nopLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately.
 

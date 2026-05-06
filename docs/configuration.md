@@ -120,6 +120,7 @@ clickhouse:
   password: ""
 
 mq:
+  stream_name: WAVEHOUSE
   embedded_dir: ./data/nats
   url: nats://localhost:4222
   gap_window_minutes: 15

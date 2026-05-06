@@ -48,6 +48,7 @@ services:
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
+      WH_MQ_STREAM_NAME: WAVEHOUSE
       WH_MQ_URL: nats://nats:4222
       WH_CACHE_REDIS_URL: redis://redis:6379
       WH_AUTH_ENABLED: "false"
@@ -71,6 +72,7 @@ services:
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
+      WH_MQ_STREAM_NAME: WAVEHOUSE
       WH_MQ_URL: nats://nats:4222
       WH_CACHE_REDIS_URL: redis://redis:6379
       WH_AUTH_ENABLED: "false"
@@ -94,6 +96,7 @@ services:
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
+      WH_MQ_STREAM_NAME: WAVEHOUSE
       WH_MQ_URL: nats://nats:4222
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"
@@ -109,6 +112,7 @@ services:
     environment:
       WH_MODE: clustered
       WH_CH_ADDR: clickhouse:9000
+      WH_MQ_STREAM_NAME: WAVEHOUSE
       WH_MQ_URL: nats://nats:4222
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"

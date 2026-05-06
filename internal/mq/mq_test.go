@@ -7,11 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestStreamName(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "WAVEHOUSE", StreamName())
-}
-
 func TestMessage_AckNak(t *testing.T) {
 	t.Parallel()
 

@@ -136,3 +136,37 @@ func TestEnsureDLQStream_Idempotent(t *testing.T) {
 	assert.Equal(t, handler.DLQStreamName, info.Config.Name)
 	assert.Equal(t, []string{"dlq.>"}, info.Config.Subjects)
 }
+
+func TestEnsureDLQStream_CustomName(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Use a non-default stream name
+	customStreamName := "MY_CUSTOM_TENANT"
+	expectedDLQName := customStreamName + "_DLQ"
+
+	emb, err := mq.NewEmbedded(dir, customStreamName, 1024*1024, testutil.NopLogger())
+	require.NoError(t, err)
+	defer func() { _ = emb.Close() }()
+
+	js := emb.JetStream()
+	ctx := context.Background()
+
+	// 1. Ensure the DLQ stream is created
+	require.NoError(t, EnsureDLQStream(ctx, js, customStreamName, 1024*1024))
+
+	// 2. Instantiate the handler
+	handler := NewDLQHandler(js, customStreamName, slog.Default())
+
+	// 3. Assert the handler stored the correct derived name
+	assert.Equal(t, expectedDLQName, handler.DLQStreamName)
+
+	// 4. Assert NATS actually created a stream with that exact derived name
+	stream, err := js.Stream(ctx, expectedDLQName)
+	require.NoError(t, err)
+
+	info, err := stream.Info(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, expectedDLQName, info.Config.Name)
+	assert.Equal(t, []string{"dlq.>"}, info.Config.Subjects)
+}

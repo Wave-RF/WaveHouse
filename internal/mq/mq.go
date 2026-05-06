@@ -45,8 +45,3 @@ type Subscriber interface {
 	Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error
 	Close() error
 }
-
-// StreamName returns the JetStream stream name used by all MQ implementations.
-func StreamName() string {
-	return "WAVEHOUSE"
-}

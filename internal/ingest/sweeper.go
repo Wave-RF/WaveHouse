@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -20,18 +19,20 @@ import (
 // ClickHouse down freezes purging; catastrophic outage fills to MaxBytes
 // and triggers backpressure via DiscardNew.
 type Sweeper struct {
-	js        jetstream.JetStream
-	gapWindow time.Duration
-	logger    *slog.Logger
+	js         jetstream.JetStream
+	streamName string
+	gapWindow  time.Duration
+	logger     *slog.Logger
 }
 
 // NewSweeper creates an Active Sweeper.
 // TODO: need leader election or shared lock to only run one instance of the sweeper in clustered mode
-func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Logger) *Sweeper {
+func NewSweeper(js jetstream.JetStream, streamName string, gapWindow time.Duration, logger *slog.Logger) *Sweeper {
 	return &Sweeper{
-		js:        js,
-		gapWindow: gapWindow,
-		logger:    logger,
+		js:         js,
+		streamName: streamName,
+		gapWindow:  gapWindow,
+		logger:     logger,
 	}
 }
 
@@ -50,14 +51,14 @@ func (s *Sweeper) Start(ctx context.Context) {
 }
 
 func (s *Sweeper) sweep(ctx context.Context) {
-	stream, err := s.js.Stream(ctx, mq.StreamName())
+	stream, err := s.js.Stream(ctx, s.streamName)
 	if err != nil {
 		s.logger.Error("sweeper: get stream", "error", err)
 		return
 	}
 
 	// 1. Get buffer consumer's AckFloor — highest contiguous ACKed sequence.
-	cons, err := s.js.Consumer(ctx, mq.StreamName(), BufferConsumerName)
+	cons, err := s.js.Consumer(ctx, s.streamName, BufferConsumerName)
 	if err != nil {
 		// Consumer may not exist yet if no messages have been ingested.
 		s.logger.Warn("sweeper: buffer consumer not found (may not exist yet)", "error", err)

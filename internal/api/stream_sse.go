@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
-	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -21,10 +20,11 @@ type SSEHandler struct {
 	Hub         *Hub
 	JS          jetstream.JetStream
 	PolicyStore *policy.Store
+	StreamName  string
 }
 
-func NewSSEHandler(hub *Hub, js jetstream.JetStream) *SSEHandler {
-	return &SSEHandler{Hub: hub, JS: js}
+func NewSSEHandler(hub *Hub, js jetstream.JetStream, streamName string) *SSEHandler {
+	return &SSEHandler{Hub: hub, JS: js, StreamName: streamName}
 }
 
 func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +171,7 @@ func (h *SSEHandler) applyStreamPolicy(raw []byte, role string, claims map[strin
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time
 // and sends all available messages to the callback until caught up.
 func (h *SSEHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
+	cons, err := h.JS.CreateOrUpdateConsumer(ctx, h.StreamName, jetstream.ConsumerConfig{
 		FilterSubject:     subject,
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
 		OptStartTime:      &since,

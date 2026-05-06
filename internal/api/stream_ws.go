@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
-	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -37,10 +36,11 @@ type WSHandler struct {
 	JS             jetstream.JetStream
 	PolicyStore    *policy.Store
 	AllowedOrigins []string
+	StreamName     string
 }
 
-func NewWSHandler(hub *Hub, js jetstream.JetStream, allowedOrigins []string) *WSHandler {
-	return &WSHandler{Hub: hub, JS: js, AllowedOrigins: allowedOrigins}
+func NewWSHandler(hub *Hub, js jetstream.JetStream, allowedOrigins []string, streamName string) *WSHandler {
+	return &WSHandler{Hub: hub, JS: js, AllowedOrigins: allowedOrigins, StreamName: streamName}
 }
 
 // wsCommand represents an in-band subscribe/unsubscribe command.
@@ -250,7 +250,7 @@ func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string
 
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time.
 func (h *WSHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
-	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
+	cons, err := h.JS.CreateOrUpdateConsumer(ctx, h.StreamName, jetstream.ConsumerConfig{
 		FilterSubject:     subject,
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
 		OptStartTime:      &since,

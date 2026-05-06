@@ -17,7 +17,7 @@ import (
 func newTestEmbedded(t *testing.T) *EmbeddedNATS {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e, err := NewEmbedded(t.TempDir(), StreamName(), 64<<20, logger)
+	e, err := NewEmbedded(t.TempDir(), "WAVEHOUSE", 64<<20, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
 	return e
@@ -73,7 +73,7 @@ func TestEmbeddedNATS_Accessors(t *testing.T) {
 func TestEmbeddedNATS_DefaultLogger(t *testing.T) {
 	// NewEmbedded without a logger should not panic — it falls back to the
 	// default slog logger.
-	e, err := NewEmbedded(t.TempDir(), StreamName(), 64<<20)
+	e, err := NewEmbedded(t.TempDir(), "WAVEHOUSE", 64<<20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
 }

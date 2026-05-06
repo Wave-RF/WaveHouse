@@ -143,7 +143,7 @@ func run() int {
 
 	// Active sweeper — purges processed + expired messages every minute.
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute
-	sweeper := ingest.NewSweeper(remoteMQ.JetStream(), gapWindow, logger)
+	sweeper := ingest.NewSweeper(remoteMQ.JetStream(), cfg.MQ.StreamName, gapWindow, logger)
 	go sweeper.Start(ctx)
 
 	logger.Info("worker started", "mode", "clustered")
