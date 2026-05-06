@@ -188,6 +188,9 @@ func run() int {
 	// Start policy watch for cluster-wide updates.
 	go policyStore.Watch(ctx)
 
+	// Start pipes watch
+	go pipesStore.Watch(ctx)
+
 	// Hub bridge: MQ → broadcast to connected clients.
 	consumerName := "hub-bridge-" + uuid.New().String()
 	if err := remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {

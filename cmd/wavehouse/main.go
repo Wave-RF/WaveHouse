@@ -187,6 +187,9 @@ func run() int {
 	// Start policy watch for cluster-wide updates.
 	go policyStore.Watch(ctx)
 
+	// Start pipes watch
+	go pipesStore.Watch(ctx)
+
 	// Start batch consumer → ClickHouse.
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
