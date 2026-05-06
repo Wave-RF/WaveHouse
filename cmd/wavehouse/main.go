@@ -262,6 +262,7 @@ func run() int {
 			RoleClaim: cfg.Auth.RoleClaim,
 			DevMode:   cfg.Auth.DevMode,
 		}),
+		AuthEnabled: cfg.Auth.Enabled,
 		JS:          js,
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,

@@ -123,15 +123,24 @@ describe('_createStream transport selection', () => {
   // but we test through .from().stream() behavior by verifying
   // which global constructors are accessed.
 
+  // vitest 4 tightened `vi.fn().mockImplementation()` behaviour: the
+  // implementation is no longer implicitly callable with `new`. Arrow
+  // functions don't have [[Construct]], so `new esConstructor()` in
+  // SSETransport.connect / WSTransport._doConnect now throws
+  // `TypeError: () => ({`. The fix is to pass a regular function (or a
+  // class) — both have [[Construct]]. Keeps the test's intent intact.
+
   it('uses SSE when no auth (auto mode)', () => {
-    const esConstructor = vi.fn().mockImplementation(() => ({
-      addEventListener: vi.fn(),
-      close: vi.fn(),
-      readyState: 0,
-      onopen: null,
-      onmessage: null,
-      onerror: null,
-    }));
+    const esConstructor = vi.fn(function () {
+      return {
+        addEventListener: vi.fn(),
+        close: vi.fn(),
+        readyState: 0,
+        onopen: null,
+        onmessage: null,
+        onerror: null,
+      };
+    });
     vi.stubGlobal('EventSource', esConstructor);
 
     const client = createClient({ baseURL: 'http://localhost:8080' });
@@ -144,15 +153,17 @@ describe('_createStream transport selection', () => {
   });
 
   it('uses WS when auth is set (auto mode)', async () => {
-    const wsConstructor = vi.fn().mockImplementation(() => ({
-      addEventListener: vi.fn(),
-      close: vi.fn(),
-      readyState: 0,
-      onopen: null,
-      onmessage: null,
-      onerror: null,
-      onclose: null,
-    }));
+    const wsConstructor = vi.fn(function () {
+      return {
+        addEventListener: vi.fn(),
+        close: vi.fn(),
+        readyState: 0,
+        onopen: null,
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+      };
+    });
     vi.stubGlobal('WebSocket', wsConstructor);
 
     const client = createClient({
@@ -168,14 +179,16 @@ describe('_createStream transport selection', () => {
   });
 
   it('forces SSE transport when explicitly set', () => {
-    const esConstructor = vi.fn().mockImplementation(() => ({
-      addEventListener: vi.fn(),
-      close: vi.fn(),
-      readyState: 0,
-      onopen: null,
-      onmessage: null,
-      onerror: null,
-    }));
+    const esConstructor = vi.fn(function () {
+      return {
+        addEventListener: vi.fn(),
+        close: vi.fn(),
+        readyState: 0,
+        onopen: null,
+        onmessage: null,
+        onerror: null,
+      };
+    });
     vi.stubGlobal('EventSource', esConstructor);
 
     const client = createClient({

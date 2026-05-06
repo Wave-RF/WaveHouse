@@ -5,18 +5,13 @@ name: Auto-label PR
 # current changed-file set, so removing a change also removes its
 # label.
 #
-# Dual-trigger: `pull_request` runs from the PR head branch (works
-# on internal PRs); `pull_request_target` runs from the default
-# branch with base-repo permissions (so fork PRs also get labels).
-# `actions/labeler` is idempotent — same label set applied twice is
-# a no-op, so the duplicate run on internal PRs is harmless.
-#
-# A follow-up PR can drop the `pull_request` trigger once we've
-# confirmed `pull_request_target` is firing correctly. Closes #56.
+# Triggered by `pull_request_target` so the workflow runs from the
+# default branch with base-repo permissions — fork PRs get auto-labels
+# too. (`pull_request` from the head ref is not used: it lacks
+# `pull-requests: write` on forks, so the labeler step would fail and
+# the dual-trigger duplicate run was wasted CI minutes.)
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   pull_request_target:
     types: [opened, synchronize, reopened]
 
@@ -25,17 +20,13 @@ permissions:
   pull-requests: write
 
 concurrency:
-  # Same reasoning as pr-title.yml: include event_name so
-  # `pull_request` and `pull_request_target` don't cancel each
-  # other (which on fork PRs could kill the only run with
-  # permissions to apply labels).
-  group: label-${{ github.event.pull_request.number }}-${{ github.event_name }}
+  group: label-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   label:
     name: Apply labels
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     steps:
       - uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b  # v6.0.1
         with:

@@ -37,18 +37,119 @@ jobs:
       github.event.pull_request.draft == false
       && github.actor != 'dependabot[bot]'
       && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
-    runs-on: ubuntu-latest
+    runs-on: [wave-rf-runners]
     permissions:
       contents: read
       pull-requests: write
       issues: write
+      checks: read
       id-token: write
     steps:
+      - name: Wait for required CI checks, skip review if any failed
+        # Don't burn Claude review tokens on PRs whose required CI is
+        # already red — the human will bounce them back as "fix CI
+        # first." Poll the specific required checks (not all checks,
+        # which would include our own Review job and deadlock); when
+        # they reach a terminal state, skip if any failed.
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          # Required checks from the `main branch protection` ruleset.
+          # Newline-separated so names with spaces ("Integration Tests")
+          # round-trip correctly. Keep in sync with the ruleset. A
+          # check missing from the PR (paths-filtered or not yet
+          # created at the deadline) is treated as "not failing"
+          # rather than blocking the review forever.
+          REQUIRED_CHECKS: |
+            Check
+            Build
+            Validate
+            Lint
+            Test
+            Integration Tests
+        run: |
+          set -euo pipefail
+          mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | sed '/^$/d')
+
+          # Use per_page=100 rather than --paginate. The check-runs
+          # endpoint returns one JSON object (with a total_count + a
+          # check_runs array) per page; --paginate concatenates the
+          # raw responses with no merge, which breaks subsequent jq
+          # parsing. A PR will never realistically exceed 100 check
+          # runs, so a single page is enough. (Copilot review feedback.)
+          fetch_runs() {
+            gh api "repos/$REPO/commits/$PR_HEAD_SHA/check-runs?per_page=100"
+          }
+
+          deadline=$(( $(date +%s) + 900 ))  # 15-minute cap
+          ALL_DONE=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            # Swallow transient gh api failures with an empty object
+            # and retry on the next tick — a network blip shouldn't
+            # flip the loop into "all done" and mask red CI.
+            RUNS=$(fetch_runs 2>/dev/null || echo '{"check_runs":[]}')
+
+            ALL_DONE=1
+            for check in "${CHECKS[@]}"; do
+              STATUS=$(jq -r --arg n "$check" \
+                '.check_runs[] | select(.name == $n) | .status' <<<"$RUNS" | head -n1)
+              # Treat missing checks as not-done until the deadline:
+              # jobs that run in parallel may not have created their
+              # check-runs yet when this loop starts. If we still
+              # don't see them at deadline, we escape below and
+              # skip-on-safety rather than wait forever. (Copilot
+              # flagged the earlier "missing = done" short-circuit.)
+              if [ -z "$STATUS" ] || [ "$STATUS" != "completed" ]; then
+                ALL_DONE=0
+                break
+              fi
+            done
+
+            [ "$ALL_DONE" = "1" ] && break
+            sleep 30
+          done
+
+          if [ "$ALL_DONE" != "1" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Claude review — required CI checks still missing/incomplete after 15-minute wait."
+            exit 0
+          fi
+
+          # Final read for conclusions; if this one fails, skip
+          # defensively rather than silently proceeding.
+          if ! RUNS=$(fetch_runs); then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Claude review — unable to read required CI check conclusions."
+            exit 0
+          fi
+
+          FAILED=""
+          for check in "${CHECKS[@]}"; do
+            CONCLUSION=$(jq -r --arg n "$check" \
+              '.check_runs[] | select(.name == $n) | .conclusion' <<<"$RUNS" | head -n1)
+            case "$CONCLUSION" in
+              failure|cancelled|timed_out)
+                FAILED="$FAILED $check"
+                ;;
+            esac
+          done
+
+          if [ -n "$FAILED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Claude review — required CI checks failing:$FAILED"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        if: steps.gate.outputs.skip != 'true'
         with:
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e  # v1.0.102
+        if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_sticky_comment: true

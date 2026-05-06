@@ -5,6 +5,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -95,11 +96,24 @@ func setupTestEnv(t *testing.T) *testEnv {
 	testStream := "WAVEHOUSE"
 
 	// Start ClickHouse container.
+	//
+	// ClickHouse opens 9000/tcp early in startup — before it's actually
+	// ready to accept native-protocol queries. Waiting only on the
+	// listening port produced flakes where the next chConn call hit
+	// "connection reset by peer" because the server hadn't finished
+	// initializing. Wait on /ping (HTTP, fully-initialized signal) too,
+	// then explicitly Ping the native connection before any queries
+	// run. Belt-and-suspenders against the same readiness race.
 	chReq := testcontainers.ContainerRequest{
 		Image:        "clickhouse/clickhouse-server:latest",
 		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
 		Env:          map[string]string{"CLICKHOUSE_PASSWORD": "test"},
-		WaitingFor:   wait.ForListeningPort("9000/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("9000/tcp"),
+			wait.ForHTTP("/ping").WithPort("8123/tcp").WithStatusCodeMatcher(func(status int) bool {
+				return status == http.StatusOK
+			}),
+		).WithDeadline(120 * time.Second),
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: chReq,
@@ -120,6 +134,36 @@ func setupTestEnv(t *testing.T) *testEnv {
 		Auth: clickhouse.Auth{Database: "default", Username: "default", Password: "test"},
 	})
 	require.NoError(t, err)
+
+	// `clickhouse.Open` is lazy — it doesn't dial until the first query.
+	// Force the dial here with retries so the first real Exec below
+	// can't be the one that meets a half-ready server. Report the last
+	// non-context error ("connection refused", DNS, TLS) on timeout
+	// rather than the generic `context.DeadlineExceeded` the final
+	// Ping will return — Copilot flagged that the naive "save last
+	// error" pattern overwrites the useful error with the context one.
+	pingCtx, pingCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer pingCancel()
+	var lastRealErr error
+	for {
+		pingErr := chConn.Ping(pingCtx)
+		if pingErr == nil {
+			break
+		}
+		if !errors.Is(pingErr, context.DeadlineExceeded) && !errors.Is(pingErr, context.Canceled) {
+			lastRealErr = pingErr
+		}
+		if pingCtx.Err() != nil {
+			// Surface the last meaningful error if we captured one;
+			// fall back to the raw ping error otherwise.
+			reported := lastRealErr
+			if reported == nil {
+				reported = pingErr
+			}
+			require.NoError(t, reported, "ClickHouse never became reachable on native protocol")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	// Create test table.
 	err = chConn.Exec(ctx, `

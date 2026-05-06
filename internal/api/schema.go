@@ -28,7 +28,7 @@ func (h *SchemaHandler) Get(w http.ResponseWriter, r *http.Request) {
 	table := chi.URLParam(r, "table")
 	schema := h.Registry.Get(table)
 	if schema == nil {
-		http.Error(w, `{"error":"table not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "table not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -38,7 +38,7 @@ func (h *SchemaHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Refresh forces an immediate schema refresh from ClickHouse.
 func (h *SchemaHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	if err := h.Registry.Refresh(r.Context()); err != nil {
-		http.Error(w, `{"error":"refresh failed"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "refresh failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

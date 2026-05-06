@@ -13,14 +13,13 @@ import (
 
 func TestRequireRole_AllowedRole(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin", "service")
+	mw := RequireRole(true, "admin", "service")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "admin")
-	req = req.WithContext(ctx)
+	ctx := context.WithValue(context.Background(), ContextKeyRole, "admin")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -29,23 +28,23 @@ func TestRequireRole_AllowedRole(t *testing.T) {
 
 func TestRequireRole_DeniedRole(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin", "service")
+	mw := RequireRole(true, "admin", "service")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "viewer")
-	req = req.WithContext(ctx)
+	ctx := context.WithValue(context.Background(), ContextKeyRole, "viewer")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
+	assertJSONErrorResponse(t, w)
 }
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole("admin")
+	mw := RequireRole(false, "admin")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -217,4 +216,143 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestRequireRole_NoRole_FailClosed(t *testing.T) {
+	t.Parallel()
+
+	// Empty context is REJECTED
+	mw := RequireRole(true, "admin")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("handler should not be called - security should have blocked this!")
+	}))
+
+	// Create a request with NO role in the context
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "unauthorized")
+	assertJSONErrorResponse(t, w)
+}
+
+func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
+	t.Parallel()
+
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+	deps := Dependencies{
+		Ingest: NewIngestHandler(reg, pub),
+		Query:  &QueryHandler{},
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
+		Health: &HealthHandler{},
+		Schema: NewSchemaHandler(reg),
+		AuthMW: func(next http.Handler) http.Handler { return next },
+	}
+	router := NewRouter(deps)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/no-such-path", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertJSONErrorResponse(t, rec)
+}
+
+func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
+	t.Parallel()
+
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+	deps := Dependencies{
+		Ingest: NewIngestHandler(reg, pub),
+		Query:  &QueryHandler{},
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
+		Health: &HealthHandler{},
+		Schema: NewSchemaHandler(reg),
+		AuthMW: func(next http.Handler) http.Handler { return next },
+	}
+	router := NewRouter(deps)
+
+	// /health is registered for GET only; POST should hit MethodNotAllowed.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/health", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assertJSONErrorResponse(t, rec)
+}
+
+func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
+	t.Parallel()
+
+	handler := jsonRecoverer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assertJSONErrorResponse(t, rec)
+	assert.Contains(t, rec.Body.String(), "internal server error")
+}
+
+func TestJSONRecoverer_NoPanicPassthrough(t *testing.T) {
+	t.Parallel()
+
+	handler := jsonRecoverer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusTeapot, rec.Code)
+}
+
+func TestJSONRecoverer_AbortHandlerRepanics(t *testing.T) {
+	t.Parallel()
+
+	handler := jsonRecoverer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		handler.ServeHTTP(rec, req)
+	}, "ErrAbortHandler must propagate so the server's serve loop can terminate the connection")
+}
+
+func TestJSONRecoverer_PanicAfterPartialWriteDoesNotCorrupt(t *testing.T) {
+	t.Parallel()
+
+	// If the handler has already flushed bytes to the wire before
+	// panicking, the headers are committed and a JSON 500 appended after
+	// them would corrupt the response. The recoverer must detect this
+	// and skip the write.
+	handler := jsonRecoverer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial body"))
+		panic("boom mid-stream")
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "status already committed before panic must not be overwritten")
+	assert.Equal(t, "text/plain", rec.Header().Get("Content-Type"), "headers already flushed must not be rewritten")
+	assert.Equal(t, "partial body", rec.Body.String(), "JSON 500 body must not be appended after a partial write")
 }

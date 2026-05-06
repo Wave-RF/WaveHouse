@@ -77,6 +77,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_NotFound(t *testing.T) {
@@ -90,6 +91,7 @@ func TestPipesHandler_Execute_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_RoleForbidden(t *testing.T) {
@@ -113,6 +115,7 @@ func TestPipesHandler_Execute_RoleForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_RoleAllowed(t *testing.T) {
@@ -183,6 +186,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing required parameter")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
