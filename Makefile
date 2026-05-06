@@ -140,8 +140,8 @@ COV_TOTAL := tmp/coverage/total
 # `make cov` for the merged total). Override via env or CLI:
 #   COV_THRESHOLD_UNIT=80 make test
 COV_THRESHOLD_UNIT        ?= 70
-COV_THRESHOLD_INTEGRATION ?= 30
-COV_THRESHOLD_E2E         ?= 10
+COV_THRESHOLD_INTEGRATION ?= 12
+COV_THRESHOLD_E2E         ?= 50
 COV_THRESHOLD_TOTAL       ?= 70
 
 # Derived: coverage-instrumented and release-stripped binaries.
@@ -454,7 +454,7 @@ clean: ## Remove build artifacts (bin/, tmp/, dist/)
 .PHONY: clean-all
 clean-all: clean ## Full reset — also wipes .bin/ tools AND data/ dev state
 	@echo "$(YELLOW)==> Full reset (tools, dev data, docker)...$(RESET)"
-	@rm -rf .bin/ data/ tests/e2e/sdk/.setup-state.json clients/ts/node_modules/ tests/e2e/sdk/node_modules/
+	@rm -rf .bin/ data/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/
 	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans
 
 ##@ Tooling

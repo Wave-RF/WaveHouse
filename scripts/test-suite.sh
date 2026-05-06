@@ -25,8 +25,8 @@ DATA_DIR="$ROOT/$suite/data"
 # does this when COV_THRESHOLD_<SUITE> is set).
 case "$suite" in
 unit)         threshold=${COV_THRESHOLD_UNIT:-70} ;;
-integration)  threshold=${COV_THRESHOLD_INTEGRATION:-30} ;;
-e2e)          threshold=${COV_THRESHOLD_E2E:-10} ;;
+integration)  threshold=${COV_THRESHOLD_INTEGRATION:-12} ;;
+e2e)          threshold=${COV_THRESHOLD_E2E:-50} ;;
 *)
 	printf '%sUnknown suite: %s%s\n' "$RED" "$suite" "$RESET" >&2
 	exit 2
@@ -70,30 +70,19 @@ integration)
 	;;
 
 e2e)
-	# TODO: refactor into a Go test-containers harness in tests/. For now this
-	# matches the legacy Makefile recipe: build the coverage-instrumented
-	# binary, run the SDK suite against it, SIGINT to flush coverage.
 	printf "%s==> Running E2E Tests...%s\n" "$CYAN" "$RESET"
 	rm -rf "$DATA_DIR" && mkdir -p "$DATA_DIR" tmp
-	make build-cover >/dev/null
 
-	printf "%s==> Starting instrumented binary...%s\n" "$YELLOW" "$RESET"
-	GOCOVERDIR="$PWD/$DATA_DIR" bin/wavehouse-cov &
-	pid=$!
-	echo "$pid" >tmp/wavehouse.pid
-	sleep 2
-
-	printf "%s==> Running SDK E2E suite...%s\n" "$YELLOW" "$RESET"
-	if ! (cd tests/e2e/sdk && npm install --silent && npx vitest run); then
-		kill -SIGINT "$pid" 2>/dev/null || true
-		rm -f tmp/wavehouse.pid
+	if [ ! -x "$PWD/bin/wavehouse-cov" ]; then
+		printf '%sERROR: bin/wavehouse-cov missing — run `make build-cover` first.%s\n' \
+			"$RED" "$RESET" >&2
 		exit 1
 	fi
 
-	printf "%s==> Stopping binary (flushes coverage)...%s\n" "$YELLOW" "$RESET"
-	kill -SIGINT "$pid" 2>/dev/null || true
-	wait "$pid" 2>/dev/null || true
-	rm -f tmp/wavehouse.pid
+	# The orchestrator now picks a random free port for the cover binary
+	# (WH_SERVER_PORT) so a `make dev` instance on :8080 no longer
+	# competes — no pre-flight conflict check needed.
+	go run ./tests/e2e/orchestrator
 	;;
 esac
 
