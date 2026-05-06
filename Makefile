@@ -194,12 +194,12 @@ fmt: ## Check formatting (run `make fix` to apply)
 	@echo "$(GREEN)==> Formatting OK$(RESET)"
 
 .PHONY: lint
-lint: $(GOLANGCI_LINT) ## Run golangci-lint (run `make fix` to apply --fix)
+lint: $(GOLANGCI_LINT) go-mod-download ## Run golangci-lint (run `make fix` to apply --fix)
 	@echo "$(CYAN)==> Running linters...$(RESET)"
 	@$(GOLANGCI_LINT) run ./...
 
 .PHONY: vulncheck
-vulncheck: ## Run govulncheck (V=1 for full call stacks)
+vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
 	@echo "$(CYAN)==> Running govulncheck...$(RESET)"
 ifdef V
 	@$(GOVULNCHECK) ./...
@@ -248,9 +248,17 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 # would dispatch them concurrently if BINARIES grows.
 #
 # VERSION_LDFLAGS / LDFLAGS / TAGS are exported to recipes near the top.
+#
+# go-mod-download is a no-doc intermediate target — every Go-toolchain target
+# (build/test/lint variants) declares it as a prereq so `make -j` doesn't
+# kick off N parallel `go mod download` calls racing on the module cache.
+# Symmetric with install-sdk for the Node side.
+.PHONY: go-mod-download
+go-mod-download:
+	@go mod download
 
 .PHONY: $(BINARIES)
-$(BINARIES):
+$(BINARIES): go-mod-download
 	@scripts/build.sh $@ debug
 
 .PHONY: build
@@ -264,7 +272,7 @@ build-debug: build
 # Release variants build alongside (not overwriting) the debug binaries, so
 # `make size` can compare the two without recompiling between targets.
 .PHONY: $(RELEASE_BINARIES)
-$(RELEASE_BINARIES): %-release:
+$(RELEASE_BINARIES): %-release: go-mod-download
 	@scripts/build.sh $* release
 
 .PHONY: build-release
@@ -273,11 +281,45 @@ build-release: $(RELEASE_BINARIES) ## Compile all binaries stripped → bin/<nam
 # Coverage-instrumented variants (`wavehouse-cov`): used by E2E to capture
 # coverage from the running binary.
 .PHONY: $(COVER_BINARIES)
-$(COVER_BINARIES): %-cov:
+$(COVER_BINARIES): %-cov: go-mod-download
 	@scripts/build.sh $* cover
 
 .PHONY: build-cover
 build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation → bin/<name>-cov
+
+# --- TypeScript SDK build / install ------------------------------------------
+# pnpm is the canonical package manager (migrated from npm). Locally available
+# via PATH; CI installs/caches it via actions/cache + setup-node. Both the SDK
+# (clients/ts/) and the E2E test harness (tests/e2e/sdk/) use pnpm.
+PNPM        ?= pnpm
+SDK_DIR     := clients/ts
+E2E_SDK_DIR := tests/e2e/sdk
+
+# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
+# comment so they don't show in `make help`. The user-facing targets below
+# (build-sdk, test-sdk, test-e2e) depend on them.
+.PHONY: install-sdk
+install-sdk:
+	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
+
+.PHONY: install-e2e-sdk
+install-e2e-sdk:
+	@cd $(E2E_SDK_DIR) && $(PNPM) install --frozen-lockfile
+
+.PHONY: build-sdk
+build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
+	@echo "$(CYAN)==> Building SDK...$(RESET)"
+	@cd $(SDK_DIR) && $(PNPM) build
+
+# build-docker: build the WaveHouse Dockerfile. No run, no test — just
+# proves the Dockerfile compiles. CI's e2e job formerly built this image too;
+# now that test-e2e uses bin/wavehouse-cov locally, this target gives PRs a
+# light Dockerfile-validity check independent of E2E.
+.PHONY: build-docker
+build-docker: ## Build WaveHouse Docker image (Dockerfile sanity check)
+	@echo "$(CYAN)==> Building production Docker image...$(RESET)"
+	@docker buildx build --load -t wavehouse:test -f deployments/Dockerfile .
+	@echo "$(GREEN)==> Image built: wavehouse:test$(RESET)"
 
 ##@ Test
 
@@ -288,7 +330,7 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 # format env vars are exported to recipes near the top.
 
 .PHONY: test
-test: ## Run unit tests + render coverage + gate threshold
+test: go-mod-download ## Run unit tests + render coverage + gate threshold
 	@scripts/test-suite.sh unit $(ARGS)
 
 # Hidden alias — symmetry with test-integration / test-e2e for muscle memory.
@@ -296,11 +338,24 @@ test: ## Run unit tests + render coverage + gate threshold
 test-unit: test
 
 .PHONY: test-integration
-test-integration: ## Run integration tests + render coverage + gate threshold (requires Docker)
+test-integration: go-mod-download ## Run integration tests + render coverage + gate threshold (requires Docker)
 	@scripts/test-suite.sh integration $(ARGS)
 
+# test-sdk runs vitest unit tests inside clients/ts. Independent of any Go
+# work — separate toolchain, separate runner pod in CI.
+.PHONY: test-sdk
+test-sdk: install-sdk ## Run SDK vitest unit tests
+	@echo "$(CYAN)==> Running SDK Tests...$(RESET)"
+	@cd $(SDK_DIR) && $(PNPM) test
+
+# test-e2e starts ClickHouse via compose, runs bin/wavehouse-cov locally
+# (with auth enabled) so coverage is captured natively, then runs the SDK
+# vitest harness against it. Depends on:
+#   - build-sdk: clients/ts/dist/ (E2E tests import @wavehouse/sdk via file: link)
+#   - build-cover: bin/wavehouse-cov (the running binary; coverage flushes on SIGINT)
+#   - install-e2e-sdk: tests/e2e/sdk/node_modules/
 .PHONY: test-e2e
-test-e2e: ## Run E2E SDK suite against instrumented binary + render coverage + gate
+test-e2e: build-sdk build-cover install-e2e-sdk ## Run E2E SDK suite against cover binary + render coverage + gate
 	@scripts/test-suite.sh e2e $(ARGS)
 
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
@@ -325,28 +380,41 @@ cov: ## Merge all available covdata + gate against total threshold
 
 ##@ CI
 
-# ci: local approximation of the GHA pipeline. Mirrors the structure of
-# .github/workflows/ci.yml, which runs the same suites as separate jobs
-# (lint / test / build / integration / e2e). Use before opening a PR.
+# ci: full local pipeline mirroring the planned GHA "go-pipeline" job —
+# runs every check on a single pod (or one local make invocation) so the
+# Go module + build cache stays hot across phases. Designed to be run
+# under `make -j N` for safe parallelism via the dependency graph below.
 #
-# Recipe-based with $(MAKE) calls (not prereqs) so each stage's banner
-# prints in order and a failure halts the pipeline at that stage. Re-parsing
-# the Makefile per call costs ~ms — cheap for the readability win.
+#   verify         — tidy + fmt + vulncheck + lint (parallel-safe internally)
+#   build, build-cover, build-sdk — independent compile outputs
+#   test, test-integration        — independent Go suites; both use the
+#                                   shared module/build cache and write
+#                                   covdata to per-suite dirs in tmp/coverage/
+#   test-e2e       — chains its own prereqs (build-sdk + build-cover +
+#                    install-e2e-sdk); reuses an existing ClickHouse if
+#                    present, otherwise spins one up via compose; runs the
+#                    cover binary natively so coverage is captured
+#   cov-final      — declared with explicit prereqs on the three test
+#                    targets so make's DAG walker holds the merge until
+#                    all suites have completed, even under -j
 #
-# TODO: add `$(MAKE) test-e2e` and switch to `$(MAKE) cov` for a merged
-# total once the e2e refactor (Go test-containers harness in tests/e2e)
-# lands and the suite is fast enough for a pre-push gate.
+# Output interleaves under -j (the default unsync'd output buffer mode).
+# GNU Make 4.0+ lets you run `make -j N --output-sync=target ci` for
+# per-target buffered output; macOS Make 3.81 ignores --output-sync but
+# still parallelizes correctly.
 .PHONY: ci
-ci: ## Full pipeline: verify + build + unit + integration tests
-	@printf "\n$(BOLD)$(YELLOW)━━━ 1/4  Static checks ━━━$(RESET)\n"
-	@$(MAKE) verify
-	@printf "\n$(BOLD)$(YELLOW)━━━ 2/4  Build ━━━$(RESET)\n"
-	@$(MAKE) build
-	@printf "\n$(BOLD)$(YELLOW)━━━ 3/4  Unit tests ━━━$(RESET)\n"
-	@$(MAKE) test
-	@printf "\n$(BOLD)$(YELLOW)━━━ 4/4  Integration tests ━━━$(RESET)\n"
-	@$(MAKE) test-integration
-	@printf "\n$(BOLD)$(GREEN)✔ All CI checks passed$(RESET)\n"
+ci: verify build build-cover build-sdk test test-integration test-e2e cov-final ## Full pipeline. `make -j ci` to parallelize.
+	@echo
+	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+
+# cov-final: aggregate covdata after all three suites have run + gate
+# against COV_THRESHOLD_TOTAL. Distinct from `cov` — the latter just
+# merges whatever covdata exists with no prereqs (useful for "I just ran
+# one suite and want to see the partial total"). cov-final is the
+# orchestration form, used as the last step of `ci`.
+.PHONY: cov-final
+cov-final: test test-integration test-e2e
+	@scripts/coverage.sh merge $(COV_THRESHOLD_TOTAL)
 
 ##@ Analysis
 
@@ -407,28 +475,29 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 .PHONY: clean
 clean: ## Remove build artifacts (bin/, tmp/, dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ tmp/ dist/
+	@rm -rf bin/ tmp/ dist/ clients/ts/dist/
 
 .PHONY: clean-all
-clean-all: ## Full reset — also wipes .bin/ tools AND data/ dev state
-	@echo "$(YELLOW)==> Full reset (build artifacts + tools + dev data)...$(RESET)"
-	@rm -rf bin/ tmp/ dist/ .bin/ data/
+clean-all: clean ## Full reset — also wipes .bin/ tools AND data/ dev state
+	@echo "$(YELLOW)==> Full reset (tools, dev data, docker)...$(RESET)"
+	@rm -rf .bin/ data/ tests/e2e/sdk/.setup-state.json clients/ts/node_modules/ tests/e2e/sdk/node_modules/
+	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans
 
 ##@ Tooling
 
 # tools: bootstrap a fresh clone.
 #   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
 #   - Downloads Go modules so go.mod tool deps are available offline.
+#   - Installs SDK + E2E pnpm deps so test-sdk / test-e2e are runnable
+#     without a separate manual setup step.
 #
 # Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by
 # `go mod download` but compile lazily on first `go tool <name>` invocation.
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) ## Install pinned tools and download Go modules
-	@echo "$(CYAN)==> Downloading Go modules...$(RESET)"
-	@go mod download
-	@echo "$(GREEN)==> Modules cached; tool binaries in $(LOCAL_BIN)$(RESET)"
+tools: $(GOLANGCI_LINT) go-mod-download install-sdk install-e2e-sdk ## Install pinned tools, Go modules, and pnpm deps
+	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
 # File-target rules: only run when the versioned binary is missing. Bumping
