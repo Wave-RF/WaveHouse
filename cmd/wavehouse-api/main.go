@@ -221,10 +221,10 @@ func run() int {
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
 	queryHandler.PolicyStore = policyStore
 
-	sseHandler := api.NewSSEHandler(hub, remoteMQ.JetStream())
+	sseHandler := api.NewSSEHandler(hub, remoteMQ.JetStream(), cfg.MQ.StreamName)
 	sseHandler.PolicyStore = policyStore
 
-	wsHandler := api.NewWSHandler(hub, remoteMQ.JetStream(), cfg.Server.CORSAllowedOrigins)
+	wsHandler := api.NewWSHandler(hub, remoteMQ.JetStream(), cfg.Server.CORSAllowedOrigins, cfg.MQ.StreamName)
 	wsHandler.PolicyStore = policyStore
 
 	deps := api.Dependencies{

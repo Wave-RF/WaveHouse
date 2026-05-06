@@ -214,8 +214,8 @@ func setupTestEnv(t *testing.T) *testEnv {
 	// Wire handlers.
 	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
 	queryHandler := api.NewQueryHandler(chConn, tiered, 5*time.Second)
-	sseHandler := api.NewSSEHandler(hub, js)
-	wsHandler := api.NewWSHandler(hub, js, nil)
+	sseHandler := api.NewSSEHandler(hub, js, testStream)
+	wsHandler := api.NewWSHandler(hub, js, nil, testStream)
 	dlqHandler := api.NewDLQHandler(js, testStream, logger)
 
 	deps := api.Dependencies{

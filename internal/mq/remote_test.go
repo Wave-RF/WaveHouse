@@ -34,7 +34,7 @@ func startListeningNATS(t *testing.T) string {
 func TestRemoteNATS_PublishSubscribe(t *testing.T) {
 	url := startListeningNATS(t)
 
-	r, err := NewRemote(url, StreamName(), 64<<20)
+	r, err := NewRemote(url, "WAVEHOUSE", 64<<20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -73,7 +73,7 @@ func TestRemoteNATS_PublishSubscribe(t *testing.T) {
 
 func TestRemoteNATS_Accessors(t *testing.T) {
 	url := startListeningNATS(t)
-	r, err := NewRemote(url, StreamName(), 64<<20)
+	r, err := NewRemote(url, "WAVEHOUSE", 64<<20)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -85,6 +85,6 @@ func TestRemoteNATS_Accessors(t *testing.T) {
 func TestRemoteNATS_BadURL(t *testing.T) {
 	// Connecting to an obviously wrong URL should return an error rather than
 	// hanging or panicking.
-	_, err := NewRemote("nats://127.0.0.1:1", StreamName(), 1<<20)
+	_, err := NewRemote("nats://127.0.0.1:1", "WAVEHOUSE", 1<<20)
 	require.Error(t, err)
 }

@@ -173,7 +173,7 @@ func run() int {
 	// Active sweeper — purges messages that are both written to CH and
 	// older than the SSE gap window. Runs every minute.
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute
-	sweeper := ingest.NewSweeper(embeddedMQ.JetStream(), gapWindow, logger)
+	sweeper := ingest.NewSweeper(embeddedMQ.JetStream(), cfg.MQ.StreamName, gapWindow, logger)
 
 	// Hub for streaming fan-out.
 	hub := api.NewHub()
@@ -238,10 +238,10 @@ func run() int {
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
 	queryHandler.PolicyStore = policyStore
 
-	sseHandler := api.NewSSEHandler(hub, js)
+	sseHandler := api.NewSSEHandler(hub, js, cfg.MQ.StreamName)
 	sseHandler.PolicyStore = policyStore
 
-	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
+	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins, cfg.MQ.StreamName)
 	wsHandler.PolicyStore = policyStore
 
 	deps := api.Dependencies{
