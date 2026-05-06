@@ -12,24 +12,25 @@ SHELL := /usr/bin/env bash
 # Warn on undefined variables — catches typos like $(BINAIRES) silently expanding to empty.
 MAKEFLAGS += --warn-undefined-variables
 
-.DEFAULT_GOAL := help
+# Suppress "Entering directory '...'" / "Leaving directory '...'" around every
+# $(MAKE) recursion. The `ci` target alone makes 4 recursive calls; without
+# this, output gets noisy fast (especially under --output-sync where each
+# pair brackets a target's whole log block).
+MAKEFLAGS += --no-print-directory
 
-# --- Conventions used in this Makefile ----------------------------------------
-# Parallelization — two patterns, picked per target by what the work needs:
-#
-#   1. Declared prereqs (`target: prereq1 prereq2 …`) → parallel-safe under
-#      `make -j N`. Used by aggregators whose sub-steps are read-only and
-#      independent (e.g. `verify`, `binary-analysis`).
-#
-#   2. Recipe-based `$(MAKE) X` calls → strictly sequential regardless of -j.
-#      Used by aggregators that need ordered output (banners) or whose steps
-#      are stateful / share resources (e.g. `ci`, `test-all` where suites
-#      bind ports or spin testcontainers).
-#
-# Hidden aliases — convenience targets that forward to the canonical name
-# without showing up in `make help`. The help-menu awk filter only picks up
-# lines with a `## ` doc comment, so an alias defined as `foo: bar` (no ##)
-# is invisible. See `test-unit` and `build-debug` near the end for examples.
+ifdef CI
+  MAKEFLAGS += --output-sync=target
+endif
+
+# Delete the target file if its recipe fails non-zero. Default Make leaves
+# a partial file behind, which then satisfies the dependency check on the
+# next run and silently ships stale/broken output. Most of our recipes are
+# .PHONY (so this is a no-op for them), but the file-target rules — like
+# the golangci-lint installer at $(GOLANGCI_LINT) — benefit, and any future
+# file-target rule gets the safety property for free.
+.DELETE_ON_ERROR:
+
+.DEFAULT_GOAL := help
 
 # --- Environment Detection ----------------------------------------------------
 # NO_COLOR is read by the colors block below; CI is read by scripts/size.sh
@@ -229,12 +230,6 @@ fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint
 	@$(GOLANGCI_LINT) run --fix ./...
 	@echo "$(GREEN)==> Done$(RESET)"
 
-# verify: aggregate of all static checks. The "is my code OK?" target —
-# what contributors should run before pushing. Mirrors what CI's lint job
-# checks (CI uses golangci-lint-action for the lint step for cache speed).
-#
-# Declared as direct prereqs (not recursive `$(MAKE)` calls) so all four
-# checks can run concurrently with `make -j verify`.
 .PHONY: verify
 verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -j verify`)
 	@echo "$(GREEN)==> All static checks passed$(RESET)"
@@ -380,41 +375,20 @@ cov: ## Merge all available covdata + gate against total threshold
 
 ##@ CI
 
-# ci: full local pipeline mirroring the planned GHA "go-pipeline" job —
-# runs every check on a single pod (or one local make invocation) so the
-# Go module + build cache stays hot across phases. Designed to be run
-# under `make -j N` for safe parallelism via the dependency graph below.
-#
-#   verify         — tidy + fmt + vulncheck + lint (parallel-safe internally)
-#   build, build-cover, build-sdk — independent compile outputs
-#   test, test-integration        — independent Go suites; both use the
-#                                   shared module/build cache and write
-#                                   covdata to per-suite dirs in tmp/coverage/
-#   test-e2e       — chains its own prereqs (build-sdk + build-cover +
-#                    install-e2e-sdk); reuses an existing ClickHouse if
-#                    present, otherwise spins one up via compose; runs the
-#                    cover binary natively so coverage is captured
-#   cov-final      — declared with explicit prereqs on the three test
-#                    targets so make's DAG walker holds the merge until
-#                    all suites have completed, even under -j
-#
-# Output interleaves under -j (the default unsync'd output buffer mode).
-# GNU Make 4.0+ lets you run `make -j N --output-sync=target ci` for
-# per-target buffered output; macOS Make 3.81 ignores --output-sync but
-# still parallelizes correctly.
-.PHONY: ci
-ci: verify build build-cover build-sdk test test-integration test-e2e cov-final ## Full pipeline. `make -j ci` to parallelize.
-	@echo
-	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+# ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
+# it stays out of `make help`; users invoke `make ci`, not this directly.
+.PHONY: ci-parallel
+ci-parallel: verify build build-cover build-sdk build-docker test test-sdk
 
-# cov-final: aggregate covdata after all three suites have run + gate
-# against COV_THRESHOLD_TOTAL. Distinct from `cov` — the latter just
-# merges whatever covdata exists with no prereqs (useful for "I just ran
-# one suite and want to see the partial total"). cov-final is the
-# orchestration form, used as the last step of `ci`.
-.PHONY: cov-final
-cov-final: test test-integration test-e2e
-	@scripts/coverage.sh merge $(COV_THRESHOLD_TOTAL)
+.PHONY: ci
+ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
+	@echo "$(CYAN)==> Phase 1: Parallel Build & Static Checks$(RESET)"
+	@$(MAKE) -j 4 ci-parallel
+	@echo "$(CYAN)==> Phase 2: Sequential Heavy Tests$(RESET)"
+	@$(MAKE) test-integration
+	@$(MAKE) test-e2e
+	@$(MAKE) cov
+	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
 
