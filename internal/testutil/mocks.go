@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,6 +135,22 @@ func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Dura
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store[key] = value
+	return nil
+}
+
+func (m *MockCache) InvalidateByPrefix(_ context.Context, prefix string) error {
+	if m.Err != nil {
+		return m.Err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Iterate through all keys in the mock store
+	for key := range m.store {
+		// If the key starts with the prefix, delete it
+		if strings.HasPrefix(key, prefix) {
+			delete(m.store, key)
+		}
+	}
 	return nil
 }
 
