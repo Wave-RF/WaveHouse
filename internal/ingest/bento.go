@@ -43,6 +43,7 @@ var (
 )
 
 type jsInput struct {
+	js       jetstream.JetStream
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
 	chConn   driver.Conn
@@ -130,26 +131,32 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
 				span.RecordError(err)
-				slog.ErrorContext(spanCtx, "clickhouse delete failed",
+				slog.ErrorContext(spanCtx, "clickhouse delete failed, moving to DLQ",
 					"table", raw.TableName,
 					"id", raw.ID,
 					"error", err,
 				)
-				if nakErr := m.Nak(); nakErr != nil {
-					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+
+				// 1. Manually publish to the DLQ subject
+				dlqSubject := "dlq.unknown"
+				if raw.TableName != "" {
+					dlqSubject = "dlq." + raw.TableName
 				}
-			} else {
-				// Log the success with all context
-				slog.InfoContext(spanCtx, "successfully deleted record",
-					"table", raw.TableName,
-					"id", raw.ID,
-				)
-				if ackErr := m.Ack(); ackErr != nil {
-					slog.WarnContext(spanCtx, "ack failed after delete", "error", ackErr)
+				
+				if _, pubErr := j.js.Publish(ctx, dlqSubject, m.Data()); pubErr != nil {
+					slog.ErrorContext(spanCtx, "failed to publish bad delete to DLQ", "error", pubErr)
+				} else {
+					bentoDLQDropped.Add(ctx, 1, metric.WithAttributes(attribute.String("table", raw.TableName)))
 				}
+
+				// 2. DoubleAck to permanently remove it from the main queue
+				if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+					slog.WarnContext(spanCtx, "double ack failed for dead-lettered delete", "error", doubleAckErr)
+				}
+
+				span.End()
+				continue // Move on to the next message immediately! Do not return an error to Bento.
 			}
-			span.End()
-			continue
 		}
 
 		// Insert case
@@ -257,6 +264,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, ch
 		if err := service.RegisterInput("nats_bridge", service.NewConfigSpec(),
 			func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
 				return &jsInput{
+					js:       js,
 					consumer: cons,
 					chConn:   chConn,
 				}, nil

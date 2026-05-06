@@ -311,17 +311,31 @@ func TestJsInput_Read_DeleteExecError(t *testing.T) {
 	conn := &bentoMockConn{
 		execFn: func(context.Context, string, ...any) error { return errors.New("db error") },
 	}
+    
+	// 1. Add the mock JetStream so we can capture the DLQ publish
+	mockJS := &bentoMockJS{}
 
 	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
 	iter.msgs <- delMsg
 	iter.msgs <- insertMsg
 
-	input := &jsInput{iter: iter, chConn: conn}
-	_, _, err := input.Read(context.Background())
+	// 2. Inject mockJS into the input
+	input := &jsInput{iter: iter, chConn: conn, js: mockJS} 
+	
+	// 3. Read no longer returns an error. It drops the delete and returns the insert.
+	msg, _, err := input.Read(context.Background())
 	require.NoError(t, err)
+	require.NotNil(t, msg)
 
-	// On exec error, message should be Nak'd for retry.
-	assert.True(t, delMsg.naked, "delete message should be nak'd on exec error")
+	// 4. Verify the Delete message was properly Dead-Lettered
+	assert.False(t, delMsg.naked, "delete message should NOT be nak'd anymore")
+	assert.True(t, delMsg.doubleAcked, "delete message should be double-acked after DLQ")
+	require.Len(t, mockJS.published, 1, "should have published the failed message to DLQ")
+	assert.Equal(t, "dlq.clicks", mockJS.published[0].Subject)
+
+	// 5. Verify we got the NEXT message in the queue
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table)
 }
 
 func TestJsInput_Read_IteratorError(t *testing.T) {
