@@ -70,8 +70,8 @@ func run() error {
 	if err := os.MkdirAll(coverDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir coverdir: %w", err)
 	}
-	natsDir := filepath.Join(repoRoot, "tmp", "nats")
-	_ = os.RemoveAll(natsDir)
+	dataDir := filepath.Join(repoRoot, "tmp", "data")
+	_ = os.RemoveAll(dataDir)
 
 	// Capture WH output to a file rather than the orchestrator's console.
 	// V=1 reverts to streaming for interactive debugging.
@@ -146,7 +146,7 @@ func run() error {
 		// on that port (e.g. a `make dev` instance), while tests verify
 		// against the testcontainer's CH which has zero rows.
 		"WH_CH_HTTP_PORT="+chHTTPPort.Port(),
-		"WH_MQ_EMBEDDED_DIR="+natsDir,
+		"WH_DATA_DIR="+dataDir,
 		"WH_MQ_MAX_BYTES_GB=1",
 		"WH_AUTH_ENABLED=true",
 		"WH_AUTH_JWT_SECRET=sdk-dev-secret",

@@ -36,7 +36,7 @@ services:
       - "8080:8080"
     environment:
       WH_CH_ADDR: clickhouse:9000
-      WH_MQ_EMBEDDED_DIR: /data/nats
+      WH_DATA_DIR: /app/data
       WH_MQ_MAX_BYTES_GB: "1"
       WH_AUTH_ENABLED: "true"
       WH_AUTH_JWT_SECRET: sdk-dev-secret
@@ -47,7 +47,7 @@ services:
       WH_DLQ_ENABLED: "true"
       WH_SERVER_CORS_ALLOWED_ORIGINS: "*"
     volumes:
-      - wavehouse-data:/data
+      - wavehouse-data:/app/data
     depends_on:
       clickhouse:
         condition: service_healthy

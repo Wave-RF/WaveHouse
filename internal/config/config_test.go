@@ -27,7 +27,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
 	assert.True(t, cfg.DLQ.Enabled)
 	assert.Equal(t, "policy.yaml", cfg.Policy.FilePath)
-	assert.Equal(t, "./pipes", cfg.Pipes.Directory)
+	assert.Equal(t, "", cfg.Pipes.Dir)
+	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.Equal(t, 300, cfg.Cache.DefaultTTL)
 }

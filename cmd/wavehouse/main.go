@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -114,10 +115,15 @@ func run() int {
 		return 1
 	}
 
+	// State directories — one configurable root, fixed subdir convention.
+	natsDir := filepath.Join(cfg.DataDir, "nats")
+	pebbleDir := filepath.Join(cfg.DataDir, "pebble")
+
 	// Optional embedded dedupe (Pebble).
 	var dedup dedupe.Deduplicator
 	if cfg.Dedupe.Enabled {
-		dedup, err = dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
+		config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
+		dedup, err = dedupe.NewEmbedded(pebbleDir)
 		if err != nil {
 			logger.Error("dedupe init", "error", err)
 			return 1
@@ -126,8 +132,9 @@ func run() int {
 	}
 
 	// Embedded MQ (NATS).
+	config.WarnIfFreshDataDir(logger, "nats", natsDir)
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, cfg.MQ.StreamName, maxBytes)
+	embeddedMQ, err := mq.NewEmbedded(natsDir, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
 		logger.Error("mq init", "error", err)
 		return 1
@@ -163,7 +170,7 @@ func run() int {
 	}
 
 	// Pipes store (NATS KV + optional SQL file directory).
-	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Directory, logger)
+	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
 		return 1

@@ -21,6 +21,12 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 
+### State
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](deployment.md#persistent-storage-required-for-containers). |
+
 ### Server
 
 | YAML Key | Env Var | Default | Description |
@@ -50,7 +56,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `mq.stream_name` | `WH_MQ_STREAM_NAME` | `WAVEHOUSE` | The JetStream namespace to isolate environments (e.g., Staging vs Prod). |
-| `mq.embedded_dir` | `WH_MQ_EMBEDDED_DIR` | `./data/nats` | Data directory for the embedded NATS server. |
 | `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE/WS gap-fill. The Active Sweeper will not purge messages newer than this window. |
 | `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
@@ -60,7 +65,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | -------- | ------- | ------- | ----------- |
 | `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
 | `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
-| `dedupe.embedded_dir` | `WH_DEDUPE_EMBEDDED_DIR` | `./data/pebble` | Data directory for Pebble KV store. |
 
 ### Cache
 
@@ -96,11 +100,12 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `pipes.directory` | `WH_PIPES_DIRECTORY` | `./pipes` | Directory containing `.sql` files for named query pipes. Files are loaded on startup to bootstrap the NATS KV pipe store. |
+| `pipes.dir` | `WH_PIPES_DIR` | *(empty)* | Optional bootstrap source for named query pipes. When set, `.sql` files in this directory are loaded into the NATS KV pipe store on startup. The directory is **read-only at runtime** — it's a seed, not authoritative storage. After bootstrap, the API and KV are the source of truth (runtime pipe edits go through the API, not the files). Empty default skips bootstrap entirely. Mount read-only in containers (e.g. `./my-pipes:/app/pipes:ro`). |
 
 ## Example Config File
 
 ```yaml
+data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 
 server:
   port: 8080
@@ -114,14 +119,12 @@ clickhouse:
   password: ""
 
 mq:
-  embedded_dir: ./data/nats
   gap_window_minutes: 15
   max_bytes_gb: 50
 
 dedupe:
   enabled: false
   id_field: event_id
-  embedded_dir: ./data/pebble
 
 cache:
   l1_max_cost: 67108864
@@ -145,5 +148,5 @@ policy:
   file_path: policy.yaml
 
 pipes:
-  directory: ./pipes
+  dir: ""                # empty = skip bootstrap; set + read-only mount to seed pipes
 ```

@@ -9,6 +9,12 @@ import (
 
 // Config is the top-level application configuration.
 type Config struct {
+	// DataDir is the root for embedded state. NATS JetStream lives at
+	// `<DataDir>/nats`; Pebble (when dedupe is enabled) at `<DataDir>/pebble`.
+	// Subdirectory names are conventions, not config — one knob, one mount.
+	// In a container this MUST resolve to a host-backed volume; the relative
+	// `./data` default is fine for local binary use only.
+	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
 	Server     Server     `yaml:"server"`
 	ClickHouse ClickHouse `yaml:"clickhouse"`
 	MQ         MQ         `yaml:"mq"`
@@ -37,15 +43,13 @@ type ClickHouse struct {
 
 type MQ struct {
 	StreamName       string `yaml:"stream_name" env:"WH_MQ_STREAM_NAME" env-default:"WAVEHOUSE"`
-	EmbeddedDir      string `yaml:"embedded_dir" env:"WH_MQ_EMBEDDED_DIR" env-default:"./data/nats"`
 	GapWindowMinutes int    `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
 	MaxBytesGB       int    `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
 type Dedupe struct {
-	Enabled     bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
-	IDField     string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
-	EmbeddedDir string `yaml:"embedded_dir" env:"WH_DEDUPE_EMBEDDED_DIR" env-default:"./data/pebble"`
+	Enabled bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
+	IDField string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
 }
 
 type Cache struct {
@@ -68,8 +72,15 @@ type Policy struct {
 }
 
 // Pipes configures named query pipes.
+//
+// Dir is an OPTIONAL bootstrap source: on startup, any `.sql` files in it are
+// loaded into the NATS KV pipe store. After bootstrap, the API/KV is the
+// authoritative store — the directory is read-only at runtime and not
+// rewritten. Empty default skips bootstrap entirely (most users will create
+// pipes via the API). When set, mount the directory read-only in containers
+// (e.g. `./my-pipes:/app/pipes:ro`) so it's clear it's a seed, not state.
 type Pipes struct {
-	Directory string `yaml:"directory" env:"WH_PIPES_DIRECTORY" env-default:"./pipes"`
+	Dir string `yaml:"dir" env:"WH_PIPES_DIR" env-default:""`
 }
 
 // Schema configures ClickHouse schema discovery.

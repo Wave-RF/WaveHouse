@@ -119,7 +119,7 @@ WH_AUTH_ROLE_CLAIM=app_metadata.role
 
 # Access control & pipes
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
-WH_PIPES_DIRECTORY=/etc/wavehouse/pipes
+WH_PIPES_DIR=/etc/wavehouse/pipes
 
 # Cache tuning
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
@@ -135,6 +135,41 @@ WH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers bac
 # DLQ
 WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 ```
+
+## Persistent Storage (REQUIRED for containers)
+
+WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
+
+- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the Bento → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
+- `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
+
+In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose files in `deployments/compose/standalone.yaml`, `tests/e2e/compose.yaml`, and `clients/ts/playground/compose.yaml` set `WH_DATA_DIR=/app/data` and bind a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data/nats`, `/app/data/pebble`, and `/app/pipes` owned by the nonroot user (UID 65532).
+
+If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
+
+WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
+
+```
+WARN  data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.
+```
+
+On a first-ever run this is expected. On every subsequent run it should be silent — so when this warning *does* fire after a redeploy, that's the most direct signal that the persistent volume isn't actually persisting.
+
+## Pipes Bootstrap (optional, read-only)
+
+Named query pipes live in NATS KV (`WAVEHOUSE_PIPES`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
+
+```yaml
+services:
+  wavehouse:
+    environment:
+      WH_PIPES_DIR: /app/pipes
+    volumes:
+      - wavehouse-data:/app/data
+      - ./my-pipes:/app/pipes:ro     # ← read-only seed
+```
+
+The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `POST /v1/pipes`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
 
 ## Health Checks
 

@@ -1,3 +1,8 @@
+# Root for embedded state. NATS lives at <data_dir>/nats; Pebble (when dedupe
+# is enabled) lives at <data_dir>/pebble. In a container, this MUST be on a
+# host-backed volume — the relative default is for local binary use only.
+data_dir: ./data
+
 server:
   port: 8080
   shutdown_timeout: 10
@@ -13,14 +18,12 @@ clickhouse:
 
 mq:
   stream_name: WAVEHOUSE
-  embedded_dir: ./data/nats
   gap_window_minutes: 15
   max_bytes_gb: 50
 
 dedupe:
   enabled: false
   id_field: event_id
-  embedded_dir: ./data/pebble
 
 cache:
   l1_max_cost: 67108864
@@ -43,5 +46,9 @@ dlq:
 policy:
   file_path: policy.yaml
 
+# Optional bootstrap source for named query pipes. When set, .sql files in
+# this directory are loaded into the NATS KV pipe store on startup. Empty
+# default skips bootstrap. Mount read-only in containers (e.g. `:ro`) — the
+# directory is a seed, not authoritative storage.
 pipes:
-  directory: ./pipes
+  dir: ""
