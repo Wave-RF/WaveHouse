@@ -39,7 +39,7 @@ func TestEmbeddedNATS_PublishSubscribe(t *testing.T) {
 		mu.Lock()
 		received[msg.Subject] = msg.Data
 		mu.Unlock()
-		_ = msg.Ack(ctx)
+		_ = msg.Ack()
 		select {
 		case done <- struct{}{}:
 		default:

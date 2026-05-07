@@ -193,13 +193,13 @@ func run() int {
 	if err := remoteMQ.Subscribe(ctx, "ingest.>", consumerName, func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			if err := msg.AsyncAck(); err != nil {
+			if err := msg.Ack(); err != nil {
 				slog.Warn("failed to ack message from hub bridge", "error", err)
 			}
 			return nil
 		}
 		hub.Broadcast(msg.Subject, msg)
-		if err := msg.AsyncAck(); err != nil {
+		if err := msg.Ack(); err != nil {
 			slog.Warn("failed to ack message from hub bridge", "error", err)
 		}
 		return nil

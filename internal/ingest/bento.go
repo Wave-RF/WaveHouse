@@ -81,8 +81,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			Action    string          `json:"action"`
 			TableName string          `json:"table_name"`
 			ID        string          `json:"id"`
-			Data      json.RawMessage `json:"data"` // Handles lowercase
-			DataCap   json.RawMessage `json:"Data"`
+			Payload   json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.ErrorContext(msgCtx, "rejecting message: invalid JSON", "error", err)
@@ -206,10 +205,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		// Insert case
-		payload := raw.Data
-		if len(payload) == 0 || string(payload) == "null" {
-			payload = raw.DataCap
-		}
+		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
 			// Fallback to the whole message if it was flattened
 			payload = m.Data()
@@ -236,19 +232,16 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
-			} else {
-				slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
-
-				bentoEventsProcessed.Add(ackCtx, 1, metric.WithAttributes(
-					attribute.String("table", raw.TableName),
-				))
-			}
-
-			if err != nil {
 				// NATS jetstream.Msg.Nak() is a non-blocking, fire-and-forget network call
 				// that does not accept a context. The lack of context here is intentional.
 				return m.Nak()
 			}
+
+			slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
+			bentoEventsProcessed.Add(ackCtx, 1, metric.WithAttributes(
+				attribute.String("table", raw.TableName),
+			))
+
 			return m.DoubleAck(ackCtx)
 		}
 		return msg, ackFn, nil

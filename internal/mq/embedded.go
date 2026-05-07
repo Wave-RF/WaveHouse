@@ -136,18 +136,13 @@ func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName stri
 			func() error {
 				return m.Ack()
 			},
-			func(ctx context.Context) error {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
-				}
+			func() error {
 				return m.Nak()
 			},
 		)
 
 		if err := handler(msg); err != nil {
-			_ = msg.Nak(ctx)
+			_ = msg.Nak()
 		}
 	})
 	if err != nil {

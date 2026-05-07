@@ -7,47 +7,44 @@ import (
 
 // Message represents a message received from the queue.
 type Message struct {
-	Ctx        context.Context
-	Subject    string
-	Data       []byte
-	Timestamp  time.Time
-	ack        func(ctx context.Context) error
-	asyncAckFn func() error
-	nak        func(ctx context.Context) error
+	Ctx         context.Context
+	Subject     string
+	Data        []byte
+	Timestamp   time.Time
+	doubleAckFn func(ctx context.Context) error
+	ackFn       func() error
+	nakFn       func() error
 }
 
 // NewMessage constructs a Message with ack/nak callbacks.
-func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, ack func(context.Context) error, asyncAckFn func() error, nak func(ctx context.Context) error) *Message {
-	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, ack: ack, asyncAckFn: asyncAckFn, nak: nak}
+func NewMessage(ctx context.Context, subject string, data []byte, ts time.Time, doubleAck func(context.Context) error, ack func() error, nak func() error) *Message {
+	return &Message{Ctx: ctx, Subject: subject, Data: data, Timestamp: ts, doubleAckFn: doubleAck, ackFn: ack, nakFn: nak}
 }
 
-// AsyncAck fires a non-blocking Ack without waiting for server confirmation.
-// Use for low-criticality consumers (e.g. SSE fan-out hub bridge) where
-// DoubleAck latency is not worth the guarantee. Use Ack(ctx) for ingest paths.
-func (m *Message) AsyncAck() error {
-	if m.asyncAckFn != nil {
-		return m.asyncAckFn()
+// DoubleAck acknowledges the message synchronously, blocking until the NATS
+// server confirms receipt. Use this for critical ingest paths (ClickHouse writes).
+func (m *Message) DoubleAck(ctx context.Context) error {
+	if m.doubleAckFn != nil {
+		return m.doubleAckFn(ctx)
 	}
 	return nil
 }
 
-// Ack acknowledges successful processing.
-func (m *Message) Ack(ctx context.Context) error {
-	if m.ack != nil {
-		return m.ack(ctx)
+// Ack acknowledges the message asynchronously (fire-and-forget).
+// Use for low-criticality consumers or high-throughput scenarios where
+// latency is more important than a "received" confirmation from the server.
+func (m *Message) Ack() error {
+	if m.ackFn != nil {
+		return m.ackFn()
 	}
 	return nil
 }
 
-// Nak signals processing failure for redelivery.
-//
-// NOTE: While the underlying NATS Nak is fire-and-forget, this wrapper
-// honors context cancellation. If the provided context is cancelled
-// (e.g., during graceful shutdown), the network call is suppressed and
-// the message will silently wait for AckWait to expire before redelivery.
-func (m *Message) Nak(ctx context.Context) error {
-	if m.nak != nil {
-		return m.nak(ctx)
+// Nak negatively acknowledges the message asynchronously for redelivery.
+// This is fire-and-forget and does not require a context.
+func (m *Message) Nak() error {
+	if m.nakFn != nil {
+		return m.nakFn()
 	}
 	return nil
 }
