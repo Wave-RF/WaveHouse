@@ -78,10 +78,11 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
-			Action    string          `json:"action"`
-			TableName string          `json:"table_name"`
-			ID        string          `json:"id"`
-			Payload   json.RawMessage `json:"data"`
+			Action            string          `json:"action"`
+			TableName         string          `json:"table_name"`
+			ID                string          `json:"id"`
+			Payload           json.RawMessage `json:"data"`
+			ReceivedTimestamp string          `json:"received_timestamp"`
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.ErrorContext(msgCtx, "rejecting message: invalid JSON", "error", err)
@@ -141,21 +142,17 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					case <-flushCtx.Done(): // 60-second drain timeout hit or context cancelled
 						ticker.Stop()
 
-						// Only log the error and Nak if the parent context is NOT cancelled.
-						// If ctx.Err() != nil, this is a clean shutdown, so we skip the alarm.
-						if ctx.Err() == nil {
-							// Log the failure explicitly
-							slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
-								"table", raw.TableName,
-								"id", raw.ID,
-							)
-
-							// Nak the message so it doesn't sit in limbo
-							if nakErr := m.Nak(); nakErr != nil {
-								slog.WarnContext(spanCtx, "nak failed after drain timeout", "error", nakErr)
-							}
+						if ctxErr := ctx.Err(); ctxErr != nil {
+							span.End()
+							flushCancel()
+							return nil, nil, ctxErr
 						}
 
+						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
+							"table", raw.TableName,
+							"id", raw.ID,
+						)
+						_ = m.Nak()
 						span.End()
 						flushCancel()
 						return nil, nil, fmt.Errorf("drain wait aborted: %w", flushCtx.Err())
@@ -227,6 +224,10 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		msg = msg.WithContext(msgCtx)
 
 		msg.MetaSet("table_name", raw.TableName)
+
+		if raw.ReceivedTimestamp != "" {
+			msg.MetaSet("received_timestamp", raw.ReceivedTimestamp)
+		}
 
 		// Instead of time.Now(), ask NATS exactly when this message arrived in the queue
 		publishedTime := time.Now()
@@ -379,6 +380,19 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 			)
 			return fmt.Errorf("read message bytes: %w", err)
 		}
+
+		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
+			data = bytes.TrimSpace(data)
+			// Ensure it's a valid JSON object structure {...}
+			if len(data) > 2 && data[0] == '{' && data[len(data)-1] == '}' {
+				// Drop the trailing '}'
+				data = data[:len(data)-1]
+				// Append the timestamp and close the object
+				extra := fmt.Sprintf(`,"received_timestamp":%q}`, rt)
+				data = append(data, []byte(extra)...)
+			}
+		}
+
 		buf.Write(data)
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
 	}
