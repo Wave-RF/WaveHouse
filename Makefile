@@ -185,7 +185,7 @@ coverage: ## Unit test coverage → tmp/coverage/ and summary
 	@echo "$(YELLOW)==> Open tmp/coverage/coverage.html in your browser for line-by-line details$(RESET)"
 
 coverage-enforce: coverage ## Fail if unit test coverage is below the 70% threshold in .testcoverage.yml
-	@go run github.com/vladopajic/go-test-coverage/v2@v2.18.7 --config=.testcoverage.yml
+	@go run github.com/vladopajic/go-test-coverage/v2@v2.18.8 --config=.testcoverage.yml
 
 smoke-test: ## Manual Bento insert+delete (requires running WaveHouse)
 	@go run ./tests/cmd/bento_pub

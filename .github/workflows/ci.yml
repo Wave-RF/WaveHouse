@@ -77,7 +77,7 @@ jobs:
         run: make coverage
 
       - name: Enforce coverage threshold & generate badge
-        uses: vladopajic/go-test-coverage@8cfd056d3bc5cc2bc64a840ded0c907aaae3dc46  # v2.18.7
+        uses: vladopajic/go-test-coverage@a93b868a4cbcbf18dc3781650fad241f0020e609  # v2.18.8
         with:
           # Threshold + exclude.paths live in .testcoverage.yml (70% total).
           config: ./.testcoverage.yml
