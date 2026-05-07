@@ -215,7 +215,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		// Insert case
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
-			// Removed m.Data() fallback. If Payload is missing, the message is malformed.
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
 			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for malformed message", "error", doubleAckErr)
