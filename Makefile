@@ -18,9 +18,11 @@ MAKEFLAGS += --warn-undefined-variables
 # pair brackets a target's whole log block).
 MAKEFLAGS += --no-print-directory
 
-ifdef CI
-  MAKEFLAGS += --output-sync=target
-endif
+# Serialize recipe output per-target whenever make is running in parallel.
+# Without this, `make -j N` interleaves stdout/stderr from concurrent
+# recipes line-by-line, and a failure (e.g. `make[1]: *** [lint] Error 1`)
+# scrolls off-screen behind whichever ✓ output happened to land last.
+MAKEFLAGS += --output-sync=target
 
 # Delete the target file if its recipe fails non-zero. Default Make leaves
 # a partial file behind, which then satisfies the dependency check on the

@@ -43,7 +43,13 @@ release)
 cover)
 	label="$name (coverage instrumented)"
 	ldflags="${LDFLAGS:-} ${VERSION_LDFLAGS:-}"
-	build_flags=(-cover)
+	# -covermode=atomic matches what unit/integration use under -race
+	# (Go forces atomic mode on race-detector builds). Without this,
+	# `make cov` later refuses to merge the suites — covdata bails on
+	# "counter mode clash while reading meta-data file ..." and the
+	# combined coverage gate fails even though every individual suite
+	# passed.
+	build_flags=(-cover -covermode=atomic)
 	output="bin/$name-cov"
 	;;
 *)

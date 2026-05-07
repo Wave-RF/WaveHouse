@@ -43,9 +43,6 @@ jobs:
     #      a different CI tool's pipeline file is one line.
     #
     # The Makefile's `ci` target handles parallelization internally
-    # (`make -j 4 ci-parallel` then sequential test-integration / test-e2e
-    # / cov), capped at 4 to match the burstable per-pod CPU limit and
-    # avoid OOM on the 6 GiB pod under -race.
     name: CI
     runs-on: [wave-rf-runners]
     # Sum of the previous per-job timeouts was ~105 min; in practice on a
