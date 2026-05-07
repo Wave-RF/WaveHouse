@@ -76,8 +76,6 @@ ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 #   VERSION=v1.2.3               override version string embedded in binary
 #   LDFLAGS="-s -w"              extra ldflags (e.g. force-strip a local build)
 #   LIMIT=50                     top-N for `make dep-cut`
-#   COV_THRESHOLD_<SUITE>=NN     per-suite coverage gate; see Coverage Thresholds
-#                                section below for defaults and full list
 #
 # Add binaries here as the project grows (e.g., wavehouse-api, wavehouse-worker).
 BINARIES := wavehouse
@@ -138,13 +136,7 @@ COV_E2E   := tmp/coverage/e2e
 COV_TOTAL := tmp/coverage/total
 
 # --- Coverage Thresholds ------------------------------------------------------
-# Per-suite + total thresholds enforced after each test suite runs (and by
-# `make cov` for the merged total). Override via env or CLI:
-#   COV_THRESHOLD_UNIT=80 make test
-COV_THRESHOLD_UNIT        ?= 70
-COV_THRESHOLD_INTEGRATION ?= 12
-COV_THRESHOLD_E2E         ?= 50
-COV_THRESHOLD_TOTAL       ?= 70
+# Per-suite and total thresholds live in .testcoverage.yml
 
 # Derived: coverage-instrumented and release-stripped binaries.
 COVER_BINARIES   := $(addsuffix -cov,$(BINARIES))
@@ -155,7 +147,6 @@ RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
 # applying these per-section would imply scoping that doesn't exist.
 export VERSION_LDFLAGS LDFLAGS TAGS
 export GOTESTSUM_FMT
-export COV_THRESHOLD_UNIT COV_THRESHOLD_INTEGRATION COV_THRESHOLD_E2E COV_THRESHOLD_TOTAL
 
 # ==============================================================================
 # Targets
@@ -308,79 +299,91 @@ build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by
 	@echo "$(CYAN)==> Building SDK...$(RESET)"
 	@cd $(SDK_DIR) && $(PNPM) build
 
-# build-docker: build the WaveHouse Dockerfile. No run, no test — just
-# proves the Dockerfile compiles. CI's e2e job formerly built this image too;
-# now that test-e2e uses bin/wavehouse-cov locally, this target gives PRs a
-# light Dockerfile-validity check independent of E2E.
-.PHONY: build-docker
-build-docker: ## Build WaveHouse Docker image (Dockerfile sanity check)
-	@echo "$(CYAN)==> Building production Docker image...$(RESET)"
-	@docker buildx build --load -t wavehouse:test -f deployments/Dockerfile .
-	@echo "$(GREEN)==> Image built: wavehouse:test$(RESET)"
-
 ##@ Test
 
-# Each test target hands off to scripts/test-suite.sh, which runs the suite,
-# writes covdata to tmp/coverage/<suite>/data/, and gates against
-# COV_THRESHOLD_<SUITE> via scripts/coverage.sh. Per-suite specifics (build
-# tags, package globs, gotestsum format) live in test-suite.sh. Threshold +
-# format env vars are exported to recipes near the top.
+# Each Go test target writes covdata to tmp/coverage/<suite>/data/ and
+# hands off to .tools/cov for rendering + the threshold gate. Suite-specific
+# coverage scope:
+#   unit:         -cover (per-package — each test covers its own package)
+#   integration:  -coverpkg=./... (cross-package — drives end-to-end paths)
+#   e2e:          covdata flushed on SIGINT by the running cover binary,
+#                 captured by the orchestrator
+# Thresholds (per suite + total) live in .testcoverage.yml.
 
-.PHONY: test
-test: go-mod-download ## Run unit tests + render coverage + gate threshold
-	@scripts/test-suite.sh unit $(ARGS)
-
-# Hidden alias — symmetry with test-integration / test-e2e for muscle memory.
 .PHONY: test-unit
-test-unit: test
+test-unit: go-mod-download ## Run Go unit tests + render coverage + gate threshold
+	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
+	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
+	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
+		-tags="$(TAGS)" -cover -race ./internal/... $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
+	@go run ./scripts/cov render unit
+
+# Hidden alias: `make test` matches `go test ./...` muscle memory; test-unit
+# is the explicit form.
+.PHONY: test
+test: test-unit
 
 .PHONY: test-integration
-test-integration: go-mod-download ## Run integration tests + render coverage + gate threshold (requires Docker)
-	@scripts/test-suite.sh integration $(ARGS)
+test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
+	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
+	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
+	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
+		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
+		./tests/integration/... $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
+	@go run ./scripts/cov render integration
 
-# test-sdk runs vitest unit tests inside clients/ts. Independent of any Go
-# work — separate toolchain, separate runner pod in CI.
+# test-sdk: vitest unit tests for the SDK. SDK_COVERAGE_DIR points vitest
+# at tmp/coverage/sdk/ (see clients/ts/vitest.config.ts), and the threshold
+# is read from .testcoverage.yml's `suites.sdk` and passed to vitest's
+# inline gate. Independent of Go — separate toolchain.
 .PHONY: test-sdk
-test-sdk: install-sdk ## Run SDK vitest unit tests
-	@echo "$(CYAN)==> Running SDK Tests...$(RESET)"
-	@cd $(SDK_DIR) && $(PNPM) test
+test-sdk: install-sdk ## Run SDK vitest unit tests + render coverage + gate threshold
+	@printf "$(CYAN)==> Running SDK Tests...$(RESET)\n"
+	@rm -rf tmp/coverage/sdk && mkdir -p tmp/coverage/sdk
+	@SDK_COVERAGE_DIR="$(CURDIR)/tmp/coverage/sdk" \
+		pnpm --dir clients/ts exec vitest run --coverage \
+		--coverage.thresholds.statements=$$(go run ./scripts/cov threshold sdk) $(ARGS)
+	@printf "$(GREEN)==> sdk gate passed$(RESET)  HTML: tmp/coverage/sdk/index.html\n"
 
-# test-e2e starts ClickHouse via compose, runs bin/wavehouse-cov locally
-# (with auth enabled) so coverage is captured natively, then runs the SDK
-# vitest harness against it. Depends on:
-#   - build-sdk: clients/ts/dist/ (E2E tests import @wavehouse/sdk via file: link)
-#   - build-cover: bin/wavehouse-cov (the running binary; coverage flushes on SIGINT)
-#   - install-e2e-sdk: tests/e2e/sdk/node_modules/
+# test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
+# scripts/, then runs the SDK vitest harness against the live stack so both
+# halves are exercised. covdata flushes on SIGINT into tmp/coverage/e2e/data/.
 .PHONY: test-e2e
 test-e2e: build-sdk build-cover install-e2e-sdk ## Run E2E SDK suite against cover binary + render coverage + gate
-	@scripts/test-suite.sh e2e $(ARGS)
+	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
+	@rm -rf $(COV_E2E)/data && mkdir -p $(COV_E2E)/data tmp
+	@go run ./scripts/orchestrator
+	@go run ./scripts/cov render e2e
 
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
 # under `make -j N`. The suites bind ports / spin testcontainers / start the
 # release binary, so concurrent execution is unsafe.
 .PHONY: test-all
-test-all: ## Run all suites sequentially + merged total coverage + gate
-	@$(MAKE) test
+test-all: ## Run all suites sequentially + merged Go coverage + gate
+	@$(MAKE) test-unit
+	@$(MAKE) test-sdk
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
 
 ##@ Coverage
 
-# cov: aggregates whichever covdata exists across unit/integration/e2e,
-# renders merged text + HTML to tmp/coverage/total/, prints per-suite
-# breakdown, gates against COV_THRESHOLD_TOTAL. Does NOT run tests — call
+# cov: merges whichever Go suites have covdata into tmp/coverage/total/,
+# prints a per-suite breakdown (plus SDK as informational), and gates
+# against threshold.total in .testcoverage.yml. Does NOT run tests — call
 # the test targets first (or run `make test-all` for the full pipeline).
 .PHONY: cov
 cov: ## Merge all available covdata + gate against total threshold
-	@scripts/coverage.sh merge $(COV_THRESHOLD_TOTAL)
+	@go run ./scripts/cov merge
 
 ##@ CI
 
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify build build-cover build-sdk build-docker test test-sdk
+ci-parallel: verify build build-cover build-sdk test test-sdk
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -448,16 +451,35 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 
 ##@ Cleanup
 
+# Tiered clean targets, each scoped to a single artifact class. Compose them
+# explicitly (e.g. `make clean clean-test`) when you want a partial reset
+# without nuking installed tools or pnpm deps. `clean-all` chains them.
+#
+#   clean        build outputs only       (bin/, dist/, clients/ts/dist/)
+#   clean-test   test outputs only        (tmp/ — coverage, logs, NATS state)
+#   clean-tools  installed deps           (.bin/, node_modules/ everywhere)
+#   clean-all    everything above + data/ + docker volumes (full reset)
+
 .PHONY: clean
-clean: ## Remove build artifacts (bin/, tmp/, dist/)
+clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ tmp/ dist/ clients/ts/dist/
+	@rm -rf bin/ dist/ clients/ts/dist/
+
+.PHONY: clean-test
+clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
+	@echo "$(YELLOW)==> Cleaning test artifacts...$(RESET)"
+	@rm -rf tmp/
+
+.PHONY: clean-tools
+clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
+	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
+	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/
 
 .PHONY: clean-all
-clean-all: clean ## Full reset — also wipes .bin/ tools AND data/ dev state
-	@echo "$(YELLOW)==> Full reset (tools, dev data, docker)...$(RESET)"
-	@rm -rf .bin/ data/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/
-	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans
+clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
+	@echo "$(YELLOW)==> Full reset (dev state, docker)...$(RESET)"
+	@rm -rf data/
+	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans 2>/dev/null || true
 
 ##@ Tooling
 
