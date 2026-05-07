@@ -166,6 +166,8 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
+WH_CH_HTTP_PORT=8123                # Port for Bento HTTP inserts (default: 8123)
+WH_CH_HTTP_SCHEME=http              # Scheme for Bento HTTP inserts (http/https)
 
 # Schema discovery
 WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
@@ -200,6 +202,8 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 # Clustered mode
 WH_MODE=clustered
+WH_CH_HTTP_PORT=8123                # Required for wavehouse-worker nodes
+WH_CH_HTTP_SCHEME=http              # Required for wavehouse-worker nodes
 WH_MQ_URL=nats://nats:4222
 WH_CACHE_REDIS_URL=redis://redis:6379
 WH_DEDUPE_SCYLLA_HOSTS=scylla-1:9042,scylla-2:9042

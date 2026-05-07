@@ -128,6 +128,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			// Read() would block indefinitely on the counter, creating a deadlock
 			// where ackFn can never be called to decrement the counter.
 			if j.inFlight.Load() > 0 {
+				// NOTE: The effective drain window is min(60s, global_shutdown_timeout).
+				// If the main context (ctx) is cancelled, the drain terminates immediately.
 				flushCtx, flushCancel := context.WithTimeout(ctx, 60*time.Second)
 				ticker := time.NewTicker(10 * time.Millisecond)
 
@@ -187,7 +189,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				"table", raw.TableName,
 				"id", raw.ID,
 			)
-			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+			if doubleAckErr := m.DoubleAck(spanCtx); doubleAckErr != nil {
 				slog.WarnContext(spanCtx, "double ack failed for processed delete message", "error", doubleAckErr)
 			}
 
