@@ -86,7 +86,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.ErrorContext(msgCtx, "rejecting message: invalid JSON", "error", err)
-			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
@@ -95,7 +95,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		// Reject messages with no table name.
 		if raw.TableName == "" {
 			slog.ErrorContext(msgCtx, "rejecting message: empty table_name")
-			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
@@ -105,7 +105,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if !safeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
@@ -199,7 +199,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			// ACTION SAFETY: Reject unrecognized actions (e.g., "update", "upsert")
 			// to prevent them from accidentally falling through to the insert path.
 			slog.WarnContext(msgCtx, "rejecting message: unknown action type", "action", raw.Action)
-			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for rejected message", "error", doubleAckErr)
 			}
 			continue
@@ -209,7 +209,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
-			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for malformed message", "error", doubleAckErr)
 			}
 			continue
@@ -380,14 +380,21 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
 			data = bytes.TrimSpace(data)
 			// Ensure it's a valid JSON object structure {...}
-			if len(data) > 2 && data[0] == '{' && data[len(data)-1] == '}' {
-				// Use json.Marshal to ensure the string is JSON-encoded correctly (\uXXXX vs \UXXXXXXXX)
+			if len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}' {
 				rtJSON, _ := json.Marshal(rt)
 
 				// Drop the trailing '}'
 				data = data[:len(data)-1]
-				// Append the timestamp and close the object
-				extra := fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
+
+				// If the object only contains whitespace after '{', we don't need a comma
+				needsComma := len(bytes.TrimSpace(data[1:])) > 0
+
+				var extra string
+				if needsComma {
+					extra = fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
+				} else {
+					extra = fmt.Sprintf(`"received_timestamp":%s}`, rtJSON)
+				}
 				data = append(data, []byte(extra)...)
 			}
 		}

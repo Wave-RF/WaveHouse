@@ -830,6 +830,72 @@ func TestClickhouseOutput_WriteBatch_MultiMessage(t *testing.T) {
 	assert.NoError(t, err, "WriteBatch should succeed with multi-message batch")
 }
 
+func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody string
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			bodyBytes, _ := io.ReadAll(req.Body)
+			capturedBody = string(bodyBytes)
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
+		host:       "localhost",
+		port:       "8123",
+	}
+
+	tests := []struct {
+		name           string
+		payload        string
+		timestamp      string
+		expectedPrefix string
+	}{
+		{
+			name:           "standard injection",
+			payload:        `{"metric": 99}`,
+			timestamp:      "2026-05-07T12:00:00Z",
+			expectedPrefix: `{"metric": 99,"received_timestamp":"2026-05-07T12:00:00Z"}`,
+		},
+		{
+			name:           "empty object without syntax error",
+			payload:        `{}`,
+			timestamp:      "2026-05-07T12:00:00Z",
+			expectedPrefix: `{"received_timestamp":"2026-05-07T12:00:00Z"}`,
+		},
+		{
+			name:           "whitespace empty object",
+			payload:        `{  }`,
+			timestamp:      "2026-05-07T12:00:00Z",
+			expectedPrefix: `{  "received_timestamp":"2026-05-07T12:00:00Z"}`,
+		},
+		{
+			name:           "pre-existing timestamp",
+			payload:        `{"metric": 99,"received_timestamp":"old-time"}`,
+			timestamp:      "2026-05-07T12:00:00Z",
+			expectedPrefix: `{"metric": 99,"received_timestamp":"old-time","received_timestamp":"2026-05-07T12:00:00Z"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := service.NewMessage([]byte(tt.payload))
+			msg.MetaSet("table_name", "test_table")
+			msg.MetaSet("received_timestamp", tt.timestamp)
+
+			err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
+			require.NoError(t, err)
+
+			// Verify the injected payload matches what we expect (plus the ClickHouse JSONEachRow newline)
+			assert.Equal(t, tt.expectedPrefix+"\n", capturedBody)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // jsInput payload extraction validation
 // ---------------------------------------------------------------------------
