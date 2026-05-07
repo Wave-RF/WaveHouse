@@ -4,8 +4,21 @@
 profile: tmp/coverage/unit/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
+# Default threshold for go-test-coverage's own gate (used by the badge-publish
+# step in CI, which invokes the action directly without `--threshold-total`).
+# Per-suite gating in `make test-<suite>` uses the `suites` block below.
 threshold:
   total: 70
+
+# Per-suite coverage thresholds (custom key — read by scripts/coverage.sh,
+# silently ignored by go-test-coverage). Single source of truth for what
+# percentage each suite must hit before it counts as passing.
+#
+suites:
+  unit: 70
+  integration: 12
+  e2e: 50
+  sdk: 50 # statements (vitest gates via --coverage.thresholds.statements)
 
 exclude:
   paths:
@@ -14,3 +27,7 @@ exclude:
     # production code, so there's nothing meaningful to cover.
     - ^internal/testutil/
     - ^tests/
+    # scripts/ holds Go helpers (cov, orchestrator) that drive the build but
+    # aren't part of the shipped binary; they show up in `-coverpkg=./...`
+    # but never get exercised by tests.
+    - ^scripts/

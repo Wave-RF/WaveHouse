@@ -29,12 +29,12 @@
     "codegen": "tsx src/cli/codegen.ts"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.5",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
   },
-  "peerDependencies": {},
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
