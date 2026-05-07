@@ -42,7 +42,6 @@
 - [ ] Get Delve setup working for local development with `make dev` and VS Code Go extension for easier debugging.
 - [ ] Add more integration tests covering the full end-to-end flow from API ingestion to ClickHouse, including edge cases and failure scenarios.
 - [ ] Add benchmarks for critical code paths (e.g. batch processing, NATS message handling) to monitor performance and catch regressions.
-- [ ] Setup goreleaser for building and releasing binaries, including proper versioning and changelog generation.
 - [x] Setup one docker image with multiple entrypoints for API and worker instead of two separate images, to simplify deployment and reduce maintenance overhead.
 - [ ] Docker image multiple architecture support (amd64 + arm64)
 - [ ] Docker compose docs for running standalone vs clustered, and for running with different ClickHouse configurations (e.g. single node vs cluster)

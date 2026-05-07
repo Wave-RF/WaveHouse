@@ -1,0 +1,94 @@
+name: Cleanup GHCR dev tags
+
+# Weekly housekeeping for `ghcr.io/wave-rf/wavehouse`. Prunes immutable
+# `:dev-<sha>` tags older than 30 days, but always keeps the newest 5
+# regardless of age. Tagged releases (`latest`, `vX.Y.Z`) and the rolling
+# `:dev` pointer are never touched.
+#
+# Why custom logic vs GHCR's built-in retention rules: the built-in
+# retention is per-package and date-only, can't combine "newest N OR
+# within X days" or filter by tag pattern. We need both: keep recent
+# debug history (the count guard) AND auto-prune long tail (the age
+# guard). One bash + jq script does it.
+on:
+  schedule:
+    # Every Monday 03:00 UTC. Off-peak; ~1 build/main-push, so the
+    # weekly cadence is plenty.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    name: Prune dev-<sha> tags
+    runs-on: [wave-rf-runners]
+    timeout-minutes: 5
+    steps:
+      - name: Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: Wave-RF
+          PACKAGE: wavehouse
+          KEEP_NEWEST: "5"
+          MAX_AGE_DAYS: "30"
+        run: |
+          set -euo pipefail
+
+          # Fetch every version (paginated) into a single JSON array.
+          all=$(gh api --paginate \
+            "/orgs/${ORG}/packages/container/${PACKAGE}/versions" \
+            | jq -s 'add')
+
+          total=$(echo "$all" | jq 'length')
+          echo "Total versions in registry: ${total}"
+
+          # Candidates for cleanup: versions tagged with at least one
+          # `dev-<hex>` tag AND no protected tag (`latest`, `dev`, or
+          # `vX.Y.Z`). Sorted newest-first so we can slice off the head.
+          candidates=$(echo "$all" | jq -c '
+            map(select(
+              ((.metadata.container.tags // []) | length > 0) and
+              ((.metadata.container.tags // []) | any(test("^dev-[0-9a-f]+$"))) and
+              (((.metadata.container.tags // []) | any(
+                  . == "latest" or
+                  . == "dev" or
+                  test("^v[0-9]+\\.[0-9]+\\.[0-9]+")
+                )) | not)
+            ))
+            | sort_by(.created_at) | reverse
+          ')
+
+          eligible=$(echo "$candidates" | jq 'length')
+          echo "Cleanup candidates (dev-<sha> only): ${eligible}"
+
+          # Cutoff: anything older than MAX_AGE_DAYS is eligible to delete,
+          # but we always keep KEEP_NEWEST regardless of age. Both guards
+          # apply: a 60-day-old tag is preserved if it's in the newest 5.
+          cutoff=$(date -u -d "${MAX_AGE_DAYS} days ago" +%s)
+          to_delete=$(echo "$candidates" | jq -c \
+            --argjson keep "${KEEP_NEWEST}" \
+            --argjson cutoff "${cutoff}" '
+            to_entries
+            | map(select(.key >= $keep))
+            | map(.value)
+            | map(select((.created_at | fromdateiso8601) < $cutoff))
+          ')
+
+          delete_count=$(echo "$to_delete" | jq 'length')
+          echo "Will delete: ${delete_count} versions"
+
+          if [[ "${delete_count}" == "0" ]]; then
+            echo "Nothing to do."
+            exit 0
+          fi
+
+          echo "$to_delete" | jq -r '.[] | "\(.id)\t\(.metadata.container.tags | join(","))"' | \
+            while IFS=$'\t' read -r id tags; do
+              echo "Deleting version id=${id} tags=${tags}"
+              gh api -X DELETE \
+                "/orgs/${ORG}/packages/container/${PACKAGE}/versions/${id}"
+            done
+
+          echo "Cleanup complete."

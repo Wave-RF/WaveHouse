@@ -28,6 +28,10 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 
 ## 🛠️ Quick Start
 
+Pick whichever flavour fits — Docker, prebuilt binary, or `go install`. Each one ends with WaveHouse listening on `http://localhost:8080`.
+
+### A. Docker Compose (recommended for first-time)
+
 The easiest way to see WaveHouse in action. Requires Docker.
 
 ```bash
@@ -69,6 +73,39 @@ curl -N http://localhost:8080/v1/stream/sse
 ```
 
 WaveHouse is now accepting API requests on `http://localhost:8080`.
+
+### B. Prebuilt container image
+
+Skip the source clone — pull from GHCR:
+
+```bash
+# Tagged release (recommended for production)
+docker pull ghcr.io/wave-rf/wavehouse:latest
+
+# Or rolling main-branch dev build
+docker pull ghcr.io/wave-rf/wavehouse:dev
+```
+
+Tagged images are built by `release.yml` on every `v*` git tag (`:latest`, `:vX.Y.Z`). Dev images are built by `publish-dev.yml` on every push to `main` (`:dev`, `:dev-<sha>`); old `:dev-<sha>` tags are pruned weekly by `cleanup-ghcr.yml`.
+
+### C. `go install` / `go run` (binary, no Docker)
+
+If you have Go 1.25+ installed:
+
+```bash
+# Install the latest tagged release into $GOBIN
+go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
+
+# Or run directly without installing
+go run github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
+
+# Or pin to a specific version
+go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@v0.1.0
+```
+
+You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/configuration.md).
+
+WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/sdk.md) is the supported integration surface.
 
 ## 💻 Local Development
 

@@ -41,6 +41,27 @@ USER nonroot:nonroot
 COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /app/wavehouse
 
+# OCI image metadata. Static labels live here; per-build dynamic ones
+# (revision, version, created) are added by the workflow at build time
+# via `docker build --label`.
+LABEL org.opencontainers.image.title="WaveHouse"
+LABEL org.opencontainers.image.description="Schema-aware real-time API gateway for ClickHouse"
+LABEL org.opencontainers.image.url="https://github.com/Wave-RF/WaveHouse"
+LABEL org.opencontainers.image.source="https://github.com/Wave-RF/WaveHouse"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.vendor="Wave RF"
+
+# Declares /app/data as a managed mount point. If the operator runs the
+# container without an explicit volume or bind mount, Docker creates an
+# anonymous volume here automatically — preventing JetStream/Pebble state
+# from landing on the writable overlay layer (where it'd be wiped on
+# every restart). Doesn't override or interact with explicit `-v` /
+# compose `volumes:` declarations; those still take precedence.
+#
+# Pipes (/app/pipes) is intentionally NOT a VOLUME — it's a read-only
+# bootstrap source, not state. See docs/deployment.md.
+VOLUME ["/app/data"]
+
 # Default listen port. ENV is just a default — compose `environment:` or
 # `docker run -e` overrides it normally — and EXPOSE is image-metadata
 # documentation only, not a port publish. If you set WH_SERVER_PORT to

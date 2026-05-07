@@ -82,16 +82,16 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
           # Required checks from the `main branch protection` ruleset.
-          # Newline-separated so names with spaces ("Integration Tests")
-          # round-trip correctly. Keep in sync with the ruleset and
-          # project-orchestrator.yml's bot-clean check.
+          # Newline-separated so names with spaces round-trip correctly.
+          # Post-consolidation (PR #93b3206): ci.yml is a single job named
+          # "CI" that runs the full make-ci pipeline (lint + test + build +
+          # SDK + integration + e2e). Validate is the PR-title check from
+          # pr-title.yml. Keep this list in sync with the ruleset's
+          # required_status_checks and project-orchestrator.yml's bot-clean
+          # check.
           REQUIRED_CHECKS: |
-            Build
+            CI
             Validate
-            Lint
-            Test
-            Integration Tests
-            SDK Tests
         run: |
           set -euo pipefail
 
