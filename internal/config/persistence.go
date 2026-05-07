@@ -7,6 +7,25 @@ import (
 	"os"
 )
 
+// LogStorageInitError emits an error log for a storage-init failure, with a
+// UID-65532 hint when the failure looks like a permission denial — the
+// dominant signature of a Docker bind mount whose host directory is owned
+// by root rather than the distroless `nonroot` user. Keeps the actionable
+// remediation right next to the error line so operators don't have to dig.
+//
+// `kind` is a short label (e.g. "mq", "dedupe"). The caller still decides
+// whether to exit; this only logs.
+func LogStorageInitError(logger *slog.Logger, kind, path string, err error) {
+	fields := []any{"error", err, "path", path}
+	if errors.Is(err, os.ErrPermission) {
+		fields = append(fields,
+			"hint",
+			"if running in a container with a host bind mount, the host directory must be owned by UID 65532 (the `nonroot` user in the distroless image). Try `sudo chown -R 65532:65532 /your/host/path`. Named volumes inherit ownership automatically and don't need this.",
+		)
+	}
+	logger.Error(kind+" init failed", fields...)
+}
+
 // WarnIfFreshDataDir logs a startup `WARN` if dir doesn't already exist or is
 // empty, signalling that we're about to start with no prior state.
 //

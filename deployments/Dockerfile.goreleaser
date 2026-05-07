@@ -1,3 +1,17 @@
+# Tiny stage just to mkdir + chown the state directories. Distroless has no
+# shell, so the runtime image can't run RUN commands itself; we materialise
+# the layout here and COPY it into the final image. Keeps the goreleaser
+# variant in lockstep with deployments/Dockerfile (source-build) so the two
+# images expose the same /app filesystem layout to operators.
+#
+# Only the parents are pre-created — the binary mkdirs `nats/` and `pebble/`
+# subdirs itself when NATS/Pebble open their stores. Named-volume copy-up
+# runs against `/app/data`; bind mounts mask the image dir entirely and
+# require host-side ownership matching UID 65532.
+
+FROM alpine:3 AS layout
+RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
+
 FROM gcr.io/distroless/static-debian12
 
 # GoReleaser automatically injects this based on the platform it's building for
@@ -6,8 +20,20 @@ ARG TARGETPLATFORM
 WORKDIR /app
 USER nonroot:nonroot
 
-# Copy the binaries from the platform-specific subdirectories GoReleaser creates
-COPY $TARGETPLATFORM/wavehouse /app/wavehouse
+# Pre-created state directories owned by the nonroot user (UID 65532) so
+# the binary can mkdir under /app/data without a volume mount, and so
+# bind-mounting empty volumes at /app/data inherits correct ownership.
+COPY --from=layout --chown=nonroot:nonroot /app /app
 
+# Copy the binaries from the platform-specific subdirectories GoReleaser creates
+COPY --chown=nonroot:nonroot $TARGETPLATFORM/wavehouse /app/wavehouse
+
+# Default listen port. ENV is just a default — compose `environment:` or
+# `docker run -e` overrides it normally — and EXPOSE is image-metadata
+# documentation only, not a port publish. If you set WH_SERVER_PORT to
+# something else, also update your compose `ports:` mapping accordingly;
+# Docker can't recompute EXPOSE at runtime.
+ENV WH_SERVER_PORT=8080
 EXPOSE 8080
+
 ENTRYPOINT ["/app/wavehouse"]

@@ -125,7 +125,7 @@ func run() int {
 		config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
 		dedup, err = dedupe.NewEmbedded(pebbleDir)
 		if err != nil {
-			logger.Error("dedupe init", "error", err)
+			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
 			return 1
 		}
 		defer func() { _ = dedup.Close() }()
@@ -136,7 +136,7 @@ func run() int {
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
 	embeddedMQ, err := mq.NewEmbedded(natsDir, cfg.MQ.StreamName, maxBytes)
 	if err != nil {
-		logger.Error("mq init", "error", err)
+		config.LogStorageInitError(logger, "mq", natsDir, err)
 		return 1
 	}
 	defer func() { _ = embeddedMQ.Close() }()

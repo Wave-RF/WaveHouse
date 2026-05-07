@@ -155,6 +155,50 @@ WARN  data directory does not exist — starting with no prior state. If this is
 
 On a first-ever run this is expected. On every subsequent run it should be silent — so when this warning *does* fire after a redeploy, that's the most direct signal that the persistent volume isn't actually persisting.
 
+### Distroless Permission Traps (named volume vs bind mount)
+
+WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong produces a hard-to-read permission error from NATS or Pebble at startup.
+
+**Named volumes** (the recommended pattern):
+
+```yaml
+volumes:
+  - wavehouse-data:/app/data
+```
+
+On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data` and `/app/pipes` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
+
+**Bind mounts** (host directory):
+
+```yaml
+volumes:
+  - /srv/wavehouse:/app/data
+```
+
+Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
+
+```
+ERROR  mq init failed  error="..."  path=/app/data/nats  hint="if running in a container with a host bind mount, the host directory must be owned by UID 65532..."
+```
+
+The fix is one host-side command before first start:
+
+```bash
+sudo mkdir -p /srv/wavehouse
+sudo chown -R 65532:65532 /srv/wavehouse
+```
+
+UID 65532 is the canonical distroless `nonroot` user; the same number works regardless of whether your host has a matching name in `/etc/passwd`. The error log includes this remediation hint, so if you see "permission denied" at startup, copy the suggested `chown` command and re-run.
+
+**Pipes bind mount** follows the same rule — but mount it **read-only** since pipes is a seed, not state:
+
+```yaml
+volumes:
+  - ./my-pipes:/app/pipes:ro    # :ro is intentional, see below
+```
+
+Read-only mounts don't need write permission for the container user, so `chown` isn't strictly required — but matching ownership keeps everything consistent.
+
 ## Pipes Bootstrap (optional, read-only)
 
 Named query pipes live in NATS KV (`WAVEHOUSE_PIPES`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
