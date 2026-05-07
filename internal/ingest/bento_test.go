@@ -883,6 +883,8 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			
 			msg := service.NewMessage([]byte(tt.payload))
 			msg.MetaSet("table_name", "test_table")
 			msg.MetaSet("received_timestamp", tt.timestamp)
