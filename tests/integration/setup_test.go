@@ -40,7 +40,6 @@ import (
 )
 
 const (
-	testStream     = "WAVEHOUSE"
 	testCHPassword = "test"
 	testCHDatabase = "default"
 	testCHUser     = "default"
@@ -144,7 +143,7 @@ func setup() (int, func()) {
 	// Embedded NATS lives in-process — no testcontainer needed. Production
 	// uses the same in-process server, so the integration tests exercise
 	// the real wiring rather than a NATS Docker image we never ship with.
-	embeddedMQ, err := mq.NewEmbedded(mustTempDir(), testStream, 10*1024*1024, testutil.NopLogger())
+	embeddedMQ, err := mq.NewEmbedded(mustTempDir(), 10*1024*1024, testutil.NopLogger())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: embedded nats: %v\n", err)
 		return 1, cleanup
@@ -152,7 +151,7 @@ func setup() (int, func()) {
 	cleanups.push(func() { _ = embeddedMQ.Close() })
 
 	js := embeddedMQ.JetStream()
-	if err := api.EnsureDLQStream(ctx, js, testStream, 1024*1024); err != nil {
+	if err := api.EnsureDLQStream(ctx, js, 1024*1024); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: ensure dlq: %v\n", err)
 		return 1, cleanup
 	}
@@ -166,7 +165,6 @@ func setup() (int, func()) {
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		testStream,
 		ch.conn,
 		ch.nativeAddr(),
 		ch.httpPort,
@@ -316,7 +314,7 @@ func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *disc
 		WS:     api.NewWSHandler(hub, js, nil),
 		Health: api.NewHealthHandler(chConn),
 		Schema: api.NewSchemaHandler(registry),
-		DLQ:    api.NewDLQHandler(js, testStream, logger),
+		DLQ:    api.NewDLQHandler(js, logger),
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
 		JS:     js,
 	}

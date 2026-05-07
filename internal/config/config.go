@@ -42,9 +42,8 @@ type ClickHouse struct {
 }
 
 type MQ struct {
-	StreamName       string `yaml:"stream_name" env:"WH_MQ_STREAM_NAME" env-default:"WAVEHOUSE"`
-	GapWindowMinutes int    `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
-	MaxBytesGB       int    `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
+	GapWindowMinutes int `yaml:"gap_window_minutes" env:"WH_MQ_GAP_WINDOW_MINUTES" env-default:"15"`
+	MaxBytesGB       int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
 type Dedupe struct {
@@ -117,10 +116,6 @@ func (c *Config) Validate() error {
 
 	if c.MQ.GapWindowMinutes < 0 {
 		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
-	}
-
-	if c.MQ.StreamName == "" {
-		c.MQ.StreamName = "WAVEHOUSE"
 	}
 
 	return nil

@@ -12,6 +12,11 @@ func TestStreamName(t *testing.T) {
 	assert.Equal(t, "WAVEHOUSE", StreamName())
 }
 
+func TestDLQStreamName(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "WAVEHOUSE_DLQ", DLQStreamName())
+}
+
 func TestMessage_AckNak(t *testing.T) {
 	t.Parallel()
 

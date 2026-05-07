@@ -17,7 +17,6 @@ clickhouse:
   password: ""
 
 mq:
-  stream_name: WAVEHOUSE
   gap_window_minutes: 15
   max_bytes_gb: 50
 

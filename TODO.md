@@ -38,7 +38,6 @@
 - [ ] Pipes need to use KV Watcher to update in real-time across cluster instead of just on startup
 - [ ] Consider custom buffer instead of Bento for smaller binary and dependencies
 - [ ] Ack and Nak methods in mq should have context for timeouts and cancellation
-- [ ] don't make streamnames magic strings (like "WAVEHOUSE"), let them be configurable for when running staging + prod on same NATS cluster, and also to allow users to run multiple WaveHouse instances with different stream names on the same cluster if they want
 - [ ] Move API handlers into their own package for better organization and separation of concerns, and to avoid the `internal/api` package becoming too large and unwieldy as we add more endpoints and features.
 - [ ] Get Delve setup working for local development with `make dev` and VS Code Go extension for easier debugging.
 - [ ] Add more integration tests covering the full end-to-end flow from API ingestion to ClickHouse, including edge cases and failure scenarios.

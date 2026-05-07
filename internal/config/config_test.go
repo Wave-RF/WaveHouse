@@ -189,18 +189,6 @@ func TestValidate_NegativeGapWindow(t *testing.T) {
 	assert.Contains(t, err.Error(), "gap_window_minutes")
 }
 
-func TestValidate_DefaultsStreamNameWhenEmpty(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server: Server{Port: 8080},
-		Schema: Schema{RefreshInterval: 60},
-	}
-
-	err := cfg.Validate()
-	require.NoError(t, err)
-	assert.Equal(t, "WAVEHOUSE", cfg.MQ.StreamName)
-}
-
 func TestLoad_AuthEnabledNoSecret_FailsValidation(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

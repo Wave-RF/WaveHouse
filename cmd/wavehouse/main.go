@@ -134,7 +134,7 @@ func run() int {
 	// Embedded MQ (NATS).
 	config.WarnIfFreshDataDir(logger, "nats", natsDir)
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	embeddedMQ, err := mq.NewEmbedded(natsDir, cfg.MQ.StreamName, maxBytes)
+	embeddedMQ, err := mq.NewEmbedded(natsDir, maxBytes)
 	if err != nil {
 		config.LogStorageInitError(logger, "mq", natsDir, err)
 		return 1
@@ -147,7 +147,7 @@ func run() int {
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), cfg.MQ.StreamName, maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
 			return 1
 		}
@@ -197,7 +197,6 @@ func run() int {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		cfg.MQ.StreamName,
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
@@ -238,7 +237,7 @@ func run() int {
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
-		dlqHandler = api.NewDLQHandler(js, cfg.MQ.StreamName, logger)
+		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
