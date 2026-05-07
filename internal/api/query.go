@@ -70,26 +70,45 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
+	cacheKey := queryCacheKey(req.SQL, req.Params)
 
-	result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+	// Try cache.
+	if h.Cache != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			_, _ = w.Write(data)
+			return
+		}
+	}
+
+	// Execute query with singleflight to protect ClickHouse from thundering herds.
+	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
+		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+		if err != nil {
+			return nil, err
+		}
+
+		data, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+
+		if h.Cache != nil {
+			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
+		}
+		return data, nil
+	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// 2. Marshal the results to JSON
-	data, err := json.Marshal(result)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to serialize results")
-		return
-	}
-
-	// 3. Write response with explicit no-cache headers
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-cache") // Tells browsers/proxies not to cache this
-	_, _ = w.Write(data)
+	w.Header().Set("X-Cache", "MISS")
+	_, _ = w.Write(v.([]byte))
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
