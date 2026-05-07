@@ -175,14 +175,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"error", err,
 				)
 
-				// Context-aware Nak wrapper
-				select {
-				case <-ctx.Done():
-					// Suppress Nak during shutdown
-				default:
-					if nakErr := m.Nak(); nakErr != nil {
-						slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
-					}
+				if nakErr := m.Nak(); nakErr != nil {
+					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
 				}
 
 				span.End()
