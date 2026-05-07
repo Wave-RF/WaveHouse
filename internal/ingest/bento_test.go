@@ -831,45 +831,33 @@ func TestClickhouseOutput_WriteBatch_MultiMessage(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// jsInput payload extraction fallbacks
+// jsInput payload extraction validation
 // ---------------------------------------------------------------------------
 
-func TestJsInput_Read_DataCapFallback(t *testing.T) {
+func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	t.Parallel()
-	// Message with empty "data" (lowercase) but populated "Data" (uppercase)
-	evtData := []byte(`{"table_name": "events", "Data": {"source": "DataCap fallback"}}`)
-	natsMsg := &bentoMockMsg{data: evtData}
 
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
-	iter.msgs <- natsMsg
+	// Message missing the "data" payload completely. Should be rejected.
+	badData := []byte(`{"table_name": "events", "action": "insert"}`)
+	badMsg := &bentoMockMsg{data: badData}
+
+	// Good message so the Read loop has something to successfully return
+	goodData := []byte(`{"table_name": "events", "data": {"id": 1}}`)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- badMsg
+	iter.msgs <- goodMsg
 
 	input := &jsInput{iter: iter}
 	msg, _, err := input.Read(context.Background())
 	require.NoError(t, err)
 
+	// The bad message should be DoubleAcked (dropped)
+	assert.True(t, badMsg.doubleAcked, "empty payload message should be acked and dropped")
+
+	// We should have received the good message
 	payload, err := msg.AsBytes()
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"source": "DataCap fallback"}`, string(payload))
-}
-
-func TestJsInput_Read_RawMessageFallback(t *testing.T) {
-	t.Parallel()
-	// Message with BOTH "data" and "Data" empty/missing. Should fall back to the entire raw message.
-	evtData := []byte(`{"table_name": "flattened_events", "some_key": "some_value"}`)
-	natsMsg := &bentoMockMsg{data: evtData}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
-	iter.msgs <- natsMsg
-
-	input := &jsInput{iter: iter}
-	msg, _, err := input.Read(context.Background())
-	require.NoError(t, err)
-
-	payload, err := msg.AsBytes()
-	require.NoError(t, err)
-	// Note: The payload includes the full envelope (including "table_name").
-	// This is safe because ClickHouse HTTP insertion uses
-	// `input_format_skip_unknown_fields=1`, which will silently ignore the
-	// envelope fields that don't match the destination table schema.
-	assert.JSONEq(t, `{"table_name": "flattened_events", "some_key": "some_value"}`, string(payload))
+	assert.JSONEq(t, `{"id": 1}`, string(payload))
 }

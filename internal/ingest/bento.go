@@ -202,13 +202,25 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			span.End()
 			continue
+		} else if raw.Action != "insert" && raw.Action != "" {
+			// ACTION SAFETY: Reject unrecognized actions (e.g., "update", "upsert")
+			// to prevent them from accidentally falling through to the insert path.
+			slog.WarnContext(msgCtx, "rejecting message: unknown action type", "action", raw.Action)
+			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+				slog.WarnContext(msgCtx, "double ack failed for rejected message", "error", doubleAckErr)
+			}
+			continue
 		}
 
 		// Insert case
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
-			// Fallback to the whole message if it was flattened
-			payload = m.Data()
+			// Removed m.Data() fallback. If Payload is missing, the message is malformed.
+			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
+			if doubleAckErr := m.DoubleAck(ctx); doubleAckErr != nil {
+				slog.WarnContext(msgCtx, "double ack failed for malformed message", "error", doubleAckErr)
+			}
+			continue
 		}
 
 		msg := service.NewMessage(payload)

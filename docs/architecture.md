@@ -131,7 +131,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `mq/` — Message Queue
 
-- `mq.go` — `Publisher` and `Subscriber` interfaces. `Message` struct with `doubleAck(ctx)`, `Ack(ctx)`, and `Nak()`.
+- `mq.go` — `Publisher` and `Subscriber` interfaces. `Message` struct with `DoubleAck(ctx)`, `Ack(ctx)`, and `Nak()`.
 - **embedded.go** — Standalone mode: in-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
 - **remote.go** — Clustered mode: connects to an external NATS cluster with the same stream/subject configuration.
 
