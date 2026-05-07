@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 ### Added
 - Created custom `clickhouseOutput` for the Bento ingest pipeline to handle secure SQL interpolation and retroactive trace spanning.
-- Hub bridge uses new `Ack()` (fire-and-forget) to reduce latency and overhead during fan-out.
+- Hub bridge uses new `Ack()` (fire-and-forget) to reduce latency and overhead during fan-out. Enforced standard NATS naming conventions across all consumers.
 - Configurable NATS JetStream stream names via `WH_MQ_STREAM_NAME` to support multi-tenant deployments.
 - **Unit tests for previously-untested packages** (`internal/observability`, `internal/mq`, `internal/dedupe`) and new KV-backed tests for `internal/policy.Store` + `internal/pipes.Store`. Also adds `testutil.NewJetStream(t)` — a shared helper that spins up an in-process NATS + JetStream for tests that need a real `jetstream.JetStream` handle. Per-package coverage: observability 84%, mq 78%, policy 89.6%, pipes 85.2%, dedupe 61.2% (the ScyllaDB paths in `distributed.go` and `schema.go` remain integration-only).
 - **Composite actions for board operations** (`.github/actions/board-upsert-status`, `.github/actions/assign-and-request-review`, `.github/actions/set-linked-issues-status`): reusable building blocks for idempotent "upsert item on the Task Board + set Status," "assign PR reviewers + request their review as a pair," and "mirror status to all linked issues" across workflows. Replaces ~200 lines of duplicated GraphQL/gh-project bash between `project-orchestrator.yml` and `dependabot-automerge.yml`, and gives the new `board-state-sync.yml` a single place to debug board interactions.
@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`workflow_dispatch` manual trigger on `ci.yml`**: lets us re-run CI on demand for any branch via `gh workflow run CI --ref <branch>`. Added after PR #79 hit a GitHub-side anomaly where `pull_request` events stopped firing for a single PR's branch.
 
 ### Changed
-- **Breaking:** `mq.Message.Ack()` and `mq.Message.Nak()` now return `error` and no longer accept a `context.Context`. 
-- **Breaking:** Added `mq.Message.DoubleAck(ctx context.Context) error` for synchronous, server-confirmed acknowledgments. Use this for critical paths (Ingest), and use `Ack()` for non-critical paths (Hub).
+- **Breaking:** `mq.Message.Ack()` and `mq.Message.Nak()` now return `error` (previously no return value) and no longer accept a `context.Context`.
+- **Breaking:** Added `mq.Message.DoubleAck(ctx context.Context) error` for synchronous, server-confirmed acknowledgments. Use this for critical ingest paths (ClickHouse writes).
 - Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation before finalizing batches.
+- Ingest worker now strictly enforces `insert` and `delete` actions; unrecognized actions are safely rejected to the DLQ.
 
 ### Fixed
 
@@ -29,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`admin-approval.yml` required-check staying red after a valid admin approval** (`.github/workflows/admin-approval.yml`): two independent causes, both fixed.
   - `concurrency.cancel-in-progress: true` was producing CANCELLED check runs when a second event (e.g., a bot comment) fired while the approval-triggered run was still executing. Cancelled check runs aren't SUCCESS or FAILURE; the ruleset treated them as not-passing. Changed to `cancel-in-progress: false` so runs queue and complete sequentially — an extra few seconds of latency is far cheaper than a stuck merge gate.
   - Added a fast-path: when the triggering event *is* an admin's APPROVED review, trust `github.event.review.state == 'approved'` + `review.user.login` directly instead of round-tripping through `GET /pulls/{n}/reviews`. The reviews API has observable lag after `pull_request_review.submitted` — the API can take 1–2 seconds to reflect a new review, and the workflow was sometimes polling before that. The slow path (reviews API) retries up to 3× with 2-second backoff for events that aren't themselves a review submit.
+- **Restored** `received_timestamp` injection in Bento ingest pipeline: Fixed a regression where the API-receipt timestamp was lost during the transition to the custom Bento worker. The `jsInput` now captures `received_timestamp` from the NATS envelope and the `clickhouseOutput` safely injects it into the JSON payload via byte-splicing before ClickHouse insertion, ensuring time-series query accuracy.
 
 ### Changed
 
