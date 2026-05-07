@@ -379,10 +379,13 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 			data = bytes.TrimSpace(data)
 			// Ensure it's a valid JSON object structure {...}
 			if len(data) > 2 && data[0] == '{' && data[len(data)-1] == '}' {
+				// Use json.Marshal to ensure the string is JSON-encoded correctly (\uXXXX vs \UXXXXXXXX)
+				rtJSON, _ := json.Marshal(rt)
+
 				// Drop the trailing '}'
 				data = data[:len(data)-1]
 				// Append the timestamp and close the object
-				extra := fmt.Sprintf(`,"received_timestamp":%q}`, rt)
+				extra := fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
 				data = append(data, []byte(extra)...)
 			}
 		}
