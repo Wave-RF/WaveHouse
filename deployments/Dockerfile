@@ -13,17 +13,23 @@ RUN --mount=type=cache,target=/root/.cache/go-build go mod download
 # Copy source code
 COPY . .
 
-# Build all three binaries and cache the build output using BuildKit cache mounts
+# Build all binaries and cache the build output using BuildKit cache mounts
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
+
+# Create directories for state and config, and set ownership to nonroot (UID 65532 in distroless)
+RUN mkdir -p /app/data/nats /app/data/pebble /app/pipes && chown -R 65532:65532 /app
 
 # Stage 2: Final minimal image
 FROM gcr.io/distroless/static-debian12
 
-# Set user and group to non-root for security
+WORKDIR /app
 USER nonroot:nonroot
 
-# Copy binaries from builder
-COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /usr/local/bin/wavehouse
+COPY --from=builder --chown=nonroot:nonroot /app /app
+COPY --from=builder --chown=nonroot:nonroot /bin/wavehouse /app/wavehouse
+
+# Explicitly expose server port
+EXPOSE 8080
 
 # Set standalone as the default if no command is passed
-ENTRYPOINT ["/usr/local/bin/wavehouse"]
+ENTRYPOINT ["/app/wavehouse"]

@@ -3,7 +3,11 @@ FROM gcr.io/distroless/static-debian12
 # GoReleaser automatically injects this based on the platform it's building for
 ARG TARGETPLATFORM
 
-# Copy the binaries from the platform-specific subdirectories GoReleaser creates
-COPY $TARGETPLATFORM/wavehouse /usr/local/bin/wavehouse
+WORKDIR /app
+USER nonroot:nonroot
 
-ENTRYPOINT ["/usr/local/bin/wavehouse"]
+# Copy the binaries from the platform-specific subdirectories GoReleaser creates
+COPY $TARGETPLATFORM/wavehouse /app/wavehouse
+
+EXPOSE 8080
+ENTRYPOINT ["/app/wavehouse"]
