@@ -861,3 +861,31 @@ func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id": 1}`, string(payload))
 }
+
+func TestJsInput_Read_UnknownActionRejected(t *testing.T) {
+	t.Parallel()
+
+	// Message with an unsupported action ("update")
+	badData := []byte(`{"table_name": "events", "action": "update", "data": {"id": 1}}`)
+	badMsg := &bentoMockMsg{data: badData}
+
+	// Good message so Read loop returns successfully
+	goodData := []byte(`{"table_name": "events", "action": "insert", "data": {"id": 2}}`)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- badMsg
+	iter.msgs <- goodMsg
+
+	input := &jsInput{iter: iter}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	// The unknown action message should be DoubleAcked (dropped)
+	assert.True(t, badMsg.doubleAcked, "unknown action message should be acked and dropped")
+
+	// We should have received the good message
+	payload, err := msg.AsBytes()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id": 2}`, string(payload))
+}

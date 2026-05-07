@@ -65,6 +65,10 @@ type Subscriber interface {
 	// CONTRACT: Symmetrically, if you explicitly call msg.Nak(), do NOT also
 	// return an error — the consume loop will call Nak() again on any non-nil
 	// error return.
+	//
+	// CONTRACT: Calling msg.DoubleAck(ctx) and then returning a non-nil error is
+	// undefined behaviour — the consume loop will Nak() after a successful
+	// server-confirmed Ack. Call DoubleAck, then return nil on success.
 	Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error
 	Close() error
 }

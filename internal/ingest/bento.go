@@ -504,7 +504,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, ch
 					scheme = "http" // Default fallback
 				}
 				return &clickhouseOutput{
-					httpClient: &http.Client{Timeout: 15 * time.Second},
+					httpClient: &http.Client{Timeout: 30 * time.Second},
 					scheme:     scheme,
 					host:       host,
 					port:       chHTTPPort,
