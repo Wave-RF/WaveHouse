@@ -376,7 +376,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		var payload map[string]any
 		if err := json.Unmarshal(data, &payload); err != nil {
 			slog.ErrorContext(ctx, "failed to unmarshal payload for timestamp injection", "error", err)
-			return err
+			return fmt.Errorf("unmarshal payload for timestamp injection: %w", err)
 		}
 
 		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
@@ -385,7 +385,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 
 		modifiedData, err := json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to re-marshal payload: %w", err)
+			return fmt.Errorf("re-marshal payload: %w", err)
 		}
 
 		buf.Write(modifiedData)
