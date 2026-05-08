@@ -90,7 +90,7 @@ Tagged images are built by `release.yml` on every `v*` git tag (`:latest`, `:vX.
 
 ### C. `go install` / `go run` (binary, no Docker)
 
-If you have Go 1.25+ installed:
+If you have Go 1.26+ installed:
 
 ```bash
 # Install the latest tagged release into $GOBIN
@@ -109,11 +109,14 @@ WaveHouse is built as an application, not a library — `internal/` packages are
 
 ## 💻 Local Development
 
+You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 20+, and pnpm 10+** on your PATH — see [docs/development.md § Prerequisites](docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
+
 For building and testing WaveHouse locally with hot-reload:
 
 ```bash
-# Install dependencies
-go mod download
+# One-time bootstrap: installs golangci-lint into .bin/, downloads Go modules,
+# and runs pnpm install for the SDK + E2E harness.
+make tools
 
 # Start ClickHouse
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse

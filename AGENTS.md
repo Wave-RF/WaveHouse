@@ -44,7 +44,7 @@ Ten internal packages under `internal/`:
 
 ## Code Conventions
 
-- **Go 1.25**, strict formatting (`gofumpt`, enforced by CI)
+- **Go 1.26**, strict formatting (`gofumpt`, enforced by CI)
 - **Structured logging** with `log/slog` (JSON handler)
 - **Chi v5** for HTTP routing
 - **Error handling**: Return errors, don't panic. Wrap with `fmt.Errorf("context: %w", err)`.
@@ -53,49 +53,85 @@ Ten internal packages under `internal/`:
 
 ## Build & Test Commands
 
+`make help` is the source of truth — run it to see every target with its
+one-line description. Common targets, grouped:
+
 ```bash
+# Setup
+make tools             # Install pinned tools, Go modules, and pnpm deps
 make help              # Show all targets with descriptions
-make setup             # Download Go modules and cache tools
-make tools             # Install external dev tools (golangci-lint, air, goreleaser)
-make check-tools       # Verify all required tools are installed
-make build             # Compile all 3 binaries to bin/
-make build-debug       # Compile with debug symbols (for delve/profiling)
-make fmt               # Format code (gofumpt + goimports)
-make fmt-check         # Verify formatting (non-zero exit if unformatted)
+
+# Static checks (parallel-safe: `make -j verify`)
+make fmt               # Check formatting (run `make fix` to apply)
+make tidy              # Verify go.mod/go.sum are tidy (run `make fix` to apply)
 make lint              # golangci-lint run ./...
-make lint-fix          # golangci-lint run --fix ./...
-make fix               # Auto-format + auto-fix linters
-make test              # Unit tests with race detector
-make test-integration  # Integration tests (needs Docker)
-make test-all          # Unit + integration tests
-make ci                # Full CI check: tidy + fmt + lint + vulncheck + build + tests
-make coverage          # Unit test coverage → tmp/coverage/
-make coverage-enforce  # Fail if coverage is below 70% threshold (see .testcoverage.yml)
-make mod-tidy-check    # Verify go.mod/go.sum are tidy
-make vulncheck         # Run govulncheck vulnerability scanner
-make security          # Combined scan: vulncheck + gosec via linter
+make vulncheck         # Run govulncheck (V=1 for full call stacks)
+make verify            # tidy + fmt + vulncheck + lint
+make fix               # Auto-apply: tidy + gofumpt + goimports + lint --fix
+
+# Build
+make build             # Compile wavehouse → bin/wavehouse (debug symbols kept)
+make build-release     # Stripped release-style build → bin/wavehouse-release
+make build-cover       # Coverage-instrumented build → bin/wavehouse-cov (used by E2E)
+make build-sdk         # Build TypeScript SDK → clients/ts/dist/
+
+# Test (each suite renders coverage and gates against .testcoverage.yml)
+make test              # Alias for test-unit
+make test-unit         # Go unit tests + coverage gate
+make test-integration  # Go integration tests (requires Docker) + coverage gate
+make test-sdk          # SDK vitest unit tests + coverage gate
+make test-e2e          # E2E SDK suite against bin/wavehouse-cov + coverage gate
+make test-all          # All four suites sequentially + merged coverage gate
+make cov               # Merge whichever covdata exists + gate against total threshold
+
+# CI
+make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk
+                       # Phase 2 (sequential): test-integration + test-e2e + cov
+
+# Analysis (informational, not in CI)
+make size              # Binary size analysis → text + SVG + interactive HTML
+make audit-cgo         # Audit deps for C code (builds use CGO_ENABLED=0)
 make deadcode          # Find unreachable functions
-make audit-cgo         # Audit deps for C code (informational — builds use CGO_ENABLED=0)
-make size-report       # Show binary sizes
-make size-tree         # Top packages by size in the binary (text table)
-make size-treemap      # Full binary analysis → text + SVG + interactive HTML
-make dep-graph         # Dependency graph → tmp/analysis/graph.svg (requires graphviz)
-make dep-why MOD=...   # Show why a module is included
-make dep-cut           # Top cuttable deps by transitive impact (LIMIT=N)
-make binary-analysis   # Combined: sizes + dead code + CGO audit
-make smoke-test        # Manual Bento insert+delete (needs running WaveHouse)
-make test-sdk          # TypeScript SDK unit tests
-make test-e2e          # E2E integration tests via SDK (starts Docker services)
-make test-e2e-dev      # E2E tests in watch mode
-make test-everything   # All four test layers: unit + SDK + integration + E2E
-make dev               # Hot-reload dev server (air) — starts ClickHouse + applies fixtures
-make docker            # Build Docker image
-make clean             # Remove bin/, tmp/, data/, dist/
+make dep-cut           # Top cuttable deps by transitive weight (LIMIT=N)
+make binary-analysis   # size + audit-cgo + deadcode
+
+# Dev loop (Docker required for everything in this group)
+make dev               # ClickHouse + WaveHouse with air hot-reload on :8080.
+                       # CORS=*, auth off by default. Override with env vars; e.g.
+                       #   WH_AUTH_ENABLED=true WH_AUTH_DEV_MODE=true make dev
+                       # for the SDK playground (clients/ts/playground/).
+make deps-up           # Start ClickHouse alone (idempotent; blocks until healthy)
+make deps-down         # Stop ClickHouse (preserves data volume)
+make deps-logs         # Tail ClickHouse logs
+make deps-shell        # clickhouse-client REPL on the running container
+make deps-wipe         # Stop AND destroy ClickHouse data volume (DESTRUCTIVE)
+
+# Cleanup (tiered — compose explicitly for partial resets)
+make clean             # Build outputs only (bin/, dist/, clients/ts/dist/)
+make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
+make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
+make clean-all         # Full reset: above + data/ + docker volumes
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
+Build tags: `make build TAGS="foo bar"`.
 
-Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via native `tool` directives and invoked with `go run` — no manual installation needed. `golangci-lint` is installed separately (binary install recommended).
+Tooling notes:
+
+- Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`,
+  `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via
+  native `tool` directives and invoked with `go tool <name>` — no manual
+  install needed.
+- `golangci-lint` is pinned in the Makefile (currently v2.11.4) and
+  auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via
+  `make tools`). Not in `go.mod` — its dependency tree conflicts with the
+  main module.
+- `pnpm` (>= 10.33) and `Node.js` (>= 20) must be on your PATH; the SDK and
+  E2E test harnesses both shell out to `pnpm`. `make tools` runs
+  `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
+- `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD
+  Make 3.81 which will not parse the Makefile. See `docs/development.md` §
+  Prerequisites for the full setup checklist.
 
 ## Testing Conventions
 
@@ -108,7 +144,7 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
 - **Coverage target**: 70% minimum (CI enforced via `.testcoverage.yml`). Aim for 80%+ on new code.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
-- **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run, or `make test-e2e-dev` for watch mode. Add new E2E scenarios as `tests/sdk/*.test.ts` files using helpers from `tests/sdk/helpers.ts`.
+- **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run. Add new E2E scenarios as `tests/e2e/sdk/*.test.ts` files using helpers from `tests/e2e/sdk/helpers.ts`.
 
 ## Local-First Validation (MANDATORY)
 
@@ -119,11 +155,10 @@ Dev tools (`gotestsum`, `gofumpt`, `goimports`) are pinned in `go.mod` via nativ
 Run the CI-equivalent locally:
 
 ```bash
-make ci         # Full parity with CI: tidy + fmt + lint + vulncheck + build + tests
-make coverage   # Matches the CI `Test` job (race detector; -p 1 in CI for package serialization)
+make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then integration + E2E + cov
 ```
 
-If `make ci` passes, your commit has crossed the same gates CI will run. If it fails, fix it before pushing — don't rely on CI to surface issues that took seconds to catch locally.
+`make ci` runs every gate that CI runs (verify = tidy + fmt + lint + vulncheck; build + build-cover + build-sdk; test-unit + test-sdk; test-integration + test-e2e; final merged coverage gate). If it passes, your commit has crossed the same gates CI will run. If it fails, fix it before pushing — don't rely on CI to surface issues that took seconds to catch locally.
 
 For workflow-only changes where `make ci` isn't relevant, manually read through your YAML diff line-by-line before pushing. If you already have `actionlint` installed locally, also run `actionlint .github/workflows/*.yml`; CI's own billing makes "push and see" for workflow-file iteration especially wasteful.
 
@@ -134,7 +169,7 @@ For workflow-only changes where `make ci` isn't relevant, manually read through 
 Order of operations before patching tests for "CI flakiness":
 
 1. **Reproduce the reported failure locally first.** `go test -race -run TestFoo ./...` on your machine. If it fails locally, you have a real test bug; fix it with deterministic primitives (use `c.Wait()` not `time.Sleep`, use `require.Eventually` not `time.Sleep` then assert, use channel sync not goroutine scheduling assumptions).
-2. **If it passes locally, try to reproduce under load.** Run 4 concurrent copies of `make coverage` to simulate the VM's shared-runner contention. If that still passes, the problem is the VM — not the test.
+2. **If it passes locally, try to reproduce under load.** Run 4 concurrent copies of `make test-unit` to simulate the VM's shared-runner contention. If that still passes, the problem is the VM — not the test.
 3. **Only then touch the runner.** SSH in, check `iostat -x 2`, `pgrep -af nats-server`, `df -h`, `du -sh /opt/github/action-runner-*/_work`. Environment fixes (cleanup crons, tmpfs for test temp dirs, slower runner count, faster disk) stay scoped to the runner and don't pollute the codebase.
 
 ### When delegating to another agent
@@ -254,7 +289,7 @@ Before finishing any task, do a quick search across docs for the identifiers you
 3. Use shared mocks from `internal/testutil/` (MockPublisher, MockCache, MockDeduplicator, MockSubscriber).
 4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
 5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
-6. Run `make test` to verify. Run `make coverage` to check coverage.
+6. Run `make test` — it gates the unit-test coverage threshold from `.testcoverage.yml`, so a passing run already confirms coverage.
 7. Aim for 80%+ coverage on new code. 70% is the CI-enforced minimum.
 
 ## File Structure
@@ -273,10 +308,11 @@ internal/policy/        → Access control policies (types, evaluation, NATS KV 
 internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
-tests/compose.yaml      → Shared Docker Compose (ClickHouse + optional WaveHouse via profiles)
+tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
 tests/fixtures/         → Idempotent ClickHouse DDL scripts for test tables
-tests/sdk/              → E2E integration tests via TypeScript SDK (Vitest)
-tests/cmd/bento_pub/    → Manual smoke-test tool (insert+delete via NATS)
+tests/e2e/              → E2E test stack
+tests/e2e/compose.yaml  → Docker Compose with profiles (ClickHouse always; WaveHouse via --profile app)
+tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
 deployments/compose/    → Docker Compose files
 deployments/docker/     → Dockerfiles
 docs/                   → Project documentation

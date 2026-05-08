@@ -125,6 +125,13 @@ GSA         := GOEXPERIMENT=jsonv2 go tool gsa
 GOLANGCI_LINT_VERSION := v2.11.4
 GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
+# air is the hot-reload runner used by `make dev`. We install it to .bin/
+# rather than as a go.mod tool directive because air's transitive deps
+# (hugo, godartsass, sass libs) are heavy enough to bloat go.sum on every
+# `go mod download` — same exclusion principle as golangci-lint.
+AIR_VERSION := v1.65.1
+AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
+
 # --- Coverage Directories -----------------------------------------------------
 # One path per suite. Internal layout (managed by scripts/coverage.sh):
 #   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
@@ -166,10 +173,49 @@ help: ## Show this help menu
 		}' $(MAKEFILE_LIST)
 	@printf "\nTunable variables are documented at the top of the Makefile.\n"
 
+##@ Dev
+
+# All dev / dependency targets share one Compose file. Aliasing the full
+# `docker compose -f ...` invocation keeps recipes terse and lets us swap
+# the path or compose binary in one place if it ever moves (e.g. to support
+# `podman compose`).
+DEV_COMPOSE_FILE := deployments/compose/dependencies.yaml
+DEV_COMPOSE      := docker compose -f $(DEV_COMPOSE_FILE)
+
 .PHONY: dev
-dev: ## Start dev environment (ClickHouse + hot-reload)
-	@echo "$(CYAN)==> Starting Dev Environment...$(RESET)"
-	@go run scripts/dev.go
+dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
+	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
+	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
+	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
+	@echo "    Override config via env: e.g. $(CYAN)WH_AUTH_ENABLED=true WH_AUTH_DEV_MODE=true make dev$(RESET)"
+	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
+	@$(AIR) -c .air.toml
+
+# `up -d --wait` blocks until the compose healthcheck transitions to
+# healthy, so callers can chain on success without a polling loop. The
+# ClickHouse healthcheck (in $(DEV_COMPOSE_FILE)) probes /ping on :8123.
+.PHONY: deps-up
+deps-up: ## Start ClickHouse (idempotent; blocks until healthy)
+	@echo "$(CYAN)==> Starting ClickHouse...$(RESET)"
+	@$(DEV_COMPOSE) up -d --wait clickhouse
+
+.PHONY: deps-down
+deps-down: ## Stop ClickHouse (preserves data volume)
+	@echo "$(YELLOW)==> Stopping ClickHouse...$(RESET)"
+	@$(DEV_COMPOSE) down
+
+.PHONY: deps-logs
+deps-logs: ## Tail ClickHouse logs (Ctrl+C to detach; container keeps running)
+	@$(DEV_COMPOSE) logs -f clickhouse
+
+.PHONY: deps-shell
+deps-shell: ## Open a clickhouse-client REPL on the running container
+	@$(DEV_COMPOSE) exec clickhouse clickhouse-client
+
+.PHONY: deps-wipe
+deps-wipe: ## Stop ClickHouse AND destroy its data volume (DESTRUCTIVE — use to reset state)
+	@echo "$(RED)==> Wiping ClickHouse (containers + volumes)...$(RESET)"
+	@$(DEV_COMPOSE) down -v --remove-orphans
 
 ##@ Code Quality
 
@@ -479,6 +525,7 @@ clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
 	@echo "$(YELLOW)==> Full reset (dev state, docker)...$(RESET)"
 	@rm -rf data/
+	@$(DEV_COMPOSE) down -v --remove-orphans 2>/dev/null || true
 	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans 2>/dev/null || true
 
 ##@ Tooling
@@ -494,7 +541,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) go-mod-download install-sdk install-e2e-sdk ## Install pinned tools, Go modules, and pnpm deps
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk ## Install pinned tools, Go modules, and pnpm deps
 	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
@@ -511,4 +558,13 @@ $(GOLANGCI_LINT):
 	@mkdir -p $(LOCAL_BIN)
 	@curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(LOCAL_BIN) $(GOLANGCI_LINT_VERSION)
 	@mv $(LOCAL_BIN)/golangci-lint $@
+	@echo "$(GREEN)==> Installed: $@$(RESET)"
+
+# air installs cleanly via `go install` (pure Go, no shell-piping). GOBIN
+# pins the install location to our .bin/ rather than the user's $GOPATH/bin.
+$(AIR):
+	@echo "$(YELLOW)==> Installing air $(AIR_VERSION) for $(OS)_$(ARCH)...$(RESET)"
+	@mkdir -p $(LOCAL_BIN)
+	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
+	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"

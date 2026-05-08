@@ -1,3 +1,14 @@
+# Compose stack used by `make dev` (and direct `docker compose` invocations).
+# Brings up ClickHouse on the standard ports so a host-side WaveHouse (run
+# under air, or `go run`, or `./bin/wavehouse`) can connect at :9000 / :8123.
+#
+# `name:` pins the Compose project name so containers/volumes/networks land
+# under `wavehouse-dev_*` regardless of CWD — without this, the project
+# name defaults to the parent directory and changes if you invoke from a
+# worktree or move the repo.
+
+name: wavehouse-dev
+
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -9,6 +20,15 @@ services:
       CLICKHOUSE_PASSWORD: ""
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 15
 
 volumes:
   clickhouse-data:
