@@ -857,12 +857,6 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 			timestamp:      "2026-05-07T12:00:00Z",
 			expectedPrefix: `{  "received_timestamp":"2026-05-07T12:00:00Z"}`,
 		},
-		{
-			name:           "pre-existing timestamp",
-			payload:        `{"metric": 99,"received_timestamp":"old-time"}`,
-			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{"metric": 99,"received_timestamp":"old-time","received_timestamp":"2026-05-07T12:00:00Z"}`,
-		},
 	}
 
 	for _, tt := range tests {

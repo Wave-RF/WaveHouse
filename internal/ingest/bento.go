@@ -238,7 +238,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		j.inFlight.Add(1)
 
 		ackFn := func(ackCtx context.Context, err error) error {
-			j.inFlight.Add(-1)
+			defer j.inFlight.Add(-1)
 
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
