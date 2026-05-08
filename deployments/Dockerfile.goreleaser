@@ -9,7 +9,14 @@
 # runs against `/app/data`; bind mounts mask the image dir entirely and
 # require host-side ownership matching UID 65532.
 
-FROM alpine:3 AS layout
+# Pin to the builder's native arch via $BUILDPLATFORM. Without this, a
+# cross-arch build (e.g. linux/arm64 from an amd64 builder) would default
+# this FROM to the target platform — pulling arm64 alpine and executing
+# arm64 mkdir/chown under QEMU. Since the stage's only outputs are
+# directory entries + UID metadata (arch-agnostic bytes), building it
+# once natively and COPY'ing into each target image is correct AND
+# removes the binfmt/QEMU dependency entirely.
+FROM --platform=$BUILDPLATFORM alpine:3 AS layout
 RUN mkdir -p /app/data /app/pipes && chown -R 65532:65532 /app
 
 FROM gcr.io/distroless/static-debian12
