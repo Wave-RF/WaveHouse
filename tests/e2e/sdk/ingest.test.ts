@@ -2,11 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   dataClient,
   viewerClient,
-  adminClient,
   waitForCondition,
   testId,
   chQuery,
-  isDevMode,
 } from "./helpers.js";
 
 describe("Ingest", () => {
@@ -78,8 +76,6 @@ describe("Ingest", () => {
     } as any);
 
     expect(result.error).not.toBeNull();
-    // In dev mode (no auth), validation errors are 400.
-    // In full mode, admin client also gets 400 for validation.
     expect(result.error!.status).toBe(400);
   });
 
@@ -93,13 +89,6 @@ describe("Ingest", () => {
   });
 
   it("inserts with viewer role", async () => {
-    if (isDevMode()) {
-      console.log(
-        "    ⏭  Skipped: viewer role insert (auth not enforced in dev mode)",
-      );
-      return;
-    }
-
     const viewer = viewerClient();
     const id = testId();
 
@@ -127,3 +116,4 @@ describe("Ingest", () => {
     expect(rows).toHaveLength(1);
   });
 });
+
