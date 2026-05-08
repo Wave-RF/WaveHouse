@@ -123,10 +123,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			// message batch is fully processed (either successfully committed to
 			// ClickHouse or routed to the DLQ). This drain ensures that pending
 			// writes are finished before executing a delete operation.
-			//
-			// NOTE: This relies on Bento having max_in_flight > 1. If set to 1,
-			// Read() would block indefinitely on the counter, creating a deadlock
-			// where ackFn can never be called to decrement the counter.
 			if j.inFlight.Load() > 0 {
 				// NOTE: The effective drain window is min(60s, global_shutdown_timeout).
 				// If the main context (ctx) is cancelled, the drain terminates immediately.
@@ -375,23 +371,30 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 			return fmt.Errorf("read message bytes: %w", err)
 		}
 
-		var payload map[string]any
-		if err := json.Unmarshal(data, &payload); err != nil {
-			slog.ErrorContext(ctx, "failed to unmarshal payload for timestamp injection", "error", err)
-			return fmt.Errorf("unmarshal payload for timestamp injection: %w", err)
-		}
-
+		// Inject timestamp via byte-splicing to prevent float64 precision loss on large Int64/UInt64 values.
 		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
-			payload["received_timestamp"] = rt
-		}
+			data = bytes.TrimSpace(data)
+			// Ensure it's a valid JSON object structure {...}
+			if len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}' {
+				rtJSON, _ := json.Marshal(rt)
 
-		modifiedData, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("re-marshal payload: %w", err)
-		}
+				// Drop the trailing '}'
+				data = data[:len(data)-1]
 
-		buf.Write(modifiedData)
-		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
+				// If the object only contains whitespace after '{', we don't need a comma
+				needsComma := len(bytes.TrimSpace(data[1:])) > 0
+
+				var extra string
+				if needsComma {
+					extra = fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
+				} else {
+					extra = fmt.Sprintf(`"received_timestamp":%s}`, rtJSON)
+				}
+				data = append(data, []byte(extra)...)
+			}
+		}
+		buf.Write(data)
+		buf.WriteString("\n")
 	}
 
 	q := url.Values{}

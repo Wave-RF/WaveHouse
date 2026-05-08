@@ -59,7 +59,6 @@ func (m *bentoMockMsg) Nak() error           { m.naked = true; return nil }
 
 func (m *bentoMockMsg) DoubleAck(ctx context.Context) error {
 	m.doubleAcked = true
-	m.acked = true
 	return nil
 }
 
@@ -221,7 +220,6 @@ func TestJsInput_Read_InsertMessage(t *testing.T) {
 
 	// Ack with nil error — should increment Ack on NATS msg.
 	require.NoError(t, ackFn(context.Background(), nil))
-	assert.True(t, natsMsg.acked)
 	assert.True(t, natsMsg.doubleAcked, "insert message should use DoubleAck, not Ack")
 	assert.Equal(t, int32(0), input.inFlight.Load())
 }
@@ -263,9 +261,7 @@ func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
 	msg, _, err := input.Read(context.Background())
 	require.NoError(t, err)
 
-	// Bad message should have been acked (dropped).
-	assert.True(t, badMsg.acked, "unsafe message should be acked and dropped")
-	assert.True(t, badMsg.doubleAcked, "unsafe message should use DoubleAck, not Ack")
+	assert.True(t, badMsg.doubleAcked, "unsafe message should be double-acked and dropped")
 
 	// Returned message should be the safe one.
 	table, _ := msg.MetaGet("table_name")
@@ -307,8 +303,7 @@ func TestJsInput_Read_DeleteMessage(t *testing.T) {
 	assert.Equal(t, "DELETE FROM `clicks` WHERE id = ?", execQuery)
 	require.Len(t, execArgs, 1)
 	assert.Equal(t, "abc123", execArgs[0])
-	assert.True(t, delMsg.acked, "delete message should be acked on success")
-	assert.True(t, delMsg.doubleAcked, "delete should use DoubleAck")
+	assert.True(t, delMsg.doubleAcked, "delete message should be double-acked on success")
 
 	// Returned message should be the insert.
 	table, _ := msg.MetaGet("table_name")
@@ -482,9 +477,7 @@ func TestJsInput_Read_MalformedJSON(t *testing.T) {
 	msg, _, err := input.Read(context.Background())
 	require.NoError(t, err)
 
-	// Bad message should be acked and dropped.
-	assert.True(t, badMsg.acked, "malformed JSON message should be acked and dropped")
-	assert.True(t, badMsg.doubleAcked, "malformed JSON should use DoubleAck, not Ack")
+	assert.True(t, badMsg.doubleAcked, "malformed JSON message should be double-acked and dropped")
 
 	// Returned message should be the valid one.
 	table, _ := msg.MetaGet("table_name")
@@ -512,8 +505,7 @@ func TestJsInput_Read_EmptyTableName(t *testing.T) {
 	msg, _, err := input.Read(context.Background())
 	require.NoError(t, err)
 
-	assert.True(t, emptyMsg.acked, "empty table_name message should be acked and dropped")
-	assert.True(t, emptyMsg.doubleAcked, "empty table name should use DoubleAck, not Ack")
+	assert.True(t, emptyMsg.doubleAcked, "empty table name should be double-acked and dropped")
 
 	table, _ := msg.MetaGet("table_name")
 	assert.Equal(t, "events", table)
@@ -549,9 +541,7 @@ func TestJsInput_Read_DeleteUnsafeTableName(t *testing.T) {
 	msg, _, err := input.Read(context.Background())
 	require.NoError(t, err)
 
-	// Delete with unsafe table name should be dropped, NOT executed.
-	assert.True(t, delMsg.acked, "unsafe delete should be acked and dropped")
-	assert.True(t, delMsg.doubleAcked, "unsafe delete table name should use DoubleAck, not Ack")
+	assert.True(t, delMsg.doubleAcked, "unsafe delete should be double-acked and dropped")
 	assert.False(t, execCalled, "delete should not be executed for unsafe table name")
 
 	table, _ := msg.MetaGet("table_name")
@@ -843,7 +833,7 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 			name:           "standard injection",
 			payload:        `{"metric": 99}`,
 			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{"metric":99,"received_timestamp":"2026-05-07T12:00:00Z"}`,
+			expectedPrefix: `{"metric": 99,"received_timestamp":"2026-05-07T12:00:00Z"}`,
 		},
 		{
 			name:           "empty object without syntax error",
@@ -855,7 +845,7 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 			name:           "whitespace empty object",
 			payload:        `{  }`,
 			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{"received_timestamp":"2026-05-07T12:00:00Z"}`,
+			expectedPrefix: `{  "received_timestamp":"2026-05-07T12:00:00Z"}`,
 		},
 	}
 
