@@ -154,7 +154,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 							"table", raw.TableName,
 							"id", raw.ID,
 						)
-						_ = m.Nak()
+						if nakErr := m.Nak(); nakErr != nil {
+							slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
+						}
 						span.End()
 						flushCancel()
 						return nil, nil, fmt.Errorf("drain wait aborted: %w", flushCtx.Err())
