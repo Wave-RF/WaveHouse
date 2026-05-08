@@ -139,20 +139,23 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 					case <-flushCtx.Done(): // 60-second drain timeout hit or context cancelled
 						ticker.Stop()
-
-						if ctx.Err() == nil {
-							slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
-								"table", raw.TableName,
-								"id", raw.ID,
-							)
-							// Only Nak if we aren't shutting down; otherwise, let NATS handle redelivery
-							if nakErr := m.Nak(); nakErr != nil {
-								slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
-							}
-						}
-
 						span.End()
 						flushCancel()
+
+						if ctx.Err() != nil {
+							return nil, nil, ctx.Err() // Return canonical cancellation
+						}
+
+						// Real 60-second timeout
+						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
+							"table", raw.TableName,
+							"id", raw.ID,
+						)
+						// Only Nak if we aren't shutting down; otherwise, let NATS handle redelivery
+						if nakErr := m.Nak(); nakErr != nil {
+							slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
+						}
+
 						return nil, nil, fmt.Errorf("drain wait aborted: %w", flushCtx.Err())
 
 					case <-ticker.C:
@@ -234,9 +237,11 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
-				// NATS jetstream.Msg.Nak() is a non-blocking, fire-and-forget network call
-				// that does not accept a context. The lack of context here is intentional.
-				return m.Nak()
+				// Log the Nak failure but return nil to Bento so it doesn't treat the Nak-error as a crash
+				if nakErr := m.Nak(); nakErr != nil {
+					slog.WarnContext(msgCtx, "nak failed for unprocessed batch", "error", nakErr)
+				}
+				return nil
 			}
 
 			slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
@@ -378,11 +383,9 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 			if len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}' {
 				rtJSON, _ := json.Marshal(rt)
 
-				// Drop the trailing '}'
-				data = data[:len(data)-1]
-
-				// If the object only contains whitespace after '{', we don't need a comma
-				needsComma := len(bytes.TrimSpace(data[1:])) > 0
+				// Check if the object has existing fields to see if we need a comma
+				inside := data[1 : len(data)-1]
+				needsComma := len(bytes.TrimSpace(inside)) > 0
 
 				var extra string
 				if needsComma {
@@ -390,7 +393,13 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 				} else {
 					extra = fmt.Sprintf(`"received_timestamp":%s}`, rtJSON)
 				}
-				data = append(data, []byte(extra)...)
+
+				// SAFE ALLOCATION: Create a completely new slice to avoid mutating the original message's backing array
+				newData := make([]byte, 0, len(data)+len(extra))
+				newData = append(newData, data[:len(data)-1]...) // copy everything except the trailing '}'
+				newData = append(newData, []byte(extra)...)      // append the new field + closing '}'
+
+				data = newData // reassign the local variable
 			}
 		}
 		buf.Write(data)
