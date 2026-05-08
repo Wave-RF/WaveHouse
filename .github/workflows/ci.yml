@@ -56,13 +56,47 @@ jobs:
       # resolves on the runner.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: ./.github/actions/setup-env
+      - id: setup
+        uses: ./.github/actions/setup-env
 
       - name: Run CI pipeline
         # `make ci` runs verify + every build variant + unit tests + SDK
         # tests in parallel (under -j 4), then test-integration → test-e2e
         # → cov sequentially. Mirrors local `make ci` exactly.
         run: make ci
+
+      # Cache save: only on push to main, and only when the exact key
+      # didn't already exist upstream (skip the re-upload no-op). PR
+      # pushes are restore-only — see setup-env/action.yml. Net effect:
+      # PR runs save ~3 minutes per push by skipping the ~1.7 GB
+      # post-step that the unified `actions/cache@v4` was running.
+      #
+      # Three save steps mirror the three restore caches in setup-env —
+      # paths and keys must stay in sync.
+      - name: Save Go module + build cache
+        if: github.ref == 'refs/heads/main' && steps.setup.outputs.gobuild-cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Save golangci-lint cache
+        if: github.ref == 'refs/heads/main' && steps.setup.outputs.golangci-cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .bin
+            ~/.cache/golangci-lint
+          key: golangci-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yml') }}
+
+      - name: Save pnpm store cache
+        if: github.ref == 'refs/heads/main' && steps.setup.outputs.pnpm-cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml') }}
 
       # Coverage badge — only on main, only when the workflow can push to
       # the `badges` branch. The action no-ops on PRs (empty git-token in

@@ -1,17 +1,22 @@
-name: Lint PR title
+name: PR housekeeping
 
-# When squash-merging, the PR title becomes the commit message on main.
-# This workflow enforces Conventional Commits on the PR title so history
-# stays parseable (changelog generation, `git log --oneline`, etc).
+# Combines two responsibilities that both run once per PR open/push, in a
+# single job to keep PR-time runner-pod usage low:
 #
-# Required by the `main branch protection` ruleset as the `Validate`
-# check — must report on every PR or merge gets stuck at "pending."
+#   1. Apply path-based labels via actions/labeler (was label.yml).
+#   2. Validate PR title against Conventional Commits (was pr-title.yml).
 #
 # Triggered by `pull_request_target` so the workflow runs from the
-# default branch with base-repo permissions — fork PRs get the sticky
-# comment too. (`pull_request` from the head ref is not used: it runs
-# without `issues: write` on forks, so the comment step would fail
-# and the dual-trigger duplicate run was wasted CI minutes.)
+# default branch with base-repo permissions — fork PRs get auto-labels
+# AND the title sticky-comment. (`pull_request` from the head ref isn't
+# used: it lacks `pull-requests: write` and `issues: write` on forks,
+# so the labeler + sticky-comment steps would silently fail there.)
+#
+# Required by the `main branch protection` ruleset as the
+# `PR housekeeping` check — must report on every PR or merge gets stuck
+# at "pending." The check fails if and only if the PR title doesn't
+# match Conventional Commits; labeling failures are non-fatal so a flaky
+# label call can't block merge.
 
 on:
   pull_request_target:
@@ -28,15 +33,28 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: pr-title-${{ github.event.pull_request.number }}
+  group: pr-housekeeping-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Validate
+  housekeeping:
+    name: PR housekeeping
     runs-on: [wave-rf-runners]
     timeout-minutes: 5
     steps:
+      # --- Path-based labeling -----------------------------------------
+      # actions/labeler reads .github/labeler.yml from the BASE branch
+      # (main) and applies labels based on the PR's changed files.
+      # `sync-labels: true` removes labels when their matching files are
+      # no longer in the diff, so labels stay in sync with the current
+      # change set rather than accumulating.
+      - name: Apply file-path labels
+        uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b # v6.0.1
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: true
+
+      # --- PR title validation -----------------------------------------
       - name: Check Conventional Commits format
         id: check
         env:
@@ -68,7 +86,7 @@ jobs:
             echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"
           fi
 
-      - name: Post / update sticky comment on failure
+      - name: Post / update sticky comment on title fail
         # continue-on-error because GITHUB_TOKEN is read-only for fork
         # PRs, so the comment will fail there — that must not mask the
         # final exit-1 below that drives the required-check status.
@@ -118,7 +136,7 @@ jobs:
             echo "Posted new pr-title-lint comment"
           fi
 
-      - name: Clean up sticky comment on pass
+      - name: Clean up sticky comment on title pass
         if: steps.check.outputs.passed == 'true'
         continue-on-error: true
         env:

@@ -7,11 +7,28 @@ name: Admin approval
 # `.github/workflows/project-orchestrator.yml`) and human reviewers
 # are only notified once bots are clean.
 #
-# Dependabot PRs bypass this check because they go through
-# dependabot-automerge.yml for patch/minor bumps — auto-approved by
-# the bot and merged hands-off. Major bumps post a comment and stay
-# open for human review, at which point an admin approval is recorded
-# normally.
+# Status reporting model: this workflow does NOT use its own check-run
+# conclusion to drive the gate. Instead it manually POSTs a commit
+# status with context "Admin approval" via the GitHub statuses API.
+# Two reasons:
+#
+#   1. PRs sit unapproved by definition for most of their lifetime.
+#      With check-run conclusions, every push reported FAILURE until
+#      an admin reviewed, which spammed the author with workflow-
+#      failure emails on every iteration.
+#   2. Commit-status state `pending` (⏳) is a non-failure way to
+#      block merge. The required-status-check ruleset accepts either
+#      check runs or commit statuses by name, so swapping to commit
+#      statuses preserves the merge gate while killing the email
+#      noise.
+#
+# The workflow itself always exits 0; the commit status is the source
+# of truth. Required by ruleset 15353356 by name "Admin approval".
+#
+# Dependabot PRs bypass this check entirely (status is posted as
+# success without any review check). Patch / minor bumps are merged
+# hands-off via dependabot-automerge.yml; major bumps still get
+# human eyes through the same workflow's Ready-board path.
 
 on:
   pull_request:
@@ -24,6 +41,10 @@ on:
 
 permissions:
   pull-requests: read
+  # statuses: write is the new permission needed for the
+  # `POST /repos/.../statuses/{sha}` API call. This is what lets us
+  # bypass the check-run-conclusion → workflow-fail-email path.
+  statuses: write
 
 concurrency:
   # cancel-in-progress: false is deliberate. The earlier `true` setting
@@ -53,17 +74,39 @@ jobs:
       - name: Load board config
         run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
-      - name: Check for admin approval
+      - name: Evaluate admin approval and post commit status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
           REVIEW_AUTHOR: ${{ github.event.review.user.login }}
+          # Build a link back to this run so the commit status's
+          # target_url surfaces the approval logic if anyone clicks
+          # the status's "Details" link.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+
+          # Helper: post a commit status. Always succeed at the
+          # workflow level — the commit status is the source of truth
+          # for whether merge is allowed, not this workflow's
+          # conclusion. (See header comment.)
+          post_status() {
+            local state="$1"      # pending | success
+            local description="$2"
+            gh api -X POST "repos/$REPO/statuses/$PR_HEAD_SHA" \
+              -f "state=$state" \
+              -f "context=Admin approval" \
+              -f "description=$description" \
+              -f "target_url=$RUN_URL" > /dev/null
+            echo "Posted commit status: state=$state context='Admin approval' description='$description'"
+          }
+
           # Dependabot bypass — dependabot-automerge.yml handles these.
           # Match both login shapes ("dependabot[bot]" is the standard
           # user-context login; "app/dependabot" shows up in some GH
@@ -71,6 +114,7 @@ jobs:
           # with project-orchestrator.yml.
           if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
             echo "::notice::Dependabot PR — bypassing admin approval (handled by dependabot-automerge workflow)."
+            post_status success "Dependabot PR — bypassed"
             exit 0
           fi
 
@@ -89,7 +133,8 @@ jobs:
           if [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "submitted" && "$REVIEW_STATE" == "approved" ]]; then
             for admin in "${admins[@]}"; do
               if [[ "$REVIEW_AUTHOR" == "$admin" ]]; then
-                echo "::notice::Admin $REVIEW_AUTHOR just approved PR #$PR_NUM — short-circuit success."
+                echo "::notice::Admin $REVIEW_AUTHOR just approved PR #$PR_NUM — fast-path success."
+                post_status success "Approved by $REVIEW_AUTHOR"
                 exit 0
               fi
             done
@@ -113,19 +158,10 @@ jobs:
           # path above covers the common submit case; this retry
           # guards non-submit events (synchronize, opened) that fire
           # in the same cluster as a submit.
-          # Retry until an *admin* login appears in approvers — not
-          # merely until approvers is non-empty. A non-admin approval
-          # (e.g. an external contributor approving their own PR's
-          # author) would otherwise satisfy the `-n "$approvers"` break
-          # condition on the first attempt, short-circuiting before
-          # a newly-submitted admin approval has propagated through
-          # the reviews API (Copilot flagged this).
           # Distinguish "API succeeded, no admin in approvers yet"
-          # (retry — propagation lag) from "API failed" (fail loud
-          # rather than silently passing an empty approvers list as
-          # 'no approval'). Copilot flagged the blanket `2>/dev/null
-          # || echo ""` as masking real regressions (rate limit,
-          # permissions lost, etc.) as "no one approved yet."
+          # (retry — propagation lag) from "API failed" (post a
+          # pending status with the error in the description so it's
+          # surfaced, rather than silently treating it as no-approval).
           attempts=0
           approvers=""
           admin_found=""
@@ -165,30 +201,32 @@ jobs:
             [ $attempts -lt 3 ] && sleep 2
           done
 
-          # If every attempt errored, fail hard rather than report
-          # "no admin approval" — which would be misleading when the
-          # reason is really a broken API call.
+          # If every attempt errored, post pending with an error
+          # description rather than silently reporting "no admin
+          # approval." The status stays blocking either way (pending
+          # blocks merge same as a failure would), but the description
+          # makes the real cause visible.
           if [ -z "$admin_found" ] && [ -n "$last_api_err" ]; then
             echo "::error::Unable to read PR reviews after 3 attempts. Last error: $last_api_err"
-            exit 1
+            post_status pending "Reviews API unreachable; unable to check approval"
+            exit 0
           fi
 
           if [ -n "$admin_found" ]; then
             echo "PR #$PR_NUM has admin approval from $admin_found (latest review state: APPROVED)."
+            post_status success "Approved by $admin_found"
             exit 0
           fi
 
-          {
-            echo "::error::PR #$PR_NUM needs approval from an admin."
-            echo ""
-            echo "Current APPROVED reviewers:"
-            if [[ -z "$approvers" ]]; then
-              echo "  (none)"
-            else
-              printf '  - %s\n' $approvers
-            fi
-            echo ""
-            echo "Required: at least one approving review from any of:"
-            printf '  - %s\n' "${admins[@]}"
-          } >&2
-          exit 1
+          # No admin approval yet — post pending with the wait list in
+          # the description. Pending blocks merge but doesn't email.
+          admin_list=$(IFS=,; echo "${admins[*]}")
+          if [[ -z "$approvers" ]]; then
+            description="Waiting for approval from one of: $admin_list"
+          else
+            # Other approvers exist (non-admin reviewers); call them
+            # out so reviewers see why their approval isn't unblocking
+            # merge.
+            description="Waiting for admin approval. Current approvers: $(echo "$approvers" | tr '\n' ',' | sed 's/,$//; s/,/, /g'). Required: one of $admin_list"
+          fi
+          post_status pending "$description"

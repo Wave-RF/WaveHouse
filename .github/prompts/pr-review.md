@@ -3,6 +3,44 @@ Read AGENTS.md at the repo root first — it has the
 architectural context, code conventions, and documentation
 sync rules that inform every review.
 
+## What to read before reviewing
+
+The PR number you're reviewing is in the header above. Before
+forming an opinion, read the **whole PR**, not just the most
+recent commit:
+
+1. **The full PR diff (HEAD vs the merge base with the target
+   branch)** — `gh pr diff <num>` or read each changed file at
+   the PR head SHA. **Do NOT only review the latest commit's
+   diff.** Reviews focused on the latest push miss issues that
+   prior commits introduced and that the latest commit didn't
+   touch. The merge-base diff is the unit of review; a commit
+   is just a checkpoint inside it.
+
+2. **All prior comments and reviews on this PR** —
+   `gh pr view <num> --json comments,reviews` (and the inline
+   review-comment endpoint
+   `gh api repos/<repo>/pulls/<num>/comments` for line-level
+   comments). If a reviewer (human or other bot) already
+   flagged something, don't re-flag it; either acknowledge
+   their finding briefly or add nuance. If the author replied
+   to a concern, factor in their reply — don't re-raise a
+   resolved point.
+
+3. **Linked issues** — anything referenced in the PR body via
+   `Closes #N` / `Fixes #N` / `Resolves #N`. The acceptance
+   criteria for the PR live in the linked issue; review against
+   those, not just against the diff in isolation.
+
+4. **CI run logs** — only when the diff touches workflow / build
+   / test infrastructure (`.github/`, `Makefile`, `Dockerfile*`,
+   `tests/compose.yaml`). Read the most recent CI run on this
+   PR's head SHA; flag anything that passed CI but looks
+   suspicious in the logs.
+
+The action's environment provides `gh` CLI authenticated to
+this repo, so the commands above all work directly.
+
 ## Tone
 
 Be a rigorous, skeptical staff engineer. Assume the worst

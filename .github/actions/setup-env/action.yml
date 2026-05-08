@@ -3,6 +3,12 @@
 # explicit actions/checkout step (composite actions cannot self-checkout —
 # the workflow has to land the repo first so this action's path resolves).
 #
+# Restore-only: this action only restores caches. Saving is gated on
+# `github.ref == 'refs/heads/main'` and lives in the consuming workflow
+# (ci.yml) so PR pushes never re-upload the 1.7 GB go-build bundle. The
+# `*-cache-hit` outputs let the workflow short-circuit save when the
+# exact key already exists upstream.
+#
 # What's cached, and why each cache is keyed the way it is:
 #
 #   1. Go module + build cache (~/go/pkg/mod, ~/.cache/go-build) keyed on
@@ -30,13 +36,28 @@
 name: Setup CI environment
 description: Restores caches and sets up Go + pnpm + Node for WaveHouse CI
 
+# Cache-hit flags surfaced to the consuming workflow. ci.yml uses these to
+# skip the `actions/cache/save` step when the exact key was already in
+# the cache server (no point re-uploading an identical 1.7 GB blob).
+outputs:
+  gobuild-cache-hit:
+    description: "true if the exact-key Go module + build cache was restored"
+    value: ${{ steps.gobuild-cache.outputs.cache-hit }}
+  golangci-cache-hit:
+    description: "true if the exact-key golangci-lint cache was restored"
+    value: ${{ steps.golangci-cache.outputs.cache-hit }}
+  pnpm-cache-hit:
+    description: "true if the exact-key pnpm store cache was restored"
+    value: ${{ steps.pnpm-cache.outputs.cache-hit }}
+
 runs:
   using: composite
   steps:
     # Go module + build cache. setup-go's bundled cache is exact-key-only
     # (every go.sum change is a hard miss); explicit cache + restore-keys
     # keeps the build cache warm across dep bumps.
-    - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      id: gobuild-cache
       with:
         path: |
           ~/go/pkg/mod
@@ -48,7 +69,8 @@ runs:
     # golangci-lint binary (.bin/) + analysis cache (~/.cache/golangci-lint).
     # Key on Makefile so a GOLANGCI_LINT_VERSION bump invalidates and the
     # binary file-target rule reinstalls the new version.
-    - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      id: golangci-cache
       with:
         path: |
           .bin
@@ -58,7 +80,8 @@ runs:
           golangci-${{ runner.os }}-
 
     # pnpm store, shared across clients/ts and tests/e2e/sdk lockfiles.
-    - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      id: pnpm-cache
       with:
         path: ~/.local/share/pnpm/store
         key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml') }}

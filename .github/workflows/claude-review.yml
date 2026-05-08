@@ -1,52 +1,86 @@
 name: Claude PR review
 
-# Auto-reviews pull requests after CI + PR-title checks complete, but only
-# when the PR author is already trusted (OWNER, MEMBER, COLLABORATOR,
-# or CONTRIBUTOR) to bound token cost. PRs from first-time
-# contributors on forks are skipped here — a maintainer can invoke
-# Claude on them by commenting `@claude`, which is handled by
-# claude-agent.yml.
+# The single Claude workflow on this repo. Auto-reviews trusted-author
+# PRs after CI completes, and accepts manual re-review requests via
+# `@claude` / `/review` comments and the workflow_dispatch button.
+# (Was previously split with `claude-agent.yml`; the agent's
+# code-modifying capability was dropped in favour of a single
+# review-only workflow with a smaller blast radius.)
 #
-# Triggering: this workflow fires on `workflow_run: completed` for both
-# CI and Lint PR title. Each upstream's completion fires us once; the
-# gate-check below skips invocations where any required check is still
-# in-progress (and waits for the next workflow_run to retry). On the
-# common path, "Lint PR title" finishes in <30s, then CI finishes
-# minutes later — we typically run twice: once where CI is still
-# in-progress (early exit), then once where everything's settled.
-# Net runner cost vs. the previous 15-minute polling loop: a few
-# seconds for the early exit, and the remainder runs only when CI is
-# definitely done.
+# Triggers:
+#   workflow_run     — fires after every successful CI run on a PR.
+#                      Reviews update the same sticky comment on every
+#                      run so iteration history stays in one place.
+#   issue_comment    — manual re-trigger when a trusted reviewer types
+#                      `@claude` or `/review` in a PR comment.
+#   workflow_dispatch — UI / `gh workflow run` escape hatch with an
+#                      explicit PR-number input.
+#
+# Trust gating: only OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR
+# can trigger Claude (covers Eric, Taite, John, Leo + any future
+# org members; excludes drive-by fork PRs and Dependabot). The gate
+# is enforced inside the job so all three trigger paths share one
+# code path.
 #
 # Prompt structure follows Anthropic's canonical pr-review-comprehensive
-# template (Code Quality / Security / Performance / Testing / Docs) with
-# a strictness directive, WaveHouse-specific concerns (Go concurrency,
-# ClickHouse SQL injection, AGENTS.md doc-sync), and the severity
-# rubric from Anthropic's security-review example.
+# template — see `.github/prompts/pr-review.md`. The header block we
+# prepend ("REPO: ... PR NUMBER: ...") tells Claude which PR to read
+# the full context of (diff, prior comments, prior reviews, linked
+# issues).
 #
 # Gemini Code Assist (installed as a GitHub App) also reviews PRs. The
 # two reviewers operate independently and their outputs are both
-# advisory. CODEOWNERS + the ruleset are the actual merge-gate.
+# advisory. The ruleset (PR housekeeping + CI + Admin approval +
+# review-thread resolution) is the actual merge gate.
 
 on:
   workflow_run:
-    workflows: [CI, Lint PR title]
+    workflows: [CI]
     types: [completed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+        type: string
 
-# Dedupe per PR — both upstreams firing back-to-back for the same PR
-# could otherwise schedule overlapping reviews. The number is reachable
-# from the workflow_run payload before any step runs.
+# Dedup per PR — the upstream CI's workflow_run + a manual `/review`
+# comment in quick succession could otherwise schedule overlapping
+# reviews. PR-number reachable from each event payload before any
+# step runs.
 concurrency:
-  group: claude-review-${{ github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  group: claude-review-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   review:
     name: Review
-    # Filter to PR-triggered upstreams only. CI also runs on `push: main`
-    # and pr-title's workflow_run can fire from `pull_request_target` —
-    # neither is a PR we want to review here.
-    if: github.event.workflow_run.event == 'pull_request'
+    # Workflow-level gate: short-circuit untrusted / non-PR / red-CI
+    # invocations before spinning up a runner pod. The job-level
+    # `if:` covers each trigger path independently:
+    #
+    #   workflow_run → only when triggered by a successful CI on a
+    #                  pull_request event (skip CI for push:main and
+    #                  failed CI runs)
+    #   issue_comment → only on PR comments (issue.pull_request != null)
+    #                   that mention @claude or /review, from a trusted
+    #                   actor
+    #   workflow_dispatch → always (manual escape hatch)
+    if: |
+      (
+        github.event_name == 'workflow_run'
+          && github.event.workflow_run.event == 'pull_request'
+          && github.event.workflow_run.conclusion == 'success'
+      ) || (
+        github.event_name == 'issue_comment'
+          && github.event.issue.pull_request != null
+          && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/review'))
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: [wave-rf-runners]
     timeout-minutes: 15
     permissions:
@@ -59,50 +93,60 @@ jobs:
       - name: Resolve PR number
         id: pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          ISSUE_COMMENT_PR: ${{ github.event.issue.number }}
+          DISPATCH_PR: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
-          # workflow_run.pull_requests is populated for non-fork PRs.
-          # Fork PRs run CI in the fork's context — workflow_run still
-          # fires here, but the array is empty. Bail out cleanly.
-          num=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+          case "$EVENT_NAME" in
+            workflow_run)
+              # Empty for fork PRs (workflow_run associates pull_requests
+              # only for same-repo PRs). We bail out cleanly below.
+              num="$WORKFLOW_RUN_PR"
+              ;;
+            issue_comment)
+              num="$ISSUE_COMMENT_PR"
+              ;;
+            workflow_dispatch)
+              num="$DISPATCH_PR"
+              ;;
+            *)
+              num=""
+              ;;
+          esac
           if [ -z "$num" ]; then
-            echo "::notice::No PR associated with workflow_run (fork PR or push event); skipping."
+            echo "::notice::No PR number resolved (fork PR? push event?); skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "num=$num" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-      - name: Gate — author trust + required-check snapshot
+      - name: Author trust gate + required-check snapshot
         id: gate
         if: steps.pr.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUM: ${{ steps.pr.outputs.num }}
+          EVENT_NAME: ${{ github.event_name }}
           # Required checks from the `main branch protection` ruleset.
-          # Newline-separated so names with spaces round-trip correctly.
-          # Post-consolidation (PR #93b3206): ci.yml is a single job named
-          # "CI" that runs the full make-ci pipeline (lint + test + build +
-          # SDK + integration + e2e). Validate is the PR-title check from
-          # pr-title.yml. Keep this list in sync with the ruleset's
-          # required_status_checks and project-orchestrator.yml's bot-clean
-          # check.
+          # Newline-separated so names with spaces ("PR housekeeping")
+          # round-trip correctly. Keep in sync with the ruleset's
+          # required_status_checks and project-orchestrator.yml's
+          # bot-clean check.
           REQUIRED_CHECKS: |
             CI
-            Validate
+            PR housekeeping
         run: |
           set -euo pipefail
 
-          # Read the PR's current state in one round-trip: draft, author,
-          # association, and the full check rollup.
+          # Read the PR's current state in one round-trip: draft,
+          # author, association, head SHA, and the full check rollup.
           pr=$(gh pr view "$PR_NUM" -R "$REPO" \
-            --json isDraft,author,authorAssociation,statusCheckRollup)
+            --json isDraft,author,authorAssociation,headRefOid,statusCheckRollup)
 
-          # Author-trust gate — same as the previous pull_request `if:`
-          # but evaluated here since workflow_run doesn't carry pull_request
-          # context to the job-level `if:`.
           if [ "$(echo "$pr" | jq -r '.isDraft')" = "true" ]; then
             echo "::notice::PR #$PR_NUM is draft; skipping review."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -127,58 +171,58 @@ jobs:
               ;;
           esac
 
-          # Required-check snapshot. Each required check must be in a
-          # terminal SUCCESS-equivalent state for us to proceed. If any
-          # is still running, we exit cheaply — the OTHER upstream's
-          # workflow_run completion will fire us again and we'll retry.
-          # If any has concluded as failure/cancelled/timed_out, skip
-          # review (don't burn tokens reviewing red CI).
-          rollup=$(echo "$pr" | jq -c '.statusCheckRollup')
-          mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | awk 'NF')
+          head_sha=$(echo "$pr" | jq -r '.headRefOid')
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
-          for check in "${CHECKS[@]}"; do
-            entry=$(echo "$rollup" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
-            if [ -z "$entry" ]; then
-              # Check hasn't been created yet (parallel job not started,
-              # paths-filtered, etc.). Treat as not-yet-done — the next
-              # workflow_run will retry once it appears (or is skipped
-              # by GitHub's required-check-timeout).
-              echo "::notice::Required check '$check' not yet present on PR #$PR_NUM; will retry on next workflow_run."
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            status=$(echo "$entry" | jq -r '.status // empty')
-            conclusion=$(echo "$entry" | jq -r '.conclusion // empty')
-            if [ "$status" != "COMPLETED" ]; then
-              echo "::notice::Required check '$check' is $status (not COMPLETED); will retry on next workflow_run."
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            case "$conclusion" in
-              SUCCESS|NEUTRAL|SKIPPED) ;;
-              FAILURE|CANCELLED|TIMED_OUT|STARTUP_FAILURE|ACTION_REQUIRED|STALE)
-                echo "::notice::Required check '$check' concluded $conclusion; skipping Claude review (no point reviewing red CI)."
+          # Required-check snapshot — only enforced for workflow_run.
+          # On manual triggers (issue_comment, workflow_dispatch) we
+          # honour the explicit ask even if CI is still red or running;
+          # the human has already decided they want a review.
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            rollup=$(echo "$pr" | jq -c '.statusCheckRollup')
+            mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | awk 'NF')
+
+            for check in "${CHECKS[@]}"; do
+              entry=$(echo "$rollup" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
+              if [ -z "$entry" ]; then
+                echo "::notice::Required check '$check' not yet present on PR #$PR_NUM; will retry on next workflow_run."
                 echo "skip=true" >> "$GITHUB_OUTPUT"
                 exit 0
-                ;;
-              *)
-                echo "::warning::Required check '$check' has unrecognised conclusion '$conclusion'; skipping defensively."
+              fi
+              status=$(echo "$entry" | jq -r '.status // empty')
+              conclusion=$(echo "$entry" | jq -r '.conclusion // empty')
+              if [ "$status" != "COMPLETED" ]; then
+                echo "::notice::Required check '$check' is $status (not COMPLETED); will retry on next workflow_run."
                 echo "skip=true" >> "$GITHUB_OUTPUT"
                 exit 0
-                ;;
-            esac
-          done
+              fi
+              case "$conclusion" in
+                SUCCESS|NEUTRAL|SKIPPED) ;;
+                FAILURE|CANCELLED|TIMED_OUT|STARTUP_FAILURE|ACTION_REQUIRED|STALE)
+                  echo "::notice::Required check '$check' concluded $conclusion; skipping Claude review (no point reviewing red CI)."
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+                *)
+                  echo "::warning::Required check '$check' has unrecognised conclusion '$conclusion'; skipping defensively."
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+              esac
+            done
+          fi
 
-          echo "All required checks completed successfully — proceeding with Claude review."
+          echo "Proceeding with Claude review (event: $EVENT_NAME)."
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.skip != 'true'
         with:
-          # workflow_run defaults to checking out the default branch.
-          # Pin to the PR's head SHA so the diff Claude reviews matches
-          # the SHA that actually passed CI.
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # workflow_run / issue_comment / workflow_dispatch all default
+          # to checking out the default branch. Pin to the PR's head
+          # SHA so the diff Claude reviews matches the SHA that
+          # actually passed CI.
+          ref: ${{ steps.gate.outputs.head_sha }}
           fetch-depth: 1
 
       - name: Build review prompt from .github/prompts/pr-review.md

@@ -240,14 +240,14 @@ jobs:
           # Admin approval is deliberately excluded — it opens only
           # after an admin reviews, which is the step this workflow
           # triggers. Including it here would self-reference.
-          # Post-consolidation (commit 93b3206): ci.yml is a single job
-          # named "CI" running the full make-ci pipeline (lint + test +
-          # build + SDK + integration + e2e). Validate is the PR-title
-          # check from pr-title.yml. Keep this list in sync with the
+          # ci.yml is a single job named "CI" running the full make-ci
+          # pipeline (lint + test + build + SDK + integration + e2e).
+          # "PR housekeeping" is the merged label + title-lint check
+          # from housekeeping.yml. Keep this list in sync with the
           # ruleset's required_status_checks and claude-review.yml's
           # REQUIRED_CHECKS.
           pr=$(gh pr view "$PR_NUM" -R "$REPO" --json statusCheckRollup)
-          for check in CI Validate; do
+          for check in CI "PR housekeeping"; do
             state=$(echo "$pr" | jq -r --arg n "$check" \
               '[.statusCheckRollup[] | select(.name == $n)] | .[0].conclusion // "MISSING"')
             if [[ "$state" != "SUCCESS" ]]; then
