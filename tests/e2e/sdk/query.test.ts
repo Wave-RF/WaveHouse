@@ -96,12 +96,17 @@ describe("Query", () => {
   });
 
   it("raw SQL query", async () => {
+    // Scope to seededIds so the SQL string is unique per run — avoids
+    // colliding with admin.test.ts's identical-SQL count which can cache
+    // a stale 0 in /v1/query when it runs first.
     const admin = adminClient();
-    const result = await admin.sql("SELECT count() as cnt FROM default.clicks");
+    const result = await admin.sql(
+      `SELECT count() as cnt FROM default.clicks WHERE event_id IN ('${seededIds.join("','")}')`,
+    );
     expect(result.error).toBeNull();
     expect(result.data).toBeInstanceOf(Array);
     expect(result.data!.length).toBe(1);
-    expect(Number((result.data![0] as any).cnt)).toBeGreaterThan(0);
+    expect(Number((result.data![0] as any).cnt)).toBe(seededIds.length);
   });
 
   it("query non-existent table returns error", async () => {
