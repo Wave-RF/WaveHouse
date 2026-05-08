@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -158,4 +160,13 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
 	_, _ = w.Write(v.([]byte))
+}
+
+func queryCacheKey(sql string, params []any) string {
+	h := sha256.New()
+	h.Write([]byte(sql))
+	for _, p := range params {
+		_, _ = fmt.Fprintf(h, "\x00%v", p)
+	}
+	return "query:" + hex.EncodeToString(h.Sum(nil))
 }

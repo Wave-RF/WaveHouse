@@ -2,10 +2,7 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"reflect"
 	"time"
@@ -14,7 +11,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
 // QueryHandler handles POST /v1/query.
@@ -23,7 +19,6 @@ type QueryHandler struct {
 	Cache       *cache.TieredCache
 	DefaultTTL  time.Duration
 	PolicyStore *policy.Store
-	sf          singleflight.Group
 }
 
 func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
@@ -70,45 +65,25 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := queryCacheKey(req.SQL, req.Params)
-
-	// Try cache.
-	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data)
-			return
-		}
+	// Execute query directly against ClickHouse (bypassing cache and singleflight)
+	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	
+	result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
-	// Execute query with singleflight to protect ClickHouse from thundering herds.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
-		if err != nil {
-			return nil, err
-		}
-
-		data, err := json.Marshal(result)
-		if err != nil {
-			return nil, err
-		}
-
-		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
-		}
-		return data, nil
-	})
+	data, err := json.Marshal(result)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte))
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
@@ -151,13 +126,4 @@ func transformRow(row map[string]any) map[string]any {
 		}
 	}
 	return row
-}
-
-func queryCacheKey(sql string, params []any) string {
-	h := sha256.New()
-	h.Write([]byte(sql))
-	for _, p := range params {
-		_, _ = fmt.Fprintf(h, "\x00%v", p)
-	}
-	return "query:" + hex.EncodeToString(h.Sum(nil))
 }
