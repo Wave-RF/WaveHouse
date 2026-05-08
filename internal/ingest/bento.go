@@ -221,6 +221,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		msg.MetaSet("table_name", raw.TableName)
 
+		msg.MetaSet("received_timestamp", raw.ReceivedTimestamp)
+
 		// Instead of time.Now(), ask NATS exactly when this message arrived in the queue
 		publishedTime := time.Now()
 		if meta, err := m.Metadata(); err == nil {
