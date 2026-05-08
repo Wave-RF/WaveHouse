@@ -141,9 +141,13 @@ func renderSuite(c *config, suite string) error {
 		return err
 	}
 	threshold := thresholdFor(c, suite)
+	rows, total, covered, err := parseCoverage(profile, c)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("\n%s==> %s coverage: %s%s%s  (threshold: %d%%)%s\n\n",
-		cyan, suite, yellow, totalPct(profile), reset, threshold, reset)
-	printBreakdown(profile, c, threshold)
+		cyan, suite, yellow, formatPct(covered, total), reset, threshold, reset)
+	printBreakdown(rows, threshold)
 	fmt.Printf("\n  HTML: %s\n\n", htmlOut)
 
 	if err := gate(profile, threshold); err != nil {
@@ -189,7 +193,7 @@ func merge(c *config) error {
 
 	fmt.Printf("\n%s==> Per-suite breakdown:%s\n", cyan, reset)
 	for _, s := range goSuites {
-		fmt.Printf("  %s%-13s%s %s\n", cyan, s+":", reset, suitePct(s))
+		fmt.Printf("  %s%-13s%s %s\n", cyan, s+":", reset, suitePct(c, s))
 	}
 	if pct := readSDKPct(); pct != "" {
 		fmt.Printf("  %s%-13s%s %s%%  %s(separate gate; not in merge above)%s\n",
@@ -197,8 +201,12 @@ func merge(c *config) error {
 	}
 
 	threshold := c.Threshold.Total
+	rows, _, _, err := parseCoverage(profile, c)
+	if err != nil {
+		return err
+	}
 	fmt.Println()
-	printBreakdown(profile, c, threshold)
+	printBreakdown(rows, threshold)
 	fmt.Printf("\n  HTML: %s\n\n", htmlOut)
 	fmt.Printf("%s==> Combined coverage gate (threshold %d%%):%s\n", cyan, threshold, reset)
 
@@ -210,24 +218,24 @@ func merge(c *config) error {
 	return nil
 }
 
-// printBreakdown emits a per-package coverage table for `profile`, sorted
-// ascending so the least-covered packages land at the top. Honors the
-// YAML `local-prefix` (strips the module path for readability) and
-// `exclude.paths` regexes (so the table matches what the gate evaluates).
-func printBreakdown(profile string, c *config, threshold int) {
-	type row struct {
-		pkg            string
-		total, covered int
-	}
-	pkgs := map[string]*row{}
-	excludes := compileRegexes(c.Exclude.Paths)
+type pkgRow struct {
+	pkg            string
+	total, covered int
+}
 
-	// #nosec G304,G703 — profile is filepath.Join(root, <suite>, "coverage.txt"),
-	// rendered by this same tool. Not user input.
+// parseCoverage reads a textfmt coverage profile, groups statements by
+// package, applies local-prefix stripping and exclude.paths from the config,
+// and returns the per-package rows plus aggregate totals. The aggregates
+// match what go-test-coverage's gate evaluates, so callers can render
+// headers that line up with its "Total test coverage" output.
+func parseCoverage(profile string, c *config) (rows []pkgRow, total, covered int, err error) {
+	// #nosec G304,G703 — profile is a coverage.txt path we rendered ourselves.
 	raw, err := os.ReadFile(profile)
 	if err != nil {
-		return
+		return nil, 0, 0, err
 	}
+	excludes := compileRegexes(c.Exclude.Paths)
+	pkgs := map[string]*pkgRow{}
 	for i, line := range strings.Split(string(raw), "\n") {
 		if i == 0 || line == "" {
 			continue // mode line / blank
@@ -259,21 +267,35 @@ func printBreakdown(profile string, c *config, threshold int) {
 		count, _ := strconv.Atoi(f[2])
 		r, ok := pkgs[pkg]
 		if !ok {
-			r = &row{pkg: pkg}
+			r = &pkgRow{pkg: pkg}
 			pkgs[pkg] = r
 		}
 		r.total += stmts
+		total += stmts
 		if count > 0 {
 			r.covered += stmts
+			covered += stmts
 		}
 	}
-
-	rows := make([]row, 0, len(pkgs))
+	rows = make([]pkgRow, 0, len(pkgs))
 	for _, r := range pkgs {
 		if r.total > 0 {
 			rows = append(rows, *r)
 		}
 	}
+	return rows, total, covered, nil
+}
+
+func formatPct(covered, total int) string {
+	if total == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%%", float64(covered)*100.0/float64(total))
+}
+
+// printBreakdown emits a per-package coverage table from pre-parsed rows,
+// sorted ascending so the least-covered packages land at the top.
+func printBreakdown(rows []pkgRow, threshold int) {
 	if len(rows) == 0 {
 		return
 	}
@@ -323,11 +345,11 @@ func readSDKPct() string {
 	return ""
 }
 
-// suitePct returns "go tool cover -func" total for a suite, or "n/a" if
-// covdata is missing. Uses an existing coverage.txt when present, else
-// renders a throwaway one (so `make cov` shows per-suite numbers without
-// requiring you to have run `make test-<suite>` separately).
-func suitePct(suite string) string {
+// suitePct returns the post-exclusion coverage percentage for a suite, or
+// "n/a" if covdata is missing. Uses an existing coverage.txt when present,
+// else renders a throwaway one (so `make cov` shows per-suite numbers
+// without requiring you to have run `make test-<suite>` separately).
+func suitePct(c *config, suite string) string {
 	d := filepath.Join(root, suite, "data")
 	if !hasCovdata(d) {
 		return "n/a"
@@ -347,25 +369,11 @@ func suitePct(suite string) string {
 		}
 		profile = tmp.Name()
 	}
-	return totalPct(profile)
-}
-
-// totalPct extracts the trailing total percentage from `go tool cover -func`.
-func totalPct(profile string) string {
-	// #nosec G204,G702 — profile is a coverage textfmt path we rendered ourselves.
-	out, err := exec.CommandContext(context.Background(), "go", "tool", "cover", "-func="+profile).Output()
-	if err != nil {
+	_, total, covered, err := parseCoverage(profile, c)
+	if err != nil || total == 0 {
 		return "?"
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) == 0 {
-		return "?"
-	}
-	f := strings.Fields(lines[len(lines)-1])
-	if len(f) == 0 {
-		return "?"
-	}
-	return f[len(f)-1]
+	return formatPct(covered, total)
 }
 
 // gate runs go-test-coverage with the given total threshold. Exclusions
