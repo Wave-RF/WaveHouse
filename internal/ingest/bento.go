@@ -156,7 +156,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 							slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
 						}
 
-						return nil, nil, fmt.Errorf("drain wait aborted: %w", flushCtx.Err())
+						// Use ErrNotConnected to trigger a Bento reconnect/retry rather than a fatal exit.
+						return nil, nil, service.ErrNotConnected
 
 					case <-ticker.C:
 						// Keep waiting
@@ -369,7 +370,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		data, err := msg.AsBytes()
 		if err != nil {
 			chSpan.RecordError(err)
-			slog.ErrorContext(ctx, "failed to read message bytes",
+			slog.ErrorContext(reqCtx, "failed to read message bytes",
 				"table", tableName,
 				"error", err,
 			)
