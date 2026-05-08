@@ -144,19 +144,17 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					case <-flushCtx.Done(): // 60-second drain timeout hit or context cancelled
 						ticker.Stop()
 
-						if ctxErr := ctx.Err(); ctxErr != nil {
-							span.End()
-							flushCancel()
-							return nil, nil, ctxErr
+						if ctx.Err() == nil {
+							slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
+								"table", raw.TableName,
+								"id", raw.ID,
+							)
+							// Only Nak if we aren't shutting down; otherwise, let NATS handle redelivery
+							if nakErr := m.Nak(); nakErr != nil {
+								slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
+							}
 						}
 
-						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
-							"table", raw.TableName,
-							"id", raw.ID,
-						)
-						if nakErr := m.Nak(); nakErr != nil {
-							slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
-						}
 						span.End()
 						flushCancel()
 						return nil, nil, fmt.Errorf("drain wait aborted: %w", flushCtx.Err())
@@ -222,10 +220,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		msg = msg.WithContext(msgCtx)
 
 		msg.MetaSet("table_name", raw.TableName)
-
-		if raw.ReceivedTimestamp != "" {
-			msg.MetaSet("received_timestamp", raw.ReceivedTimestamp)
-		}
 
 		// Instead of time.Now(), ask NATS exactly when this message arrived in the queue
 		publishedTime := time.Now()
@@ -379,29 +373,22 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 			return fmt.Errorf("read message bytes: %w", err)
 		}
 
-		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
-			data = bytes.TrimSpace(data)
-			// Ensure it's a valid JSON object structure {...}
-			if len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}' {
-				rtJSON, _ := json.Marshal(rt)
-
-				// Drop the trailing '}'
-				data = data[:len(data)-1]
-
-				// If the object only contains whitespace after '{', we don't need a comma
-				needsComma := len(bytes.TrimSpace(data[1:])) > 0
-
-				var extra string
-				if needsComma {
-					extra = fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
-				} else {
-					extra = fmt.Sprintf(`"received_timestamp":%s}`, rtJSON)
-				}
-				data = append(data, []byte(extra)...)
-			}
+		var payload map[string]any
+		if err := json.Unmarshal(data, &payload); err != nil {
+			slog.ErrorContext(ctx, "failed to unmarshal payload for timestamp injection", "error", err)
+			return err
 		}
 
-		buf.Write(data)
+		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
+			payload["received_timestamp"] = rt
+		}
+
+		modifiedData, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to re-marshal payload: %w", err)
+		}
+
+		buf.Write(modifiedData)
 		buf.WriteString("\n") // ClickHouse JSONEachRow requires newline separation
 	}
 

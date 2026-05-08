@@ -843,7 +843,7 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 			name:           "standard injection",
 			payload:        `{"metric": 99}`,
 			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{"metric": 99,"received_timestamp":"2026-05-07T12:00:00Z"}`,
+			expectedPrefix: `{"metric":99,"received_timestamp":"2026-05-07T12:00:00Z"}`,
 		},
 		{
 			name:           "empty object without syntax error",
@@ -855,7 +855,7 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 			name:           "whitespace empty object",
 			payload:        `{  }`,
 			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{  "received_timestamp":"2026-05-07T12:00:00Z"}`,
+			expectedPrefix: `{"received_timestamp":"2026-05-07T12:00:00Z"}`,
 		},
 	}
 
