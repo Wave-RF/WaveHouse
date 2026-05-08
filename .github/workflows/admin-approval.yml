@@ -73,7 +73,14 @@ concurrency:
 
 jobs:
   admin-approval:
-    name: Admin approval
+    # The job's display name is the check-run name GitHub auto-creates.
+    # We deliberately use a different name from the commit-status
+    # context ("Admin approval") so the PR checks list doesn't show
+    # two entries with the same name competing — one pass (this
+    # workflow's check run) and one pending (our posted commit
+    # status). The status is the gate; this name advertises the
+    # workflow's job.
+    name: Evaluate admin reviews
     runs-on: [wave-rf-runners]
     timeout-minutes: 5
     steps:
