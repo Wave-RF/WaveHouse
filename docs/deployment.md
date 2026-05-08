@@ -217,12 +217,62 @@ The directory is a *seed*, not authoritative storage: after bootstrap, the API +
 
 ## Health Checks
 
-API servers in standalone mode expose health endpoints:
+API servers in standalone mode expose two health endpoints:
 
-- `GET /health` — Liveness probe. Returns 200 if the process is running.
+- `GET /health` — Liveness probe. Returns 200 if the process is running. No external dependencies.
 - `GET /ready` — Readiness probe. Returns 200 if ClickHouse is reachable, 503 otherwise.
 
 Configure your load balancer or orchestrator to use these endpoints.
+
+### Docker `HEALTHCHECK`
+
+Both bundled Dockerfiles (`deployments/Dockerfile` and `deployments/Dockerfile.goreleaser`) ship a built-in `HEALTHCHECK` that probes `/health` every 10 seconds. Because the runtime image is distroless (no shell, no `curl`/`wget`), the check uses the binary's own `health` subcommand:
+
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+  CMD ["/app/wavehouse", "health"]
+```
+
+The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/health` and exits 0 (200 OK) or 1 (anything else). It honours `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
+
+You can run it manually for debugging:
+
+```bash
+docker exec my-wavehouse /app/wavehouse health
+echo $?   # 0 = healthy, 1 = unhealthy
+```
+
+`docker ps` will show `(healthy)` / `(unhealthy)` in the STATUS column once the start-period elapses.
+
+### Compose `depends_on: service_healthy`
+
+The Dockerfile `HEALTHCHECK` lets dependent services wait for WaveHouse to be ready before starting:
+
+```yaml
+services:
+  wavehouse:
+    image: ghcr.io/wave-rf/wavehouse:latest
+    # HEALTHCHECK is inherited from the image — no override needed.
+
+  my-frontend:
+    image: my-frontend:latest
+    depends_on:
+      wavehouse:
+        condition: service_healthy
+```
+
+If you need different intervals (e.g. faster probes for E2E tests), override per-service via the compose `healthcheck:` block — that replaces the image's HEALTHCHECK for that container.
+
+### Kubernetes / orchestrator note
+
+K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside the container — they don't go through the Dockerfile `HEALTHCHECK` at all. Configure them directly against `/health` and `/ready` in the PodSpec:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /health, port: 8080 }
+readinessProbe:
+  httpGet: { path: /ready,  port: 8080 }
+```
 
 ## ClickHouse Schema
 

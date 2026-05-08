@@ -34,6 +34,13 @@ var (
 )
 
 func main() {
+	// Subcommand dispatch. Currently only `health` exists — used by the
+	// Dockerfile HEALTHCHECK to self-probe /health without needing curl
+	// or wget in the (distroless) image. If we ever need more, swap to
+	// a real argv router.
+	if len(os.Args) > 1 && os.Args[1] == "health" {
+		os.Exit(runHealthCheck())
+	}
 	os.Exit(run())
 }
 

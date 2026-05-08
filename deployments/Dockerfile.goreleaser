@@ -59,4 +59,15 @@ VOLUME ["/app/data"]
 ENV WH_SERVER_PORT=8080
 EXPOSE 8080
 
+# Liveness probe via the binary's built-in `health` subcommand — does an
+# HTTP GET to /health on localhost. Distroless has no shell or curl, so
+# the subcommand approach is the standard pattern here.
+#
+# --interval=10s: probe every 10 seconds
+# --timeout=3s:   in-process check itself caps at 2s
+# --start-period=15s: grace window for schema discovery + NATS init
+# --retries=3:    three consecutive failures before unhealthy
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+  CMD ["/app/wavehouse", "health"]
+
 ENTRYPOINT ["/app/wavehouse"]
