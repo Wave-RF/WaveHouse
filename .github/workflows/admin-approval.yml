@@ -40,6 +40,15 @@ on:
     types: [submitted, dismissed]
 
 permissions:
+  # contents: read is required for `actions/checkout` against this
+  # private repo. The old admin-approval.yml omitted it and was
+  # silently failing at the checkout step on every run — masked by
+  # the workflow's "failure" conclusion, which Eric (correctly) read
+  # as "no admin approved yet" since both states produced the same
+  # red ❌. With the new commit-status approach the workflow always
+  # exits 0, so this latent bug would have surfaced as the workflow
+  # never posting any status. Fixed.
+  contents: read
   pull-requests: read
   # statuses: write is the new permission needed for the
   # `POST /repos/.../statuses/{sha}` API call. This is what lets us
