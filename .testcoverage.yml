@@ -8,7 +8,7 @@ local-prefix: github.com/Wave-RF/WaveHouse
 # step in CI, which invokes the action directly without `--threshold-total`).
 # Per-suite gating in `make test-<suite>` uses the `suites` block below.
 threshold:
-  total: 70
+  total: 80
 
 # Per-suite coverage thresholds (custom key — read by scripts/coverage.sh,
 # silently ignored by go-test-coverage). Single source of truth for what

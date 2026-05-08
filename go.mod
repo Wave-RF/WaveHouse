@@ -14,7 +14,7 @@ tool (
 )
 
 require (
-	github.com/ClickHouse/clickhouse-go/v2 v2.45.0
+	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/coder/websocket v1.8.14
