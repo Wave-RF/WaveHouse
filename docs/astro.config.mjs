@@ -28,7 +28,6 @@ function remarkMermaid() {
 export default defineConfig({
 	site: 'https://wavehouse.dev',
 	trailingSlash: 'never',
-	build: { format: 'file' },
 	markdown: {
 		remarkPlugins: [remarkMermaid],
 	},
