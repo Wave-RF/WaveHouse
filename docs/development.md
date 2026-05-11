@@ -2,27 +2,51 @@
 
 ## Prerequisites
 
-- **Go 1.25+** — [Install Go](https://go.dev/dl/)
-- **Docker** — For running dependencies and integration tests
-- **golangci-lint v2** — [Install golangci-lint](https://golangci-lint.run/welcome/install/) (binary install recommended; not in `go.mod` due to dependency tree size)
-- **air** — For hot-reload during development: [Install air](https://github.com/air-verse/air) (`brew install air` on macOS)
+You need these on your `PATH` before any `make` recipe will work end-to-end:
 
-Other dev tools (`gotestsum`, `gofumpt`, `goimports`) are **pinned in `go.mod`** via native `tool` directives (Go 1.24+) and run automatically through the Makefile — no manual installation needed.
+| Tool | Required version | Why | Install |
+| ---- | ---------------- | --- | ------- |
+| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
+| **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
+| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/` and `tests/e2e/compose.yaml`; integration tests boot a ClickHouse testcontainer | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
+| **Node.js** | 20+ | Runtime for pnpm and the Vitest suites | [nodejs.org](https://nodejs.org/) or `nvm`/`fnm`/`volta` |
+| **pnpm** | 10.33+ (pinned via `packageManager` in `clients/ts/package.json` and `tests/e2e/sdk/package.json`) | Package manager for the TypeScript SDK and E2E test harness; `make build-sdk`, `make test-sdk`, `make test-e2e` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@10.33.0 --activate` (recommended), or `npm i -g pnpm` |
+| **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
-> **Note**: Both `golangci-lint` and `air` are installed as external binaries (not in `go.mod`) because their large dependency trees cause conflicts. If missing, `make lint` and `make dev` print install instructions.
+### Auto-installed by `make tools`
 
-## Quick Start (Standalone Mode)
+Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
+
+- **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
+- **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
+- **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
+- **pnpm deps** for `clients/ts/` and `tests/e2e/sdk/` (via `pnpm install --frozen-lockfile`).
+
+### Verify your setup
+
+```bash
+go version          # go1.26+
+make --version      # GNU Make 4.x
+docker compose version
+node --version      # v20+
+pnpm --version      # 10.33+
+```
+
+If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-sdk`).
+
+## Quick Start
 
 This is the fastest way to get a fully functional local environment:
 
 ```bash
-# 1. Clone and install dependencies
+# 1. Clone and bootstrap (Go modules + golangci-lint + pnpm deps)
 git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
-go mod download
+make tools
 
-# 2. Start ClickHouse (the only external dependency for standalone mode)
-make compose-deps
+# 2. Start ClickHouse (the only external dependency)
+docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 
 # 3. Create a table in ClickHouse
 docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
@@ -43,7 +67,7 @@ make dev
 WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no Redis needed
+- **L1 cache only** (Ristretto) — no external cache needed
 - **Auth disabled** by default — no JWT needed
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
@@ -81,6 +105,66 @@ curl http://localhost:8080/health
 # DLQ stats
 curl http://localhost:8080/v1/dlq/stats
 ```
+
+### How `make dev` works
+
+`make dev` is a one-stop convenience target for backend and frontend
+development. The recipe is essentially:
+
+```make
+dev: deps-up $(AIR)
+    air -c .air.toml
+```
+
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` plus `config.yaml`, rebuilds `tmp/wavehouse` on change, and restarts the binary.
+
+`air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
+
+**While `make dev` is running you get:**
+
+- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
+- Auth disabled by default — every request goes through. Override with env vars (see below).
+- ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
+- Hot reload: editing any `.go` file under `cmd/` or `internal/` (or `config.yaml`) triggers a debounced rebuild + restart. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+
+### Dev convenience targets
+
+These are the small targets behind `make dev` — useful directly when you want
+to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or
+when you need to poke at ClickHouse:
+
+| Target | What it does |
+| ------ | ------------ |
+| `make deps-up` | Start ClickHouse and block until healthy. Idempotent. |
+| `make deps-down` | Stop ClickHouse. Data volume is preserved. |
+| `make deps-logs` | `docker compose logs -f clickhouse` (Ctrl+C detaches; container keeps running). |
+| `make deps-shell` | Drop into a `clickhouse-client` REPL on the running container. |
+| `make deps-wipe` | Stop ClickHouse **and destroy its data volume**. Use when you want a clean schema. |
+| `make clean-all` | Nuclear option — every `make` artifact + dev/E2E containers + volumes + `data/`. |
+
+**Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
+
+### Using the SDK playground against `make dev`
+
+The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse with auth enabled in dev mode and the secret `sdk-dev-secret`. To match those defaults under `make dev`:
+
+```bash
+WH_AUTH_ENABLED=true \
+WH_AUTH_DEV_MODE=true \
+WH_AUTH_JWT_SECRET=sdk-dev-secret \
+make dev
+```
+
+Then in another terminal:
+
+```bash
+cd clients/ts
+pnpm install
+npx tsx playground/setup.ts          # seed sample tables + data
+npx tsx playground/public.ts         # SDK demo against the live server
+```
+
+Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
 
 ### Enable Auth (Optional)
 
@@ -125,64 +209,28 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # → {"duplicate":true}
 ```
 
-## Quick Start (Clustered Mode)
-
-To develop against the full clustered infrastructure locally:
-
-```bash
-# 1. Start all dependencies (ClickHouse, NATS, Redis, ScyllaDB)
-make compose-deps
-
-# 2. Create your tables in ClickHouse
-docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
-  clickhouse-client --query "
-    CREATE TABLE IF NOT EXISTS clicks (
-      page String, button String, score Float64,
-      received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
-    ) ENGINE = MergeTree() ORDER BY (page)
-  "
-
-# 3. Run the API server in one terminal
-WH_MODE=clustered \
-WH_MQ_URL=nats://localhost:4222 \
-WH_CACHE_REDIS_URL=redis://localhost:6379 \
-go run ./cmd/wavehouse-api
-
-# 4. Run the worker in another terminal
-WH_MODE=clustered \
-WH_MQ_URL=nats://localhost:4222 \
-WH_CH_ADDR=localhost:9000 \
-go run ./cmd/wavehouse-worker
-```
-
 ### Using an .env File
 
 ```bash
-# .env.clustered
-export WH_MODE=clustered
+# .env
 export WH_CH_ADDR=localhost:9000
-export WH_MQ_URL=nats://localhost:4222
-export WH_CACHE_REDIS_URL=redis://localhost:6379
 ```
 
 Then:
 
 ```bash
-source .env.clustered
-go run ./cmd/wavehouse-api    # terminal 1
-go run ./cmd/wavehouse-worker # terminal 2
+source .env
+go run ./cmd/wavehouse
 ```
 
 ## Building
 
 ```bash
-# Build all three binaries to bin/
+# Build the binary to bin/
 make build
 
 # Build individual binaries
 go build -o bin/wavehouse ./cmd/wavehouse
-go build -o bin/wavehouse-api ./cmd/wavehouse-api
-go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 ```
 
 ## Running Modes at a Glance
@@ -190,12 +238,9 @@ go build -o bin/wavehouse-worker ./cmd/wavehouse-worker
 | What you want | Command |
 | ------------- | ------- |
 | Hot-reload standalone dev server | `make dev` |
-| Standalone binary (default config) | `./bin/wavehouse` |
-| Standalone via Docker Compose | `make compose-standalone` |
-| Clustered API server (local deps) | `source .env.clustered && go run ./cmd/wavehouse-api` |
-| Clustered worker (local deps) | `source .env.clustered && go run ./cmd/wavehouse-worker` |
-| Full clustered stack via Docker | `make compose-clustered` |
-| Infrastructure deps only | `make compose-deps` |
+| Standalone binary (default config) | `make build && ./bin/wavehouse` |
+| Standalone via Docker Compose | `docker compose -f deployments/compose/standalone.yaml up -d` |
+| Infrastructure deps only (ClickHouse) | `docker compose -f deployments/compose/dependencies.yaml up -d clickhouse` |
 
 ## Testing
 
@@ -208,17 +253,20 @@ All tests run with Go's **race detector** (`-race`) enabled by default. WaveHous
 ### Quick Reference
 
 ```bash
-make test                              # Unit tests (compact output)
+make test                              # Unit tests (compact output) — alias for `test-unit`
 V=1 make test                          # Unit tests (verbose output)
 make test ARGS="-run TestValidate"     # Run specific test(s)
 V=1 make test ARGS="-run TestValidate" # Specific test, verbose
-make test-integration                  # Integration tests (requires Docker)
+make test-integration                  # Go integration tests (requires Docker)
 V=1 make test-integration              # Integration tests, verbose
-make test-all                          # Unit + integration
-make ci                                # Full CI check: fmt + lint + all tests
-make coverage                          # Unit test coverage → tmp/coverage/
-make smoke-test                        # Manual Bento insert+delete (needs running WaveHouse)
+make test-sdk                          # SDK vitest unit tests
+make test-e2e                          # E2E SDK suite against bin/wavehouse-cov
+make test-all                          # All four suites sequentially + merged coverage
+make ci                                # Full CI: parallel verify+builds+test+test-sdk, then test-integration+test-e2e+cov
+make cov                               # Merge available covdata + gate against total threshold
 ```
+
+Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total.
 
 **Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag).
 
@@ -232,41 +280,40 @@ make smoke-test                        # Manual Bento insert+delete (needs runni
 |----------|----------|---------|---------|
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-sdk` |
-| Integration tests (Go) | `tests/integration_test.go` | Yes | `make test-integration` |
-| E2E tests (SDK) | `tests/sdk/*.test.ts` | Yes | `make test-e2e` |
-| Smoke test (manual) | `tests/cmd/bento_pub/main.go` | External | `make smoke-test` |
+| Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
+| E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
 - **Integration tests** use the `//go:build integration` build tag. The `setupTestEnv` helper starts a ClickHouse testcontainer, embedded NATS, Bento ingest worker, and a full API router via `httptest.Server`. Subtests run sequentially because Bento's global registrations are one-time-per-process. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second Bento batch window.
-- **Smoke test** (`make smoke-test`) is a standalone binary that publishes insert + delete events to a running NATS (`localhost:4222`) and verifies ClickHouse (`localhost:9000`) processing. Requires a running WaveHouse instance — it is **not** part of `go test` and does not run with `make test-all`.
 
 Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()` for silencing embedded NATS output).
 
 ### Adding New Tests
 
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest inside `tests/integration_test.go` or create a new `tests/*_test.go` file with `//go:build integration`.
-- **E2E test via SDK** → add a `tests/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e` or `make test-e2e-dev` (watch mode).
-- **Test helpers** → add to `internal/testutil/` (Go) or `tests/sdk/helpers.ts` (E2E).
+- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
+- **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
+- **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
 ### E2E Tests via SDK
 
-The primary E2E integration test suite lives in `tests/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
+The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
 
 **Architecture**:
-- `tests/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app` (allowing `air` hot-reload as an alternative).
-- `tests/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
-- `tests/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
+- `tests/e2e/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app`, so you can also point the suite at a hot-reload `make dev` instance instead.
+- `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
+- `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
 
 ```bash
-make test-e2e          # Install deps + run all E2E tests (starts Docker services if needed)
-make test-e2e-dev      # Watch mode for iterative development
+make test-e2e                    # Build the cover binary, install deps, run all E2E tests
 KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
 ```
 
-**If you already have `air` running** (`make dev`), the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
+`make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
+
+**If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
 
 **Test files**: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
 
@@ -307,14 +354,12 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 ```text
 WaveHouse/
 ├── cmd/                    # Binary entry points
-│   ├── wavehouse/          # Standalone all-in-one binary
-│   ├── wavehouse-api/      # Clustered API server
-│   └── wavehouse-worker/   # Clustered background worker
+│   └── wavehouse/          # Standalone all-in-one binary
 ├── internal/               # Private application packages
 │   ├── api/                # HTTP handlers, router, middleware
-│   ├── cache/              # L1 (Ristretto) + L2 (Redis) caching
+│   ├── cache/              # L1 (Ristretto) + L2 caching
 │   ├── config/             # YAML + env var configuration
-│   ├── dedupe/             # Optional deduplication (Pebble or ScyllaDB)
+│   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
@@ -340,7 +385,7 @@ WaveHouse/
 ## Code Conventions
 
 - **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
-- **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and clustered modes.
+- **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces with separate implementations for standalone and (future) clustered modes.
 - **Package boundaries**: The `internal/` directory ensures packages are private to this module.
 - **Error handling**: Return errors to callers. Use `slog` for structured logging.
 - **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
@@ -351,50 +396,49 @@ Run `make help` to see all targets. Key ones:
 
 | Target | Description |
 | ------ | ----------- |
-| `make help` | Show all targets with descriptions |
-| `make setup` | Download Go modules and cache tools |
-| `make tools` | Install external dev tools (golangci-lint, air, goreleaser) |
-| `make check-tools` | Verify all required tools are installed |
-| `make build` | Compile all three binaries to `bin/` |
-| `make build-debug` | Compile with debug symbols (for delve/profiling) |
-| `make dev` | Hot-reload development server (requires air) |
-| `make fmt` | Format code (`gofumpt` + `goimports`) |
-| `make fmt-check` | Verify formatting (non-zero exit if unformatted) |
-| `make lint` | Run golangci-lint |
-| `make lint-fix` | Run golangci-lint with `--fix` |
-| `make fix` | Auto-format + auto-fix linters |
-| `make test` | Unit tests with race detector |
-| `make test-integration` | Integration tests (requires Docker) |
-| `make test-all` | Unit + integration tests |
-| `make ci` | Full CI check: tidy + fmt + lint + vulncheck + build + tests |
-| `make coverage` | Unit test coverage → `tmp/coverage/` |
-| `make coverage-enforce` | Fail if coverage is below 60% threshold (interim; #67 tracks restoring 70%) |
-| `make mod-tidy-check` | Verify `go.mod`/`go.sum` are tidy |
-| `make smoke-test` | Manual Bento insert+delete (requires running WaveHouse) |
-| `make test-sdk` | TypeScript SDK unit tests |
-| `make test-e2e` | E2E integration tests via SDK (starts Docker services) |
-| `make test-e2e-dev` | E2E tests in watch mode |
-| `make test-everything` | All four test layers: unit + SDK + integration + E2E |
-| `make vulncheck` | Run `govulncheck` vulnerability scanner |
-| `make security` | Combined scan: vulncheck + gosec via linter |
-| `make deadcode` | Find unreachable functions and unused code |
-| `make audit-cgo` | Audit dependencies for C code (informational) |
-| `make size-report` | Show binary sizes |
-| `make size-tree` | Top packages by size in the binary (text table) |
-| `make size-treemap` | Full binary analysis → `tmp/analysis/` (text + SVG + HTML) |
-| `make dep-graph` | Dependency graph → `tmp/analysis/graph.svg` (requires graphviz) |
-| `make dep-why MOD=...` | Show why a module is included |
-| `make dep-cut` | Top cuttable deps by transitive impact (`LIMIT=N`) |
-| `make binary-analysis` | Combined: sizes + dead code + CGO audit |
-| `make docker` | Build Docker image |
-| `make compose-standalone` | Start standalone mode via Docker Compose |
-| `make compose-clustered` | Start clustered mode via Docker Compose |
-| `make compose-deps` | Start infrastructure dependencies only |
-| `make deps-wipe` | Destroy and recreate dependency containers |
-| `make release-test` | Test cross-compilation via GoReleaser |
-| `make clean` | Remove `bin/`, `tmp/`, `data/`, `dist/` |
+| `make help` | Show all targets with descriptions (always the source of truth) |
+| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`), Go modules, pnpm deps |
+| **Dev** | |
+| `make dev` | Hot-reload dev server: ClickHouse via Compose + WaveHouse under air on `:8080` |
+| `make deps-up` | Start ClickHouse alone (idempotent; blocks until healthy) |
+| `make deps-down` | Stop ClickHouse (preserves data volume) |
+| `make deps-logs` | Tail ClickHouse logs |
+| `make deps-shell` | `clickhouse-client` REPL on the running container |
+| `make deps-wipe` | Stop ClickHouse AND destroy its data volume (DESTRUCTIVE) |
+| **Static checks** | |
+| `make fmt` | Check formatting (run `make fix` to apply) |
+| `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
+| `make lint` | Run `golangci-lint` |
+| `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
+| `make verify` | All four above (parallel-safe: `make -j verify`) |
+| `make fix` | Auto-apply: `tidy` + `gofumpt` + `goimports` + `lint --fix` |
+| **Build** | |
+| `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
+| `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
+| `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
+| `make build-sdk` | Build TypeScript SDK → `clients/ts/dist/` |
+| **Test** | |
+| `make test` | Alias for `test-unit` |
+| `make test-unit` | Go unit tests + render coverage + gate suite threshold |
+| `make test-integration` | Go integration tests (requires Docker) + coverage gate |
+| `make test-sdk` | SDK vitest unit tests + coverage gate |
+| `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
+| `make test-all` | All four suites sequentially + merged coverage gate |
+| `make cov` | Merge available `covdata` + gate against total threshold |
+| `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
+| **Analysis** (informational, not in CI) | |
+| `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
+| `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
+| `make deadcode` | Find unreachable functions |
+| `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
+| `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
+| **Cleanup** (tiered — compose explicitly for partial resets) | |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`) |
+| `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
+| `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
+| `make clean-all` | Full reset: above + `data/` + Docker volumes |
 
-All test targets accept `ARGS="..."` for pass-through flags. Build targets accept `TAGS="..."` for build tags (e.g., `make build TAGS="scylla"`).
+All test targets accept `ARGS="..."` for pass-through `go test` flags. Build targets accept `TAGS="..."` for Go build tags. `V=1` switches to verbose `gotestsum` output.
 
 ## Dependency Management
 
@@ -413,13 +457,7 @@ go mod tidy            # Remove unused, add missing
 make vulncheck
 ```
 
-For a combined security scan (vulncheck + gosec):
-
-```bash
-make security
-```
-
-This also runs automatically in CI on every push and pull request.
+For a combined security scan, run `make verify` — it runs `vulncheck` alongside `lint`, and `gosec` is one of the linters enabled in `.golangci.yml`. This is also what CI runs on every push and pull request.
 
 ### Dependabot
 
@@ -428,7 +466,7 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
 - **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
 - **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
-- **npm — E2E tests** (`tests/sdk/`), commit prefix `deps(tests):`
+- **npm — E2E tests** (`tests/e2e/sdk/`), commit prefix `deps(tests):`
 
 PRs are grouped by ecosystem to reduce noise.
 

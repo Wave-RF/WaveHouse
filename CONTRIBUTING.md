@@ -14,7 +14,7 @@ Thank you for your interest in contributing to WaveHouse! This guide will help y
 
 Open a [bug report issue](https://github.com/Wave-RF/WaveHouse/issues/new?template=bug_report.md) with:
 
-- WaveHouse version and deployment mode (standalone/clustered)
+- WaveHouse version
 - Steps to reproduce
 - Expected vs. actual behavior
 - Relevant logs or error messages
@@ -80,14 +80,14 @@ Examples:
 
 ```text
 feat(api): add rate limiting middleware
-fix(dedupe): handle ScyllaDB timeout gracefully
+fix(dedupe): handle external DB timeout gracefully
 docs(api): add WebSocket authentication example
 test(cache): add tiered cache stampede test
 ```
 
 ## Code Style
 
-- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` runs it; CI enforces it via `make fmt-check`.
+- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks it (CI runs the same target); `make fix` applies it.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.

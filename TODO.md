@@ -38,12 +38,10 @@
 - [ ] Pipes need to use KV Watcher to update in real-time across cluster instead of just on startup
 - [ ] Consider custom buffer instead of Bento for smaller binary and dependencies
 - [ ] Ack and Nak methods in mq should have context for timeouts and cancellation
-- [ ] don't make streamnames magic strings (like "WAVEHOUSE"), let them be configurable for when running staging + prod on same NATS cluster, and also to allow users to run multiple WaveHouse instances with different stream names on the same cluster if they want
 - [ ] Move API handlers into their own package for better organization and separation of concerns, and to avoid the `internal/api` package becoming too large and unwieldy as we add more endpoints and features.
 - [ ] Get Delve setup working for local development with `make dev` and VS Code Go extension for easier debugging.
 - [ ] Add more integration tests covering the full end-to-end flow from API ingestion to ClickHouse, including edge cases and failure scenarios.
 - [ ] Add benchmarks for critical code paths (e.g. batch processing, NATS message handling) to monitor performance and catch regressions.
-- [ ] Setup goreleaser for building and releasing binaries, including proper versioning and changelog generation.
 - [x] Setup one docker image with multiple entrypoints for API and worker instead of two separate images, to simplify deployment and reduce maintenance overhead.
 - [ ] Docker image multiple architecture support (amd64 + arm64)
 - [ ] Docker compose docs for running standalone vs clustered, and for running with different ClickHouse configurations (e.g. single node vs cluster)
@@ -60,4 +58,4 @@
 - [ ] Add support for graceful handling of NATS server restarts or connectivity issues, including automatic reconnection and backoff strategies, to improve the robustness of the system in production environments where network issues can occur.
 - [ ] Add support for batching and retrying failed events in the worker, with exponential backoff and a dead letter queue for events that fail repeatedly, to improve reliability and ensure that transient issues do not result in data loss.
 - [ ] Fuzzing and security testing, especially around the API endpoints, to identify and fix potential vulnerabilities before they can be exploited in production. This could include testing for SQL injection, authentication bypass, and other common web vulnerabilities.
-- [ ] 
+- [ ]

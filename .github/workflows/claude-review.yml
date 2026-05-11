@@ -1,43 +1,88 @@
 name: Claude PR review
 
-# Auto-reviews pull requests on open/push/ready-for-review, but only
-# when the PR author is already trusted (OWNER, MEMBER, COLLABORATOR,
-# or CONTRIBUTOR) to bound token cost. PRs from first-time
-# contributors on forks are skipped here — a maintainer can invoke
-# Claude on them by commenting `@claude`, which is handled by
-# claude-agent.yml.
+# The single Claude workflow on this repo. Auto-reviews trusted-author
+# PRs after CI completes, and accepts manual re-review requests via
+# `@claude` / `/review` comments and the workflow_dispatch button.
+# (Was previously split with `claude-agent.yml`; the agent's
+# code-modifying capability was dropped in favour of a single
+# review-only workflow with a smaller blast radius.)
+#
+# Triggers:
+#   workflow_run     — fires after every successful CI run on a PR.
+#                      Reviews update the same sticky comment on every
+#                      run so iteration history stays in one place.
+#   issue_comment    — manual re-trigger when a trusted reviewer types
+#                      `@claude` or `/review` in a PR comment.
+#   workflow_dispatch — UI / `gh workflow run` escape hatch with an
+#                      explicit PR-number input.
+#
+# Trust gating: only OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR
+# can trigger Claude (covers Eric, Taite, John, Leo + any future
+# org members; excludes drive-by fork PRs and Dependabot). The gate
+# is enforced inside the job so all three trigger paths share one
+# code path.
 #
 # Prompt structure follows Anthropic's canonical pr-review-comprehensive
-# template (Code Quality / Security / Performance / Testing / Docs) with
-# a strictness directive, WaveHouse-specific concerns (Go concurrency,
-# ClickHouse SQL injection, AGENTS.md doc-sync), and the severity
-# rubric from Anthropic's security-review example.
+# template — see `.github/prompts/pr-review.md`. The header block we
+# prepend ("REPO: ... PR NUMBER: ...") tells Claude which PR to read
+# the full context of (diff, prior comments, prior reviews, linked
+# issues).
 #
 # Gemini Code Assist (installed as a GitHub App) also reviews PRs. The
 # two reviewers operate independently and their outputs are both
-# advisory. CODEOWNERS + the ruleset are the actual merge-gate.
+# advisory. The ruleset (PR housekeeping + CI + Admin approval +
+# review-thread resolution) is the actual merge gate.
 
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+        type: string
 
+# Dedup per PR — the upstream CI's workflow_run + a manual `/review`
+# comment in quick succession could otherwise schedule overlapping
+# reviews. PR-number reachable from each event payload before any
+# step runs.
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   review:
     name: Review
-    # CONTRIBUTOR is included because webhook payloads report users
-    # with *private* org membership as CONTRIBUTOR (not MEMBER) even
-    # when the REST API reports them as MEMBER. Org members who want
-    # stricter gating can flip their Wave-RF membership visibility to
-    # public, which makes webhooks report MEMBER as expected.
-    if: >-
-      github.event.pull_request.draft == false
-      && github.actor != 'dependabot[bot]'
-      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+    # Workflow-level gate: short-circuit untrusted / non-PR / red-CI
+    # invocations before spinning up a runner pod. The job-level
+    # `if:` covers each trigger path independently:
+    #
+    #   workflow_run → only when triggered by a successful CI on a
+    #                  pull_request event (skip CI for push:main and
+    #                  failed CI runs)
+    #   issue_comment → only on PR comments (issue.pull_request != null)
+    #                   that mention @claude or /review, from a trusted
+    #                   actor
+    #   workflow_dispatch → always (manual escape hatch)
+    if: |
+      (
+        github.event_name == 'workflow_run'
+          && github.event.workflow_run.event == 'pull_request'
+          && github.event.workflow_run.conclusion == 'success'
+      ) || (
+        github.event_name == 'issue_comment'
+          && github.event.issue.pull_request != null
+          && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/review'))
+          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: [wave-rf-runners]
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
@@ -45,221 +90,166 @@ jobs:
       checks: read
       id-token: write
     steps:
-      - name: Wait for required CI checks, skip review if any failed
-        # Don't burn Claude review tokens on PRs whose required CI is
-        # already red — the human will bounce them back as "fix CI
-        # first." Poll the specific required checks (not all checks,
-        # which would include our own Review job and deadlock); when
-        # they reach a terminal state, skip if any failed.
-        id: gate
+      - name: Resolve PR number
+        id: pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REPO: ${{ github.repository }}
-          # Required checks from the `main branch protection` ruleset.
-          # Newline-separated so names with spaces ("Integration Tests")
-          # round-trip correctly. Keep in sync with the ruleset. A
-          # check missing from the PR (paths-filtered or not yet
-          # created at the deadline) is treated as "not failing"
-          # rather than blocking the review forever.
-          REQUIRED_CHECKS: |
-            Check
-            Build
-            Validate
-            Lint
-            Test
-            Integration Tests
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          ISSUE_COMMENT_PR: ${{ github.event.issue.number }}
+          DISPATCH_PR: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
-          mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | sed '/^$/d')
+          case "$EVENT_NAME" in
+            workflow_run)
+              # Empty for fork PRs (workflow_run associates pull_requests
+              # only for same-repo PRs). We bail out cleanly below.
+              num="$WORKFLOW_RUN_PR"
+              ;;
+            issue_comment)
+              num="$ISSUE_COMMENT_PR"
+              ;;
+            workflow_dispatch)
+              num="$DISPATCH_PR"
+              ;;
+            *)
+              num=""
+              ;;
+          esac
+          if [ -z "$num" ]; then
+            echo "::notice::No PR number resolved (fork PR? push event?); skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "num=$num" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
-          # Use per_page=100 rather than --paginate. The check-runs
-          # endpoint returns one JSON object (with a total_count + a
-          # check_runs array) per page; --paginate concatenates the
-          # raw responses with no merge, which breaks subsequent jq
-          # parsing. A PR will never realistically exceed 100 check
-          # runs, so a single page is enough. (Copilot review feedback.)
-          fetch_runs() {
-            gh api "repos/$REPO/commits/$PR_HEAD_SHA/check-runs?per_page=100"
-          }
+      - name: Author trust gate + required-check snapshot
+        id: gate
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Required checks from the `main branch protection` ruleset.
+          # Newline-separated so names with spaces ("PR housekeeping")
+          # round-trip correctly. Keep in sync with the ruleset's
+          # required_status_checks and project-orchestrator.yml's
+          # bot-clean check.
+          REQUIRED_CHECKS: |
+            CI
+            PR housekeeping
+        run: |
+          set -euo pipefail
 
-          deadline=$(( $(date +%s) + 900 ))  # 15-minute cap
-          ALL_DONE=0
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            # Swallow transient gh api failures with an empty object
-            # and retry on the next tick — a network blip shouldn't
-            # flip the loop into "all done" and mask red CI.
-            RUNS=$(fetch_runs 2>/dev/null || echo '{"check_runs":[]}')
+          # Read the PR's current state in one round-trip: draft,
+          # author, association, head SHA, and the full check rollup.
+          pr=$(gh pr view "$PR_NUM" -R "$REPO" \
+            --json isDraft,author,authorAssociation,headRefOid,statusCheckRollup)
 
-            ALL_DONE=1
+          if [ "$(echo "$pr" | jq -r '.isDraft')" = "true" ]; then
+            echo "::notice::PR #$PR_NUM is draft; skipping review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          author=$(echo "$pr" | jq -r '.author.login')
+          if [ "$author" = "dependabot" ] || [ "$author" = "dependabot[bot]" ]; then
+            echo "::notice::PR #$PR_NUM is from Dependabot; skipping review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          association=$(echo "$pr" | jq -r '.authorAssociation')
+          # CONTRIBUTOR is included because webhook payloads report users
+          # with *private* org membership as CONTRIBUTOR (not MEMBER) even
+          # when the REST API reports them as MEMBER.
+          case "$association" in
+            OWNER|MEMBER|COLLABORATOR|CONTRIBUTOR) ;;
+            *)
+              echo "::notice::PR #$PR_NUM author $author has association $association; skipping (untrusted-actor gate)."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          head_sha=$(echo "$pr" | jq -r '.headRefOid')
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          # Required-check snapshot — only enforced for workflow_run.
+          # On manual triggers (issue_comment, workflow_dispatch) we
+          # honour the explicit ask even if CI is still red or running;
+          # the human has already decided they want a review.
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            rollup=$(echo "$pr" | jq -c '.statusCheckRollup')
+            mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | awk 'NF')
+
             for check in "${CHECKS[@]}"; do
-              STATUS=$(jq -r --arg n "$check" \
-                '.check_runs[] | select(.name == $n) | .status' <<<"$RUNS" | head -n1)
-              # Treat missing checks as not-done until the deadline:
-              # jobs that run in parallel may not have created their
-              # check-runs yet when this loop starts. If we still
-              # don't see them at deadline, we escape below and
-              # skip-on-safety rather than wait forever. (Copilot
-              # flagged the earlier "missing = done" short-circuit.)
-              if [ -z "$STATUS" ] || [ "$STATUS" != "completed" ]; then
-                ALL_DONE=0
-                break
+              entry=$(echo "$rollup" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
+              if [ -z "$entry" ]; then
+                echo "::notice::Required check '$check' not yet present on PR #$PR_NUM; will retry on next workflow_run."
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
               fi
+              status=$(echo "$entry" | jq -r '.status // empty')
+              conclusion=$(echo "$entry" | jq -r '.conclusion // empty')
+              if [ "$status" != "COMPLETED" ]; then
+                echo "::notice::Required check '$check' is $status (not COMPLETED); will retry on next workflow_run."
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              case "$conclusion" in
+                SUCCESS|NEUTRAL|SKIPPED) ;;
+                FAILURE|CANCELLED|TIMED_OUT|STARTUP_FAILURE|ACTION_REQUIRED|STALE)
+                  echo "::notice::Required check '$check' concluded $conclusion; skipping Claude review (no point reviewing red CI)."
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+                *)
+                  echo "::warning::Required check '$check' has unrecognised conclusion '$conclusion'; skipping defensively."
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+              esac
             done
-
-            [ "$ALL_DONE" = "1" ] && break
-            sleep 30
-          done
-
-          if [ "$ALL_DONE" != "1" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping Claude review — required CI checks still missing/incomplete after 15-minute wait."
-            exit 0
           fi
 
-          # Final read for conclusions; if this one fails, skip
-          # defensively rather than silently proceeding.
-          if ! RUNS=$(fetch_runs); then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping Claude review — unable to read required CI check conclusions."
-            exit 0
-          fi
+          echo "Proceeding with Claude review (event: $EVENT_NAME)."
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
-          FAILED=""
-          for check in "${CHECKS[@]}"; do
-            CONCLUSION=$(jq -r --arg n "$check" \
-              '.check_runs[] | select(.name == $n) | .conclusion' <<<"$RUNS" | head -n1)
-            case "$CONCLUSION" in
-              failure|cancelled|timed_out)
-                FAILED="$FAILED $check"
-                ;;
-            esac
-          done
-
-          if [ -n "$FAILED" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping Claude review — required CI checks failing:$FAILED"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.skip != 'true'
         with:
+          # workflow_run / issue_comment / workflow_dispatch all default
+          # to checking out the default branch. Pin to the PR's head
+          # SHA so the diff Claude reviews matches the SHA that
+          # actually passed CI.
+          ref: ${{ steps.gate.outputs.head_sha }}
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e  # v1.0.102
+      - name: Build review prompt from .github/prompts/pr-review.md
+        # The prompt template is checked in as markdown so it's diff-able
+        # and editor-friendly. We prepend the dynamic header (REPO + PR
+        # number) here and pass the assembled string via $GITHUB_OUTPUT.
+        # Using a heredoc-style multi-line output to preserve newlines.
+        id: prompt
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ steps.pr.outputs.num }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'content<<PROMPT_EOF'
+            echo "REPO: $REPO"
+            echo "PR NUMBER: $PR_NUM"
+            echo
+            cat .github/prompts/pr-review.md
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e # v1.0.102
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_sticky_comment: true
           track_progress: true
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            You are reviewing a pull request on the WaveHouse project.
-            Read AGENTS.md at the repo root first — it has the
-            architectural context, code conventions, and documentation
-            sync rules that inform every review.
-
-            ## Tone
-
-            Be a rigorous, skeptical staff engineer. Assume the worst
-            about every change until the diff convinces you otherwise.
-            "Could this break in production?" "What's the failure
-            mode?" "What about on a restart, during a deploy, under
-            load?" Err on the side of flagging a concern — a false
-            positive is cheap (reply with a rebuttal), a missed real
-            issue is expensive.
-
-            Be specific and constructive. Cite file/line and suggest
-            a concrete remediation whenever possible; don't leave
-            vague "consider refactoring" notes. If the code is
-            genuinely good, say so briefly — don't invent complaints.
-
-            ## Focus areas
-
-            Review against each of these, in this order:
-
-            1. **Correctness** — Go concurrency (goroutine leaks, data
-               races, missing context propagation, channel leaks,
-               `sync.Once` / `sync.Map` misuse, handlers ignoring
-               `r.Context()`), error wrapping with `%w`, resource
-               cleanup on every error path (`defer` that ignores Close
-               errors is OK when intentional, but flag if the error
-               could mask data loss), invariants preserved (schema
-               validation before DB writes, policy enforcement,
-               tenant/role isolation).
-
-            2. **Security** — walk the OWASP Top 10 against the diff:
-                 - SQL injection in any ClickHouse-bound path
-                   (`BindParams`, query builders, dynamic table names)
-                 - Broken authentication / authorization (JWT claim
-                   handling, role extraction, policy templating)
-                 - Sensitive data exposure (secrets in logs, error
-                   messages leaking internal state)
-                 - Broken access control (policy bypass, raw-SQL
-                   without `raw_sql: true` permission)
-                 - Security misconfiguration (CORS, TLS, default
-                   credentials, permissive defaults)
-                 - Insufficient logging / monitoring
-                 - SSRF, XXE, deserialization flaws if touched
-                 - Hardcoded secrets or credentials
-                 - TOCTOU / race conditions in auth or policy paths
-               Rate every security finding with severity: `CRITICAL`,
-               `HIGH`, `MEDIUM`, `LOW`, or `NONE` and include it in the
-               comment. Flag `CRITICAL` / `HIGH` prominently in the
-               summary.
-
-            3. **Performance** — hot-path allocation in ingest / query /
-               cache, unbounded goroutine spawns, unbatched DB work,
-               missing caching where cost is high, locks held across
-               I/O, N+1 query patterns, singleflight misuse.
-
-            4. **Testing** — new code without tests (especially on
-               critical paths: auth middleware, ingest pipeline, policy
-               evaluation, structured query builder, cache coherence,
-               dedup). Missing edge-case coverage. Mocks where a real
-               integration test would catch more (per the "no mocking
-               DB" rule in the test conventions). Unit tests that
-               don't actually exercise the code path they claim to.
-
-            5. **Documentation & doc-sync** — AGENTS.md has a hard rule
-               that code changes affecting API / config / architecture
-               / event format must update `docs/api.md`,
-               `docs/configuration.md`, `docs/architecture.md`,
-               `docs/deployment.md`, `CHANGELOG.md` (under
-               `[Unreleased]`), and the compose files / `config.yaml`
-               defaults. Flag every missed sync. The table in
-               AGENTS.md §"Documentation & Consistency Sync" is
-               authoritative — diff changed files against that map.
-
-            ## Output discipline
-
-            - Post inline comments on specific lines where the issue is
-              concrete. Use top-level comments for architectural
-              concerns or praise.
-            - In the summary, separate findings by severity. End with
-              **exactly one of**: `Ship it`, `Iterate`, or `Block`,
-              followed by the single most important thing the author
-              must address.
-            - Use `Block` only when a CRITICAL/HIGH security finding,
-              data-loss risk, or broken core invariant is present. Use
-              `Iterate` for everything else that needs changes.
-            - Don't repeat what the linter already catches (gofumpt,
-              govet, staticcheck, gosec, gocritic, errcheck, etc. — see
-              `.golangci.yml`). CI enforces those.
-            - Don't suggest comments on self-explanatory code — this
-              project prefers well-named identifiers.
-
-            ## Noise filter (important)
-
-            Before posting, re-read every finding you wrote and drop
-            the ones you wouldn't personally ask the author to change
-            if you were reviewing in-person. Quality of feedback beats
-            quantity. Follow this rule from Anthropic's `/review-pr`:
-            *"Review the feedback and post only the feedback that you
-            also deem noteworthy. Keep feedback concise."*
-
-            Do not make code changes — this is a review only.
+          prompt: ${{ steps.prompt.outputs.content }}

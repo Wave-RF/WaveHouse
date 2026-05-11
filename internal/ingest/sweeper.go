@@ -26,7 +26,7 @@ type Sweeper struct {
 }
 
 // NewSweeper creates an Active Sweeper.
-// TODO: need leader election or shared lock to only run one instance of the sweeper in clustered mode
+// TODO: (future) need leader election or shared lock to only run one instance of the sweeper in clustered mode
 func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Logger) *Sweeper {
 	return &Sweeper{
 		js:        js,

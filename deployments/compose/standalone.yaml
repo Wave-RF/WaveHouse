@@ -17,17 +17,23 @@ services:
     ports:
       - "8080:8080"
     environment:
-      WH_MODE: standalone
       WH_CH_ADDR: clickhouse:9000
-      WH_MQ_EMBEDDED_DIR: /data/nats
+      # NATS lives at /app/data/nats, Pebble at /app/data/pebble — subdirs
+      # are convention, not config. The Dockerfile pre-creates /app/data
+      # owned by the nonroot user; bind-mount any persistent volume here.
+      WH_DATA_DIR: /app/data
       WH_AUTH_ENABLED: "false"
       WH_DEDUPE_ENABLED: "false"
-      WH_DEDUPE_EMBEDDED_DIR: /data/pebble
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"
       WH_SERVER_CORS_ALLOWED_ORIGINS: "*"
+      # Optional: bootstrap pipes from .sql files. Mount your pipes dir
+      # read-only and uncomment WH_PIPES_DIR. The directory is a seed for
+      # NATS KV — runtime pipe edits go through the API, not the files.
+      # WH_PIPES_DIR: /app/pipes
     volumes:
-      - wavehouse-data:/data
+      - wavehouse-data:/app/data
+      # - ./my-pipes:/app/pipes:ro    # uncomment alongside WH_PIPES_DIR
     depends_on:
       - clickhouse
 

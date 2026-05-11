@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -30,21 +31,27 @@ var (
 	Version   = "dev"
 	BuildTime = time.Now().Format(time.RFC3339)
 	GitCommit = "unknown"
-	Binary    = "standalone"
 )
 
 func main() {
+	// Subcommand dispatch. Currently only `health` exists — used by the
+	// Dockerfile HEALTHCHECK to self-probe /health without needing curl
+	// or wget in the (distroless) image. If we ever need more, swap to
+	// a real argv router.
+	if len(os.Args) > 1 && os.Args[1] == "health" {
+		os.Exit(runHealthCheck())
+	}
 	os.Exit(run())
 }
 
-// run executes the standalone binary and returns a process exit code. Using a
+// run executes the binary and returns a process exit code. Using a
 // separate function (rather than os.Exit directly in main) ensures deferred
 // cleanups — especially OTEL flush — still run before the process exits.
 func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit, "binary", Binary)
+	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit)
 
 	cfgPath := "config.yaml"
 	if p := os.Getenv("WH_CONFIG"); p != "" {
@@ -69,7 +76,7 @@ func run() int {
 	}
 
 	ctx := context.Background()
-	serviceName := "wavehouse-" + Binary
+	serviceName := "wavehouse"
 	otelAddr := os.Getenv("WH_OTEL_ADDR")
 	if otelAddr == "" {
 		otelAddr = "127.0.0.1:4317"
@@ -115,22 +122,28 @@ func run() int {
 		return 1
 	}
 
+	// State directories — one configurable root, fixed subdir convention.
+	natsDir := filepath.Join(cfg.DataDir, "nats")
+	pebbleDir := filepath.Join(cfg.DataDir, "pebble")
+
 	// Optional embedded dedupe (Pebble).
 	var dedup dedupe.Deduplicator
 	if cfg.Dedupe.Enabled {
-		dedup, err = dedupe.NewEmbedded(cfg.Dedupe.EmbeddedDir)
+		config.WarnIfFreshDataDir(logger, "pebble", pebbleDir)
+		dedup, err = dedupe.NewEmbedded(pebbleDir)
 		if err != nil {
-			logger.Error("dedupe init", "error", err)
+			config.LogStorageInitError(logger, "dedupe", pebbleDir, err)
 			return 1
 		}
 		defer func() { _ = dedup.Close() }()
 	}
 
 	// Embedded MQ (NATS).
+	config.WarnIfFreshDataDir(logger, "nats", natsDir)
 	maxBytes := int64(cfg.MQ.MaxBytesGB) * 1024 * 1024 * 1024
-	embeddedMQ, err := mq.NewEmbedded(cfg.MQ.EmbeddedDir, cfg.MQ.StreamName, maxBytes)
+	embeddedMQ, err := mq.NewEmbedded(natsDir, maxBytes)
 	if err != nil {
-		logger.Error("mq init", "error", err)
+		config.LogStorageInitError(logger, "mq", natsDir, err)
 		return 1
 	}
 	defer func() { _ = embeddedMQ.Close() }()
@@ -141,7 +154,7 @@ func run() int {
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), cfg.MQ.StreamName, maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
 			return 1
 		}
@@ -164,7 +177,7 @@ func run() int {
 	}
 
 	// Pipes store (NATS KV + optional SQL file directory).
-	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Directory, logger)
+	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
 		return 1
@@ -191,7 +204,6 @@ func run() int {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		cfg.MQ.StreamName,
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
@@ -232,7 +244,7 @@ func run() int {
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
-		dlqHandler = api.NewDLQHandler(js, cfg.MQ.StreamName, logger)
+		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
@@ -290,7 +302,7 @@ func run() int {
 		}
 	}()
 
-	logger.Info("starting server", "port", cfg.Server.Port, "mode", "standalone")
+	logger.Info("starting server", "port", cfg.Server.Port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server error", "error", err)
 		return 1

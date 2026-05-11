@@ -14,7 +14,6 @@ func TestLoad_Defaults(t *testing.T) {
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
 
-	assert.Equal(t, ModeStandalone, cfg.Mode)
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, "localhost:9000", cfg.ClickHouse.Addr)
@@ -28,7 +27,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
 	assert.True(t, cfg.DLQ.Enabled)
 	assert.Equal(t, "policy.yaml", cfg.Policy.FilePath)
-	assert.Equal(t, "./pipes", cfg.Pipes.Directory)
+	assert.Equal(t, "", cfg.Pipes.Dir)
+	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.Equal(t, 300, cfg.Cache.DefaultTTL)
 }
@@ -37,7 +37,6 @@ func TestLoad_FromYAML(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	yamlContent := `
-mode: clustered
 server:
   port: 9090
 clickhouse:
@@ -53,7 +52,6 @@ auth:
 	cfg, err := Load(path)
 	require.NoError(t, err)
 
-	assert.Equal(t, ModeClustered, cfg.Mode)
 	assert.Equal(t, 9090, cfg.Server.Port)
 	assert.Equal(t, "clickhouse:9000", cfg.ClickHouse.Addr)
 	assert.Equal(t, "mydb", cfg.ClickHouse.Database)
@@ -87,18 +85,6 @@ func TestLoad_InvalidYAML(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestValidate_InvalidMode(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Mode:   "invalid",
-		Server: Server{Port: 8080, ShutdownTimeout: 10},
-		Schema: Schema{RefreshInterval: 60},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid mode")
-}
-
 func TestValidate_PortOutOfRange(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -113,7 +99,6 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
-				Mode:   ModeStandalone,
 				Server: Server{Port: tt.port},
 				Schema: Schema{RefreshInterval: 60},
 			}
@@ -127,7 +112,6 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080, ShutdownTimeout: -1},
 		Schema: Schema{RefreshInterval: 60},
 	}
@@ -139,7 +123,6 @@ func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 func TestValidate_AuthEnabledNoSecret(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080},
 		Auth:   Auth{Enabled: true},
 		Schema: Schema{RefreshInterval: 60},
@@ -152,7 +135,6 @@ func TestValidate_AuthEnabledNoSecret(t *testing.T) {
 func TestValidate_AuthEnabledWithJWKS(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080},
 		Auth:   Auth{Enabled: true, JWKSURL: "https://example.com/.well-known/jwks.json"},
 		Schema: Schema{RefreshInterval: 60},
@@ -164,7 +146,6 @@ func TestValidate_AuthEnabledWithJWKS(t *testing.T) {
 func TestValidate_AuthDevModeBypassesCheck(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080},
 		Auth:   Auth{Enabled: true, DevMode: true},
 		Schema: Schema{RefreshInterval: 60},
@@ -176,7 +157,6 @@ func TestValidate_AuthDevModeBypassesCheck(t *testing.T) {
 func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080},
 		Schema: Schema{RefreshInterval: 0},
 	}
@@ -188,7 +168,6 @@ func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 func TestValidate_NegativeCacheTTL(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080},
 		Cache:  Cache{DefaultTTL: -1},
 		Schema: Schema{RefreshInterval: 60},
@@ -201,7 +180,6 @@ func TestValidate_NegativeCacheTTL(t *testing.T) {
 func TestValidate_NegativeGapWindow(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Mode:   ModeStandalone,
 		Server: Server{Port: 8080},
 		MQ:     MQ{GapWindowMinutes: -1},
 		Schema: Schema{RefreshInterval: 60},
@@ -211,24 +189,10 @@ func TestValidate_NegativeGapWindow(t *testing.T) {
 	assert.Contains(t, err.Error(), "gap_window_minutes")
 }
 
-func TestValidate_DefaultsStreamNameWhenEmpty(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Mode:   ModeStandalone,
-		Server: Server{Port: 8080},
-		Schema: Schema{RefreshInterval: 60},
-	}
-
-	err := cfg.Validate()
-	require.NoError(t, err)
-	assert.Equal(t, "WAVEHOUSE", cfg.MQ.StreamName)
-}
-
 func TestLoad_AuthEnabledNoSecret_FailsValidation(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	yamlContent := `
-mode: standalone
 server:
   port: 8080
 auth:

@@ -1,0 +1,160 @@
+name: PR housekeeping
+
+# Combines two responsibilities that both run once per PR open/push, in a
+# single job to keep PR-time runner-pod usage low:
+#
+#   1. Apply path-based labels via actions/labeler (was label.yml).
+#   2. Validate PR title against Conventional Commits (was pr-title.yml).
+#
+# Triggered by `pull_request_target` so the workflow runs from the
+# default branch with base-repo permissions — fork PRs get auto-labels
+# AND the title sticky-comment. (`pull_request` from the head ref isn't
+# used: it lacks `pull-requests: write` and `issues: write` on forks,
+# so the labeler + sticky-comment steps would silently fail there.)
+#
+# Required by the `main branch protection` ruleset as the
+# `PR housekeeping` check — must report on every PR or merge gets stuck
+# at "pending." The check fails if and only if the PR title doesn't
+# match Conventional Commits; labeling failures are non-fatal so a flaky
+# label call can't block merge.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  # `issues: write` is required for /repos/.../issues/{num}/comments
+  # (the sticky-comment endpoint) — PRs are issues at the REST layer
+  # for comments but `pull-requests: write` alone does NOT grant that
+  # scope. Without it, fork PR runs fail to post the comment even on
+  # `pull_request_target` with full base-repo permissions.
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-housekeeping-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  housekeeping:
+    name: PR housekeeping
+    runs-on: [wave-rf-runners]
+    timeout-minutes: 5
+    steps:
+      # --- Path-based labeling -----------------------------------------
+      # actions/labeler reads .github/labeler.yml from the BASE branch
+      # (main) and applies labels based on the PR's changed files.
+      # `sync-labels: true` removes labels when their matching files are
+      # no longer in the diff, so labels stay in sync with the current
+      # change set rather than accumulating.
+      - name: Apply file-path labels
+        uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b # v6.0.1
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: true
+
+      # --- PR title validation -----------------------------------------
+      - name: Check Conventional Commits format
+        id: check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          # Max length matches the conventional 72-char git subject cap;
+          # PR titles become the squash-merge subject on main, and longer
+          # subjects mangle `git log --oneline`, GitHub's PR list, and
+          # most commit-graph viewers.
+          MAX_LEN: "72"
+        run: |
+          # Type list — keep in sync with CONTRIBUTING.md.
+          # Optional `!` before `:` marks a breaking change per
+          # Conventional Commits 1.0.0.
+          #
+          # The `[^A-Z]` after `: ` enforces a lowercase first character
+          # — this is *house style* (consistency in the squashed commit
+          # log), NOT a Conventional Commits requirement. The spec is
+          # silent on subject capitalization.
+          pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
+
+          if [[ ${#PR_TITLE} -gt $MAX_LEN ]]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::PR title is ${#PR_TITLE} chars (max $MAX_LEN): $PR_TITLE"
+          elif [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "PR title OK: $PR_TITLE"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"
+          fi
+
+      - name: Post / update sticky comment on title fail
+        # continue-on-error because GITHUB_TOKEN is read-only for fork
+        # PRs, so the comment will fail there — that must not mask the
+        # final exit-1 below that drives the required-check status.
+        if: steps.check.outputs.passed == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- pr-title-lint-comment -->'
+          BODY=$(cat <<EOF
+          $MARKER
+          ## PR title doesn't match the required format
+
+          **Got:** \`$PR_TITLE\` (length: ${#PR_TITLE})
+
+          **Expected format:** \`<type>(optional-scope)(optional-!): <lowercase subject, no trailing period>\` (max 72 chars — the title becomes the squash-merge commit subject)
+
+          **Allowed types:** \`feat\`, \`fix\`, \`docs\`, \`refactor\`, \`test\`, \`chore\`, \`ci\`, \`deps\`, \`build\`, \`perf\`, \`revert\`, \`style\`.
+
+          The optional \`!\` before the colon marks a breaking change per [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/). The lowercase-first-letter rule is house style for log readability, not part of the spec.
+
+          **Examples:**
+          - \`feat: add dedupe cache\`
+          - \`fix(ingest): drop duplicate events\`
+          - \`feat(api)!: remove deprecated endpoint\`
+          - \`chore(deps): bump clickhouse-go to v2.30\`
+
+          ---
+
+          This check is required by the \`main branch protection\` ruleset — merge is blocked until the title matches. Edit the PR title to trigger a re-check automatically. I'll clean up this comment once the title is valid.
+          EOF
+          )
+
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f "body=$BODY" > /dev/null
+            echo "Updated existing pr-title-lint comment ($EXISTING)"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f "body=$BODY" > /dev/null
+            echo "Posted new pr-title-lint comment"
+          fi
+
+      - name: Clean up sticky comment on title pass
+        if: steps.check.outputs.passed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- pr-title-lint-comment -->'
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X DELETE "repos/$REPO/issues/comments/$EXISTING"
+            echo "Removed stale pr-title-lint comment ($EXISTING)"
+          fi
+
+      - name: Fail the check if title was invalid
+        # Final step owns the exit code so the check's red-X reliably
+        # reflects the regex result, independent of comment-step I/O.
+        if: steps.check.outputs.passed == 'false'
+        run: exit 1

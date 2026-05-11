@@ -1,381 +1,570 @@
-# ── Pinned tools (versions locked in go.mod tool directives) ─────
-GOTESTSUM := go run gotest.tools/gotestsum
-GOFUMPT   := go run mvdan.cc/gofumpt
-GOIMPORTS := go run golang.org/x/tools/cmd/goimports
+# ==============================================================================
+# WaveHouse Build System
+# ==============================================================================
 
-# ── External tool versions (for `make tools`) ─────────────────────
-GOLANGCI_LINT_VERSION := v2.11.4
+# --- Make Configuration -------------------------------------------------------
+# Pin recipes to bash. /bin/sh is dash on Debian/Ubuntu and a thin bash on
+# macOS — pinning avoids subtle portability bugs (arrays, $'...', [[ ]], etc.).
+# Recipes that need strict-mode safety set it themselves; the scripts under
+# scripts/ all start with `set -euo pipefail`.
+SHELL := /usr/bin/env bash
 
-# Build tags (e.g., TAGS="scylla dynamodb")
+# Warn on undefined variables — catches typos like $(BINAIRES) silently expanding to empty.
+MAKEFLAGS += --warn-undefined-variables
+
+# Suppress "Entering directory '...'" / "Leaving directory '...'" around every
+# $(MAKE) recursion. The `ci` target alone makes 4 recursive calls; without
+# this, output gets noisy fast (especially under --output-sync where each
+# pair brackets a target's whole log block).
+MAKEFLAGS += --no-print-directory
+
+# Serialize recipe output per-target whenever make is running in parallel.
+# Without this, `make -j N` interleaves stdout/stderr from concurrent
+# recipes line-by-line, and a failure (e.g. `make[1]: *** [lint] Error 1`)
+# scrolls off-screen behind whichever ✓ output happened to land last.
+MAKEFLAGS += --output-sync=target
+
+# Delete the target file if its recipe fails non-zero. Default Make leaves
+# a partial file behind, which then satisfies the dependency check on the
+# next run and silently ships stale/broken output. Most of our recipes are
+# .PHONY (so this is a no-op for them), but the file-target rules — like
+# the golangci-lint installer at $(GOLANGCI_LINT) — benefit, and any future
+# file-target rule gets the safety property for free.
+.DELETE_ON_ERROR:
+
+.DEFAULT_GOAL := help
+
+# --- Environment Detection ----------------------------------------------------
+# NO_COLOR is read by the colors block below; CI is read by scripts/size.sh
+# to suppress the browser auto-open. Both are set by GitHub Actions et al.
+CI       ?=
+NO_COLOR ?=
+
+# --- Colors -------------------------------------------------------------------
+# GitHub Actions, GitLab, etc. all render ANSI fine — only opt out via NO_COLOR.
+# We bake the literal ESC byte (0x1B) into each variable via $(shell printf).
+# This way `echo "$(CYAN)..."` outputs raw ESC sequences regardless of whether
+# the shell's echo interprets backslash escapes (bash builtin echo doesn't,
+# unless xpg_echo is set — which we can't reliably toggle on Make 3.81).
+ifeq ($(strip $(NO_COLOR)),)
+  ESC    := $(shell printf '\033')
+  CYAN   := $(ESC)[36m
+  GREEN  := $(ESC)[32m
+  YELLOW := $(ESC)[33m
+  RED    := $(ESC)[31m
+  BOLD   := $(ESC)[1m
+  RESET  := $(ESC)[0m
+else
+  CYAN   :=
+  GREEN  :=
+  YELLOW :=
+  RED    :=
+  BOLD   :=
+  RESET  :=
+endif
+
+# --- System & Architecture ----------------------------------------------------
+OS   := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+
+# --- Build Variables ----------------------------------------------------------
+# Tunables (override via env or `make VAR=value target`):
+#   V=1                          verbose test output
+#   TAGS="foo bar"               Go build/test tags (space-separated)
+#   ARGS="-run TestX"            extra flags passed to `go test`
+#   NO_COLOR=1                   disable colored output
+#   VERSION=v1.2.3               override version string embedded in binary
+#   LDFLAGS="-s -w"              extra ldflags (e.g. force-strip a local build)
+#   LIMIT=50                     top-N for `make dep-cut`
+#
+# Add binaries here as the project grows (e.g., wavehouse-api, wavehouse-worker).
+BINARIES := wavehouse
+
 TAGS ?=
+ARGS ?=
 
-# Analysis output row limit (e.g., LIMIT=50 make dep-cut)
-LIMIT ?= 30
+# Version metadata is always embedded in the binary. Names match the package
+# vars in cmd/wavehouse/main.go (Version / GitCommit / BuildTime), which the
+# goreleaser config injects the same way for release artifacts.
+VERSION    ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
+COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+VERSION_LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)
 
-# ── Build Configuration ───────────────────────────────────────────
-# Strip debugging symbols to reduce binary size (~30%).
-# Use `make build-debug` for delve/profiling builds with full symbols.
-LDFLAGS := -s -w
+# LDFLAGS is the strip toggle — empty by default (debug-friendly local builds);
+# `make build-release` sets it to `-s -w` for stripped release-style output.
+LDFLAGS ?=
 
-# Define the targets
-BINARIES := wavehouse wavehouse-api wavehouse-worker
-
-# Verbose test output: V=1 make test
 ifdef V
   GOTESTSUM_FMT := standard-verbose
 else
-  GOTESTSUM_FMT := testdox
+  # pkgname-and-test-fails: one line per package on success, full detail on
+  # failure. Quiet enough for CI logs, informative when something breaks.
+  GOTESTSUM_FMT := pkgname-and-test-fails
 endif
 
-# Colors
-GREEN  := \033[32m
-YELLOW := \033[33m
-CYAN   := \033[36m
-RED    := \033[31m
-RESET  := \033[0m
+# --- Tooling Paths ------------------------------------------------------------
+# $(CURDIR) is Make's built-in for the working dir — no subshell needed.
+LOCAL_BIN := $(CURDIR)/.bin/$(OS)_$(ARCH)
 
-.PHONY: help setup tools check-tools build build-debug dev \
-        fmt fmt-check lint lint-fix fix \
-        test test-integration test-all ci coverage coverage-enforce \
-        test-sdk test-e2e test-e2e-dev test-e2e-setup test-everything \
-        smoke-test mod-tidy-check \
-        docker compose-standalone compose-clustered compose-deps deps-wipe \
-        clean release-test \
-        vulncheck security deadcode audit-cgo \
-        size-report size-tree size-treemap dep-graph dep-why dep-cut binary-analysis
+# Pinned via go.mod tool directives — no install step needed.
+GOTESTSUM   := go tool gotestsum
+GOFUMPT     := go tool gofumpt
+GOIMPORTS   := go tool goimports
+GOCOVER     := go tool go-test-coverage
+GOVULNCHECK := go tool govulncheck
+DEADCODE    := go tool deadcode
+GODA        := go tool goda
+# gsa imports encoding/json/v2 which is still gated behind a build experiment;
+# the env var is required at every invocation because Go's build cache keys on
+# experiment flags.
+GSA         := GOEXPERIMENT=jsonv2 go tool gsa
 
-help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+# Externally-installed tools — version is encoded in the path so bumping the
+# version invalidates the file rule and triggers a reinstall.
+GOLANGCI_LINT_VERSION := v2.11.4
+GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
-# ── Setup ─────────────────────────────────────────────────────────
-setup: ## Download Go modules and cache tools
-	@echo "$(GREEN)==> Downloading modules...$(RESET)"
-	@go mod download
-	@echo "$(GREEN)==> Done$(RESET)"
+# air is the hot-reload runner used by `make dev`. We install it to .bin/
+# rather than as a go.mod tool directive because air's transitive deps
+# (hugo, godartsass, sass libs) are heavy enough to bloat go.sum on every
+# `go mod download` — same exclusion principle as golangci-lint.
+AIR_VERSION := v1.65.1
+AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
 
-tools: ## Install external dev tools (golangci-lint, air, goreleaser)
-	@echo "$(GREEN)==> Installing external tools...$(RESET)"
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "$(CYAN)  Installing golangci-lint $(GOLANGCI_LINT_VERSION)...$(RESET)"; \
-		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
-	else \
-		echo "$(CYAN)  golangci-lint already installed: $$(golangci-lint version --short 2>/dev/null || echo 'unknown')$(RESET)"; \
-	fi
-	@if ! command -v air >/dev/null 2>&1; then \
-		echo "$(CYAN)  Installing air (hot-reload)...$(RESET)"; \
-		go install github.com/air-verse/air@latest; \
-	else \
-		echo "$(CYAN)  air already installed$(RESET)"; \
-	fi
-	@if ! command -v goreleaser >/dev/null 2>&1; then \
-		echo "$(CYAN)  Installing goreleaser...$(RESET)"; \
-		go install github.com/goreleaser/goreleaser/v2@latest; \
-	else \
-		echo "$(CYAN)  goreleaser already installed$(RESET)"; \
-	fi
-	@echo "$(GREEN)==> All tools installed$(RESET)"
+# --- Coverage Directories -----------------------------------------------------
+# One path per suite. Internal layout (managed by scripts/coverage.sh):
+#   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
+#   $(COV_X)/coverage.txt  rendered textfmt profile
+#   $(COV_X)/coverage.html rendered HTML report
+COV_UNIT  := tmp/coverage/unit
+COV_INT   := tmp/coverage/integration
+COV_E2E   := tmp/coverage/e2e
+COV_TOTAL := tmp/coverage/total
 
-check-tools: ## Verify all required tools are installed
-	@echo "$(CYAN)Go tools (pinned in go.mod — no install needed):$(RESET)"
-	@echo "  gotestsum:  $$($(GOTESTSUM) --version 2>/dev/null || echo 'available via go run')"
-	@echo "  gofumpt:    $$($(GOFUMPT) -version 2>/dev/null || echo 'available via go run')"
-	@echo "  goimports:  available via go run"
-	@echo ""
-	@echo "$(CYAN)External tools:$(RESET)"
-	@printf "  golangci-lint: "; command -v golangci-lint >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET) $$(golangci-lint version --short 2>/dev/null)" || echo "$(RED)✗ not installed (run 'make tools')$(RESET)"
-	@printf "  air:           "; command -v air >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET)" || echo "$(YELLOW)✗ optional — needed for 'make dev'$(RESET)"
-	@printf "  goreleaser:    "; command -v goreleaser >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET)" || echo "$(YELLOW)✗ optional — needed for 'make release-test'$(RESET)"
-	@printf "  docker:        "; command -v docker >/dev/null 2>&1 && echo "$(GREEN)✔$(RESET)" || echo "$(YELLOW)✗ optional — needed for integration tests & Docker builds$(RESET)"
+# --- Coverage Thresholds ------------------------------------------------------
+# Per-suite and total thresholds live in .testcoverage.yml
 
-# ── Build ─────────────────────────────────────────────────────────
-build: $(BINARIES) ## Compile all binaries (run `make -j3 build` for parallel)
+# Derived: coverage-instrumented and release-stripped binaries.
+COVER_BINARIES   := $(addsuffix -cov,$(BINARIES))
+RELEASE_BINARIES := $(addsuffix -release,$(BINARIES))
 
-# This is a "Pattern Rule". It tells Make how to build ANY of the binaries in the list.
-$(BINARIES):
-	@echo "$(GREEN)==> Building $@...$(RESET)"
-	@START=$$(date +%s); \
-	CGO_ENABLED=0 go build -tags="$(TAGS)" -ldflags="$(LDFLAGS)" -o bin/$@ ./cmd/$@; \
-	END=$$(date +%s); \
-	SIZE=$$(ls -lh bin/$@ | awk '{print $$5}'); \
-	printf "$(GREEN)✔$(RESET) $(CYAN)%-25s$(RESET) built in %ss (Size: $(YELLOW)%s$(RESET))\n" "$@" "$$((END - START))" "$$SIZE"
+# --- Exported to recipes ------------------------------------------------------
+# All variables consumed by scripts/* live here. `export` in Make is global —
+# applying these per-section would imply scoping that doesn't exist.
+export VERSION_LDFLAGS LDFLAGS TAGS
+export GOTESTSUM_FMT
 
-build-debug: LDFLAGS= ## Compile all binaries with debug symbols (for delve/profiling)
-build-debug: build
+# ==============================================================================
+# Targets
+# ==============================================================================
 
-# ── Development ───────────────────────────────────────────────────
-dev: ## Hot-reload dev server (starts ClickHouse via tests/compose.yaml + air)
-	@command -v air >/dev/null 2>&1 || { \
-		echo "$(RED)==> air not found$(RESET)"; \
-		echo "Install: https://github.com/air-verse/air"; \
-		echo "  brew install air                     (macOS)"; \
-		echo "  go install github.com/air-verse/air@latest"; \
+# (use double hashes and `@` to document make target sections for the help menu)
+##@ General
+
+.PHONY: help
+help: ## Show this help menu
+	@printf "Usage: $(BOLD)make$(RESET) $(CYAN)<target>$(RESET) [VAR=value]\n"
+	@awk 'BEGIN { FS = "## " } \
+		/^##@/ { printf "\n$(YELLOW)%s$(RESET)\n", substr($$0, 5); next } \
+		/^[a-zA-Z0-9_-]+:.*## / { \
+			tname = $$0; sub(/:.*/, "", tname); \
+			printf "  $(CYAN)%-18s$(RESET) %s\n", tname, $$2 \
+		}' $(MAKEFILE_LIST)
+	@printf "\nTunable variables are documented at the top of the Makefile.\n"
+
+##@ Dev
+
+# All dev / dependency targets share one Compose file. Aliasing the full
+# `docker compose -f ...` invocation keeps recipes terse and lets us swap
+# the path or compose binary in one place if it ever moves (e.g. to support
+# `podman compose`).
+DEV_COMPOSE_FILE := deployments/compose/dependencies.yaml
+DEV_COMPOSE      := docker compose -f $(DEV_COMPOSE_FILE)
+
+.PHONY: dev
+dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
+	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
+	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
+	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
+	@echo "    Override config via env: e.g. $(CYAN)WH_AUTH_ENABLED=true WH_AUTH_DEV_MODE=true make dev$(RESET)"
+	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
+	@$(AIR) -c .air.toml
+
+# `up -d --wait` blocks until the compose healthcheck transitions to
+# healthy, so callers can chain on success without a polling loop. The
+# ClickHouse healthcheck (in $(DEV_COMPOSE_FILE)) probes /ping on :8123.
+.PHONY: deps-up
+deps-up: ## Start ClickHouse (idempotent; blocks until healthy)
+	@echo "$(CYAN)==> Starting ClickHouse...$(RESET)"
+	@$(DEV_COMPOSE) up -d --wait clickhouse
+
+.PHONY: deps-down
+deps-down: ## Stop ClickHouse (preserves data volume)
+	@echo "$(YELLOW)==> Stopping ClickHouse...$(RESET)"
+	@$(DEV_COMPOSE) down
+
+.PHONY: deps-logs
+deps-logs: ## Tail ClickHouse logs (Ctrl+C to detach; container keeps running)
+	@$(DEV_COMPOSE) logs -f clickhouse
+
+.PHONY: deps-shell
+deps-shell: ## Open a clickhouse-client REPL on the running container
+	@$(DEV_COMPOSE) exec clickhouse clickhouse-client
+
+.PHONY: deps-wipe
+deps-wipe: ## Stop ClickHouse AND destroy its data volume (DESTRUCTIVE — use to reset state)
+	@echo "$(RED)==> Wiping ClickHouse (containers + volumes)...$(RESET)"
+	@$(DEV_COMPOSE) down -v --remove-orphans
+
+##@ Code Quality
+
+.PHONY: fmt
+fmt: ## Check formatting (run `make fix` to apply)
+	@if ! OUT=$$($(GOFUMPT) -l .); then \
+		echo "$(RED)==> gofumpt failed$(RESET)"; \
 		exit 1; \
-	}
-	@echo "$(GREEN)==> Starting ClickHouse...$(RESET)"
-	@docker compose -f tests/compose.yaml up -d clickhouse
-	@echo "$(GREEN)==> Applying SQL fixtures...$(RESET)"
-	@for f in tests/fixtures/*.sql; do \
-		curl -sf http://localhost:8123 -d @"$$f" >/dev/null 2>&1 || true; \
-	done
-	@echo "$(GREEN)==> Starting air (hot-reload)...$(RESET)"
-	@air -c .air.toml
-
-# ── Formatting ────────────────────────────────────────────────────
-fmt: ## Format code (gofumpt + goimports)
-	@echo "$(GREEN)==> Formatting...$(RESET)"
-	@$(GOFUMPT) -w .
-	@$(GOIMPORTS) -w .
-
-fmt-check: ## Verify code formatting (no changes, exits non-zero if unformatted)
-	@OUTPUT=$$($(GOFUMPT) -l .); \
-	if [ -n "$$OUTPUT" ]; then \
+	fi; \
+	if [ -n "$$OUT" ]; then \
 		echo "$(RED)==> Files not formatted:$(RESET)"; \
-		echo "$$OUTPUT"; \
-		echo "Run '$(CYAN)make fmt$(RESET)' and commit."; \
+		echo "$$OUT"; \
+		echo "Run $(CYAN)make fix$(RESET) to apply."; \
 		exit 1; \
 	fi
 	@echo "$(GREEN)==> Formatting OK$(RESET)"
 
-# ── Linting ───────────────────────────────────────────────────────
-lint: ## Run golangci-lint
-	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "$(RED)==> golangci-lint not found$(RESET)"; \
-		echo "Install: https://golangci-lint.run/welcome/install/"; \
-		echo "  brew install golangci-lint          (macOS)"; \
-		echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
-		exit 1; \
-	}
-	@golangci-lint run ./...
+.PHONY: lint
+lint: $(GOLANGCI_LINT) go-mod-download ## Run golangci-lint (run `make fix` to apply --fix)
+	@echo "$(CYAN)==> Running linters...$(RESET)"
+	@$(GOLANGCI_LINT) run ./...
 
-lint-fix: ## Run golangci-lint with --fix to auto-correct issues
-	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "$(RED)==> golangci-lint not found$(RESET)"; \
-		echo "Install: https://golangci-lint.run/welcome/install/"; \
-		echo "  brew install golangci-lint          (macOS)"; \
-		echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
-		exit 1; \
-	}
-	@golangci-lint run --fix ./...
-
-fix: ## Auto-format and auto-fix linters
-	@$(MAKE) fmt
-	@$(MAKE) lint-fix
-
-# ── Testing ───────────────────────────────────────────────────────
-# Verbose output:     V=1 make test
-# Extra flags:        make test ARGS="-run TestFoo"
-# Both:               V=1 make test ARGS="-run TestFoo"
-test: ## Unit tests with race detector
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race $(ARGS)
-
-test-integration: ## Integration tests (requires Docker)
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="integration $(TAGS)" -timeout 120s ./tests/... -race -count=1 $(ARGS)
-
-test-all: ## Unit + integration tests
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race $(ARGS)
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="integration $(TAGS)" -timeout 120s ./tests/... -race -count=1 $(ARGS)
-
-coverage: ## Unit test coverage → tmp/coverage/ and summary
-	@mkdir -p tmp/coverage
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race -coverprofile=tmp/coverage/coverage.txt -covermode=atomic $(ARGS)
-	@go tool cover -html=tmp/coverage/coverage.txt -o tmp/coverage/coverage.html
-	@echo "$(GREEN)==> Coverage Summary:$(RESET)"
-	@go tool cover -func=tmp/coverage/coverage.txt | tail -n 1 | awk '{print "  Total Coverage: $(CYAN)" $$3 "$(RESET)"}'
-	@echo "$(YELLOW)==> Open tmp/coverage/coverage.html in your browser for line-by-line details$(RESET)"
-
-coverage-enforce: coverage ## Fail if unit test coverage is below the 70% threshold in .testcoverage.yml
-	@go run github.com/vladopajic/go-test-coverage/v2@v2.18.7 --config=.testcoverage.yml
-
-smoke-test: ## Manual Bento insert+delete (requires running WaveHouse)
-	@go run ./tests/cmd/bento_pub
-
-# ── SDK & E2E Testing ─────────────────────────────────────────────
-test-sdk: ## Run SDK unit tests (clients/ts)
-	@cd clients/ts && npm test
-
-test-e2e-setup: ## Install E2E test dependencies
-	@cd tests/sdk && npm install
-
-test-e2e: ## Run E2E integration tests via SDK (auto-starts Docker if needed)
-	@cd tests/sdk && npm install --silent && npx vitest run
-
-test-e2e-dev: ## Run E2E integration tests in watch mode
-	@cd tests/sdk && npm install --silent && npx vitest
-
-test-everything: test test-sdk test-integration test-e2e ## Run ALL tests: Go unit + SDK unit + Go integration + E2E
-
-mod-tidy-check: ## Verify go.mod and go.sum are tidy
-	@echo "$(GREEN)==> Checking module tidiness...$(RESET)"
-	@go mod tidy
-	@git diff --exit-code go.mod go.sum || { echo "$(RED)==> go.mod/go.sum is not tidy. Run 'go mod tidy' and commit.$(RESET)"; exit 1; }
-	@echo "$(GREEN)==> Modules OK$(RESET)"
-
-# ── CI ────────────────────────────────────────────────────────────
-ci: ## Full CI check: tidy + fmt + lint + vulncheck + build + tests
-	@echo "$(YELLOW)==> Running full CI check...$(RESET)"
-	@echo ""
-	@echo "$(GREEN)── Step 1/7: Module tidiness ──$(RESET)"
-	@go mod tidy
-	@git diff --exit-code go.mod go.sum || { echo "$(RED)==> go.mod/go.sum is not tidy.$(RESET)"; exit 1; }
-	@echo ""
-	@echo "$(GREEN)── Step 2/7: Formatting ──$(RESET)"
-	@OUTPUT=$$($(GOFUMPT) -l .); test -z "$$OUTPUT" || { echo "$(YELLOW)Files not formatted:$(RESET)"; echo "$$OUTPUT"; echo "Run 'make fmt' and commit."; exit 1; }
-	@echo ""
-	@echo "$(GREEN)── Step 3/7: Linting ──$(RESET)"
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)==> golangci-lint not found. Run 'make tools' first.$(RESET)"; exit 1; }
-	@golangci-lint run ./...
-	@echo ""
-	@echo "$(GREEN)── Step 4/7: Vulnerability check ──$(RESET)"
-	@go run golang.org/x/vuln/cmd/govulncheck@latest -scan package ./...
-	@echo ""
-	@echo "$(GREEN)── Step 5/7: Build ──$(RESET)"
-	@CGO_ENABLED=0 $(MAKE) build
-	@echo ""
-	@echo "$(GREEN)── Step 6/7: Unit tests ──$(RESET)"
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="$(TAGS)" ./internal/... -race
-	@echo ""
-	@echo "$(GREEN)── Step 7/7: Integration tests ──$(RESET)"
-	@$(GOTESTSUM) --format $(GOTESTSUM_FMT) -- -tags="integration $(TAGS)" -timeout 120s ./tests/... -race -count=1
-	@echo ""
-	@echo "$(GREEN)==> All CI checks passed! ✔$(RESET)"
-
-# ── Docker ────────────────────────────────────────────────────────
-docker: ## Build Docker image for your local machine's architecture
-	@docker build -f deployments/Dockerfile -t wavehouse:latest .
-
-compose-standalone: ## Start standalone via Docker Compose
-	docker compose -f deployments/compose/standalone.yaml up -d
-
-compose-clustered: ## Start clustered via Docker Compose
-	docker compose -f deployments/compose/clustered.yaml up -d
-
-compose-deps: ## Start infrastructure dependencies
-	docker compose -f deployments/compose/dependencies.yaml up -d
-
-deps-wipe: ## Destroy and recreate dependencies
-	docker compose -f deployments/compose/dependencies.yaml down -v --remove-orphans
-	docker compose -f deployments/compose/dependencies.yaml up -d --force-recreate
-
-clean: ## Remove bin/, tmp/, data/, dist/
-	@rm -rf bin/ tmp/ data/ dist/
-
-# ── Releases ──────────────────────────────────────────────────────
-release-test: ## Test cross-compiling all binaries via GoReleaser (doesn't publish)
-	@command -v goreleaser >/dev/null 2>&1 || { echo "$(RED)==> goreleaser not found. Run 'make tools' to install.$(RESET)"; exit 1; }
-	@echo "$(GREEN)==> Running GoReleaser in snapshot mode...$(RESET)"
-	@goreleaser build --snapshot --clean --parallelism 2
-
-# ── Security & Analysis ───────────────────────────────────────────
-vulncheck: ## Run Go vulnerability check (summary; use V=1 for full call stacks)
-	@echo "$(GREEN)==> Running govulncheck...$(RESET)"
+.PHONY: vulncheck
+vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
+	@echo "$(CYAN)==> Running govulncheck...$(RESET)"
 ifdef V
-	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	@$(GOVULNCHECK) ./...
 else
-	@go run golang.org/x/vuln/cmd/govulncheck@latest -scan package ./...
+	@$(GOVULNCHECK) -scan package ./...
 endif
 
-security: vulncheck ## Combined security scan (vulncheck + gosec via linter)
-	@echo "$(GREEN)==> Running gosec via golangci-lint...$(RESET)"
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)==> golangci-lint not found. Run 'make tools'.$(RESET)"; exit 1; }
-	@golangci-lint run --enable gosec ./...
-	@echo "$(GREEN)==> Security scan complete$(RESET)"
-
-deadcode: ## Find unreachable functions and unused code
-	@echo "$(GREEN)==> Searching for dead code...$(RESET)"
-	@go run golang.org/x/tools/cmd/deadcode@latest -test ./...
-
-audit-cgo: ## Audit which dependencies contain C code (informational)
-	@echo "$(GREEN)==> Scanning dependency tree for packages with C files...$(RESET)"
-	@echo "  $(CYAN)Note:$(RESET) WaveHouse builds with CGO_ENABLED=0. Packages listed below"
-	@echo "  have pure-Go fallbacks and their C code is $(YELLOW)never compiled$(RESET)."
-	@echo "  This audit exists to catch new CGO deps before they cause build issues."
-	@echo ""
-	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/... 2>/dev/null || true
-	@echo ""
-	@echo "$(GREEN)==> CGO audit complete$(RESET)"
-	@echo "  To verify pure-Go build: $(CYAN)CGO_ENABLED=0 go build ./...$(RESET)"
-
-# ── Binary Size Analysis ─────────────────────────────────────────
-
-size-report: build ## Show binary sizes for all targets
-	@echo "$(GREEN)==> Binary sizes:$(RESET)"
-	@for b in $(BINARIES); do \
-		SIZE=$$(ls -lh bin/$$b | awk '{print $$5}'); \
-		SIZE_BYTES=$$(ls -l bin/$$b | awk '{print $$5}'); \
-		printf "  $(CYAN)%-25s$(RESET) %s (%s bytes)\n" "$$b" "$$SIZE" "$$SIZE_BYTES"; \
-	done
-
-size-tree: build-debug ## Top packages by size in the binary
-	@echo "$(GREEN)==> Binary size by package (debug build for DWARF accuracy):$(RESET)"
-	@echo ""
-	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
-		--format text --hide-sections bin/wavehouse 2>/dev/null
-
-size-treemap: build-debug ## Full binary size analysis → text + SVG + interactive HTML
-	@echo "$(GREEN)==> Analyzing bin/wavehouse (debug build for DWARF accuracy)...$(RESET)"
-	@echo "  Note: debug builds add ~30%% DWARF metadata but package proportions match production."
-	@echo ""
-	@mkdir -p tmp/analysis
-	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
-		--format text --hide-sections bin/wavehouse 2>/dev/null
-	@echo ""
-	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
-		--format svg --output tmp/analysis/size-map.svg --hide-sections bin/wavehouse 2>/dev/null
-	@echo "  $(CYAN)SVG  → tmp/analysis/size-map.svg$(RESET)"
-	@GOEXPERIMENT=jsonv2 go run github.com/Zxilly/go-size-analyzer/cmd/gsa@latest \
-		--format html --output tmp/analysis/size-map.html --hide-sections bin/wavehouse 2>/dev/null
-	@echo "  $(CYAN)HTML → tmp/analysis/size-map.html (interactive treemap)$(RESET)"
-	@if [ -z "$$CI" ]; then \
-		if command -v open >/dev/null 2>&1; then open tmp/analysis/size-map.html; \
-		elif command -v xdg-open >/dev/null 2>&1; then xdg-open tmp/analysis/size-map.html; \
-		fi; \
-	fi
-
-dep-graph: ## Dependency graph → tmp/analysis/graph.svg (requires graphviz `dot`)
-	@echo "$(GREEN)==> Generating dependency graph...$(RESET)"
-	@mkdir -p tmp/analysis
-	@go run github.com/loov/goda@latest graph -cluster -short "github.com/Wave-RF/WaveHouse/...:all" > tmp/analysis/graph.dot
-	@if command -v dot >/dev/null 2>&1; then \
-		dot -Tsvg tmp/analysis/graph.dot -o tmp/analysis/graph.svg 2>/dev/null; \
-		echo "$(GREEN)==> tmp/analysis/graph.svg generated$(RESET)"; \
-		if [ -z "$$CI" ]; then \
-			if command -v open >/dev/null 2>&1; then open tmp/analysis/graph.svg; \
-			elif command -v xdg-open >/dev/null 2>&1; then xdg-open tmp/analysis/graph.svg; \
-			fi; \
-		fi; \
-	else \
-		echo "$(YELLOW)==> tmp/analysis/graph.dot generated (install graphviz for SVG rendering)$(RESET)"; \
-		echo "  $(CYAN)brew install graphviz$(RESET)  then re-run this target"; \
-		echo "  or paste graph.dot into $(CYAN)https://dreampuf.github.io/GraphvizOnline/$(RESET)"; \
-	fi
-
-dep-why: ## Show why a module is included (usage: make dep-why MOD=github.com/aws/aws-sdk-go-v2)
-	@if [ -z "$(MOD)" ]; then \
-		echo "$(RED)==> Usage: make dep-why MOD=github.com/aws/aws-sdk-go-v2$(RESET)"; \
+# tidy: read-only check via `go mod tidy -diff` (Go 1.23+). Prints the
+# unified diff that would be applied and exits non-zero if anything is off,
+# without touching go.mod / go.sum. Safe to run in parallel with fmt/lint.
+.PHONY: tidy
+tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
+	@echo "$(CYAN)==> Checking module tidiness...$(RESET)"
+	@if ! go mod tidy -diff; then \
+		echo "$(RED)==> go.mod/go.sum is not tidy.$(RESET)"; \
+		echo "Run $(CYAN)make fix$(RESET) to apply."; \
 		exit 1; \
 	fi
-	@echo "$(GREEN)==> Why $(MOD) is required:$(RESET)"
-	@go mod why -m $(MOD) 2>&1 || true
-	@echo ""
-	@echo "$(GREEN)==> Import chain:$(RESET)"
-	@go mod graph | grep "$(MOD)" | head -20 || true
+	@echo "$(GREEN)==> Modules OK$(RESET)"
 
-dep-cut: ## Top cuttable dependencies by transitive impact
-	@echo "$(GREEN)==> Dependency cut analysis (top $(LIMIT), InDegree ≤ 3):$(RESET)"
-	@echo "  Packages with few dependents that pull in the most transitive weight."
-	@echo ""
-	@go run github.com/loov/goda@latest cut ./...:all 2>/dev/null | \
-		awk 'NR==1 { printf "  %-58s %4s %5s %10s\n", "Package", "Deps", "Pkgs", "Size"; next } \
-		     $$2+0 <= 3 { name=$$1; gsub(/github\.com\//, "", name); printf "  %-58s %4s %5s %10s\n", name, $$2, $$3, $$4 }' | \
-		head -n $$(($(LIMIT) + 1))
-	@echo ""
-	@echo "  $(CYAN)Full output: go run github.com/loov/goda@latest cut ./...:all$(RESET)"
+.PHONY: fix
+fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint --fix)
+	@echo "$(CYAN)==> Applying all auto-fixes...$(RESET)"
+	@go mod tidy
+	@$(GOFUMPT) -w .
+	@$(GOIMPORTS) -w .
+	@$(GOLANGCI_LINT) run --fix ./...
+	@echo "$(GREEN)==> Done$(RESET)"
 
-binary-analysis: size-report deadcode audit-cgo ## Combined binary analysis (sizes + dead code + CGO audit)
-	@echo ""
+.PHONY: verify
+verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -j verify`)
+	@echo "$(GREEN)==> All static checks passed$(RESET)"
+
+##@ Build
+
+# All three variants dispatch to scripts/build.sh, which knows how to handle
+# debug / release / cover and prints a uniform "✔ <output> (<time>s, <size>)"
+# status line. Per-binary parallelism is preserved via the $(BINARIES) /
+# $(RELEASE_BINARIES) / $(COVER_BINARIES) target lists — `make -j build`
+# would dispatch them concurrently if BINARIES grows.
+#
+# VERSION_LDFLAGS / LDFLAGS / TAGS are exported to recipes near the top.
+#
+# go-mod-download is a no-doc intermediate target — every Go-toolchain target
+# (build/test/lint variants) declares it as a prereq so `make -j` doesn't
+# kick off N parallel `go mod download` calls racing on the module cache.
+# Symmetric with install-sdk for the Node side.
+.PHONY: go-mod-download
+go-mod-download:
+	@go mod download
+
+.PHONY: $(BINARIES)
+$(BINARIES): go-mod-download
+	@scripts/build.sh $@ debug
+
+.PHONY: build
+build: $(BINARIES) ## Compile all binaries with debug symbols → bin/<name>
+
+# Hidden alias — `build` is debug by default, but `build-debug` reads more
+# obviously when paired with `build-release` in scripts or contributor docs.
+.PHONY: build-debug
+build-debug: build
+
+# Release variants build alongside (not overwriting) the debug binaries, so
+# `make size` can compare the two without recompiling between targets.
+.PHONY: $(RELEASE_BINARIES)
+$(RELEASE_BINARIES): %-release: go-mod-download
+	@scripts/build.sh $* release
+
+.PHONY: build-release
+build-release: $(RELEASE_BINARIES) ## Compile all binaries stripped → bin/<name>-release
+
+# Coverage-instrumented variants (`wavehouse-cov`): used by E2E to capture
+# coverage from the running binary.
+.PHONY: $(COVER_BINARIES)
+$(COVER_BINARIES): %-cov: go-mod-download
+	@scripts/build.sh $* cover
+
+.PHONY: build-cover
+build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation → bin/<name>-cov
+
+# --- TypeScript SDK build / install ------------------------------------------
+# pnpm is the canonical package manager (migrated from npm). Locally available
+# via PATH; CI installs/caches it via actions/cache + setup-node. Both the SDK
+# (clients/ts/) and the E2E test harness (tests/e2e/sdk/) use pnpm.
+PNPM        ?= pnpm
+SDK_DIR     := clients/ts
+E2E_SDK_DIR := tests/e2e/sdk
+
+# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
+# comment so they don't show in `make help`. The user-facing targets below
+# (build-sdk, test-sdk, test-e2e) depend on them.
+.PHONY: install-sdk
+install-sdk:
+	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
+
+.PHONY: install-e2e-sdk
+install-e2e-sdk:
+	@cd $(E2E_SDK_DIR) && $(PNPM) install --frozen-lockfile
+
+.PHONY: build-sdk
+build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
+	@echo "$(CYAN)==> Building SDK...$(RESET)"
+	@cd $(SDK_DIR) && $(PNPM) build
+
+##@ Test
+
+# Each Go test target writes covdata to tmp/coverage/<suite>/data/ and
+# hands off to .tools/cov for rendering + the threshold gate. Suite-specific
+# coverage scope:
+#   unit:         -cover (per-package — each test covers its own package)
+#   integration:  -coverpkg=./... (cross-package — drives end-to-end paths)
+#   e2e:          covdata flushed on SIGINT by the running cover binary,
+#                 captured by the orchestrator
+# Thresholds (per suite + total) live in .testcoverage.yml.
+
+.PHONY: test-unit
+test-unit: go-mod-download ## Run Go unit tests + render coverage + gate threshold
+	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
+	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
+	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
+		-tags="$(TAGS)" -cover -race ./internal/... $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
+	@go run ./scripts/cov render unit
+
+# Hidden alias: `make test` matches `go test ./...` muscle memory; test-unit
+# is the explicit form.
+.PHONY: test
+test: test-unit
+
+.PHONY: test-integration
+test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
+	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
+	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
+	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
+		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
+		./tests/integration/... $(ARGS) \
+		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
+	@go run ./scripts/cov render integration
+
+# test-sdk: vitest unit tests for the SDK. SDK_COVERAGE_DIR points vitest
+# at tmp/coverage/sdk/ (see clients/ts/vitest.config.ts), and the threshold
+# is read from .testcoverage.yml's `suites.sdk` and passed to vitest's
+# inline gate. Independent of Go — separate toolchain.
+.PHONY: test-sdk
+test-sdk: install-sdk ## Run SDK vitest unit tests + render coverage + gate threshold
+	@printf "$(CYAN)==> Running SDK Tests...$(RESET)\n"
+	@rm -rf tmp/coverage/sdk && mkdir -p tmp/coverage/sdk
+	@SDK_COVERAGE_DIR="$(CURDIR)/tmp/coverage/sdk" \
+		pnpm --dir clients/ts exec vitest run --coverage \
+		--coverage.thresholds.statements=$$(go run ./scripts/cov threshold sdk) $(ARGS)
+	@printf "$(GREEN)==> sdk gate passed$(RESET)  HTML: tmp/coverage/sdk/index.html\n"
+
+# test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
+# scripts/, then runs the SDK vitest harness against the live stack so both
+# halves are exercised. covdata flushes on SIGINT into tmp/coverage/e2e/data/.
+.PHONY: test-e2e
+test-e2e: build-sdk build-cover install-e2e-sdk ## Run E2E SDK suite against cover binary + render coverage + gate
+	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
+	@rm -rf $(COV_E2E)/data && mkdir -p $(COV_E2E)/data tmp
+	@go run ./scripts/orchestrator
+	@go run ./scripts/cov render e2e
+
+# Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
+# under `make -j N`. The suites bind ports / spin testcontainers / start the
+# release binary, so concurrent execution is unsafe.
+.PHONY: test-all
+test-all: ## Run all suites sequentially + merged Go coverage + gate
+	@$(MAKE) test-unit
+	@$(MAKE) test-sdk
+	@$(MAKE) test-integration
+	@$(MAKE) test-e2e
+	@$(MAKE) cov
+
+##@ Coverage
+
+# cov: merges whichever Go suites have covdata into tmp/coverage/total/,
+# prints a per-suite breakdown (plus SDK as informational), and gates
+# against threshold.total in .testcoverage.yml. Does NOT run tests — call
+# the test targets first (or run `make test-all` for the full pipeline).
+.PHONY: cov
+cov: ## Merge all available covdata + gate against total threshold
+	@go run ./scripts/cov merge
+
+##@ CI
+
+# ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
+# it stays out of `make help`; users invoke `make ci`, not this directly.
+.PHONY: ci-parallel
+ci-parallel: verify build build-cover build-sdk test test-sdk
+
+.PHONY: ci
+ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
+	@echo "$(CYAN)==> Phase 1: Parallel Build & Static Checks$(RESET)"
+	@$(MAKE) -j 4 ci-parallel
+	@echo "$(CYAN)==> Phase 2: Sequential Heavy Tests$(RESET)"
+	@$(MAKE) test-integration
+	@$(MAKE) test-e2e
+	@$(MAKE) cov
+	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
+
+##@ Analysis
+
+# Analysis tools are exploratory utilities run by humans investigating binary
+# size, dependency weight, or unused code. They are intentionally not part of
+# `verify` or `ci` — `deadcode` has false positives on reflection / HTTP
+# routers, and the size/dep tools are too slow for a pre-push gate.
+
+# audit-cgo: WaveHouse builds with CGO_ENABLED=0. Listed packages have pure-Go
+# fallbacks today, but a new dep could quietly break that constraint — this
+# audit surfaces every transitively-reachable package with C files so the drift
+# is visible before a release-time cross-compile breaks.
+.PHONY: audit-cgo
+audit-cgo: ## Audit dependency tree for CGO files (informational)
+	@echo "$(CYAN)==> Scanning dependency tree for packages with C files...$(RESET)"
+	@printf "  WaveHouse builds with %sCGO_ENABLED=0%s — listed packages have pure-Go fallbacks\n" "$(YELLOW)" "$(RESET)"
+	@echo  "  and their C code is never compiled. This audit catches new CGO deps."
+	@echo
+	@CGO_ENABLED=1 go list -deps -f '{{if .CgoFiles}}  ⚠ {{.ImportPath}}  ({{len .CgoFiles}} C files){{end}}' ./cmd/...
+	@echo
+	@echo "$(GREEN)==> CGO audit complete$(RESET)"
+
+# deadcode: whole-program reachability analysis, complementary to
+# golangci-lint's `unused` (which is locally scoped). False positives are
+# common for HTTP routers, reflection-based dispatch, and init() registration
+# — treat the output as a starting point, not a verdict.
+.PHONY: deadcode
+deadcode: ## Find unreachable functions
+	@echo "$(CYAN)==> Searching for dead code...$(RESET)"
+	@$(DEADCODE) -test ./...
+
+# size: binary size analysis. Default `make build` keeps DWARF symbols, which
+# gsa needs for accurate per-package attribution. The script also reports the
+# strip-equivalent size (what `make build-release` would produce) and explains
+# the gsa output's quirks (the "CGO" label is mislabeled type metadata, etc.).
+.PHONY: size
+size: build ## Binary size analysis → text + SVG + interactive HTML
+	@scripts/size.sh
+
+# dep-cut: surfaces packages with few dependents (low InDegree) that drag in
+# heavy transitive weight — i.e. the best candidates to remove or replace.
+# Override the default top-N with `make dep-cut LIMIT=50`.
+LIMIT ?= 30
+.PHONY: dep-cut
+dep-cut: ## Top cuttable dependencies by transitive weight (LIMIT=N to override)
+	@LIMIT='$(LIMIT)' scripts/dep-cut.sh
+
+# binary-analysis: one command for "what's in my binary, and what's wrong with
+# it." Runs in dep-order: build → size → audit-cgo → deadcode.
+.PHONY: binary-analysis
+binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcode
+	@echo
 	@echo "$(GREEN)==> Binary analysis complete$(RESET)"
-	@echo "  For interactive size explorer: $(CYAN)make size-treemap$(RESET)"
-	@echo "  For package weight breakdown:  $(CYAN)make size-tree$(RESET)"
-	@echo "  For dependency graph:          $(CYAN)make dep-graph$(RESET)"
-	@echo "  For dependency cut analysis:   $(CYAN)make dep-cut$(RESET)"
+	@printf "  Cuttable dependencies: %smake dep-cut%s\n" "$(CYAN)" "$(RESET)"
+
+##@ Cleanup
+
+# Tiered clean targets, each scoped to a single artifact class. Compose them
+# explicitly (e.g. `make clean clean-test`) when you want a partial reset
+# without nuking installed tools or pnpm deps. `clean-all` chains them.
+#
+#   clean        build outputs only       (bin/, dist/, clients/ts/dist/)
+#   clean-test   test outputs only        (tmp/ — coverage, logs, NATS state)
+#   clean-tools  installed deps           (.bin/, node_modules/ everywhere)
+#   clean-all    everything above + data/ + docker volumes (full reset)
+
+.PHONY: clean
+clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/)
+	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
+	@rm -rf bin/ dist/ clients/ts/dist/
+
+.PHONY: clean-test
+clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
+	@echo "$(YELLOW)==> Cleaning test artifacts...$(RESET)"
+	@rm -rf tmp/
+
+.PHONY: clean-tools
+clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
+	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
+	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/
+
+.PHONY: clean-all
+clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
+	@echo "$(YELLOW)==> Full reset (dev state, docker)...$(RESET)"
+	@rm -rf data/
+	@$(DEV_COMPOSE) down -v --remove-orphans 2>/dev/null || true
+	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans 2>/dev/null || true
+
+##@ Tooling
+
+# tools: bootstrap a fresh clone.
+#   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
+#   - Downloads Go modules so go.mod tool deps are available offline.
+#   - Installs SDK + E2E pnpm deps so test-sdk / test-e2e are runnable
+#     without a separate manual setup step.
+#
+# Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by
+# `go mod download` but compile lazily on first `go tool <name>` invocation.
+# Go's build cache makes subsequent invocations near-instant. If you need
+# them pre-compiled (offline CI image baking), run them once with --help.
+.PHONY: tools
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk ## Install pinned tools, Go modules, and pnpm deps
+	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
+	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
+
+# File-target rules: only run when the versioned binary is missing. Bumping
+# the *_VERSION variable changes the path and re-triggers the install.
+#
+# TODO: replace `curl | sh` with a SHA256-verified release tarball download.
+# The upstream installer pipes a fetched script directly to shell, which is the
+# same supply-chain risk class we reject in workflow files. See releases at
+# https://github.com/golangci/golangci-lint/releases for binary tarballs +
+# checksums.txt.
+$(GOLANGCI_LINT):
+	@echo "$(YELLOW)==> Downloading golangci-lint $(GOLANGCI_LINT_VERSION) for $(OS)_$(ARCH)...$(RESET)"
+	@mkdir -p $(LOCAL_BIN)
+	@curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(LOCAL_BIN) $(GOLANGCI_LINT_VERSION)
+	@mv $(LOCAL_BIN)/golangci-lint $@
+	@echo "$(GREEN)==> Installed: $@$(RESET)"
+
+# air installs cleanly via `go install` (pure Go, no shell-piping). GOBIN
+# pins the install location to our .bin/ rather than the user's $GOPATH/bin.
+$(AIR):
+	@echo "$(YELLOW)==> Installing air $(AIR_VERSION) for $(OS)_$(ARCH)...$(RESET)"
+	@mkdir -p $(LOCAL_BIN)
+	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
+	@mv $(LOCAL_BIN)/air $@
+	@echo "$(GREEN)==> Installed: $@$(RESET)"
