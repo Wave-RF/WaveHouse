@@ -88,9 +88,9 @@ flowchart TB
 
 ### Thundering-herd queries
 
-A popular dashboard recomputes the same expensive aggregation for every viewer. ClickHouse has a built-in query cache, but it is **per-server** and **not shared across replicas** — a clustered deployment sees every replica repeat the same work on cache miss. There is no client-facing singleflight: 50 dashboards hitting refresh at once means 50 identical queries land on ClickHouse.
+A popular dashboard recomputes the same expensive aggregation for every viewer. ClickHouse has a built-in query cache, but it is **per-server** and there is no client-facing singleflight: 50 dashboards hitting refresh at once means up to 50 identical queries land on ClickHouse.
 
-WaveHouse coalesces identical queries with a two-tier cache (L1 Ristretto in-process, L2 Redis shared) and Go's `singleflight` so only the first of N concurrent identical queries actually hits ClickHouse.
+WaveHouse coalesces identical queries with an in-process Ristretto cache and Go's `singleflight`, so only the first of N concurrent identical queries actually hits ClickHouse — the rest receive the same result without making the round trip.
 
 ```mermaid
 flowchart TB
@@ -106,12 +106,12 @@ flowchart TB
         CH1 --> COST["50× compute cost"]:::pain
     end
 
-    subgraph coalesce["TIERED CACHE + SINGLEFLIGHT"]
+    subgraph coalesce["IN-PROCESS CACHE + SINGLEFLIGHT"]
         direction TB
         C2["50 clients<br/>(same query)"]:::neutral
-        C2 --> L1["L1 Ristretto<br/>(in-process)"]:::wh
-        L1 -. miss .-> L2["L2 Redis<br/>(shared)"]:::wh
-        L2 -. miss .-> CH2[("ClickHouse")]:::win
+        C2 --> L1["Ristretto cache<br/>(in-process)"]:::wh
+        L1 -. miss .-> SF["singleflight<br/>coalesce"]:::wh
+        SF -. miss .-> CH2[("ClickHouse")]:::win
         CH2 --> RESULT["1 query hits backend<br/>49 coalesce to the same result"]:::win
     end
 ```
@@ -156,9 +156,9 @@ flowchart TB
 
 | Capability | DIY stack | WaveHouse |
 | ---------- | --------- | --------- |
-| Durable ingest buffer | Kafka / Redpanda cluster (3+ brokers, Zookeeper/KRaft) | Embedded NATS JetStream (standalone) or external NATS (clustered) |
-| Batch consumer | Custom Go/Rust/Java service you write and operate | Built in (`wavehouse-worker` or standalone) |
-| Query cache | Redis + singleflight middleware you write | Built in (L1 Ristretto + L2 Redis + singleflight) |
+| Durable ingest buffer | Kafka / Redpanda cluster (3+ brokers, Zookeeper/KRaft) | Embedded NATS JetStream |
+| Batch consumer | Custom Go/Rust/Java service you write and operate | Built in |
+| Query cache | Redis + singleflight middleware you write | Built in (Ristretto + singleflight) |
 | Real-time push | WebSocket service + bridge from Kafka | Built in (`/v1/stream/sse`, `/v1/stream/ws`) |
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
@@ -192,7 +192,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 
 | Concern | Direct ClickHouse | Kafka + ClickHouse (DIY) | Tinybird | **WaveHouse** |
 | ------- | ----------------- | ----------------------- | -------- | ------------- |
-| Single-binary deployment | — | — | N/A (SaaS) | ✓ standalone mode |
+| Single-binary deployment | — | — | N/A (SaaS) | ✓ |
 | Self-hosted | ✓ | ✓ | ✗ | ✓ |
 | Handles N-row inserts safely | ✗ merge blowup | ✓ via Kafka | ✓ | ✓ native |
 | Schema validation at the edge | ✗ | Custom | ✓ | ✓ (discovers schema) |
@@ -200,8 +200,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
 | Exact-once dedup | ✗ | Custom | ✓ | ✓ optional |
 | Real-time push (SSE/WS) | ✗ | Custom service | Partial | ✓ native, gap-fill |
-| Shared query cache (L2) | Per-server cache only | Redis + custom singleflight | ✓ | ✓ Redis + singleflight |
-| Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ |
+| Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |
 | Named parameterized pipes | ✗ | Custom | ✓ | ✓ stored in NATS KV |
 | Type-safe client SDK with codegen | ✗ | Per team | Partial | ✓ `@wavehouse/sdk` |
@@ -245,15 +244,13 @@ flowchart TB
     classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
 
     Q["Client<br/>POST /v1/query"]:::client
-    Q --> L1["L1 Ristretto<br/>(in-process)"]:::wh
-    L1 -. "miss" .-> L2["L2 Redis<br/>(shared, clustered only)"]:::wh
-    L2 -. "miss + singleflight" .-> CH[("ClickHouse")]:::store
+    Q --> L1["Ristretto cache<br/>(in-process)"]:::wh
+    L1 -. "miss + singleflight" .-> CH[("ClickHouse")]:::store
     L1 -. "hit: ~0.5ms" .-> Q
-    L2 -. "hit: ~2ms" .-> Q
     CH -. "miss: query latency" .-> Q
 ```
 
-**Latency budget at each stage** (representative, standalone mode):
+**Latency budget at each stage** (representative):
 
 | Stage | Typical p50 | Typical p99 |
 | ----- | ----------- | ----------- |

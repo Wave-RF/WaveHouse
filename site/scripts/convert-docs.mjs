@@ -56,7 +56,7 @@ const DOC_META = {
 	'deployment.md': {
 		title: 'Deployment',
 		description:
-			'Standalone, clustered, Docker, releases, health checks, and schema setup.',
+			'Running WaveHouse in production: Docker images, releases, environment variables, health checks, and schema setup.',
 		order: 8,
 	},
 	'development.md': {

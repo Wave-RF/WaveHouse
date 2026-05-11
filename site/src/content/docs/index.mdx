@@ -33,8 +33,8 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 	<Card title="Real-time push" icon="bars">
 		Every event is broadcast to SSE/WebSocket subscribers **before** it's flushed to ClickHouse. Gap-fill from JetStream history for late-connecting clients.
 	</Card>
-	<Card title="Two-tier query cache" icon="laptop">
-		Local Ristretto cache (L1) + shared Redis cache (L2) with singleflight coalescing — dashboards survive thundering herds.
+	<Card title="In-process query cache" icon="laptop">
+		Ristretto cache plus Go `singleflight` coalesces identical concurrent queries — dashboards survive thundering herds without an extra cache tier to operate.
 	</Card>
 	<Card title="Hasura-style access control" icon="seti:lock">
 		Per-table, per-role column and row-level policies with JWT claim templating. Stored in NATS KV with file-based bootstrap and cluster sync.
@@ -43,23 +43,18 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 		`@wavehouse/sdk` — zero-dependency client with type-safe query builder, live queries, real-time streaming, and codegen from your schemas.
 	</Card>
 	<Card title="Exact-once dedup (optional)" icon="seti:json">
-		Drop duplicate payloads before they reach ClickHouse. Embedded Pebble in standalone mode; distributed ScyllaDB in clustered mode.
+		Drop duplicate payloads before they reach ClickHouse — embedded Pebble key-value store, exact-match by event ID.
 	</Card>
 	<Card title="Dead Letter Queue" icon="warning">
 		Failed batch inserts land in a dedicated DLQ stream instead of blocking retries. Inspect depth via `GET /v1/dlq/stats`.
 	</Card>
 </CardGrid>
 
-## Deployment modes
+## How it ships
 
-<CardGrid>
-	<Card title="Standalone" icon="seti:config">
-		Single `wavehouse` binary. Embedded NATS + optional embedded Pebble dedup. **One external dependency: ClickHouse.** Perfect for laptops, single-server deployments, and demos.
-	</Card>
-	<Card title="Clustered" icon="puzzle">
-		`wavehouse-api` + `wavehouse-worker` binaries. External NATS, Redis, and optional ScyllaDB. Horizontally scalable behind a load balancer for production workloads.
-	</Card>
-</CardGrid>
+<Card title="Single binary" icon="seti:config">
+	One `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
+</Card>
 
 ## Start here
 
@@ -91,7 +86,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 	/>
 	<LinkCard
 		title="Deployment"
-		description="Standalone, clustered, Docker images, releases, and health checks."
+		description="Docker images, releases, environment variables, and health checks."
 		href="/deployment/"
 	/>
 </CardGrid>

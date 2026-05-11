@@ -1,6 +1,6 @@
 # Getting Started
 
-Run WaveHouse locally in under five minutes. This walkthrough uses standalone mode (single binary, ClickHouse as the only external dependency) and covers ingest, query, and real-time streaming.
+Run WaveHouse locally in under five minutes. WaveHouse ships as a single binary with ClickHouse as the only external dependency; this walkthrough covers ingest, query, and real-time streaming.
 
 ## Prerequisites
 
@@ -57,7 +57,7 @@ WaveHouse validates the body against the ClickHouse schema before acknowledging.
 
 ## 4. Query
 
-Queries are cached with a two-tier cache (L1 in-memory, L2 Redis in clustered mode).
+Queries are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once.
 
 ```bash
 # Wait ~5 seconds for the batch flush to ClickHouse, then:
@@ -89,11 +89,10 @@ curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
 - **[API Reference](api.md)** — every endpoint, request/response shape, and error code.
 - **[TypeScript SDK](sdk.md)** — zero-dependency client with query builder, live queries, and codegen.
 - **[Configuration](configuration.md)** — full YAML + environment variable reference.
-- **[Deployment](deployment.md)** — clustered mode, Docker images, releases, health checks.
+- **[Deployment](deployment.md)** — Docker images, releases, health checks.
 - **[Development](development.md)** — building from source, running tests, hot-reload workflow.
 
 ## Going further
 
 - **Enable JWT auth**: set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=<secret>` — see [API Reference — Authentication](api.md#authentication).
 - **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](configuration.md#deduplication).
-- **Scale horizontally**: switch to clustered mode with external NATS + Redis — see [Deployment — Clustered](deployment.md#clustered-distributed).

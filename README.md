@@ -20,7 +20,7 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **📋 Schema-Aware Validation:** WaveHouse discovers your ClickHouse table schemas automatically via `system.columns` and validates every ingest payload against the real schema — unknown fields are rejected, types are checked, and nullable constraints are enforced. Bring Your Own Schema: you define tables in ClickHouse, WaveHouse enforces them.
 * **📥 Asynchronous Buffered Ingestion:** Never drop a packet. WaveHouse writes incoming data to a highly durable Write-Ahead Log (WAL) and returns `200 OK` instantly, batching inserts to ClickHouse in the background.
 * **👯 Optional Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations. Enable it when you need it, skip it when you don't.
-* **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
+* **⚡ In-process Query Caching:** An in-process Ristretto cache plus Go `singleflight` coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
 * **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
 * **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
 * **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
@@ -141,7 +141,7 @@ The full documentation site lives at **[docs.wavehouse.dev](https://docs.wavehou
 * [Architecture](docs/architecture.md) — System design, data flows, and package overview
 * [API Reference](docs/api.md) — All endpoints, authentication, request/response formats
 * [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/deployment.md) — Standalone, (future) clustered, Docker, and release guide
+* [Deployment](docs/deployment.md) — Single-binary deployment, Docker images, releases, and health checks
 * [Development](docs/development.md) — Building, testing, linting, and project structure
 * [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
 

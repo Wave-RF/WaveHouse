@@ -1,10 +1,10 @@
 # Deployment Guide
 
-How to run WaveHouse in production — standalone (single binary) or clustered (API + worker + external NATS/Redis/ScyllaDB), plus Docker images, releases, health checks, and the required ClickHouse/ScyllaDB schemas.
+How to run WaveHouse in production — single binary, Docker images, releases, health checks, and the required ClickHouse schema.
 
-## Standalone (Single Binary)
+## Single binary
 
-The standalone mode runs everything in a single process with embedded NATS and optional Pebble dedup. The only external dependency is ClickHouse.
+WaveHouse runs as one process with embedded NATS and optional Pebble dedup. The only external dependency is ClickHouse.
 
 ### Quick Start with Docker Compose
 
