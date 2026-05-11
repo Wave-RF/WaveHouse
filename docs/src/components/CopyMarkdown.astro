@@ -4,7 +4,7 @@ interface Props {
 }
 
 const { slug } = Astro.props;
-const mdUrl = `/md/${slug}.md`;
+const mdUrl = `/${slug}.md`;
 ---
 
 <copy-markdown data-url={mdUrl}>

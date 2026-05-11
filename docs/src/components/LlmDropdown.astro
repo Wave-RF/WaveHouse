@@ -6,7 +6,7 @@ const prompt = encodeURIComponent(
 	`Read ${pageUrl} and prepare to answer questions about it.`
 );
 const slug = pagePath.replace(/^\/|\/$/g, '');
-const mdUrl = `/md/${slug}.md`;
+const mdUrl = `/${slug}.md`;
 ---
 
 <details class="llm-dropdown">
