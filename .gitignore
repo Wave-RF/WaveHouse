@@ -30,6 +30,9 @@ tests/sdk/.setup-state.json
 *.swo
 *~
 
+# Local git worktrees
+.worktrees/
+
 # OS files
 .DS_Store
 Thumbs.db
