@@ -1,0 +1,141 @@
+name: Upsert board item + set Status
+description: >-
+  Ensures the given PR or Issue is on the Task Board (project #7) and sets its
+  Status field. Idempotent — adding an already-present item is a no-op, and
+  setting a Status that's already correct is a no-op. Used by both
+  project-orchestrator.yml (non-Dependabot PRs) and dependabot-automerge.yml
+  (major-bump hold path).
+
+inputs:
+  project-token:
+    description: >-
+      PAT with project:write AND repo:read scopes. Required — the
+      default GITHUB_TOKEN lacks org-project scope. The resource(url)
+      GraphQL call used below dereferences the PR/Issue URL, which on
+      private repos requires repo read in addition to the project
+      write. Fine-grained PATs need both scopes explicitly selected.
+    required: true
+  project-owner:
+    description: Organization / user that owns the project.
+    required: true
+  project-number:
+    description: Project number (the integer in the project URL).
+    required: true
+  project-id:
+    description: Global node ID of the project (PVT_*). Used for item-edit calls.
+    required: true
+  status-field-id:
+    description: Global node ID of the Status field (PVTSSF_*).
+    required: true
+  status-option-id:
+    description: Global node ID of the target Status option (the specific single-select option).
+    required: true
+  url:
+    description: Full HTTPS URL of the PR or Issue to upsert.
+    required: true
+
+outputs:
+  item-id:
+    description: Board item node ID (ProjectV2Item). Always populated on success.
+    value: ${{ steps.upsert.outputs.item_id }}
+  status-changed:
+    description: >-
+      Literal "true" if this invocation actually changed the Status, "false" if it was already set.
+    value: ${{ steps.upsert.outputs.status_changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Upsert + set Status
+      id: upsert
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.project-token }}
+        PROJECT_OWNER: ${{ inputs.project-owner }}
+        PROJECT_NUMBER: ${{ inputs.project-number }}
+        PROJECT_ID: ${{ inputs.project-id }}
+        STATUS_FIELD_ID: ${{ inputs.status-field-id }}
+        STATUS_OPTION_ID: ${{ inputs.status-option-id }}
+        URL: ${{ inputs.url }}
+      run: |
+        set -euo pipefail
+
+        # Look up whether the item is already on the board. GraphQL resource(url)
+        # returns a typed object (PullRequest | Issue | …), so we query both
+        # fragments and filter to project #PROJECT_NUMBER. `gh api --jq` only
+        # accepts a single jq expression — we pipe to a standalone jq so we can
+        # inject PROJECT_NUMBER via --arg.
+        resp=$(gh api graphql -f query='query($url: URI!) {
+            resource(url: $url) {
+              ... on PullRequest {
+                projectItems(first: 20) {
+                  nodes {
+                    id
+                    project { number }
+                    fieldValueByName(name: "Status") {
+                      ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                    }
+                  }
+                }
+              }
+              ... on Issue {
+                projectItems(first: 20) {
+                  nodes {
+                    id
+                    project { number }
+                    fieldValueByName(name: "Status") {
+                      ... on ProjectV2ItemFieldSingleSelectValue { optionId }
+                    }
+                  }
+                }
+              }
+            }
+          }' -F url="$URL")
+
+        # Copilot R9 flagged: without a .errors check, a successful
+        # HTTP response with a GraphQL-level error (bad scope, URL
+        # permissions, schema issue) would leave item_id empty and
+        # trip the "item not on board — adding" branch, which would
+        # mask the real failure as a spurious re-add. Fail loudly
+        # instead.
+        graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
+        if [ -n "$graphql_errors" ]; then
+          echo "::error::GraphQL lookup failed for $URL: $graphql_errors"
+          exit 1
+        fi
+        if echo "$resp" | jq -e '.data.resource == null' > /dev/null; then
+          echo "::error::GraphQL returned null resource for $URL — check URL validity and that the token has read access."
+          exit 1
+        fi
+
+        item_id=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+          .data.resource.projectItems.nodes[]?
+          | select(.project.number == ($n | tonumber))
+          | .id' | head -n1)
+
+        current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
+          .data.resource.projectItems.nodes[]?
+          | select(.project.number == ($n | tonumber))
+          | .fieldValueByName.optionId // ""' | head -n1)
+
+        if [ -z "$item_id" ]; then
+          echo "Item not on board — adding."
+          item_id=$(gh project item-add "$PROJECT_NUMBER" \
+            --owner "$PROJECT_OWNER" --url "$URL" --format json --jq '.id')
+          current_option=""
+        fi
+
+        if [ "$current_option" != "$STATUS_OPTION_ID" ]; then
+          gh project item-edit \
+            --id "$item_id" \
+            --field-id "$STATUS_FIELD_ID" \
+            --single-select-option-id "$STATUS_OPTION_ID" \
+            --project-id "$PROJECT_ID" > /dev/null
+          echo "Status changed on item $item_id (was $current_option → $STATUS_OPTION_ID)."
+          echo "status_changed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Status already correct on item $item_id ($STATUS_OPTION_ID) — no change."
+          echo "status_changed=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "item_id=$item_id" >> "$GITHUB_OUTPUT"

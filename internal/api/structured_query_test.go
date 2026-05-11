@@ -20,7 +20,7 @@ import (
 func structuredQueryRequest(t *testing.T, table string, sq query.StructuredQuery) *http.Request {
 	t.Helper()
 	body, _ := json.Marshal(sq)
-	r := httptest.NewRequest(http.MethodPost, "/v1/tables/"+table+"/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tables/"+table+"/query", bytes.NewReader(body))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("table", table)
 	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
@@ -44,7 +44,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 	t.Parallel()
 	h := newStructuredQueryHandler()
 	body, _ := json.Marshal(query.StructuredQuery{Columns: []string{"page"}})
-	r := httptest.NewRequest(http.MethodPost, "/v1/tables//query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tables//query", bytes.NewReader(body))
 	rctx := chi.NewRouteContext()
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
@@ -52,6 +52,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing table")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_UnknownTable(t *testing.T) {
@@ -63,12 +64,13 @@ func TestStructuredQuery_UnknownTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "unknown table")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	h := newStructuredQueryHandler()
-	r := httptest.NewRequest(http.MethodPost, "/v1/tables/clicks/query", bytes.NewReader([]byte(`{bad}`)))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tables/clicks/query", bytes.NewReader([]byte(`{bad}`)))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("table", "clicks")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
@@ -77,6 +79,7 @@ func TestStructuredQuery_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_PolicyForbidden(t *testing.T) {
@@ -104,6 +107,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
@@ -133,6 +137,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "column")
 	assert.Contains(t, w.Body.String(), "not allowed")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
@@ -168,6 +173,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "aggregation")
 	assert.Contains(t, w.Body.String(), "not allowed")
+	assertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {

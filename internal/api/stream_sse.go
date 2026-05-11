@@ -30,7 +30,7 @@ func NewSSEHandler(hub *Hub, js jetstream.JetStream) *SSEHandler {
 func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
 
@@ -67,7 +67,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					return true // skip this message
 				}
 				id := extractEventTimestamp(out)
-				fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+				_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 				flusher.Flush()
 				return true
 			})
@@ -80,7 +80,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 						return true
 					}
 					id := extractEventTimestamp(out)
-					fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+					_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 					flusher.Flush()
 					return true
 				})
@@ -115,7 +115,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			id := extractEventTimestamp(out)
-			fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 			flusher.Flush()
 			pushSpan.End()
 		}

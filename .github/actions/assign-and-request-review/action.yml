@@ -1,0 +1,135 @@
+name: Assign reviewers + request review
+description: >-
+  Sets PR assignees and requests GitHub reviews from the same users. Idempotent:
+  users already assigned/requested don't get duplicate notifications. The pair
+  is always applied together because the Task Board queue (driven by assignees)
+  and GitHub's native review request (driven by `dismiss_stale_reviews_on_push`)
+  encode the same "who's on deck" signal — they must stay in sync.
+
+inputs:
+  github-token:
+    description: Token with pull-requests:write scope. GITHUB_TOKEN is fine.
+    required: true
+  repo:
+    description: "owner/repo"
+    required: true
+  pr-number:
+    description: PR number.
+    required: true
+  reviewers:
+    description: >-
+      Space-separated GitHub logins. Duplicates are de-duped. Users already
+      assigned or requested are no-ops — GitHub silently ignores repeats.
+    required: true
+  request-review:
+    description: >-
+      Whether to POST /requested_reviewers in addition to setting assignees.
+      Default "true" — set "false" on reeval re-fires after a reviewer has
+      already submitted a review and GitHub legitimately cleared the
+      request. Assigning-only in that case lets the reviewer stay in the
+      Task Board queue without re-notifying them before the author has
+      explicitly re-requested. Copilot flagged that the all-idempotent
+      repair-the-pair logic in the composite was re-firing review requests
+      after CHANGES_REQUESTED reviews, defeating the explicit re_requested
+      signal.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Assign + request review
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ inputs.repo }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        REVIEWERS: ${{ inputs.reviewers }}
+        REQUEST_REVIEW: ${{ inputs.request-review }}
+      run: |
+        set -euo pipefail
+
+        # De-dupe and drop empties.
+        mapfile -t USERS < <(printf '%s\n' $REVIEWERS | awk 'NF' | sort -u)
+
+        if [ "${#USERS[@]}" -eq 0 ]; then
+          echo "No reviewers to assign — skipping."
+          exit 0
+        fi
+
+        # Reconcile each side (assignees, review-requests) separately.
+        # The board's queue is driven by assignees; GitHub's native
+        # review notification + dismiss-stale behavior is driven by
+        # review-requests. They encode the same "who's on deck" signal
+        # but can drift (e.g., dismiss_stale_reviews_on_push clears a
+        # review-request without touching the assignee). Fixing only
+        # when both sides are missing — which is what the earlier
+        # version did — left the out-of-sync state permanent. Copilot
+        # flagged this. Both gh endpoints are idempotent server-side
+        # so targeting only the truly-missing subset keeps network
+        # calls minimal without risk.
+        pr_state=$(gh pr view "$PR_NUMBER" -R "$REPO" \
+          --json assignees,reviewRequests \
+          --jq '{
+            assignees: [.assignees[].login],
+            requested: [.reviewRequests[].login]
+          }')
+
+        mapfile -t MISSING_ASSIGNEES < <(
+          for user in "${USERS[@]}"; do
+            has=$(echo "$pr_state" | jq -r --arg u "$user" '.assignees | index($u)')
+            [ "$has" = "null" ] && printf '%s\n' "$user"
+          done
+        )
+
+        mapfile -t MISSING_REVIEW_REQUESTS < <(
+          for user in "${USERS[@]}"; do
+            has=$(echo "$pr_state" | jq -r --arg u "$user" '.requested | index($u)')
+            [ "$has" = "null" ] && printf '%s\n' "$user"
+          done
+        )
+
+        if [ "${#MISSING_ASSIGNEES[@]}" -eq 0 ] && [ "${#MISSING_REVIEW_REQUESTS[@]}" -eq 0 ]; then
+          echo "All desired reviewers (${USERS[*]}) already have synchronised assignee + review-request state — skipping."
+          exit 0
+        fi
+
+        # Assign only the missing-assignee subset.
+        if [ "${#MISSING_ASSIGNEES[@]}" -gt 0 ]; then
+          assignee_csv=$(IFS=,; echo "${MISSING_ASSIGNEES[*]}")
+          echo "Assigning [$assignee_csv] to PR #$PR_NUMBER (missing from assignees)."
+          gh pr edit "$PR_NUMBER" -R "$REPO" --add-assignee "$assignee_csv" > /dev/null
+        fi
+
+        # Request review for the missing-review-request subset. 422
+        # (already-approved-on-head-SHA post-dismiss-stale) stays a
+        # notice; other failures surface with gh stderr inline so
+        # operators can debug.
+        #
+        # Callers set request-review=false on reeval re-fires after a
+        # reviewer has legitimately submitted a review (GitHub cleared
+        # the request by design). Re-firing it there would re-notify
+        # the reviewer before the author has hit "re-request review,"
+        # defeating the explicit re_requested signal.
+        if [ "$REQUEST_REVIEW" != "true" ]; then
+          if [ "${#MISSING_REVIEW_REQUESTS[@]}" -gt 0 ]; then
+            echo "request-review=false — skipping /requested_reviewers for [${MISSING_REVIEW_REQUESTS[*]}] (assignees reconciled)."
+          fi
+        elif [ "${#MISSING_REVIEW_REQUESTS[@]}" -gt 0 ]; then
+          reviewer_json=$(printf '%s\n' "${MISSING_REVIEW_REQUESTS[@]}" | jq -R . | jq -sc '{reviewers: .}')
+
+          set +e
+          api_out=$(gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/requested_reviewers" \
+            --input - <<<"$reviewer_json" 2>&1)
+          api_rc=$?
+          set -e
+
+          if [ "$api_rc" -eq 0 ]; then
+            echo "Requested review from: ${MISSING_REVIEW_REQUESTS[*]}"
+          elif echo "$api_out" | grep -qE "(HTTP 422|422 Unprocessable)"; then
+            echo "::notice::Review request returned 422 — expected when the user already approved on this SHA post-dismiss-stale. Assignees are in sync."
+          else
+            echo "::warning::Request-review API failed (exit $api_rc). Assignees are still synchronised, but GitHub won't send a notification. gh output:"
+            printf '  %s\n' "$api_out"
+          fi
+        fi

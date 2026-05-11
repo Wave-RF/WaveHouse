@@ -24,9 +24,11 @@ We will acknowledge receipt within 48 hours and aim to provide an initial assess
 
 WaveHouse handles data and enforces strict isolation:
 
-- **JWT validation**: When auth is enabled, all `/v1/*` endpoints require valid HMAC-signed JWTs.
+- **JWT validation**: When auth is enabled, all `/v1/*` endpoints require valid JWTs. Signing supports either an HMAC shared secret or a remote JWKS endpoint (`auth.jwks_url`).
+- **Role-based access control**: Roles are extracted from a configurable JWT claim path. Non-admin/service roles have per-table, per-column, row-level policies enforced on ingest and query.
 - **Input validation**: JSON payloads are validated against ClickHouse schemas before processing.
-- **Query passthrough**: ClickHouse queries are forwarded directly — use appropriate access controls on ClickHouse itself.
+- **Query passthrough**: Raw SQL via `POST /v1/query` is restricted to roles with `raw_sql: true` in their policy. Structured queries (`POST /v1/tables/{table}/query`) are validated against schema with permission injection.
+- **Supply chain**: Third-party GitHub Actions are pinned to full commit SHAs. `govulncheck` runs on every push/PR. Dependabot opens weekly grouped PRs for Go modules and Actions.
 
 ## Disclosure Policy
 

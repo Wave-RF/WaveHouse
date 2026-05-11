@@ -21,43 +21,43 @@ func (h *PolicyHandler) Get(w http.ResponseWriter, r *http.Request) {
 	p := h.Store.Get()
 	if p == nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"tables":{}}`))
+		_, _ = w.Write([]byte(`{"tables":{}}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(p)
+	_ = json.NewEncoder(w).Encode(p)
 }
 
 // Put replaces the current access control policy.
 func (h *PolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
 	var p policy.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := h.Store.Put(r.Context(), &p); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // Validate checks a policy without saving it.
 func (h *PolicyHandler) Validate(w http.ResponseWriter, r *http.Request) {
 	var p policy.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := policy.Validate(&p); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"valid": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"valid": true})
 }

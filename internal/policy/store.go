@@ -104,7 +104,7 @@ func (s *Store) Watch(ctx context.Context) {
 		s.logger.Error("policy watch failed", "error", err)
 		return
 	}
-	defer watcher.Stop()
+	defer func() { _ = watcher.Stop() }()
 
 	for {
 		select {
@@ -158,6 +158,7 @@ func NewMemoryStore(p *Policy) *Store {
 
 // loadPolicyFile reads a policy from a YAML or JSON file.
 func loadPolicyFile(path string) (*Policy, error) {
+	// #nosec G304 -- path is operator-configured via config.yaml, not request input.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

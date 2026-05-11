@@ -48,19 +48,19 @@ func NewStructuredQueryHandler(
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	table := chi.URLParam(r, "table")
 	if table == "" {
-		http.Error(w, `{"error":"missing table"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
 
 	schema := h.Registry.Get(table)
 	if schema == nil {
-		http.Error(w, fmt.Sprintf(`{"error":"unknown table: %s"}`, table), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
 		return
 	}
 
 	var sq query.StructuredQuery
 	if err := json.NewDecoder(r.Body).Decode(&sq); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
@@ -70,24 +70,24 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	p := h.PolicyStore.Get()
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 
 	// Check column permissions.
 	for _, col := range sq.Columns {
 		if !perms.IsColumnAllowed(col) {
-			http.Error(w, fmt.Sprintf(`{"error":"column %q not allowed"}`, col), http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("column %q not allowed", col))
 			return
 		}
 	}
 	for _, agg := range sq.Aggregations {
 		if agg.Column != "*" && !perms.IsColumnAllowed(agg.Column) {
-			http.Error(w, fmt.Sprintf(`{"error":"column %q not allowed"}`, agg.Column), http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("column %q not allowed", agg.Column))
 			return
 		}
 		if !perms.IsAggregationAllowed(agg.Fn) {
-			http.Error(w, fmt.Sprintf(`{"error":"aggregation %q not allowed"}`, agg.Fn), http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("aggregation %q not allowed", agg.Fn))
 			return
 		}
 	}
@@ -95,7 +95,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// Build SQL.
 	result, err := query.Build(table, &sq, schema, h.BucketSecs)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -119,7 +119,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 	}
@@ -151,11 +151,11 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return data, nil
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	w.Write(v.([]byte))
+	_, _ = w.Write(v.([]byte))
 }
