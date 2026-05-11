@@ -323,18 +323,24 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 
 # --- TypeScript SDK build / install ------------------------------------------
 # pnpm is the canonical package manager (migrated from npm). Locally available
-# via PATH; CI installs/caches it via actions/cache + setup-node. Both the SDK
-# (clients/ts/) and the E2E test harness (tests/e2e/sdk/) use pnpm.
+# via PATH; CI installs/caches it via actions/cache + setup-node. Three pnpm
+# projects share a single store: the SDK (clients/ts/), the E2E test harness
+# (tests/e2e/sdk/), and the docs site (docs/).
 PNPM        ?= pnpm
 SDK_DIR     := clients/ts
 E2E_SDK_DIR := tests/e2e/sdk
+DOCS_DIR    := docs
 
-# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
-# comment so they don't show in `make help`. The user-facing targets below
-# (build-sdk, test-sdk, test-e2e) depend on them.
+# install-sdk + install-e2e-sdk + install-docs are intermediate prereqs — they
+# have no doc comment so they don't show in `make help`. User-facing targets
+# below (build-sdk, test-sdk, test-e2e, docs-*) depend on them.
 .PHONY: install-sdk
 install-sdk:
 	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
+
+.PHONY: install-docs
+install-docs:
+	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
 
 .PHONY: install-e2e-sdk
 install-e2e-sdk:
@@ -429,7 +435,7 @@ cov: ## Merge all available covdata + gate against total threshold
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify build build-cover build-sdk test test-sdk
+ci-parallel: verify build build-cover build-sdk docs-build test test-sdk
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -519,7 +525,7 @@ clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 .PHONY: clean-tools
 clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
-	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/
+	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
 
 .PHONY: clean-all
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
@@ -541,7 +547,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk ## Install pinned tools, Go modules, and pnpm deps
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, and pnpm deps
 	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
@@ -572,19 +578,17 @@ $(AIR):
 ##@ Documentation
 
 # Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
-# Starlight content collection itself — no separate convert step.
-.PHONY: docs-install
-docs-install: ## Install docs site dependencies
-	@cd docs && pnpm install --frozen-lockfile
-
+# Starlight content collection itself — no separate convert step. All three
+# user-facing targets depend on install-docs so a fresh checkout doesn't need
+# a manual install step.
 .PHONY: docs-dev
-docs-dev: ## Start docs dev server with hot-reload
-	@cd docs && pnpm dev
+docs-dev: install-docs ## Start docs dev server with hot-reload
+	@cd $(DOCS_DIR) && $(PNPM) dev
 
 .PHONY: docs-build
-docs-build: ## Build docs site for production
-	@cd docs && pnpm build
+docs-build: install-docs ## Build docs site for production
+	@cd $(DOCS_DIR) && $(PNPM) build
 
 .PHONY: docs-preview
 docs-preview: docs-build ## Preview production build locally
-	@cd docs && pnpm preview
+	@cd $(DOCS_DIR) && $(PNPM) preview
