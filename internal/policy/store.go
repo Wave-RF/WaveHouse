@@ -96,7 +96,7 @@ func (s *Store) Put(ctx context.Context, p *Policy) error {
 	return nil
 }
 
-// Watch subscribes to policy changes in the NATS KV store so all cluster nodes
+// Watch subscribes to policy changes in the NATS KV store so all nodes
 // stay in sync. Blocks until ctx is cancelled.
 func (s *Store) Watch(ctx context.Context) {
 	watcher, err := s.kv.Watch(ctx, kvKey)

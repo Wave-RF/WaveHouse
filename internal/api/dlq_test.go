@@ -16,12 +16,11 @@ import (
 
 func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 	dir := t.TempDir()
-	streamName := "WAVEHOUSE"
-	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
-	handler := NewDLQHandler(emb.JetStream(), streamName, slog.Default())
+	handler := NewDLQHandler(emb.JetStream(), slog.Default())
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
@@ -41,8 +40,7 @@ func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 
 func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	dir := t.TempDir()
-	streamName := "WAVEHOUSE"
-	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
@@ -50,7 +48,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 	ctx := context.Background()
 
 	// Create the DLQ stream.
-	require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
+	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
 
 	// Publish messages to DLQ subjects.
 	for i := 0; i < 3; i++ {
@@ -62,7 +60,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	handler := NewDLQHandler(js, streamName, slog.Default())
+	handler := NewDLQHandler(js, slog.Default())
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -82,20 +80,19 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 
 func TestDLQStats_SingleTable(t *testing.T) {
 	dir := t.TempDir()
-	streamName := "WAVEHOUSE"
-	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
 	js := emb.JetStream()
 	ctx := context.Background()
 
-	require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
+	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
 
 	_, err = js.Publish(ctx, "dlq.orders", []byte(`{"table_name":"orders"}`))
 	require.NoError(t, err)
 
-	handler := NewDLQHandler(js, streamName, slog.Default())
+	handler := NewDLQHandler(js, slog.Default())
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -113,8 +110,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 
 func TestEnsureDLQStream_Idempotent(t *testing.T) {
 	dir := t.TempDir()
-	streamName := "WAVEHOUSE"
-	emb, err := mq.NewEmbedded(dir, "WAVEHOUSE", 1024*1024, testutil.NopLogger())
+	emb, err := mq.NewEmbedded(dir, 1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
@@ -122,17 +118,15 @@ func TestEnsureDLQStream_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	// Calling twice should not error.
-	require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
-	require.NoError(t, EnsureDLQStream(ctx, js, streamName, 1024*1024))
+	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
+	require.NoError(t, EnsureDLQStream(ctx, js, 1024*1024))
 
-	handler := NewDLQHandler(js, streamName, slog.Default())
-
-	// Stream should be accessible.
-	stream, err := js.Stream(ctx, handler.DLQStreamName)
+	// Stream should be accessible under the canonical DLQ name.
+	stream, err := js.Stream(ctx, mq.DLQStreamName())
 	require.NoError(t, err)
 
 	info, err := stream.Info(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, handler.DLQStreamName, info.Config.Name)
+	assert.Equal(t, mq.DLQStreamName(), info.Config.Name)
 	assert.Equal(t, []string{"dlq.>"}, info.Config.Subjects)
 }

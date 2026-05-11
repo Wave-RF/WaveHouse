@@ -1,0 +1,84 @@
+name: Publish dev image
+
+# Builds and pushes a rolling dev image to GHCR on every push to main.
+# Two tags per build:
+#   - ghcr.io/wave-rf/wavehouse:dev          → rolling, always points to
+#                                              the latest main commit
+#   - ghcr.io/wave-rf/wavehouse:dev-<sha>    → immutable, point-in-time
+#                                              reference for debugging
+#
+# Mechanically this reuses the same goreleaser pipeline as release.yml.
+# A synthetic local-only tag (v0.0.0-dev.<short-sha>) gives goreleaser a
+# version anchor for HEAD, and WAVEHOUSE_DEV=1 switches the goreleaser
+# config over to dev image tags + suppresses the GitHub Release. The
+# tag is never pushed to origin.
+#
+# Tagged releases (`v*` tags) flow through `release.yml` against the
+# same `.goreleaser.yaml`; the only difference is they run on a real
+# tag without WAVEHOUSE_DEV set, so they produce `:vX.Y.Z` + `:latest`
+# and create a GitHub Release.
+#
+# Cleanup of old dev-<sha> tags is handled by `cleanup-ghcr.yml`
+# (weekly cron, keeps newest 5 + last 30 days).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Cancel any in-flight dev build when a newer commit lands on main —
+  # the :dev tag should track HEAD, and a half-finished build of an old
+  # commit is wasted work. The :dev-<sha> tag is only pushed at the very
+  # end, so cancellation can't leave the registry in an inconsistent state.
+  group: publish-dev
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build + push :dev image
+    runs-on: [wave-rf-runners]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # goreleaser uses git history for changelog + commit info; full
+          # depth matches release.yml so the dev pipeline behaves the same.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: "go.mod"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create synthetic dev tag
+        # `goreleaser release` requires a tag on HEAD to derive .Version.
+        # Created locally with --force (so retries / workflow_dispatch on
+        # the same commit don't collide) and never pushed to origin —
+        # goreleaser doesn't push tags by default, only consumes them.
+        # The tag's only consumers are goreleaser's templates; the actual
+        # image tags pushed to GHCR come from the WAVEHOUSE_DEV branch in
+        # `.goreleaser.yaml` (`dev-<full-sha>` + `dev`).
+        run: git tag --force "v0.0.0-dev.${GITHUB_SHA::7}"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
+        env:
+          # Switches `.goreleaser.yaml` into dev mode: dev/dev-<sha> image
+          # tags, dev-flavoured OCI labels, GitHub Release suppressed.
+          WAVEHOUSE_DEV: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Same v2 line as release.yml so dev validates exactly what a
+          # real release will invoke.
+          version: "~> v2"
+          args: release --clean

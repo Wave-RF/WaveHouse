@@ -2,6 +2,7 @@
   "name": "@wavehouse/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for WaveHouse — schema-aware real-time API gateway for ClickHouse",
+  "packageManager": "pnpm@10.33.0",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -24,16 +25,16 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run typecheck && npm run build",
+    "prepublishOnly": "pnpm run typecheck && pnpm run build",
     "codegen": "tsx src/cli/codegen.ts"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.5",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
   },
-  "peerDependencies": {},
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -47,5 +48,10 @@
     "sse",
     "query-builder",
     "typescript"
-  ]
+  ],
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
 }

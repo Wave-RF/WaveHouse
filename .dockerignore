@@ -1,17 +1,67 @@
-.git/
-.github/
+# Excludes paths from the Docker build context. The context is everything
+# that gets sent to the Docker daemon at the start of `docker build`, so
+# trimming here:
+#   1. speeds up the build (smaller upload to the daemon),
+#   2. reduces cache invalidation noise (a doc edit shouldn't bust the
+#      Go build cache).
+#
+# Anything excluded is invisible to every COPY/ADD in the Dockerfiles.
+# The source-build `deployments/Dockerfile` does `COPY . .` after the
+# go.mod/go.sum copy, so this list directly determines what lands in the
+# builder stage.
+
+# --- Version control ---------------------------------------------------------
+.git
+.github
+
+# --- Build outputs (regenerated inside the builder, or unrelated) ------------
 bin/
-tmp/
-data/
 dist/
-docs/
-*.md
-!README.md
+tmp/
+**/node_modules/
+clients/ts/dist/
+
+# --- Local dev state (created by `./bin/wavehouse` or compose runs) ----------
+data/
+
+# --- Tooling, editor cruft, OS junk ------------------------------------------
+.bin/
+.vscode/
+.idea/
+*.swp
+.DS_Store
 .air.toml
 .editorconfig
 .gitignore
 .golangci.yml
+.gitattributes
+.dockerignore
+
+# --- Documentation (not needed in the binary build) --------------------------
+docs/
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+LICENSE
+TODO.md
+AGENTS.md
+CLAUDE.md
+.gemini/
+
+# --- Tests + harness ---------------------------------------------------------
+# The shipped binary doesn't include test code (Go only pulls from the
+# package tree it's compiling), but excluding here mostly speeds up the
+# build-context upload.
+tests/
+
+# --- TypeScript SDK / playground ---------------------------------------------
+# Separate toolchain (~100MB of node_modules + dist). Not part of the
+# Go binary build.
+clients/
+
+# --- Misc CI / dev configs that don't affect the binary ----------------------
+.testcoverage.yml
 .goreleaser.yaml
 Makefile
-LICENSE
-AGENTS.md

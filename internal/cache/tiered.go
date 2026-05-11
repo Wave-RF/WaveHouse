@@ -14,7 +14,7 @@ type TieredCache struct {
 	group singleflight.Group
 }
 
-// NewTiered creates a tiered cache. l2 can be nil for standalone mode.
+// NewTiered creates a tiered cache. L2 can be nil for standalone mode.
 func NewTiered(l1, l2 Cache) *TieredCache {
 	return &TieredCache{l1: l1, l2: l2}
 }

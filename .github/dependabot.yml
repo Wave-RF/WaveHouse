@@ -18,6 +18,12 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    groups:
+      # One PR per Monday for all action bumps. With SHA pinning,
+      # ungrouped meant 5+ PRs each Monday that all needed identical
+      # review (verify SHA, verify version comment, merge).
+      actions-deps:
+        patterns: ["*"]
     commit-message:
       prefix: "ci"
 
@@ -47,7 +53,7 @@ updates:
 
   # E2E test harness (runs against the SDK)
   - package-ecosystem: npm
-    directory: /tests/sdk
+    directory: /tests/e2e/sdk
     schedule:
       interval: weekly
       day: monday

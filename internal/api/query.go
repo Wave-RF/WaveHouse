@@ -119,7 +119,10 @@ func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []an
 	defer func() { _ = rows.Close() }()
 
 	columns := rows.ColumnTypes()
-	var results []map[string]any
+	// Initialize as empty (not nil) so a zero-row result marshals to `[]`,
+	// not `null`. The SDK does `data!.length` on the response; a `null`
+	// crashes the client on every empty fetch.
+	results := []map[string]any{}
 
 	for rows.Next() {
 		valPtrs := make([]any, len(columns))

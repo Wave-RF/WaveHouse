@@ -60,63 +60,16 @@ runs:
       run: |
         set -euo pipefail
 
-        # Look up whether the item is already on the board. GraphQL resource(url)
-        # returns a typed object (PullRequest | Issue | …), so we query both
-        # fragments and filter to project #PROJECT_NUMBER. `gh api --jq` only
-        # accepts a single jq expression — we pipe to a standalone jq so we can
-        # inject PROJECT_NUMBER via --arg.
-        resp=$(gh api graphql -f query='query($url: URI!) {
-            resource(url: $url) {
-              ... on PullRequest {
-                projectItems(first: 20) {
-                  nodes {
-                    id
-                    project { number }
-                    fieldValueByName(name: "Status") {
-                      ... on ProjectV2ItemFieldSingleSelectValue { optionId }
-                    }
-                  }
-                }
-              }
-              ... on Issue {
-                projectItems(first: 20) {
-                  nodes {
-                    id
-                    project { number }
-                    fieldValueByName(name: "Status") {
-                      ... on ProjectV2ItemFieldSingleSelectValue { optionId }
-                    }
-                  }
-                }
-              }
-            }
-          }' -F url="$URL")
-
-        # Copilot R9 flagged: without a .errors check, a successful
-        # HTTP response with a GraphQL-level error (bad scope, URL
-        # permissions, schema issue) would leave item_id empty and
-        # trip the "item not on board — adding" branch, which would
-        # mask the real failure as a spurious re-add. Fail loudly
-        # instead.
-        graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
-        if [ -n "$graphql_errors" ]; then
-          echo "::error::GraphQL lookup failed for $URL: $graphql_errors"
-          exit 1
-        fi
-        if echo "$resp" | jq -e '.data.resource == null' > /dev/null; then
-          echo "::error::GraphQL returned null resource for $URL — check URL validity and that the token has read access."
-          exit 1
-        fi
-
-        item_id=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-          .data.resource.projectItems.nodes[]?
-          | select(.project.number == ($n | tonumber))
-          | .id' | head -n1)
-
-        current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-          .data.resource.projectItems.nodes[]?
-          | select(.project.number == ($n | tonumber))
-          | .fieldValueByName.optionId // ""' | head -n1)
+        # Lookup of "is this PR/Issue already on the board, and at what
+        # Status?" lives in .github/scripts/board-fetch-item.sh — same
+        # query as project-orchestrator uses. The script does its own
+        # GraphQL .errors / null-resource checks (Copilot R9 — without
+        # these, a token-scope failure would leave item_id empty and
+        # trip the "item not on board — adding" branch, masking the
+        # real failure as a spurious re-add).
+        IFS=$'\t' read -r item_id current_option _name < <(
+          "$GITHUB_WORKSPACE/.github/scripts/board-fetch-item.sh" url "$URL" "$PROJECT_NUMBER"
+        )
 
         if [ -z "$item_id" ]; then
           echo "Item not on board — adding."

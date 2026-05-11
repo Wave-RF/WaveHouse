@@ -10,35 +10,6 @@ builds:
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
-      - -X main.Binary=standalone
-      - -X main.Version={{.Version}}
-      - -X main.BuildTime={{.Date}}
-      - -X main.GitCommit={{.ShortCommit}}
-
-  - id: wavehouse-api
-    main: ./cmd/wavehouse-api
-    binary: wavehouse-api
-    env:
-      - CGO_ENABLED=0
-    goos: [linux, darwin, windows, freebsd]
-    goarch: [amd64, arm64]
-    ldflags:
-      - -s -w
-      - -X main.Binary=clustered-api
-      - -X main.Version={{.Version}}
-      - -X main.BuildTime={{.Date}}
-      - -X main.GitCommit={{.ShortCommit}}
-
-  - id: wavehouse-worker
-    main: ./cmd/wavehouse-worker
-    binary: wavehouse-worker
-    env:
-      - CGO_ENABLED=0
-    goos: [linux, darwin, windows, freebsd]
-    goarch: [amd64, arm64]
-    ldflags:
-      - -s -w
-      - -X main.Binary=clustered-worker
       - -X main.Version={{.Version}}
       - -X main.BuildTime={{.Date}}
       - -X main.GitCommit={{.ShortCommit}}
@@ -49,23 +20,36 @@ checksum:
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
+# Suppress the GitHub Release on dev pushes. publish-dev.yml sets
+# WAVEHOUSE_DEV=1 + a synthetic tag so it can reuse this same pipeline;
+# we don't want a release entry on the repo for every push to main.
+# Real tag releases (release.yml) leave WAVEHOUSE_DEV unset → defaults
+# to "0" → the field evaluates to "false" → release runs normally.
+# `envOrDefault` is required because goreleaser templates fail strict
+# on missing env vars; bare `.Env.WAVEHOUSE_DEV` would error on the
+# release path.
+release:
+  disable: '{{ eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}'
+
 dockers_v2:
   - dockerfile: deployments/Dockerfile.goreleaser
     ids:
       - wavehouse
-      - wavehouse-api
-      - wavehouse-worker
     images:
       - "ghcr.io/wave-rf/wavehouse"
+    # Tag scheme switches on WAVEHOUSE_DEV:
+    #   release: :{{ .Tag }} (e.g. :v1.2.3) + :latest
+    #   dev:     :dev-<full sha>            + :dev (rolling)
+    # The full SHA matches cleanup-ghcr.yml's `^dev-[0-9a-f]+$` regex.
     tags:
-      - "{{ .Tag }}"
-      - "latest"
+      - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev-{{ .FullCommit }}{{ else }}{{ .Tag }}{{ end }}'
+      - '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}dev{{ else }}latest{{ end }}'
     platforms:
       - linux/amd64
       - linux/arm64
     labels:
-      "org.opencontainers.image.title": "WaveHouse"
-      "org.opencontainers.image.description": "Schema-aware real-time API gateway for ClickHouse"
+      "org.opencontainers.image.title": '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}WaveHouse (dev){{ else }}WaveHouse{{ end }}'
+      "org.opencontainers.image.description": '{{ if eq (envOrDefault "WAVEHOUSE_DEV" "0") "1" }}Schema-aware real-time API gateway for ClickHouse — rolling dev build from main{{ else }}Schema-aware real-time API gateway for ClickHouse{{ end }}'
       "org.opencontainers.image.url": "https://github.com/Wave-RF/WaveHouse"
       "org.opencontainers.image.source": "{{ .GitURL }}"
       "org.opencontainers.image.version": "{{ .Version }}"
@@ -77,5 +61,5 @@ changelog:
   use: git
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
+      - "^docs:"
+      - "^test:"
