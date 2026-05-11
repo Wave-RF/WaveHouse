@@ -321,6 +321,16 @@ $(COVER_BINARIES): %-cov: go-mod-download
 .PHONY: build-cover
 build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation → bin/<name>-cov
 
+# build-all: umbrella for "compile every artifact this repo produces" without
+# running tests. Recursive `$(MAKE) -j 4` mirrors how `ci` forces parallelism
+# on `ci-parallel` — typing `make build-all` gets parallel builds without
+# requiring the user to remember `-j`.
+.PHONY: build-all
+build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
+	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
+	@$(MAKE) -j 4 build build-sdk docs-build
+	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
+
 # --- TypeScript SDK build / install ------------------------------------------
 # pnpm is the canonical package manager (migrated from npm). Locally available
 # via PATH; CI installs/caches it via actions/cache + setup-node. Three pnpm
