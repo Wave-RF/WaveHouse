@@ -75,7 +75,7 @@ jobs:
       # paths and keys must stay in sync.
       - name: Save Go module + build cache
         if: github.ref == 'refs/heads/main' && steps.setup.outputs.gobuild-cache-hit != 'true'
-        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/go/pkg/mod
@@ -84,7 +84,7 @@ jobs:
 
       - name: Save golangci-lint cache
         if: github.ref == 'refs/heads/main' && steps.setup.outputs.golangci-cache-hit != 'true'
-        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             .bin
@@ -93,7 +93,7 @@ jobs:
 
       - name: Save pnpm store cache
         if: github.ref == 'refs/heads/main' && steps.setup.outputs.pnpm-cache-hit != 'true'
-        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.local/share/pnpm/store
           key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml') }}
@@ -109,7 +109,7 @@ jobs:
       # harmless (config + profile already satisfy it).
       - name: Publish coverage badge
         if: github.ref == 'refs/heads/main'
-        uses: vladopajic/go-test-coverage@8cfd056d3bc5cc2bc64a840ded0c907aaae3dc46 # v2.18.7
+        uses: vladopajic/go-test-coverage@a93b868a4cbcbf18dc3781650fad241f0020e609 # v2.18.8
         with:
           config: ./.testcoverage.yml
           git-token: ${{ secrets.GITHUB_TOKEN }}

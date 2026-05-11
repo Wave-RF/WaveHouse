@@ -49,7 +49,7 @@ jobs:
       # no longer in the diff, so labels stay in sync with the current
       # change set rather than accumulating.
       - name: Apply file-path labels
-        uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b # v6.0.1
+        uses: actions/labeler@f27b608878404679385c85cfa523b85ccb86e213 # v6.1.0
         with:
           configuration-path: .github/labeler.yml
           sync-labels: true
