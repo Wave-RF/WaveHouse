@@ -191,6 +191,16 @@ dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on 
 	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
 	@$(AIR) -c .air.toml
 
+# Docs site dev/preview servers — long-running, blocking. Astro defaults to
+# :4321 for dev and :4322 for preview, so they coexist with `make dev` on :8080.
+.PHONY: dev-docs
+dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
+	@cd $(DOCS_DIR) && $(PNPM) dev
+
+.PHONY: preview-docs
+preview-docs: build-docs ## Preview the production docs build locally
+	@cd $(DOCS_DIR) && $(PNPM) preview
+
 # `up -d --wait` blocks until the compose healthcheck transitions to
 # healthy, so callers can chain on success without a polling loop. The
 # ClickHouse healthcheck (in $(DEV_COMPOSE_FILE)) probes /ping on :8123.
@@ -328,7 +338,7 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 .PHONY: build-all
 build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
-	@$(MAKE) -j 4 build build-sdk docs-build
+	@$(MAKE) -j 4 build build-sdk build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
 # --- TypeScript SDK build / install ------------------------------------------
@@ -343,7 +353,8 @@ DOCS_DIR    := docs
 
 # install-sdk + install-e2e-sdk + install-docs are intermediate prereqs — they
 # have no doc comment so they don't show in `make help`. User-facing targets
-# below (build-sdk, test-sdk, test-e2e, docs-*) depend on them.
+# below (build-sdk, test-sdk, test-e2e, build-docs, dev-docs, preview-docs)
+# depend on them.
 .PHONY: install-sdk
 install-sdk:
 	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
@@ -360,6 +371,13 @@ install-e2e-sdk:
 build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
 	@echo "$(CYAN)==> Building SDK...$(RESET)"
 	@cd $(SDK_DIR) && $(PNPM) build
+
+# Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
+# Starlight content collection itself — no separate convert step.
+.PHONY: build-docs
+build-docs: install-docs ## Build docs site for production → docs/dist/
+	@echo "$(CYAN)==> Building docs site...$(RESET)"
+	@cd $(DOCS_DIR) && $(PNPM) build
 
 ##@ Test
 
@@ -445,7 +463,7 @@ cov: ## Merge all available covdata + gate against total threshold
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify build build-cover build-sdk docs-build test test-sdk
+ci-parallel: verify build build-cover build-sdk build-docs test test-sdk
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -585,20 +603,3 @@ $(AIR):
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
 
-##@ Documentation
-
-# Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
-# Starlight content collection itself — no separate convert step. All three
-# user-facing targets depend on install-docs so a fresh checkout doesn't need
-# a manual install step.
-.PHONY: docs-dev
-docs-dev: install-docs ## Start docs dev server with hot-reload
-	@cd $(DOCS_DIR) && $(PNPM) dev
-
-.PHONY: docs-build
-docs-build: install-docs ## Build docs site for production
-	@cd $(DOCS_DIR) && $(PNPM) build
-
-.PHONY: docs-preview
-docs-preview: docs-build ## Preview production build locally
-	@cd $(DOCS_DIR) && $(PNPM) preview
