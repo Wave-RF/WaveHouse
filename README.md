@@ -11,7 +11,7 @@ WaveHouse is a high-performance, Go-based gateway designed to sit entirely in fr
 
 If you are building user-facing analytics, **WaveHouse acts like Supabase for ClickHouse**—or an **open-source Tinybird** that pushes data to your frontend in real time over SSE and WebSockets, not just via pull-based REST queries.
 
-📖 **Full documentation:** [docs.wavehouse.dev](https://docs.wavehouse.dev)
+📖 **Full documentation:** [wavehouse.dev](https://wavehouse.dev)
 
 ## ✨ Why WaveHouse?
 
@@ -135,15 +135,15 @@ We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md]
 
 ## 📖 Documentation
 
-The full documentation site lives at **[docs.wavehouse.dev](https://docs.wavehouse.dev)**. Source markdown is in [`docs/`](docs/):
+The full documentation site lives at **[wavehouse.dev](https://wavehouse.dev)**. Source markdown is in [`docs/src/content/docs/`](docs/src/content/docs/):
 
-* [Getting Started](docs/getting-started.md) — Five-minute quickstart
-* [Architecture](docs/architecture.md) — System design, data flows, and package overview
-* [API Reference](docs/api.md) — All endpoints, authentication, request/response formats
-* [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/deployment.md) — Single-binary deployment, Docker images, releases, and health checks
-* [Development](docs/development.md) — Building, testing, linting, and project structure
-* [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
+* [Getting Started](docs/src/content/docs/getting-started.md) — Five-minute quickstart
+* [Architecture](docs/src/content/docs/architecture.md) — System design, data flows, and package overview
+* [API Reference](docs/src/content/docs/api.md) — All endpoints, authentication, request/response formats
+* [Configuration](docs/src/content/docs/configuration.md) — Full config reference (YAML + environment variables)
+* [Deployment](docs/src/content/docs/deployment.md) — Single-binary deployment, Docker images, releases, and health checks
+* [Development](docs/src/content/docs/development.md) — Building, testing, linting, and project structure
+* [SDK Reference](docs/src/content/docs/sdk.md) — TypeScript client SDK usage and codegen
 
 ## 📜 License
 

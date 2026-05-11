@@ -1,4 +1,9 @@
-# API Reference
+---
+title: "API Reference"
+description: "All endpoints, authentication, request/response formats for the WaveHouse API."
+sidebar:
+  order: 5
+---
 
 Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. Authentication is optional and controlled by `auth.enabled`; see [Configuration](configuration.md#authentication) for the full auth config surface.
 

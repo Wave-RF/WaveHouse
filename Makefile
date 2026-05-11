@@ -571,25 +571,20 @@ $(AIR):
 
 ##@ Documentation
 
-# Docs site (Astro + Starlight) lives in site/. The convert script reads
-# canonical markdown from docs/ and rewrites it into site/src/content/docs/
-# so the source of truth stays in this repo rather than the build output.
+# Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
+# Starlight content collection itself — no separate convert step.
 .PHONY: docs-install
 docs-install: ## Install docs site dependencies
-	@cd site && pnpm install --frozen-lockfile
-
-.PHONY: docs-convert
-docs-convert: ## Convert docs/ markdown to Starlight content
-	@node site/scripts/convert-docs.mjs
+	@cd docs && pnpm install --frozen-lockfile
 
 .PHONY: docs-dev
-docs-dev: docs-convert ## Start docs dev server with hot-reload
-	@cd site && pnpm dev
+docs-dev: ## Start docs dev server with hot-reload
+	@cd docs && pnpm dev
 
 .PHONY: docs-build
-docs-build: docs-convert ## Build docs site for production
-	@cd site && pnpm build
+docs-build: ## Build docs site for production
+	@cd docs && pnpm build
 
 .PHONY: docs-preview
 docs-preview: docs-build ## Preview production build locally
-	@cd site && pnpm preview
+	@cd docs && pnpm preview

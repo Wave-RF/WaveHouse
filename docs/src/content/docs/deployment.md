@@ -1,4 +1,9 @@
-# Deployment Guide
+---
+title: "Deployment"
+description: "Running WaveHouse in production: Docker images, releases, environment variables, health checks, and schema setup."
+sidebar:
+  order: 8
+---
 
 How to run WaveHouse in production — single binary, Docker images, releases, health checks, and the required ClickHouse schema.
 

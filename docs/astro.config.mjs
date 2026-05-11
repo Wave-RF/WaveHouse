@@ -3,9 +3,33 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLlmsTxt from 'starlight-llms-txt';
 
+// Rewrite fenced ```mermaid blocks to <pre class="mermaid"> so the client-side
+// Mermaid loader (head script below) picks them up instead of Expressive Code.
+function remarkMermaid() {
+	return (tree) => {
+		const walk = (node) => {
+			if (!node.children) return;
+			for (const child of node.children) {
+				if (child.type === 'code' && child.lang === 'mermaid') {
+					child.type = 'html';
+					child.value = `<pre class="mermaid">${child.value}</pre>`;
+					delete child.lang;
+					delete child.meta;
+				} else {
+					walk(child);
+				}
+			}
+		};
+		walk(tree);
+	};
+}
+
 // https://astro.build/config
 export default defineConfig({
-	site: 'https://docs.wavehouse.dev',
+	site: 'https://wavehouse.dev',
+	markdown: {
+		remarkPlugins: [remarkMermaid],
+	},
 	integrations: [
 		starlight({
 			title: 'WaveHouse',

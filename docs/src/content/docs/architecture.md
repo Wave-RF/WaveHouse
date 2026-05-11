@@ -1,4 +1,9 @@
-# Architecture
+---
+title: "Architecture"
+description: "System design, data flows, internal packages, and technology stack."
+sidebar:
+  order: 4
+---
 
 This document describes the internal architecture of WaveHouse, a schema-aware ClickHouse proxy.
 

@@ -1,4 +1,9 @@
-# Why WaveHouse?
+---
+title: "Why WaveHouse?"
+description: "How WaveHouse compares to direct ClickHouse, Kafka + ClickHouse, and Tinybird — with the failure modes, DIY cost, and feature matrix."
+sidebar:
+  order: 3
+---
 
 WaveHouse is an API gateway purpose-built for fronting ClickHouse with user-facing traffic. This page is the engineering answer to "why not just point my clients at ClickHouse?" — or "why not Kafka + ClickHouse?" or "why not Tinybird?" — with the failure modes, the common DIY stacks, and where the cost falls.
 

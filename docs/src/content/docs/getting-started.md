@@ -1,4 +1,9 @@
-# Getting Started
+---
+title: "Getting Started"
+description: "Run WaveHouse locally in five minutes — ingest, query, and subscribe to real-time events."
+sidebar:
+  order: 2
+---
 
 Run WaveHouse locally in under five minutes. WaveHouse ships as a single binary with ClickHouse as the only external dependency; this walkthrough covers ingest, query, and real-time streaming.
 
