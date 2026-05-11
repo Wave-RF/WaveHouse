@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "terms": {
+    "dlq": {
+      "term": "DLQ",
+      "aliases": [
+        "DLQ",
+        "dlq"
+      ],
+      "wikipedia": "Dead_letter_queue",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "api": {
+      "term": "API",
+      "aliases": [
+        "API",
+        "api"
+      ],
+      "wikipedia": "API",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "yaml": {
+      "term": "YAML",
+      "aliases": [
+        "YAML",
+        "yaml"
+      ],
+      "wikipedia": "YAML",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "json": {
+      "term": "JSON",
+      "aliases": [
+        "JSON",
+        "json"
+      ],
+      "wikipedia": "JSON",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "sql": {
+      "term": "SQL",
+      "aliases": [
+        "SQL",
+        "sql"
+      ],
+      "wikipedia": "SQL",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "http": {
+      "term": "HTTP",
+      "aliases": [
+        "HTTP",
+        "http"
+      ],
+      "wikipedia": "HTTP",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "url": {
+      "term": "URL",
+      "aliases": [
+        "URL",
+        "url"
+      ],
+      "wikipedia": "URL",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "hmac": {
+      "term": "HMAC",
+      "aliases": [
+        "HMAC",
+        "hmac"
+      ],
+      "wikipedia": "HMAC",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "diy": {
+      "term": "Do it yourself",
+      "aliases": [
+        "DIY",
+        "Do it yourself",
+        "diy"
+      ],
+      "wikipedia": "Do_it_yourself",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "nats": {
+      "term": "NATS Messaging",
+      "aliases": [
+        "NATS",
+        "NATS Messaging",
+        "nats"
+      ],
+      "wikipedia": "NATS_Messaging",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "jwt": {
+      "term": "JSON Web Token",
+      "aliases": [
+        "JWT",
+        "JSON Web Token",
+        "jwt"
+      ],
+      "wikipedia": "JSON_Web_Token",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "sdk": {
+      "term": "Software development kit",
+      "aliases": [
+        "SDK",
+        "Software development kit",
+        "sdk"
+      ],
+      "wikipedia": "Software_development_kit",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "sse": {
+      "term": "Server-sent events",
+      "aliases": [
+        "SSE",
+        "Server-sent events",
+        "sse"
+      ],
+      "wikipedia": "Server-sent_events",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "kv": {
+      "term": "Key–value database",
+      "aliases": [
+        "KV",
+        "Key–value database",
+        "kv"
+      ],
+      "wikipedia": "Key–value_database",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "ci": {
+      "term": "Continuous integration",
+      "aliases": [
+        "CI",
+        "Continuous integration",
+        "ci"
+      ],
+      "wikipedia": "Continuous_integration",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "l1": {
+      "term": "CPU cache",
+      "aliases": [
+        "L1",
+        "CPU cache",
+        "l1"
+      ],
+      "wikipedia": "CPU_cache",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "ws": {
+      "term": "WebSocket",
+      "aliases": [
+        "WS",
+        "WebSocket",
+        "ws"
+      ],
+      "wikipedia": "WebSocket",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "rfc": {
+      "term": "Request for Comments",
+      "aliases": [
+        "RFC",
+        "Request for Comments",
+        "rfc"
+      ],
+      "wikipedia": "Request_for_Comments",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "ast": {
+      "term": "Abstract syntax tree",
+      "aliases": [
+        "AST",
+        "Abstract syntax tree",
+        "ast"
+      ],
+      "wikipedia": "Abstract_syntax_tree",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "ttl": {
+      "term": "Time to live",
+      "aliases": [
+        "TTL",
+        "Time to live",
+        "ttl"
+      ],
+      "wikipedia": "Time_to_live",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "post": {
+      "term": "POST (HTTP)",
+      "aliases": [
+        "POST",
+        "POST (HTTP)",
+        "post"
+      ],
+      "wikipedia": "POST_(HTTP)",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "id": {
+      "term": "Identifier",
+      "aliases": [
+        "ID",
+        "Identifier",
+        "id"
+      ],
+      "wikipedia": "Identifier",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "uid": {
+      "term": "User identifier",
+      "aliases": [
+        "UID",
+        "User identifier",
+        "uid"
+      ],
+      "wikipedia": "User_identifier",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "bi": {
+      "term": "Business intelligence",
+      "aliases": [
+        "BI",
+        "Business intelligence",
+        "bi"
+      ],
+      "wikipedia": "Business_intelligence",
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    },
+    "jwks": {
+      "term": "JSON Web Key Set",
+      "aliases": [
+        "JWKS",
+        "JSON Web Key Set"
+      ],
+      "wikipedia": null,
+      "caseSensitive": true,
+      "definition": null,
+      "groupWith": null
+    }
+  }
+}

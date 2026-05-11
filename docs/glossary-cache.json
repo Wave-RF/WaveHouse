@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "fetchedAt": "2026-05-11T23:39:27.940Z",
+  "terms": {
+    "dlq": {
+      "title": "Dead letter queue",
+      "description": "Term used in message queueing",
+      "extract_html": "<p>In message queueing a <b>dead letter queue</b> (DLQ), or <b>dead letter topic</b> (DLT) in some messaging systems, is a service implementation to store messages that the messaging system cannot or should not deliver. Although implementation-specific, messages can be routed to the DLQ for the following reasons:</p><ol><li>The message is sent to a queue that does not exist.</li>\n<li>The maximum queue length is exceeded.</li>\n<li>The message exceeds the size limit.</li>\n<li>The message expires because it reached the TTL </li>\n<li>The message is rejected by another queue exchange.</li>\n<li>The message has been read and rejected too many times.</li></ol>",
+      "url": "https://en.wikipedia.org/wiki/Dead_letter_queue"
+    },
+    "api": {
+      "title": "API",
+      "description": "Connection between computers or programs",
+      "extract_html": "<p>\nAn <b>application programming interface</b> (<b>API</b>) is a connection between computers or between computer programs. It is a type of software interface, offering a service to other pieces of software. A document or standard that describes how to build such a connection or interface is called an <i>API specification</i>. A computer system that meets this standard is said to <i>implement</i> or <i>expose</i> an API. The term API may refer either to the specification or to the implementation.</p>",
+      "url": "https://en.wikipedia.org/wiki/API"
+    },
+    "yaml": {
+      "title": "YAML",
+      "description": "Human-readable data serialization format",
+      "extract_html": "<p><b>YAML</b> is a human-readable data serialization language. It is commonly used for configuration files and in applications where data is being stored or transmitted. YAML targets many of the same communications applications as Extensible Markup Language (XML) but has a minimal syntax that intentionally differs from Standard Generalized Markup Language (SGML). It uses Python-style indentation to indicate nesting and does not require quotes around most string values.</p>",
+      "url": "https://en.wikipedia.org/wiki/YAML"
+    },
+    "json": {
+      "title": "JSON",
+      "description": "Open standard file format and data interchange",
+      "extract_html": "<p><b>JSON</b> is an open standard file format and data interchange format that uses human-readable text to store and transmit data objects consisting of name–value pairs and arrays. It is a commonly used data format with diverse uses in electronic data interchange, including that of web applications with servers.</p>",
+      "url": "https://en.wikipedia.org/wiki/JSON"
+    },
+    "sql": {
+      "title": "SQL",
+      "description": "Relational database programming language",
+      "extract_html": "<p><b>Structured Query Language</b> (<b>SQL</b>) is a domain-specific language used to manage data, especially in a relational database management system (RDBMS). It is particularly useful in handling structured data, i.e., data incorporating relations among entities and variables.</p>",
+      "url": "https://en.wikipedia.org/wiki/SQL"
+    },
+    "http": {
+      "title": "HTTP",
+      "description": "Application layer protocol",
+      "extract_html": "<p><b>HTTP</b> is an application layer protocol in the Internet protocol suite for distributed, collaborative, hypermedia information systems. HTTP is the foundation of data communication for the World Wide Web, where hypertext documents include hyperlinks to other resources that the user can easily access, for example by a mouse click or by tapping the screen in a web browser.</p>",
+      "url": "https://en.wikipedia.org/wiki/HTTP"
+    },
+    "url": {
+      "title": "URL",
+      "description": "Address on the World Wide Web",
+      "extract_html": "<p>A <b>uniform resource locator</b> (<b>URL</b>), colloquially known as a <b>web address</b>, is a reference to a resource on the World Wide Web. A URL specifies the location of a resource on a computer network and a mechanism for retrieving it. A URL is a specific type of Uniform Resource Identifier (URI), although many people use the two terms interchangeably. A URL is most commonly used to reference a web page (HTTP/HTTPS) but is also used for file transfer (FTP), email (mailto), database access (JDBC), and many other applications.</p>",
+      "url": "https://en.wikipedia.org/wiki/URL"
+    },
+    "hmac": {
+      "title": "HMAC",
+      "description": "Computer communications authentication algorithm",
+      "extract_html": "<p>In cryptography, an <b>HMAC</b> is a specific type of message authentication code (MAC) involving a cryptographic hash function and a secret cryptographic key. As with any MAC, it may be used to simultaneously verify both the data integrity and authenticity of a message. An HMAC is a type of keyed hash function that can also be used in a key derivation scheme or a key stretching scheme.</p>",
+      "url": "https://en.wikipedia.org/wiki/HMAC"
+    },
+    "diy": {
+      "title": "Do it yourself",
+      "description": "Building, modifying, or repairing, without the aid of experts or professionals",
+      "extract_html": "<p>\"<b>Do it yourself</b>\" (\"<b>DIY</b>\") is the method of building, <span class=\"extiw\">modifying</span>, or repairing things by oneself without the direct aid of professionals or certified experts. Academic research has described DIY as behaviors where \"individuals use raw and semi-raw materials and parts to produce, transform, or reconstruct material possessions, including those drawn from the natural environment \". DIY behavior can be triggered by various motivations previously categorized as marketplace motivations, and identity enhancement.</p>",
+      "url": "https://en.wikipedia.org/wiki/Do_it_yourself"
+    },
+    "nats": {
+      "title": "NATS Messaging",
+      "description": "Distributed messaging software",
+      "extract_html": "<p><b>NATS</b> is an open-source messaging system developed under the stewardship of the Cloud Native Computing Foundation. The NATS server is written in the Go programming language. Client libraries to interface with the server are available for dozens of major programming languages. The core design principles of NATS are performance, scalability, and ease of use.</p>",
+      "url": "https://en.wikipedia.org/wiki/NATS_Messaging"
+    },
+    "jwt": {
+      "title": "JSON Web Token",
+      "description": "Proposed web cryptography standard",
+      "extract_html": "<p><b>JSON Web Token</b> \nis a proposed Internet standard for creating data with optional signature and/or optional encryption whose payload holds JSON that asserts some number of claims. The tokens are signed either using a private secret or a public/private key.</p>",
+      "url": "https://en.wikipedia.org/wiki/JSON_Web_Token"
+    },
+    "sdk": {
+      "title": "Software development kit",
+      "description": "Set of software development tools",
+      "extract_html": "<p>A <b>software development kit</b> (<b>SDK</b>) is a collection of software development tools in one installable package. They facilitate the creation of applications by having a compiler, debugger and sometimes a software framework. They are normally specific to a hardware platform and operating system combination. To create applications with advanced functionalities such as advertisements, push notifications, etc., most application software developers use specific software development kits.</p>",
+      "url": "https://en.wikipedia.org/wiki/Software_development_kit"
+    },
+    "sse": {
+      "title": "Server-sent events",
+      "description": "Server push technology",
+      "extract_html": "<p><b>Server-Sent Events</b> (<b>SSE</b>) is a server push technology enabling a client to receive automatic updates from a server via an HTTP connection, and describes how servers can initiate data transmission towards clients once an initial client connection has been established. They are commonly used to send message updates or continuous data streams to a browser client and designed to enhance native, cross-browser streaming through a JavaScript API called EventSource, through which a client requests a particular URL in order to receive an event stream. The EventSource API is standardized as part of HTML Living Standard by the WHATWG. The media type for SSE is <code>text/event-stream</code>.</p>",
+      "url": "https://en.wikipedia.org/wiki/Server-sent_events"
+    },
+    "kv": {
+      "title": "Key–value database",
+      "description": "Data storage paradigm",
+      "extract_html": "<p>A <b>key-value database</b>, or <b>key-value store</b>, is a data storage paradigm designed for storing, retrieving, and managing associative arrays, a data structure more commonly known today as a <i>dictionary</i>. Dictionaries contain a collection of <i>objects</i>, or <i>records</i>, which in turn have many different <i>fields</i> within them. These records are stored and retrieved using a <i>key</i> that uniquely identifies the record, and is used to find the data within the database.</p>",
+      "url": "https://en.wikipedia.org/wiki/Key%E2%80%93value_database"
+    },
+    "ci": {
+      "title": "Continuous integration",
+      "description": "Software development practice of building and testing frequently",
+      "extract_html": "<p><b>Continuous integration</b> (<b>CI</b>) is the practice of integrating source code changes frequently and ensuring that the integrated codebase is in a workable state. Typically, developers merge changes to an integration branch, and an automated system builds and tests the software system. \nOften, the automated process runs on each commit or runs on a schedule such as once a day. Grady Booch first proposed the term CI in 1991, although he did not advocate integrating multiple times a day, but later, CI came to include that aspect.</p>",
+      "url": "https://en.wikipedia.org/wiki/Continuous_integration"
+    },
+    "l1": {
+      "title": "CPU cache",
+      "description": "Hardware cache of a central processing unit",
+      "extract_html": "<p>A <b>CPU cache</b> is a hardware cache used by the central processing unit (CPU) of a computer to reduce the average cost to access data from the main memory. A cache is a smaller, faster memory, located closer to a processor core, which stores copies of the data from frequently used main memory locations, avoiding the need to always refer to main memory which may be tens to hundreds of times slower to access.</p>",
+      "url": "https://en.wikipedia.org/wiki/CPU_cache"
+    },
+    "ws": {
+      "title": "WebSocket",
+      "description": "Computer network protocol",
+      "extract_html": "<p><b>WebSocket</b> is a computer communications protocol, providing a bidirectional communication channel over a single Transmission Control Protocol (TCP) connection. The protocol was standardized by the IETF as RFC <span class=\"external text\">6455</span> in 2011. The current specification allowing web applications to use this protocol is known as <i>WebSockets</i>. It is a living standard maintained by the WHATWG and a successor to <i>The WebSocket API</i> from the W3C.</p>",
+      "url": "https://en.wikipedia.org/wiki/WebSocket"
+    },
+    "rfc": {
+      "title": "Request for Comments",
+      "description": "Publication of the development and standards for the Internet",
+      "extract_html": "<p>A <b>Request for Comments</b> (<b>RFC</b>) is a publication in a series from the principal technical development and standards-setting bodies for the Internet, most prominently the Internet Engineering Task Force (IETF). An RFC is authored by individuals or groups of engineers and computer scientists in the form of a memorandum describing methods, behaviors, research, or innovations applicable to the working of the Internet and Internet-connected systems. It is submitted either for peer review or to convey new concepts, information, or, occasionally, engineering humor.</p>",
+      "url": "https://en.wikipedia.org/wiki/Request_for_Comments"
+    },
+    "ast": {
+      "title": "Abstract syntax tree",
+      "description": "Tree representation of the abstract syntactic structure of source code",
+      "extract_html": "<p>An <b>abstract syntax tree</b> (<b>AST</b>) is a data structure used in computer science to represent the structure of a program or code snippet. It is a tree representation of the abstract syntactic structure of text written in a formal language. Each node of the tree denotes a construct occurring in the text. It is sometimes called just a <b>syntax tree</b>.</p>",
+      "url": "https://en.wikipedia.org/wiki/Abstract_syntax_tree"
+    },
+    "ttl": {
+      "title": "Time to live",
+      "description": "Time limit of messages in network engineering",
+      "extract_html": "<p>\n<b>Time to live</b> (<b>TTL</b>) or <b>hop limit</b> is a mechanism which limits the lifespan or lifetime of data in a computer or network. TTL may be implemented as a counter or timestamp attached to or embedded in the data. Once the prescribed event count or timespan has elapsed, data is discarded or revalidated. In computer networking, TTL prevents a data packet from circulating indefinitely. In computing applications, TTL is commonly used to improve the performance and manage the caching of data.</p>",
+      "url": "https://en.wikipedia.org/wiki/Time_to_live"
+    },
+    "post": {
+      "title": "POST (HTTP)",
+      "description": "Request method in the HTTP protocol",
+      "extract_html": "<p>In computing, <b>POST</b> is a request method supported by HTTP used by the World Wide Web.\nBy design, the POST request method requests that a web server accepts the data enclosed in the body of the request message, most likely for storing it. It is often used when uploading a file or when submitting a completed web form.</p>",
+      "url": "https://en.wikipedia.org/wiki/POST_(HTTP)"
+    },
+    "id": {
+      "title": "Identifier",
+      "description": "Name that identifies a specific entity",
+      "extract_html": "<p>An <b>identifier</b> is a name that identifies either a unique class of objects or a unique instance of such objects; the class or instance may be an idea, person, physical countable object, or physical noncountable substance. The abbreviation \"<b>ID</b>\" may refer to identity, identification, or an identifier.</p>",
+      "url": "https://en.wikipedia.org/wiki/Identifier"
+    },
+    "uid": {
+      "title": "User identifier",
+      "description": "Value identifying a user account in Unix and Unix-like operating systems",
+      "extract_html": "<p>In Unix-like operating systems, a <b>user identifier</b> is a value used to identify a user. The UID, along with the group identifier (GID) and other access control criteria, is used to determine which system resources a user can access. The password file maps textual user names to UIDs. UIDs are stored in the inodes of the Unix file system, running processes, tar archives, and the now-obsolete Network Information Service. In POSIX-compliant environments, the shell command <span><code>id</code></span> gives the current user's UID, as well as more information such as the user name and the primary and supplementary group identifiers (GIDs) and group names.</p>",
+      "url": "https://en.wikipedia.org/wiki/User_identifier"
+    },
+    "bi": {
+      "title": "Business intelligence",
+      "description": "Strategies for analysis and use of data",
+      "extract_html": "<p><b>Business intelligence</b> (<b>BI</b>) consists of strategies, methodologies, and technologies used by enterprises for data analysis and management of business information to inform business strategies and business operations. Common functions of BI technologies include reporting, online analytical processing, analytics, dashboard development, data mining, process mining, complex event processing, business performance management, benchmarking, text mining, predictive analytics, and prescriptive analytics.</p>",
+      "url": "https://en.wikipedia.org/wiki/Business_intelligence"
+    }
+  }
+}

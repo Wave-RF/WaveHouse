@@ -1,133 +1,108 @@
 // @ts-check
-import { defineConfig } from 'astro/config';
-import starlight from '@astrojs/starlight';
-import starlightLlmsTxt from 'starlight-llms-txt';
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
+import starlightImageZoom from "starlight-image-zoom";
+import starlightGlossary from "starlight-glossary";
+import starlightLlmTools from "starlight-llm-tools";
+import rehypeMermaid from "rehype-mermaid";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import { sidebar } from "./src/config/sidebar.ts";
 
-// Rewrite fenced ```mermaid blocks to <pre class="mermaid"> so the client-side
-// Mermaid loader (head script below) picks them up instead of Expressive Code.
-function remarkMermaid() {
-	return (tree) => {
-		const walk = (node) => {
-			if (!node.children) return;
-			for (const child of node.children) {
-				if (child.type === 'code' && child.lang === 'mermaid') {
-					child.type = 'html';
-					child.value = `<pre class="mermaid">${child.value}</pre>`;
-					delete child.lang;
-					delete child.meta;
-				} else {
-					walk(child);
-				}
-			}
-		};
-		walk(tree);
-	};
-}
-
-// https://astro.build/config
 export default defineConfig({
-	site: 'https://wavehouse.dev',
-	trailingSlash: 'never',
-	markdown: {
-		remarkPlugins: [remarkMermaid],
-	},
-	integrations: [
-		starlight({
-			title: 'WaveHouse',
-			lastUpdated: true,
-			social: [
-				{
-					icon: 'github',
-					label: 'GitHub',
-					href: 'https://github.com/Wave-RF/WaveHouse',
-				},
-			],
-			head: [
-				{
-					tag: 'script',
-					attrs: { type: 'module' },
-					content: `
-import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-const isLight = document.documentElement.dataset.theme === 'light';
-mermaid.initialize({
-  startOnLoad: true,
-  theme: 'base',
-  securityLevel: 'loose',
-  themeVariables: {
-    fontFamily: 'Helvetica Neue, Helvetica, Arial, sans-serif',
-    fontSize: '15px',
-    primaryColor: '#0e7f8f',
-    primaryTextColor: '#ffffff',
-    primaryBorderColor: '#5bbfcf',
-    lineColor: isLight ? '#576270' : '#c2c9d1',
-    secondaryColor: '#475569',
-    tertiaryColor: isLight ? '#f8f9fa' : '#1a1a1a',
-    clusterBkg: isLight ? '#f1f5f9' : '#242a33',
-    clusterBorder: isLight ? '#cbd5e1' : '#3d4752',
-    edgeLabelBackground: isLight ? '#ffffff' : '#1a1a1a',
-    titleColor: isLight ? '#1a1a1a' : '#f8f9fa',
-    labelBoxBorderColor: '#5bbfcf',
-    noteBkgColor: isLight ? '#fef3c7' : '#422006',
-    noteBorderColor: '#f59e0b',
+  site: "https://wavehouse.dev",
+  trailingSlash: "never",
+  markdown: {
+    syntaxHighlight: { excludeLangs: ["mermaid"] },
+    remarkPlugins: [remarkMath],
+    rehypePlugins: [[rehypeMermaid, { strategy: "inline-svg" }], rehypeKatex],
   },
-  flowchart: {
-    padding: 24,
-    nodeSpacing: 48,
-    rankSpacing: 60,
-    htmlLabels: true,
-    curve: 'basis',
-    useMaxWidth: true,
-  },
-});
-`,
-				},
-			],
-			customCss: ['./src/styles/custom.css'],
-			sidebar: [
-				{ label: 'Home', link: '/' },
-				{ label: 'Getting Started', slug: 'getting-started' },
-				{ label: 'Why WaveHouse?', slug: 'why-wavehouse' },
-				{
-					label: 'Guides',
-					items: [
-						{ label: 'Architecture', slug: 'architecture' },
-						{ label: 'API Reference', slug: 'api' },
-						{ label: 'TypeScript SDK', slug: 'sdk' },
-					],
-				},
-				{
-					label: 'Operations',
-					items: [
-						{ label: 'Configuration', slug: 'configuration' },
-						{ label: 'Deployment', slug: 'deployment' },
-					],
-				},
-				{
-					label: 'Contributing',
-					items: [
-						{ label: 'Development', slug: 'development' },
-						{
-							label: 'Contributing Guide',
-							link: 'https://github.com/Wave-RF/WaveHouse/blob/main/CONTRIBUTING.md',
-							attrs: { target: '_blank', rel: 'noopener' },
-						},
-						{
-							label: 'Security Policy',
-							link: 'https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md',
-							attrs: { target: '_blank', rel: 'noopener' },
-						},
-						{
-							label: 'Changelog',
-							link: 'https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md',
-							attrs: { target: '_blank', rel: 'noopener' },
-						},
-					],
-				},
-			],
-			components: {
-				PageSidebar: './src/components/overrides/PageSidebar.astro',
-			},
-			plugins: [starlightLlmsTxt()],
-		}),
-	],
+  integrations: [
+    starlight({
+      title: "WaveHouse",
+      description:
+        "The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.",
+      head: [
+        // PostHog
+        {
+          tag: "script",
+          content: `!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https://us.i.posthog.com'});`,
+        },
+      ],
+      customCss: ["katex/dist/katex.min.css", "./src/styles/custom.css"],
+      social: [
+        {
+          icon: "github",
+          label: "GitHub",
+          href: "https://github.com/Wave-RF/WaveHouse",
+        },
+      ],
+      editLink: {
+        baseUrl: "https://github.com/Wave-RF/WaveHouse/edit/main/docs/",
+      },
+      lastUpdated: true,
+      expressiveCode: {
+        themes: ["github-dark", "github-light"],
+        // Alias ad-hoc fence languages used in our docs to real Shiki
+        // grammars so they highlight instead of rendering as plain text.
+        shiki: {
+          langAlias: {
+            env: "bash",
+            dns: "ini",
+          },
+        },
+      },
+      sidebar,
+      plugins: [
+        starlightImageZoom(),
+        starlightGlossary({
+          // Always-on auto-discovery: each build, lint findings get
+          // submitted to Wikipedia. Unambiguous hits land cleanly in
+          // glossary.json with the article title + extract; everything is
+          // logged loudly so we can git-diff every auto-add. Cache lives
+          // at glossary-cache.json — clear it (or run `make
+          // refresh-glossary`) to re-fetch every entry from Wikipedia.
+          lint: {
+            autoDiscover: true,
+            // Acronyms whose Wikipedia search hits a disambiguation page
+            // (or 404s) get retried with the expansion here as a hint.
+            // If the expansion has no Wikipedia article, a stub entry
+            // is created with the expansion as the term.
+            acronymExpansions: {
+              NATS: "NATS Messaging",
+              JWT: "JSON Web Token",
+              SDK: "Software development kit",
+              SSE: "Server-sent events",
+              KV: "Key-value database",
+              CI: "Continuous integration",
+              WS: "WebSocket",
+              JWKS: "JSON Web Key Set",
+              L1: "CPU cache",
+              RFC: "Request for Comments",
+              AST: "Abstract syntax tree",
+              TTL: "Time to live",
+              POST: "POST (HTTP)",
+              UID: "User identifier",
+              ID: "Identifier",
+              BI: "Business intelligence",
+            },
+            // Suppress lint candidates that aren't real glossary terms
+            // in this codebase, or that already have a glossary entry
+            // under a different label (DLQ covers Dead Letter Queue).
+            ignore: [
+              "PR",                  // ambiguous (pull request, public relations, …)
+              "E2E",                 // ambiguous (end-to-end testing/encryption)
+              "Env Var",             // generic prose
+              "Query Parameters",    // generic prose
+              "Conventional Commits", // no Wikipedia article
+              "Task Board",          // generic prose
+              "Dead Letter Queue",   // covered by DLQ entry
+            ],
+          },
+        }),
+        starlightLlmTools(),
+      ],
+    }),
+  ],
 });
