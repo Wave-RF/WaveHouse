@@ -77,27 +77,44 @@ func run() int {
 
 	ctx := context.Background()
 	serviceName := "wavehouse"
-	otelAddr := os.Getenv("WH_OTEL_ADDR")
-	if otelAddr == "" {
-		otelAddr = "127.0.0.1:4317"
+	
+	var level slog.Level
+	switch os.Getenv("WH_LOG_LEVEL") {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
 	}
-
-	logger.Info("initializing observability", "endpoint", otelAddr, "service", serviceName)
-
-	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
-	if err != nil {
-		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
-		return 1
-	}
-
-	defer func() {
-		_ = otelShutdown(context.Background()) // From InitProvider to flush traces before process dies
-	}()
 
 	logLevel := &slog.LevelVar{}
-	logLevel.Set(slog.LevelInfo)
-	logger = observability.NewLogger(serviceName, logLevel, true)
-	slog.SetDefault(logger)
+	logLevel.Set(level)
+
+	if cfg.Observability.Enabled {
+		otelShutdown, err := observability.InitProvider(ctx, serviceName, cfg.Observability.OTelAddr)
+		if err != nil {
+			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
+		} else {
+			defer func() {
+				_ = otelShutdown(context.Background())
+			}()
+
+			logLevel := &slog.LevelVar{}
+			logLevel.Set(slog.LevelInfo)
+			
+			otelLogger := observability.NewLogger(serviceName, logLevel, true)
+			logger = otelLogger.With(
+				"version", Version,
+				"build_time", BuildTime,
+				"git_commit", GitCommit,
+			)
+			slog.SetDefault(logger)
+			logger.Info("observability pipeline established", "endpoint", cfg.Observability.OTelAddr)
+		}
+	}
 
 	// ClickHouse connection.
 	chConn, err := clickhouse.Open(&clickhouse.Options{

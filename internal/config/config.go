@@ -25,6 +25,12 @@ type Config struct {
 	DLQ        DLQ        `yaml:"dlq"`
 	Policy     Policy     `yaml:"policy"`
 	Pipes      Pipes      `yaml:"pipes"`
+	Observability Observability `yaml:"observability"`
+}
+
+type Observability struct {
+	Enabled  bool   `yaml:"enabled" env:"WH_OBSERVABILITY_ENABLED" env-default:"false"`
+	OTelAddr string `yaml:"otel_addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
 }
 
 type Server struct {

@@ -14,6 +14,10 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/sdk/log"
 )
 
 // InitProvider sets up the OpenTelemetry pipeline for traces and metrics, routing them to a SigNoz OTLP gRPC endpoint.
@@ -89,6 +93,24 @@ func InitProvider(ctx context.Context, serviceName, endpoint string) (func(conte
 	)
 	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 	otel.SetMeterProvider(meterProvider)
+
+	logExporter, err := otlploggrpc.New(ctx,
+		otlploggrpc.WithEndpoint(endpoint),
+		otlploggrpc.WithInsecure(),
+	)
+	if err != nil {
+		handleErr(err)
+		return shutdown, err
+	}
+
+	loggerProvider := log.NewLoggerProvider(
+		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+		log.WithResource(res),
+	)
+	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
+	
+	global.SetLoggerProvider(loggerProvider)
+	// --- END PASTE ---
 
 	if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {
 		handleErr(err)

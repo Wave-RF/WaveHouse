@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"runtime/debug"
 
 	slogmulti "github.com/samber/slog-multi"
 	slogsampling "github.com/samber/slog-sampling"
@@ -25,6 +26,12 @@ func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 			slog.String("span_id", span.SpanContext().SpanID().String()),
 		)
 	}
+
+	// Attach Stack Trace for Errors
+	if r.Level >= slog.LevelError {
+		r.AddAttrs(slog.String("stacktrace", string(debug.Stack())))
+	}
+
 	return h.Handler.Handle(ctx, r)
 }
 
