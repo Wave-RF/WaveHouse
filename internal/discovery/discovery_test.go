@@ -459,8 +459,10 @@ func TestRetryRefresh_ReturnsOnContextCancel(t *testing.T) {
 		done <- sr.RetryRefresh(ctx, time.Second, time.Second, nil)
 	}()
 
-	// Give the goroutine a moment to enter its first sleep.
-	time.Sleep(50 * time.Millisecond)
+	// `done` provides the only synchronisation we need. Whether cancel
+	// fires before or after the goroutine enters the select, the loop
+	// must observe ctx.Done() and return — no sleep-based scheduling
+	// assumption required.
 	cancel()
 
 	select {

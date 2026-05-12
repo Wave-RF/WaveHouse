@@ -46,10 +46,11 @@ func (b *BootState) Err() error {
 // HealthHandler provides liveness and readiness probes.
 type HealthHandler struct {
 	CHConn driver.Conn
-	// Boot is consulted by Liveness. When non-nil and its Err() is non-nil,
-	// Liveness reports 503 with the diagnostic message — used while boot-
-	// time schema discovery is still failing in the retry loop. A nil Boot
-	// preserves the pre-retry-loop behaviour (always 200).
+	// Boot is consulted by both Liveness and Readiness. When non-nil and
+	// its Err() is non-nil, both endpoints report 503 with the diagnostic
+	// — used while boot-time schema discovery is still failing in the
+	// retry loop. A nil Boot preserves the pre-retry-loop behaviour
+	// (Liveness always 200; Readiness 503 only on Ping failure).
 	Boot *BootState
 }
 
