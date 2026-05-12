@@ -128,24 +128,24 @@ func (m *MockCache) Get(_ context.Context, key string) ([]byte, time.Duration, e
 }
 
 func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Duration, tags []string) error {
-    if m.Err != nil {
-        return m.Err
-    }
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    m.store[key] = value
-    return nil
+	if m.Err != nil {
+		return m.Err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store[key] = value
+	return nil
 }
 
 func (m *MockCache) InvalidateByTags(_ context.Context, tags []string) error {
-    if m.Err != nil {
-        return m.Err
-    }
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    // For the mock, we can just clear the whole store or match specific logic
-    m.store = make(map[string][]byte) 
-    return nil
+	if m.Err != nil {
+		return m.Err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// For the mock, we can just clear the whole store or match specific logic
+	m.store = make(map[string][]byte)
+	return nil
 }
 
 func (m *MockCache) Close() error { return nil }

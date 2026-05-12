@@ -34,21 +34,21 @@ func (m *memCache) Get(_ context.Context, key string) ([]byte, time.Duration, er
 }
 
 func (m *memCache) Set(_ context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
-    m.mu.Lock()
-    m.store[key] = cacheEntry{data: value, ttl: ttl}
-    m.mu.Unlock()
-    return nil
+	m.mu.Lock()
+	m.store[key] = cacheEntry{data: value, ttl: ttl}
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *memCache) InvalidateByTags(_ context.Context, tags []string) error {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    for k := range m.store {
-        // For a simple test mock, we can just clear everything 
-        // or check if any tag is relevant.
-        delete(m.store, k)
-    }
-    return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.store {
+		// For a simple test mock, we can just clear everything
+		// or check if any tag is relevant.
+		delete(m.store, k)
+	}
+	return nil
 }
 
 func (m *memCache) Close() error { return nil }
@@ -153,17 +153,17 @@ func TestTieredCache_SingleflightDedup(t *testing.T) {
 }
 
 func TestTieredCache_InvalidateByTags(t *testing.T) {
-    t.Parallel()
-    l1 := newMemCache()
-    l2 := newMemCache()
-    tc := NewTiered(l1, l2)
-    ctx := context.Background()
+	t.Parallel()
+	l1 := newMemCache()
+	l2 := newMemCache()
+	tc := NewTiered(l1, l2)
+	ctx := context.Background()
 
-    require.NoError(t, tc.Set(ctx, "q1", []byte("val"), time.Minute, []string{"clicks"}))
-    require.NoError(t, tc.InvalidateByTags(ctx, []string{"clicks"}))
+	require.NoError(t, tc.Set(ctx, "q1", []byte("val"), time.Minute, []string{"clicks"}))
+	require.NoError(t, tc.InvalidateByTags(ctx, []string{"clicks"}))
 
-    v1, _, _ := tc.Get(ctx, "q1")
-    assert.Nil(t, v1)
+	v1, _, _ := tc.Get(ctx, "q1")
+	assert.Nil(t, v1)
 }
 
 // slowCache wraps memCache with a delay and an atomic access counter for singleflight testing.

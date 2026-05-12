@@ -15,12 +15,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
 // Regex to detect mutating queries and extract table names
-var mutationRe = regexp.MustCompile(`(?i)^\s*(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)`)
-var extractTablesRawRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
+var (
+	mutationRe         = regexp.MustCompile(`(?i)^\s*(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)`)
+	extractTablesRawRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
+)
 
 // QueryHandler handles POST /v1/query.
 type QueryHandler struct {
@@ -28,7 +29,6 @@ type QueryHandler struct {
 	Cache       *cache.TieredCache
 	DefaultTTL  time.Duration
 	PolicyStore *policy.Store
-	sf          singleflight.Group
 }
 
 func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {

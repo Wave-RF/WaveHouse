@@ -25,9 +25,9 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

@@ -98,30 +98,30 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 }
 
 func TestLocalCache_InvalidateByTags(t *testing.T) {
-    t.Parallel()
-    c, err := NewLocal(1 << 20)
-    require.NoError(t, err)
-    defer func() { _ = c.Close() }()
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
 
-    ctx := context.Background()
-    
-    // Pass the table names as the tags slice
-    require.NoError(t, c.Set(ctx, "query:clicks:123", []byte("val1"), 10*time.Second, []string{"clicks"}))
-    require.NoError(t, c.Set(ctx, "query:clicks:456", []byte("val2"), 0, []string{"clicks"}))
-    
-    // This key belongs to 'users', so it won't be wiped when we invalidate 'clicks'
-    require.NoError(t, c.Set(ctx, "query:users:789", []byte("val3"), 10*time.Second, []string{"users"}))
+	ctx := context.Background()
 
-    c.Wait()
+	// Pass the table names as the tags slice
+	require.NoError(t, c.Set(ctx, "query:clicks:123", []byte("val1"), 10*time.Second, []string{"clicks"}))
+	require.NoError(t, c.Set(ctx, "query:clicks:456", []byte("val2"), 0, []string{"clicks"}))
 
-    // Wipe out the clicks table cache
-    err = c.InvalidateByTags(ctx, []string{"clicks"})
-    assert.NoError(t, err)
+	// This key belongs to 'users', so it won't be wiped when we invalidate 'clicks'
+	require.NoError(t, c.Set(ctx, "query:users:789", []byte("val3"), 10*time.Second, []string{"users"}))
+
+	c.Wait()
+
+	// Wipe out the clicks table cache
+	err = c.InvalidateByTags(ctx, []string{"clicks"})
+	assert.NoError(t, err)
 
 	// Verify the target keys are gone
 	val1, _, _ := c.Get(ctx, "query:clicks:123")
 	assert.Nil(t, val1)
-	
+
 	val2, _, _ := c.Get(ctx, "query:clicks:456")
 	assert.Nil(t, val2)
 
