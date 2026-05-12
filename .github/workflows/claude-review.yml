@@ -70,11 +70,16 @@ on:
         type: string
 
 # Dedup per PR. PR number reachable from each event payload before
-# any step runs. `cancel-in-progress: true` means a fast-follow push
-# replaces an in-flight review with one against the new HEAD.
+# any step runs. Fast-follow human action (new push, /review comment)
+# cancels an in-flight review against the now-stale HEAD. Bot-triggered
+# events do NOT cancel — otherwise Claude's own sticky comment fires
+# an `issue_comment created` webhook that would cancel the in-flight
+# review-run as it's still finishing posting. The new bot-triggered
+# run is filtered out at the job-level `if:` anyway, so making it
+# non-cancelling here just lets the original run complete.
 concurrency:
   group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event.sender.type != 'Bot' }}
 
 jobs:
   review:
