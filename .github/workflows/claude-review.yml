@@ -142,10 +142,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Read the PR's current state in one round-trip: draft,
-          # author, association, head SHA, and the full check rollup.
+          # Read draft / author / head SHA via gh pr view.
+          # - author_association is *not* a valid `gh pr view --json`
+          #   field (REST-only), fetched separately below.
+          # - statusCheckRollup is *not* fetched here: requesting it
+          #   makes GraphQL traverse `checkSuite.workflowRun` on every
+          #   check context, which the workflow's GITHUB_TOKEN can't
+          #   read for checks owned by other integrations (Gemini,
+          #   Copilot, third-party statuses). On a PR with enough
+          #   cross-integration checks the whole call fails with
+          #   "Resource not accessible by integration" even though
+          #   the data we care about is reachable. Required-check
+          #   state is fetched via REST check-runs below instead.
           pr=$(gh pr view "$PR_NUM" -R "$REPO" \
-            --json isDraft,author,authorAssociation,headRefOid,statusCheckRollup)
+            --json isDraft,author,headRefOid)
 
           if [ "$(echo "$pr" | jq -r '.isDraft')" = "true" ]; then
             echo "::notice::PR #$PR_NUM is draft; skipping review."
@@ -158,7 +168,7 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          association=$(echo "$pr" | jq -r '.authorAssociation')
+          association=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '.author_association')
           # CONTRIBUTOR is included because webhook payloads report users
           # with *private* org membership as CONTRIBUTOR (not MEMBER) even
           # when the REST API reports them as MEMBER.
@@ -178,12 +188,23 @@ jobs:
           # On manual triggers (issue_comment, workflow_dispatch) we
           # honour the explicit ask even if CI is still red or running;
           # the human has already decided they want a review.
+          #
+          # Uses the REST check-runs endpoint (filter=latest is the
+          # default, so we get one row per check name on the head
+          # commit). Status / conclusion enum values are *lowercase*
+          # in REST where GraphQL emits uppercase. Status checks
+          # (non-check_run contexts) aren't returned by this endpoint,
+          # which is fine — our required checks (CI, PR housekeeping)
+          # are both check_runs. per_page=100 is defensive against
+          # PRs that ever exceed the default page of 30 latest checks.
           if [ "$EVENT_NAME" = "workflow_run" ]; then
-            rollup=$(echo "$pr" | jq -c '.statusCheckRollup')
+            check_runs=$(gh api \
+              "repos/$REPO/commits/$head_sha/check-runs?per_page=100" \
+              --jq '.check_runs')
             mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | awk 'NF')
 
             for check in "${CHECKS[@]}"; do
-              entry=$(echo "$rollup" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
+              entry=$(echo "$check_runs" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
               if [ -z "$entry" ]; then
                 echo "::notice::Required check '$check' not yet present on PR #$PR_NUM; will retry on next workflow_run."
                 echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -191,14 +212,14 @@ jobs:
               fi
               status=$(echo "$entry" | jq -r '.status // empty')
               conclusion=$(echo "$entry" | jq -r '.conclusion // empty')
-              if [ "$status" != "COMPLETED" ]; then
-                echo "::notice::Required check '$check' is $status (not COMPLETED); will retry on next workflow_run."
+              if [ "$status" != "completed" ]; then
+                echo "::notice::Required check '$check' is $status (not completed); will retry on next workflow_run."
                 echo "skip=true" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               case "$conclusion" in
-                SUCCESS|NEUTRAL|SKIPPED) ;;
-                FAILURE|CANCELLED|TIMED_OUT|STARTUP_FAILURE|ACTION_REQUIRED|STALE)
+                success|neutral|skipped) ;;
+                failure|cancelled|timed_out|startup_failure|action_required|stale)
                   echo "::notice::Required check '$check' concluded $conclusion; skipping Claude review (no point reviewing red CI)."
                   echo "skip=true" >> "$GITHUB_OUTPUT"
                   exit 0
