@@ -1,19 +1,25 @@
 name: Dependabot auto-merge
 
 # Auto-approves and enables auto-merge for Dependabot PRs on patch-
-# and minor-version bumps. Major bumps stay held for human review and
-# are added to the Task Board (project #7) with Status=Ready, assigned
-# to both admins, and get a review-request — same surface the
-# project-orchestrator.yml `reeval` path uses for non-Dependabot PRs,
-# via shared composite actions under .github/actions/.
+# and minor-version bumps. Major bumps stay held for human review,
+# both admins get assigned as reviewers, and a sticky-comment
+# explains the hold.
+#
+# Board placement is no longer done here — the project's native
+# "Auto-add to project" workflow (configured in the project UI under
+# project #7's Workflows tab) handles adding the PR to the board, and
+# the "Item added to project" workflow sets its initial Status. The
+# orchestrator-side board-upsert step was removed in the same change
+# that deleted project-orchestrator.yml; native workflows are the
+# replacement.
 #
 # Admin-approval bypass: Dependabot PRs skip the `Admin approval`
-# required status check entirely (see `admin-approval.yml`). For patch /
-# minor, the trust model is: this workflow's bot-approval + classification
-# (via fetch-metadata) gates *enabling* auto-merge; the actual merge is
-# gated by required-checks on the ruleset (CI passing). So CI failures
-# still block merges — this workflow doesn't bypass them. For major
-# bumps: a human admin approves in GitHub as usual.
+# required status check entirely (see `admin-approval.yml`). For
+# patch / minor, the trust model is: this workflow's bot-approval +
+# classification (via fetch-metadata) gates *enabling* auto-merge;
+# the actual merge is gated by required-checks on the ruleset (CI
+# passing). So CI failures still block merges. For major bumps: a
+# human admin approves in GitHub as usual.
 
 on:
   pull_request:
@@ -25,23 +31,19 @@ permissions:
   contents: write
   pull-requests: write
 
-# Project IDs live in .github/board-config.env — loaded by the first
-# step of the auto-merge job below.
-
 jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]'
     runs-on: [wave-rf-runners]
     timeout-minutes: 10
     steps:
-      - name: Checkout main (trusted composite-action + board-config source)
+      - name: Checkout main (trusted composite-action source)
         # Security: pin to the default branch, not the PR head.
         # Dependabot PRs can modify .github/actions/** and since this
         # workflow runs with write-scoped tokens (contents:write +
         # pull-requests:write) a compromised upstream action could
         # inject code via a bump PR. Defensive regardless of the
-        # actor being dependabot[bot]. (Copilot flagged the same
-        # pull_request_target pitfall on project-orchestrator.yml.)
+        # actor being dependabot[bot].
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -49,6 +51,10 @@ jobs:
           persist-credentials: false
 
       - name: Load board config
+        # Loads ADMINS (comma-separated) from board-config.env, used by
+        # the major-bump reviewer-assign step below. board-config.env is
+        # the single source of truth for the admin set (with
+        # admin-approval.yml's documented inline-copy exception).
         run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
       - name: Fetch Dependabot metadata
@@ -68,63 +74,61 @@ jobs:
           gh pr merge --auto --squash "$PR_URL"
 
       # ───────────────────────────────────────────────────────────────
-      # Major-bump path: hold for human review, but surface it on the
-      # board so it doesn't vanish into the PR list.
-      #
-      # Order matters here: token guard + board-upsert + assign all
-      # run before the comment, so the comment's wording can honestly
-      # reflect whether board placement happened. Claude review
-      # flagged the earlier ordering (comment first) as posting a
-      # false claim when PROJECT_BOARD_TOKEN is missing.
+      # Major-bump path: hold for human review.
       # ───────────────────────────────────────────────────────────────
 
-      - name: Guard — require PROJECT_BOARD_TOKEN for board ops
+      - name: Convert ADMINS to space-separated (composite expects spaces)
+        # ADMINS is comma-separated in board-config.env; the
+        # assign-and-request-review composite splits on whitespace,
+        # so we need to convert. Done in a bash step rather than a
+        # `${{ }}` expression because GitHub Actions doesn't have a
+        # `replace()` function in its expression language — only
+        # contains/startsWith/endsWith/format/join/toJSON/fromJSON/
+        # hashFiles. Using a non-existent function in `with:` causes
+        # GitHub to fail the workflow at validation time on *every*
+        # push event, which is what was producing the
+        # ghost ".github/workflows/dependabot-automerge.yml push failure"
+        # runs on every branch.
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
-        env:
-          PROJECT_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN }}
-        run: |
-          if [[ -z "$PROJECT_TOKEN" ]]; then
-            echo "::warning::PROJECT_BOARD_TOKEN not configured; skipping board placement for this major bump."
-            echo "SKIP_BOARD=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: Add PR card to board → Ready (major bump)
-        if: steps.meta.outputs.update-type == 'version-update:semver-major' && env.SKIP_BOARD != 'true'
-        uses: ./.github/actions/board-upsert-status
-        with:
-          project-token: ${{ secrets.PROJECT_BOARD_TOKEN }}
-          project-owner: ${{ env.PROJECT_OWNER }}
-          project-number: ${{ env.PROJECT_NUMBER }}
-          project-id: ${{ env.PROJECT_ID }}
-          status-field-id: ${{ env.STATUS_FIELD_ID }}
-          status-option-id: ${{ env.STATUS_READY }}
-          url: ${{ github.event.pull_request.html_url }}
+        run: echo "ADMINS_SPACE=${ADMINS//,/ }" >> "$GITHUB_ENV"
 
       - name: Assign + request review from both admins (major bump)
-        # Dependabot is the author — no author-vs-reviewer logic needed.
-        # Assign both so whoever picks it up first can action. Runs
-        # whether or not board placement succeeded (uses GITHUB_TOKEN).
+        # Dependabot is the author — assign both admins so whoever
+        # picks it up first can action.
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         uses: ./.github/actions/assign-and-request-review
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr-number: ${{ github.event.pull_request.number }}
-          reviewers: EricAndrechek taitelee
+          reviewers: ${{ env.ADMINS_SPACE }}
 
       - name: Comment on major bumps
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          SKIP_BOARD: ${{ env.SKIP_BOARD }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # Honest wording: only claim board placement when we actually
-          # did it. Reviewers were assigned regardless since that step
-          # doesn't depend on the board token.
-          if [[ "$SKIP_BOARD" == "true" ]]; then
-            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned; board placement was skipped (PROJECT_BOARD_TOKEN not configured). See dependency changelog / release notes before merging."
+          # Marker-comment upsert (same pattern as housekeeping.yml's
+          # title-lint comment): on every synchronize the workflow
+          # re-runs and finds the existing comment by its hidden marker,
+          # then edits it in place rather than posting a new one. The
+          # previous unconditional `gh pr comment` produced a fresh
+          # comment for every Dependabot push.
+          MARKER='<!-- dependabot-major-bump-comment -->'
+          BODY="$MARKER
+          Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned. See dependency changelog / release notes before merging."
+
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f "body=$BODY" > /dev/null
+            echo "Updated existing major-bump comment ($EXISTING)"
           else
-            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Added to the Task Board (Status: Ready) and reviewers assigned. See dependency changelog / release notes before merging."
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f "body=$BODY" > /dev/null
+            echo "Posted new major-bump comment"
           fi
-          gh pr comment "$PR_URL" --body "$body"

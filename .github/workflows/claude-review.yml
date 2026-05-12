@@ -41,8 +41,8 @@ name: Claude PR review
 #   - bot accounts other than Dependabot (filtered at workflow level)
 # When the gate decides to skip, the job still completes with
 # conclusion=success (the gate step exits 0). That keeps the
-# "Claude review" check present on the PR and lets the orchestrator's
-# bot-clean wait succeed.
+# "Claude review" check present on the PR so reviewers can see at
+# a glance that the workflow ran.
 #
 # Prompt structure follows Anthropic's canonical pr-review-comprehensive
 # template — see `.github/prompts/pr-review.md`. The header block we
@@ -83,10 +83,8 @@ concurrency:
 
 jobs:
   review:
-    # The check name on the PR is the *job* name. "Claude review" is
-    # what shows up in the Checks panel and what the orchestrator's
-    # bot-clean step looks for. Keep this string and orchestrator's
-    # required-checks list in sync.
+    # The check name on the PR is the *job* name. "Claude review"
+    # is what shows up in the Checks panel.
     name: Claude review
     # Workflow-level cheap filter: skip Dependabot (handled by
     # dependabot-automerge.yml) and clearly-untrusted issue_comment
@@ -144,6 +142,27 @@ jobs:
               head_sha=$(gh pr view "$pr_num" -R "$REPO" --json headRefOid --jq '.headRefOid')
               ;;
           esac
+
+          # Self-modification gate. The Anthropic action runs a
+          # validation step that fails when its own workflow file or
+          # the prompt template is in the PR's diff (it parses them
+          # and gets confused by ones that aren't the live config).
+          # When the PR modifies either, skip the action entirely —
+          # the check still shows success because we exit 0 here, the
+          # *next* PR's run picks up the change, and we don't get a
+          # red Claude check on every PR-that-edits-Claude. Documented
+          # upstream-known limitation: anthropics/claude-code-action
+          # discussions around workflow-self-edit auto-fail.
+          self_mod_paths=$(gh pr view "$pr_num" -R "$REPO" --json files --jq '
+            .files[].path
+            | select(. == ".github/workflows/claude-review.yml"
+                  or . == ".github/prompts/pr-review.md")
+          ')
+          if [ -n "$self_mod_paths" ]; then
+            echo "::notice::PR #$pr_num modifies Claude's own workflow / prompt ($self_mod_paths). Skipping the action (it would self-fail on validation); the change will apply to the next PR's review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Trust gate. Fetch HEAD commit; check author and committer
           # logins against the repo's collaborator permission map.
@@ -217,7 +236,7 @@ jobs:
             echo 'PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: anthropics/claude-code-action@9840e4524194198b8d4e3b31a544efc441a8b11e # v1.0.102
+      - uses: anthropics/claude-code-action@5d5c10a4f389689f992ea10bb14dcb6fcc83146d # v1.0.102
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

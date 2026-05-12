@@ -3,9 +3,10 @@ name: Admin approval
 # Required status check that enforces at-least-one approval from an
 # admin (Eric or Taite) before any PR can merge. Replaces the
 # CODEOWNERS-based `require_code_owner_review` rule so that reviewer
-# assignment + Task Board state can be workflow-controlled (see
-# `.github/workflows/project-orchestrator.yml`) and human reviewers
-# are only notified once bots are clean.
+# assignment can be workflow-controlled (see `housekeeping.yml`, which
+# requests review from the non-author admin on first open) and Task
+# Board state is handled by GitHub's native Projects v2 workflows
+# configured in the project UI.
 #
 # Status reporting model: this workflow does NOT use its own check-run
 # conclusion to drive the gate. Instead it manually POSTs a commit
@@ -121,7 +122,7 @@ jobs:
           # Match both login shapes ("dependabot[bot]" is the standard
           # user-context login; "app/dependabot" shows up in some GH
           # API / app contexts). Keeping both keeps this check aligned
-          # with project-orchestrator.yml.
+          # with dependabot-automerge.yml's bypass.
           if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
             echo "::notice::Dependabot PR — bypassing admin approval (handled by dependabot-automerge workflow)."
             post_status success "Dependabot PR — bypassed"
