@@ -37,21 +37,22 @@ type Observability struct {
 }
 
 type ObservabilityTraces struct {
-	Enabled    bool    `yaml:"enabled" env:"WH_OBS_TRACES_ENABLED" env-default:"true"`
-	SampleRate float64 `yaml:"sample_rate" env:"WH_OBS_TRACES_SAMPLE_RATE" env-default:"0.10"`
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
 }
 
 type ObservabilityMetrics struct {
-	Enabled bool `yaml:"enabled" env:"WH_OBS_METRICS_ENABLED" env-default:"true"`
+	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
 }
 
-// ObservabilityLogs sample rate applies to DEBUG/INFO only.
-// WARN and ERROR always export at 100% — dropping them silently
-// during incidents is too dangerous to expose as a knob.
-// Stdout receives 100% regardless of this rate.
+// ObservabilityLogs sample rate applies to OTLP export of DEBUG/INFO only.
+// WARN and ERROR always export at 100% — dropping them silently during
+// incidents is too dangerous to expose as a knob. Stdout receives 100% of
+// records regardless of this rate (sampling for scraped-log pipelines like
+// Loki/Promtail belongs at the scraper, not the application).
 type ObservabilityLogs struct {
-	Enabled    bool    `yaml:"enabled" env:"WH_OBS_LOGS_ENABLED" env-default:"true"`
-	SampleRate float64 `yaml:"sample_rate" env:"WH_OBS_LOGS_SAMPLE_RATE" env-default:"0.10"`
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
 }
 
 type Server struct {

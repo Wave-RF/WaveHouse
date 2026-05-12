@@ -14,12 +14,12 @@ observability:
   otel_addr: "127.0.0.1:4317"
   traces:
     enabled: true
-    sample_rate: 0.10    # head-based, [0.0, 1.0]
+    sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
   metrics:
     enabled: true
   logs:
     enabled: true
-    sample_rate: 0.10    # DEBUG/INFO only; WARN+ always 100%
+    sample_rate: 1.0     # DEBUG/INFO OTLP rate; WARN+ always 100%, stdout always 100%
 
 clickhouse:
   addr: localhost:9000

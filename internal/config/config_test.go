@@ -35,10 +35,10 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.False(t, cfg.Observability.Enabled)
 	assert.Equal(t, "127.0.0.1:4317", cfg.Observability.OTelAddr)
 	assert.True(t, cfg.Observability.Traces.Enabled)
-	assert.InEpsilon(t, 0.10, cfg.Observability.Traces.SampleRate, 0.0001)
+	assert.InEpsilon(t, 1.0, cfg.Observability.Traces.SampleRate, 0.0001)
 	assert.True(t, cfg.Observability.Metrics.Enabled)
 	assert.True(t, cfg.Observability.Logs.Enabled)
-	assert.InEpsilon(t, 0.10, cfg.Observability.Logs.SampleRate, 0.0001)
+	assert.InEpsilon(t, 1.0, cfg.Observability.Logs.SampleRate, 0.0001)
 }
 
 func TestLoad_FromYAML(t *testing.T) {
