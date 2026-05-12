@@ -27,7 +27,7 @@ func TestNewLogger_JSON(t *testing.T) {
 	lvl := &slog.LevelVar{}
 	lvl.Set(slog.LevelDebug)
 
-	log := NewLogger("api", lvl, true)
+	log := NewLogger("api", lvl, true, 0.10)
 	require.NotNil(t, log)
 	// Component tag is added via With; confirm the attribute is present by
 	// emitting a record and re-parsing it through a capturing handler isn't
@@ -40,7 +40,7 @@ func TestNewLogger_Text(t *testing.T) {
 	t.Parallel()
 
 	lvl := &slog.LevelVar{}
-	log := NewLogger("worker", lvl, false)
+	log := NewLogger("worker", lvl, false, 0.10)
 	require.NotNil(t, log)
 	log.Debug("debug-msg")
 	log.Warn("warn-msg")

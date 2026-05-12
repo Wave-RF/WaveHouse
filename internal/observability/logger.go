@@ -29,8 +29,12 @@ func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-// NewLogger creates a production-ready logger with component tags and trace support
-func NewLogger(component string, level *slog.LevelVar, isJSON bool) *slog.Logger {
+// NewLogger creates a production-ready logger with component tags and trace
+// support. otlpSampleRate (in [0.0, 1.0]) caps OTLP export of DEBUG/INFO
+// records; WARN/ERROR always export at 100% — dropping them silently during
+// incidents is too dangerous to expose as a knob. Stdout receives 100% of
+// records regardless.
+func NewLogger(component string, level *slog.LevelVar, isJSON bool, otlpSampleRate float64) *slog.Logger {
 	opts := &slog.HandlerOptions{
 		Level:     level,
 		AddSource: true,
@@ -45,8 +49,13 @@ func NewLogger(component string, level *slog.LevelVar, isJSON bool) *slog.Logger
 
 	otelHandler := otelslog.NewHandler(component, otelslog.WithLoggerProvider(global.GetLoggerProvider()))
 
-	sampler := slogsampling.UniformSamplingOption{
-		Rate: 0.1, // Keep 10% of logs
+	sampler := slogsampling.CustomSamplingOption{
+		Sampler: func(_ context.Context, r slog.Record) float64 {
+			if r.Level >= slog.LevelWarn {
+				return 1.0
+			}
+			return otlpSampleRate
+		},
 	}.NewMiddleware()
 
 	handler := slogmulti.Fanout(

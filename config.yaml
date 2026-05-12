@@ -10,8 +10,16 @@ server:
     - "*"
 
 observability:
-  enabled: false         # set true to export traces/metrics/logs via OTLP gRPC
+  enabled: false         # master switch — set true to export via OTLP gRPC
   otel_addr: "127.0.0.1:4317"
+  traces:
+    enabled: true
+    sample_rate: 0.10    # head-based, [0.0, 1.0]
+  metrics:
+    enabled: true
+  logs:
+    enabled: true
+    sample_rate: 0.10    # DEBUG/INFO only; WARN+ always 100%
 
 clickhouse:
   addr: localhost:9000

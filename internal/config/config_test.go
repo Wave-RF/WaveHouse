@@ -32,6 +32,13 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.Equal(t, 300, cfg.Cache.DefaultTTL)
+	assert.False(t, cfg.Observability.Enabled)
+	assert.Equal(t, "127.0.0.1:4317", cfg.Observability.OTelAddr)
+	assert.True(t, cfg.Observability.Traces.Enabled)
+	assert.InEpsilon(t, 0.10, cfg.Observability.Traces.SampleRate, 0.0001)
+	assert.True(t, cfg.Observability.Metrics.Enabled)
+	assert.True(t, cfg.Observability.Logs.Enabled)
+	assert.InEpsilon(t, 0.10, cfg.Observability.Logs.SampleRate, 0.0001)
 }
 
 func TestLoad_FromYAML(t *testing.T) {
@@ -215,6 +222,60 @@ auth:
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validate config")
+}
+
+func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
+	t.Parallel()
+	for _, rate := range []float64{-0.01, 1.01, 2.0} {
+		cfg := Config{
+			Server:     Server{Port: 8080},
+			ClickHouse: ClickHouse{HTTPScheme: "http"},
+			Schema:     Schema{RefreshInterval: 60},
+			Observability: Observability{
+				Enabled: true,
+				Traces:  ObservabilityTraces{Enabled: true, SampleRate: rate},
+				Logs:    ObservabilityLogs{Enabled: true, SampleRate: 0.10},
+			},
+		}
+		err := cfg.Validate()
+		require.Error(t, err, "rate %v should be rejected", rate)
+		assert.Contains(t, err.Error(), "traces.sample_rate")
+	}
+}
+
+func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Observability: Observability{
+			Enabled: true,
+			Traces:  ObservabilityTraces{Enabled: true, SampleRate: 0.10},
+			Logs:    ObservabilityLogs{Enabled: true, SampleRate: 1.5},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "logs.sample_rate")
+}
+
+func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
+	t.Parallel()
+	// Out-of-range rates should not fail validation when the master switch is off —
+	// the rates are unused so policing them would surprise operators iterating on
+	// config that they haven't enabled yet.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Observability: Observability{
+			Enabled: false,
+			Traces:  ObservabilityTraces{SampleRate: 99},
+			Logs:    ObservabilityLogs{SampleRate: -1},
+		},
+	}
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_InvalidHTTPScheme(t *testing.T) {

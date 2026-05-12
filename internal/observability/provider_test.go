@@ -37,7 +37,13 @@ func TestInitProvider_Shutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	shutdown, err := InitProvider(ctx, "wavehouse-test", lis.Addr().String())
+	shutdown, err := InitProvider(ctx, "wavehouse-test", ProviderConfig{
+		Endpoint:         lis.Addr().String(),
+		TracesEnabled:    true,
+		TracesSampleRate: 0.10,
+		MetricsEnabled:   true,
+		LogsEnabled:      true,
+	})
 	require.NoError(t, err)
 	require.NotNil(t, shutdown)
 

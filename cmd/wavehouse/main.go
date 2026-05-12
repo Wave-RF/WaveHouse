@@ -97,7 +97,13 @@ func run() int {
 	slog.SetDefault(logger)
 
 	if cfg.Observability.Enabled {
-		otelShutdown, err := observability.InitProvider(ctx, serviceName, cfg.Observability.OTelAddr)
+		otelShutdown, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
+			Endpoint:         cfg.Observability.OTelAddr,
+			TracesEnabled:    cfg.Observability.Traces.Enabled,
+			TracesSampleRate: cfg.Observability.Traces.SampleRate,
+			MetricsEnabled:   cfg.Observability.Metrics.Enabled,
+			LogsEnabled:      cfg.Observability.Logs.Enabled,
+		})
 		if err != nil {
 			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
 		} else {
@@ -105,7 +111,7 @@ func run() int {
 				_ = otelShutdown(context.Background())
 			}()
 
-			otelLogger := observability.NewLogger(serviceName, logLevel, true)
+			otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.Observability.Logs.SampleRate)
 			logger = otelLogger.With(
 				"version", Version,
 				"build_time", BuildTime,

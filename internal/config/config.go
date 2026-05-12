@@ -29,8 +29,29 @@ type Config struct {
 }
 
 type Observability struct {
-	Enabled  bool   `yaml:"enabled" env:"WH_OBSERVABILITY_ENABLED" env-default:"false"`
-	OTelAddr string `yaml:"otel_addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
+	Enabled  bool                 `yaml:"enabled" env:"WH_OBSERVABILITY_ENABLED" env-default:"false"`
+	OTelAddr string               `yaml:"otel_addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
+	Traces   ObservabilityTraces  `yaml:"traces"`
+	Metrics  ObservabilityMetrics `yaml:"metrics"`
+	Logs     ObservabilityLogs    `yaml:"logs"`
+}
+
+type ObservabilityTraces struct {
+	Enabled    bool    `yaml:"enabled" env:"WH_OBS_TRACES_ENABLED" env-default:"true"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OBS_TRACES_SAMPLE_RATE" env-default:"0.10"`
+}
+
+type ObservabilityMetrics struct {
+	Enabled bool `yaml:"enabled" env:"WH_OBS_METRICS_ENABLED" env-default:"true"`
+}
+
+// ObservabilityLogs sample rate applies to DEBUG/INFO only.
+// WARN and ERROR always export at 100% — dropping them silently
+// during incidents is too dangerous to expose as a knob.
+// Stdout receives 100% regardless of this rate.
+type ObservabilityLogs struct {
+	Enabled    bool    `yaml:"enabled" env:"WH_OBS_LOGS_ENABLED" env-default:"true"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OBS_LOGS_SAMPLE_RATE" env-default:"0.10"`
 }
 
 type Server struct {
@@ -127,6 +148,15 @@ func (c *Config) Validate() error {
 
 	if c.MQ.GapWindowMinutes < 0 {
 		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
+	}
+
+	if c.Observability.Enabled {
+		if r := c.Observability.Traces.SampleRate; r < 0 || r > 1 {
+			return fmt.Errorf("observability.traces.sample_rate %g out of range [0.0, 1.0]", r)
+		}
+		if r := c.Observability.Logs.SampleRate; r < 0 || r > 1 {
+			return fmt.Errorf("observability.logs.sample_rate %g out of range [0.0, 1.0]", r)
+		}
 	}
 
 	return nil
