@@ -11,7 +11,7 @@
     "preview": "astro preview",
     "astro": "astro",
     "cf:preview": "pnpm build && wrangler dev",
-    "deploy": "pnpm build && wrangler deploy"
+    "glossary:refresh": "rm -f glossary-cache.json && astro build"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",

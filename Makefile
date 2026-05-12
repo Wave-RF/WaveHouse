@@ -201,29 +201,6 @@ dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
 preview-docs: build-docs ## Preview the production docs build locally
 	@cd $(DOCS_DIR) && $(PNPM) preview
 
-# Cloudflare runtime preview — runs the same wrangler the prod deploy
-# uses, so you exercise the worker (Accept-header / LLM-bot routing)
-# locally before pushing.
-.PHONY: cf-preview-docs
-cf-preview-docs: build-docs ## Preview docs site under wrangler (worker + ASSETS)
-	@cd $(DOCS_DIR) && $(PNPM) cf:preview
-
-.PHONY: deploy-docs
-deploy-docs: build-docs ## Deploy docs site to Cloudflare Workers (wrangler deploy)
-	@echo "$(CYAN)==> Deploying docs site to Cloudflare...$(RESET)"
-	@cd $(DOCS_DIR) && $(PNPM) deploy
-
-# Clear the glossary cache and rebuild so every entry's Wikipedia
-# extract gets re-fetched. Use this after a Wikipedia article you care
-# about has been edited substantively (the title/extract is what we
-# show in tooltips) — or just on a periodic cadence if you want the
-# definitions to track upstream Wikipedia edits.
-.PHONY: refresh-glossary
-refresh-glossary: ## Clear glossary-cache.json + rebuild docs (re-fetches all Wikipedia data)
-	@echo "$(CYAN)==> Clearing glossary cache and rebuilding...$(RESET)"
-	@rm -f $(DOCS_DIR)/glossary-cache.json
-	@$(MAKE) build-docs
-
 # `up -d --wait` blocks until the compose healthcheck transitions to
 # healthy, so callers can chain on success without a polling loop. The
 # ClickHouse healthcheck (in $(DEV_COMPOSE_FILE)) probes /ping on :8123.
