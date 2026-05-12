@@ -10,8 +10,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "cf:preview": "pnpm build && wrangler dev",
-    "glossary:refresh": "rm -f glossary-cache.json && astro build"
+    "cf:preview": "pnpm build && wrangler dev"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",
@@ -23,7 +22,6 @@
     "rehype-mermaid": "^3.0.0",
     "remark-math": "^6.0.0",
     "sharp": "^0.34.2",
-    "starlight-glossary": "github:Wave-RF/starlight-glossary",
     "starlight-image-zoom": "^0.14.1",
     "starlight-llm-tools": "github:Wave-RF/starlight-llm-tools",
     "typescript": "^5.6.0"

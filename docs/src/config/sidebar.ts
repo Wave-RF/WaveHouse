@@ -24,7 +24,6 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
       { label: "Deployment", slug: "deployment" },
     ],
   },
-  { label: "Glossary", link: "/glossary" },
   {
     label: "Contributing",
     items: [
