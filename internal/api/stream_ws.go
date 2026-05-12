@@ -50,6 +50,16 @@ type wsCommand struct {
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	// Validate ?table= before upgrading. Empty is OK — the client can
+	// still subscribe via in-band commands after connect. Reject NATS
+	// wildcards / unsafe chars here so the gap-fill path that builds
+	// FilterSubject: "ingest."+table can't be tricked into a wildcard
+	// consumer.
+	if t := r.URL.Query().Get("table"); t != "" && !validTableNameRe.MatchString(t) {
+		writeJSONError(w, http.StatusBadRequest, "invalid table name")
+		return
+	}
+
 	origins := h.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"*"}
@@ -148,6 +158,12 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			var cmd wsCommand
 			if json.Unmarshal(data, &cmd) != nil || cmd.Table == "" {
+				continue
+			}
+			// Hub lookups are exact-match so wildcards here are inert, but
+			// reject them anyway for consistency with the ?table= path and
+			// to keep the contract crisp.
+			if !validTableNameRe.MatchString(cmd.Table) {
 				continue
 			}
 			switch cmd.Action {

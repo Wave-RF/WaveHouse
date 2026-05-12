@@ -321,8 +321,10 @@ id: 2026-03-24T12:00:00.123Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","data":{"page":"/home","button":"signup"}}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"page_views","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"url":"/dashboard"}}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"page":"/pricing"}}
 ```
+
+Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table or use the WebSocket endpoint with in-band multiplexing.
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 

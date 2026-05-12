@@ -1,7 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -171,6 +175,108 @@ func TestWS_ApplyStreamPolicy_NoPolicy(t *testing.T) {
 	assert.Equal(t, "clicks", got["table"])
 	inner := got["data"].(map[string]any)
 	assert.Equal(t, "clicks", inner["table_name"])
+}
+
+// TestSSE_RejectsMissingOrInvalidTable verifies that the SSE handler returns
+// 400 when the ?table= parameter is missing or contains characters that could
+// be interpreted as NATS wildcards (regression guard for the fix that landed
+// alongside the wildcard fan-out removal in #100).
+func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
+	t.Parallel()
+	h := &SSEHandler{Hub: NewHub()}
+
+	cases := []struct {
+		name  string
+		table string
+	}{
+		{"missing", ""},
+		{"nats greater wildcard", ">"},
+		{"nats star wildcard", "*"},
+		{"dot separator", "ingest.clicks"},
+		{"nested wildcard", "ingest.>"},
+		{"trailing wildcard", "clicks.>"},
+		{"space", "click s"},
+		{"leading digit", "1clicks"},
+		{"empty after url decode", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			target := "/v1/stream/sse"
+			if tc.table != "" {
+				target += "?table=" + url.QueryEscape(tc.table)
+			}
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+		})
+	}
+}
+
+func TestSSE_AcceptsSafeTableName(t *testing.T) {
+	t.Parallel()
+	h := &SSEHandler{Hub: NewHub()}
+
+	// Use a request context that's already cancelled so the handler exits
+	// the live-stream select loop immediately instead of blocking the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream/sse?table=clicks", nil)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+	// Past the validation gate — header set to text/event-stream, not the
+	// 400-path application/json.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "text/event-stream", w.Header().Get("Content-Type"))
+}
+
+func TestWS_RejectsInvalidTableOnQuery(t *testing.T) {
+	t.Parallel()
+	h := &WSHandler{Hub: NewHub()}
+
+	cases := []string{">", "*", "ingest.>", "clicks ", "clicks.subpath"}
+	for _, tbl := range cases {
+		t.Run(tbl, func(t *testing.T) {
+			t.Parallel()
+			target := "/v1/stream/ws?table=" + url.QueryEscape(tbl)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+			// Validation runs before websocket.Accept, so we get a plain 400
+			// rather than an upgrade-attempt error.
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+		})
+	}
+}
+
+func TestValidTableNameRe(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"clicks", true},
+		{"page_views", true},
+		{"_internal", true},
+		{"events_v2", true},
+		{">", false},
+		{"*", false},
+		{"ingest.>", false},
+		{"clicks.subpath", false},
+		{"clicks ", false},
+		{"clicks*", false},
+		{"1clicks", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, validTableNameRe.MatchString(tc.in))
+		})
+	}
 }
 
 func TestExtractEventTimestamp(t *testing.T) {
