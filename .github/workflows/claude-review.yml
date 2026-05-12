@@ -5,16 +5,21 @@ name: Claude PR review
 # `/review` comments and the workflow_dispatch button.
 #
 # Triggers:
-#   pull_request_target — fires on every PR open/sync/reopen/
+#   pull_request        — fires on every PR open/sync/reopen/
 #                         ready-for-review immediately, not after CI.
 #                         The job's check appears in the PR's Checks
 #                         panel natively — no manual status posting.
-#                         `pull_request_target` (not `pull_request`)
-#                         because the Anthropic action needs the
-#                         CLAUDE_CODE_OAUTH_TOKEN secret and write
-#                         scope, which `pull_request` denies on fork
-#                         PRs. The trust gate below is what makes
-#                         that safe.
+#                         `pull_request_target` doesn't work here:
+#                         the Anthropic action's OIDC token exchange
+#                         rejects pull_request_target's OIDC claims
+#                         (upstream issue #713). With `pull_request`,
+#                         secrets are *not* available for fork PRs —
+#                         that means Claude can't auto-review a PR
+#                         from a drive-by contributor, but it also
+#                         means the action can never run with PR-
+#                         supplied code holding write tokens.
+#                         Internal PRs (the dominant case) work fine
+#                         because secrets are accessible.
 #   issue_comment       — manual re-trigger when a trusted reviewer
 #                         types `@claude` or `/review` in a PR
 #                         comment.
@@ -53,7 +58,7 @@ name: Claude PR review
 # review-thread resolution) is the actual merge gate.
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
@@ -86,7 +91,7 @@ jobs:
     # opener and miss this.
     if: |
       (
-        github.event_name == 'pull_request_target'
+        github.event_name == 'pull_request'
         && github.event.pull_request.user.login != 'dependabot[bot]'
       ) || (
         github.event_name == 'issue_comment'
@@ -117,11 +122,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve PR number + HEAD SHA. pull_request_target gives us
-          # both in the webhook payload; the other paths need a
+          # Resolve PR number + HEAD SHA. pull_request gives us both
+          # in the webhook payload; the other paths need a
           # `gh pr view` round-trip.
           case "$EVENT_NAME" in
-            pull_request_target)
+            pull_request)
               pr_num="$PR_EVENT_NUM"
               head_sha="$PR_EVENT_HEAD_SHA"
               ;;
@@ -177,12 +182,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.skip != 'true'
         with:
-          # pull_request_target defaults to checking out the *base*
-          # ref (main) — safe, because base-repo workflow code runs
-          # regardless. We override to PR HEAD because claude-code-action
-          # runs local git commands against the changed files. The
-          # trust gate above ensures only commits from repo-permissioned
-          # users land here, so HEAD's content is sanctioned.
+          # pull_request defaults to checking out the PR's merge ref
+          # (a temporary merge of PR HEAD into base). Pin to the PR
+          # HEAD SHA explicitly so claude-code-action sees exactly
+          # the user's commit, not a merge artefact. The trust gate
+          # above ensures only commits from repo-permissioned users
+          # land here.
           ref: ${{ steps.gate.outputs.head_sha }}
           fetch-depth: 1
 
