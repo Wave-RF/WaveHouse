@@ -41,6 +41,7 @@ Ten internal packages under `internal/`:
 12. **Structured queries**: Type-safe query AST endpoint (`POST /v1/tables/{table}/query`) validated against schema, with permission enforcement, timestamp bucketing for cache optimization, and `DefaultMaxRows` (10,000) limit cap.
 13. **Named query pipes**: Pre-defined SQL templates (inspired by Tinybird) with parameter binding, role restrictions, and caching. Stored in NATS KV with `.sql` file directory bootstrap.
 14. **TypeScript SDK**: `@wavehouse/sdk` — zero-dependency client with typed query builder, real-time SSE, live queries with smart aggregation classification (incrementable/decomposable/poll), and codegen CLI.
+15. **Non-fatal boot**: Schema-discovery failure on boot (ClickHouse unreachable, missing database, transient network blip) is non-fatal — `cmd/wavehouse` records an `api.BootState` diagnostic, binds `:8080`, and retries via `SchemaRegistry.RetryRefresh` (exp backoff 2s → 60s) in the background. `/health` and `/ready` return 503 with the latest diagnostic until a Refresh succeeds, after which `/health` stays 200 for the rest of the process. Keeps supervisor restart loops bounded and gives operators a queryable failure surface (`curl /health`) instead of a restart-log grep.
 
 ## Code Conventions
 
