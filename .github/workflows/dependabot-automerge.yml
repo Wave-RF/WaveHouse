@@ -77,18 +77,31 @@ jobs:
       # Major-bump path: hold for human review.
       # ───────────────────────────────────────────────────────────────
 
+      - name: Convert ADMINS to space-separated (composite expects spaces)
+        # ADMINS is comma-separated in board-config.env; the
+        # assign-and-request-review composite splits on whitespace,
+        # so we need to convert. Done in a bash step rather than a
+        # `${{ }}` expression because GitHub Actions doesn't have a
+        # `replace()` function in its expression language — only
+        # contains/startsWith/endsWith/format/join/toJSON/fromJSON/
+        # hashFiles. Using a non-existent function in `with:` causes
+        # GitHub to fail the workflow at validation time on *every*
+        # push event, which is what was producing the
+        # ghost ".github/workflows/dependabot-automerge.yml push failure"
+        # runs on every branch.
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: echo "ADMINS_SPACE=${ADMINS//,/ }" >> "$GITHUB_ENV"
+
       - name: Assign + request review from both admins (major bump)
         # Dependabot is the author — assign both admins so whoever
-        # picks it up first can action. ADMINS comes from
-        # board-config.env (comma-separated); the composite expects
-        # space-separated, so `replace()` does the conversion inline.
+        # picks it up first can action.
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         uses: ./.github/actions/assign-and-request-review
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr-number: ${{ github.event.pull_request.number }}
-          reviewers: ${{ replace(env.ADMINS, ',', ' ') }}
+          reviewers: ${{ env.ADMINS_SPACE }}
 
       - name: Comment on major bumps
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
