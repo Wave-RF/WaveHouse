@@ -18,6 +18,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 10, cfg.Server.ShutdownTimeout)
 	assert.Equal(t, "localhost:9000", cfg.ClickHouse.Addr)
 	assert.Equal(t, "8123", cfg.ClickHouse.HTTPPort)
+	assert.Equal(t, "http", cfg.ClickHouse.HTTPScheme)
 	assert.Equal(t, "default", cfg.ClickHouse.Database)
 	assert.Equal(t, "default", cfg.ClickHouse.Username)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
@@ -42,6 +43,7 @@ server:
 clickhouse:
   addr: "clickhouse:9000"
   database: "mydb"
+  http_scheme: "https"
 auth:
   enabled: true
   jwt_secret: "test-secret"
@@ -55,6 +57,7 @@ auth:
 	assert.Equal(t, 9090, cfg.Server.Port)
 	assert.Equal(t, "clickhouse:9000", cfg.ClickHouse.Addr)
 	assert.Equal(t, "mydb", cfg.ClickHouse.Database)
+	assert.Equal(t, "https", cfg.ClickHouse.HTTPScheme)
 	assert.True(t, cfg.Auth.Enabled)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 }
@@ -99,8 +102,9 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
-				Server: Server{Port: tt.port},
-				Schema: Schema{RefreshInterval: 60},
+				Server:     Server{Port: tt.port},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
 			}
 			err := cfg.Validate()
 			require.Error(t, err)
@@ -112,8 +116,9 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080, ShutdownTimeout: -1},
-		Schema: Schema{RefreshInterval: 60},
+		Server:     Server{Port: 8080, ShutdownTimeout: -1},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -123,9 +128,10 @@ func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 func TestValidate_AuthEnabledNoSecret(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080},
-		Auth:   Auth{Enabled: true},
-		Schema: Schema{RefreshInterval: 60},
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Auth:       Auth{Enabled: true},
+		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -135,9 +141,10 @@ func TestValidate_AuthEnabledNoSecret(t *testing.T) {
 func TestValidate_AuthEnabledWithJWKS(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080},
-		Auth:   Auth{Enabled: true, JWKSURL: "https://example.com/.well-known/jwks.json"},
-		Schema: Schema{RefreshInterval: 60},
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Auth:       Auth{Enabled: true, JWKSURL: "https://example.com/.well-known/jwks.json"},
+		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	assert.NoError(t, err)
@@ -146,9 +153,10 @@ func TestValidate_AuthEnabledWithJWKS(t *testing.T) {
 func TestValidate_AuthDevModeBypassesCheck(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080},
-		Auth:   Auth{Enabled: true, DevMode: true},
-		Schema: Schema{RefreshInterval: 60},
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Auth:       Auth{Enabled: true, DevMode: true},
+		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	assert.NoError(t, err)
@@ -157,8 +165,9 @@ func TestValidate_AuthDevModeBypassesCheck(t *testing.T) {
 func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080},
-		Schema: Schema{RefreshInterval: 0},
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 0},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -168,9 +177,10 @@ func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 func TestValidate_NegativeCacheTTL(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080},
-		Cache:  Cache{DefaultTTL: -1},
-		Schema: Schema{RefreshInterval: 60},
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Cache:      Cache{DefaultTTL: -1},
+		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -180,9 +190,10 @@ func TestValidate_NegativeCacheTTL(t *testing.T) {
 func TestValidate_NegativeGapWindow(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
-		Server: Server{Port: 8080},
-		MQ:     MQ{GapWindowMinutes: -1},
-		Schema: Schema{RefreshInterval: 60},
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		MQ:         MQ{GapWindowMinutes: -1},
+		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -204,4 +215,17 @@ auth:
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validate config")
+}
+
+func TestValidate_InvalidHTTPScheme(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "ftp"}, // Intentionally invalid
+		Schema:     Schema{RefreshInterval: 60},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "clickhouse.http_scheme must be 'http' or 'https'")
 }

@@ -144,6 +144,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
+| 400 | `{"error":"payload cannot contain reserved field 'received_timestamp'"}` | Payload contains a reserved field |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |

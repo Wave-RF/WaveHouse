@@ -103,6 +103,8 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
+WH_CH_HTTP_PORT=8123                # Port for Bento HTTP inserts (default: 8123)
+WH_CH_HTTP_SCHEME=http              # Scheme for Bento HTTP inserts (http/https)
 
 # Schema discovery
 WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes

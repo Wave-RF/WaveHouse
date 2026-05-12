@@ -168,9 +168,13 @@ func setup() (int, func()) {
 		ch.conn,
 		ch.nativeAddr(),
 		ch.httpPort,
+		"http",
 		testCHUser,
 		testCHPassword,
 		testCHDatabase,
+		func(err error) {
+			logger.Error("fatal error in integration test ingest worker", "error", err)
+		},
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: ingest worker: %v\n", err)
 		return 1, cleanup

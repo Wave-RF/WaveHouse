@@ -126,7 +126,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `mq/` — Message Queue
 
-- **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `Ack()`/`Nak()`.
+- **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `DoubleAck(ctx)`, `Ack()`, and `Nak()`.
 - **embedded.go** — In-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
 
 ### `policy/` — Access Control

@@ -21,6 +21,7 @@ services:
       # NATS lives at /app/data/nats, Pebble at /app/data/pebble — subdirs
       # are convention, not config. The Dockerfile pre-creates /app/data
       # owned by the nonroot user; bind-mount any persistent volume here.
+      WH_CH_HTTP_SCHEME: http
       WH_DATA_DIR: /app/data
       WH_AUTH_ENABLED: "false"
       WH_DEDUPE_ENABLED: "false"

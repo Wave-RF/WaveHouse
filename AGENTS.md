@@ -142,7 +142,7 @@ Tooling notes:
 - **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
 - **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without NATS.
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
-- **Coverage target**: 70% minimum (CI enforced via `.testcoverage.yml`). Aim for 80%+ on new code.
+- **Coverage target**: 80% project-wide (CI enforces `threshold.total` in `.testcoverage.yml` against the merged unit + integration + e2e profile). Per-suite minima also enforced: unit 70%, integration 12%, e2e 50%, sdk 50%. Aim for 80%+ on new code.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run. Add new E2E scenarios as `tests/e2e/sdk/*.test.ts` files using helpers from `tests/e2e/sdk/helpers.ts`.
 
@@ -204,7 +204,7 @@ If you hand work to a subagent or another Claude session, tell them explicitly: 
 
 | Reviewer | How it runs | Re-runs on new commits | Blocks merge |
 | -------- | ----------- | ---------------------- | ------------ |
-| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `workflow_run: [CI completed]` trigger — fires after every successful CI on a PR. Manual re-trigger via `@claude` or `/review` in a PR comment, or `gh workflow run "Claude PR review" -f pr_number=<N>` | Yes, auto — **updates the same sticky comment** rather than posting new ones | No (advisory) unless added to required checks |
+| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: [opened, synchronize, reopened, ready_for_review]` trigger — fires on every PR push directly (not chained off CI). Manual re-trigger via `@claude` or `/review` in a PR comment, or `gh workflow run "Claude PR review" -f pr_number=<N>` | Yes, auto — **posts inline review comments** at specific lines (resolution required by the ruleset) plus a sticky verdict-summary top-level comment that edits in place across pushes | Yes for inline comments — the ruleset's `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
 | Gemini Code Assist | Marketplace App at repo level | Yes on synchronize, **but silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — so Gemini reviews rarely see infra PRs | No (advisory) |
 | Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
 | Human admins (Eric / Taite) | Review requested from the non-author admin by `.github/workflows/housekeeping.yml` on `pull_request_target: opened` and `ready_for_review` (not on every synchronize — `dismiss_stale_reviews_on_push` would otherwise re-spam the reviewer after each push). Reviewer selection rule: PR author == Eric → Taite; author == Taite → Eric; any other author → admin chosen by `PR_NUM % len(ADMINS)` for deterministic load spreading. The composite action also sets the GitHub `assignees` field to the same user (the assignee + review-request pair encode "this is your PR" + "GitHub should notify you"). Board placement on project #7 is handled by GitHub's native Projects v2 workflows (`Auto-add to project`, `Item added`, `Pull request merged`) configured in the project UI. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request after a CHANGES_REQUESTED. | Yes — `.github/workflows/admin-approval.yml` is a required status check that fails unless Eric or Taite has an `APPROVED` review (Dependabot PRs bypass). |
@@ -290,7 +290,7 @@ Before finishing any task, do a quick search across docs for the identifiers you
 4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
 5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
 6. Run `make test` — it gates the unit-test coverage threshold from `.testcoverage.yml`, so a passing run already confirms coverage.
-7. Aim for 80%+ coverage on new code. 70% is the CI-enforced minimum.
+7. Aim for 80%+ coverage on new code. The project-wide CI-enforced minimum is 80% (merged unit + integration + e2e via `.testcoverage.yml`'s `threshold.total`); per-suite minima are unit 70%, integration 12%, e2e 50%, sdk 50%.
 
 ## File Structure
 
@@ -333,7 +333,7 @@ docs/                   → Project documentation
 1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
 2. **Tier 2 — Code review** (two reviewers, both advisory; the `Admin approval` required status check + the ruleset are the actual merge-gate):
    - **Gemini Code Assist App** configured via `.gemini/styleguide.md` — Marketplace App attached at the repo/org level, no workflow file.
-   - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs automatically after every successful CI on a PR, but only when the PR author is already OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR to bound token cost. Dependabot and draft PRs are skipped. Manual re-trigger via `@claude` or `/review` in a PR comment from a trusted actor, or via `gh workflow run "Claude PR review" -f pr_number=<N>`. The workflow is review-only — Claude can comment but cannot push commits. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
+   - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs on every PR open / push, gated on the HEAD commit's author or committer having at least read permission on the repo (catches "admin pushed a fixup onto an external author's PR"). Dependabot is filtered at the workflow level. Claude posts findings as **inline review comments** (tagged `[MUST]` / `[SHOULD]` / `[MAY]` per the prompt template) plus a short sticky verdict summary; inline threads count against the ruleset's `required_review_thread_resolution`, so they block merge until resolved — same mechanism Gemini uses. Manual re-trigger via `@claude` or `/review` in a PR comment from a trusted actor, or via `gh workflow run "Claude PR review" -f pr_number=<N>`. The workflow is review-only — Claude can comment but cannot push commits. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
 
 ### Dependabot automation
 
