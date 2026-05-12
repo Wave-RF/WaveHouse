@@ -254,9 +254,15 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				allowed = true
 			default:
+				// In allowlist mode the response is per-origin, so always set
+				// Vary: Origin — even when the origin is rejected. Without
+				// this, a shared cache could memoize the headerless reject
+				// response under the URL alone and replay it to a later
+				// allowed-origin request, stripping the CORS headers and
+				// breaking the legitimate client.
+				w.Header().Set("Vary", "Origin")
 				if _, ok := allowedSet[origin]; ok {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
-					w.Header().Set("Vary", "Origin")
 					allowed = true
 				}
 			}

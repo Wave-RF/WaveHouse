@@ -126,6 +126,11 @@ func TestCORSMiddleware_BlockedOrigin(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"),
 		"non-allowed origins must not receive any CORS headers")
+	// Vary: Origin is still set even though we reject the origin, so that a
+	// shared cache can't memoize this headerless reject response and replay
+	// it to a later allowed-origin request.
+	assert.Equal(t, "Origin", w.Header().Get("Vary"),
+		"allowlist mode must always emit Vary: Origin to keep caches per-origin")
 }
 
 // TestCORSMiddleware_NoCredentialsHeader pins the deliberate omission of
