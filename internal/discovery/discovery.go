@@ -113,6 +113,41 @@ func (sr *SchemaRegistry) List() []*TableSchema {
 	return result
 }
 
+// RetryRefresh repeatedly calls Refresh with exponential backoff until it
+// succeeds or ctx is cancelled. onAttempt is invoked after each failed
+// attempt with the resulting error, letting callers surface the latest
+// diagnostic (e.g. via /health) while the registry is still degraded.
+//
+// The first attempt fires immediately. After a failure the loop sleeps for
+// initialBackoff, then doubles up to maxBackoff between attempts. Returns
+// nil on success or ctx.Err() on cancellation. Zero/negative bounds are
+// clamped to sensible defaults rather than busy-looping.
+func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(err error)) error {
+	if initialBackoff <= 0 {
+		initialBackoff = time.Second
+	}
+	if maxBackoff < initialBackoff {
+		maxBackoff = initialBackoff
+	}
+	backoff := initialBackoff
+	for {
+		if err := sr.Refresh(ctx); err == nil {
+			return nil
+		} else if onAttempt != nil {
+			onAttempt(err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
 // StartAutoRefresh runs a background goroutine that refreshes schemas
 // at the configured interval. Blocks until ctx is cancelled.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {

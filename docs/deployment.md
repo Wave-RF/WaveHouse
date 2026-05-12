@@ -221,10 +221,20 @@ The directory is a *seed*, not authoritative storage: after bootstrap, the API +
 
 API servers in standalone mode expose two health endpoints:
 
-- `GET /health` — Liveness probe. Returns 200 if the process is running. No external dependencies.
-- `GET /ready` — Readiness probe. Returns 200 if ClickHouse is reachable, 503 otherwise.
+- `GET /health` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/health` stays 200 — transient ClickHouse blips at runtime are reflected in `/ready`, not `/health`.
+- `GET /ready` — Readiness probe. Returns 200 if the gateway is fully booted and ClickHouse is currently reachable, 503 otherwise.
 
 Configure your load balancer or orchestrator to use these endpoints.
+
+### Boot-time degraded mode
+
+If ClickHouse is unreachable when WaveHouse starts (connection refused, missing database, DNS failure, etc.), the gateway no longer exits — it binds `:8080` and serves `/health` 503 with the latest schema-discovery error as the diagnostic. Schema discovery retries in the background with exponential backoff (2s → 60s cap). Once a Refresh succeeds, `/health` flips to 200 and normal serving begins automatically.
+
+This means:
+
+- The supervisor (docker, systemd, k8s) won't restart the binary every ~10s because of a slow-starting or temporarily-unreachable ClickHouse. The process stays up and recovers in place.
+- An operator can `curl /health` and read the exact failure mode instead of grepping a restart-loop log.
+- `/v1/ingest/{table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
 
 ### Docker `HEALTHCHECK`
 

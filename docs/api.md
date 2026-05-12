@@ -67,19 +67,29 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 
 ### `GET /health` — Liveness Probe
 
-Returns `200 OK` if the process is running. No authentication required.
+Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
-**Response:**
+**Response (ready):**
 
 ```json
 {"status": "ok"}
 ```
 
+**Response (boot-degraded):**
+
+```json
+{"status": "degraded", "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"}
+```
+
+Status code: `503 Service Unavailable`
+
+The boot-degraded response lets an operator `curl /health` to learn why the gateway hasn't bound traffic yet, instead of grepping a restart-loop log. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
+
 ---
 
 ### `GET /ready` — Readiness Probe
 
-Returns `200 OK` if the process is running and ClickHouse is reachable. No authentication required.
+Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
 
 **Response (ready):**
 

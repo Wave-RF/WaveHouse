@@ -2,11 +2,14 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -359,6 +362,169 @@ func TestNewSchemaRegistryFromMap_Empty(t *testing.T) {
 	require.NotNil(t, sr)
 	assert.Empty(t, sr.List())
 	assert.Nil(t, sr.Get("x"))
+}
+
+// fakeConn implements just enough of driver.Conn to drive RetryRefresh. It
+// returns successive errors from errsThenSuccess, and once that slice is
+// exhausted returns emptyRows (which makes Refresh succeed with zero tables).
+// The nil-embedded interface trick handles every other method — none of them
+// are reached by Refresh.
+type fakeConn struct {
+	driver.Conn
+	errsThenSuccess []error
+	calls           atomic.Int32
+}
+
+func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
+	n := c.calls.Add(1)
+	if int(n) <= len(c.errsThenSuccess) {
+		return nil, c.errsThenSuccess[n-1]
+	}
+	return &emptyRows{}, nil
+}
+
+type emptyRows struct {
+	driver.Rows
+}
+
+func (*emptyRows) Next() bool   { return false }
+func (*emptyRows) Close() error { return nil }
+func (*emptyRows) Err() error   { return nil }
+func (*emptyRows) ColumnTypes() []driver.ColumnType {
+	return nil
+}
+
+func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
+	t.Helper()
+	conn := &fakeConn{errsThenSuccess: errs}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewSchemaRegistry(conn, "test", time.Hour, logger), conn
+}
+
+// TestRetryRefresh_SucceedsOnFirstAttempt is the happy path: Refresh returns
+// nil immediately and no backoff is observed.
+func TestRetryRefresh_SucceedsOnFirstAttempt(t *testing.T) {
+	t.Parallel()
+	sr, conn := newFakeRegistry(t, nil)
+
+	var attempts int32
+	start := time.Now()
+	err := sr.RetryRefresh(context.Background(), time.Hour, time.Hour, func(error) {
+		atomic.AddInt32(&attempts, 1)
+	})
+	require.NoError(t, err)
+
+	assert.Less(t, time.Since(start), 100*time.Millisecond, "should not have slept")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&attempts), "onAttempt should only fire on failure")
+	assert.Equal(t, int32(1), conn.calls.Load(), "exactly one Query call expected")
+}
+
+// TestRetryRefresh_RetriesUntilSuccess verifies the loop keeps trying through
+// transient errors and surfaces each failure via onAttempt with the most
+// recent error becoming the diagnostic.
+func TestRetryRefresh_RetriesUntilSuccess(t *testing.T) {
+	t.Parallel()
+	errFirst := errors.New("dial tcp: connect: connection refused")
+	errSecond := errors.New("code: 81, Database wavehouse does not exist")
+	sr, conn := newFakeRegistry(t, []error{errFirst, errSecond})
+
+	var captured []error
+	err := sr.RetryRefresh(context.Background(), time.Millisecond, 10*time.Millisecond, func(e error) {
+		captured = append(captured, e)
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(3), conn.calls.Load(), "two failures + one success")
+	require.Len(t, captured, 2)
+	assert.ErrorIs(t, captured[0], errFirst)
+	assert.ErrorIs(t, captured[1], errSecond)
+}
+
+// TestRetryRefresh_ReturnsOnContextCancel verifies the loop exits with
+// ctx.Err() when the context is cancelled mid-backoff, rather than spinning
+// forever or panicking.
+func TestRetryRefresh_ReturnsOnContextCancel(t *testing.T) {
+	t.Parallel()
+	// Long-running failure stream so success never happens.
+	errs := make([]error, 1000)
+	for i := range errs {
+		errs[i] = errors.New("still failing")
+	}
+	sr, _ := newFakeRegistry(t, errs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		// Long backoff so the loop is parked in the sleep when we cancel.
+		done <- sr.RetryRefresh(ctx, time.Second, time.Second, nil)
+	}()
+
+	// Give the goroutine a moment to enter its first sleep.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("RetryRefresh did not return after ctx cancel")
+	}
+}
+
+// TestRetryRefresh_BackoffIsBounded verifies that maxBackoff caps the
+// exponential growth. We use small bounds so the test stays fast.
+func TestRetryRefresh_BackoffIsBounded(t *testing.T) {
+	t.Parallel()
+	// Five failures then success; with initial 1ms and max 4ms backoff,
+	// sleeps are 1, 2, 4, 4, 4 = 15ms total. We assert it stays well under
+	// the unbounded-doubling worst case (1+2+4+8+16 = 31ms).
+	errs := make([]error, 5)
+	for i := range errs {
+		errs[i] = errors.New("transient")
+	}
+	sr, _ := newFakeRegistry(t, errs)
+
+	start := time.Now()
+	err := sr.RetryRefresh(context.Background(), time.Millisecond, 4*time.Millisecond, nil)
+	require.NoError(t, err)
+
+	elapsed := time.Since(start)
+	// Lower bound proves we actually slept; upper bound proves capping.
+	assert.GreaterOrEqual(t, elapsed, 10*time.Millisecond)
+	assert.Less(t, elapsed, 100*time.Millisecond)
+}
+
+// TestRetryRefresh_NilOnAttemptIsSafe verifies the loop tolerates a nil
+// onAttempt callback (we want callers to be able to skip the diagnostic
+// surface when they don't need it).
+func TestRetryRefresh_NilOnAttemptIsSafe(t *testing.T) {
+	t.Parallel()
+	sr, _ := newFakeRegistry(t, []error{errors.New("once")})
+
+	err := sr.RetryRefresh(context.Background(), time.Millisecond, time.Millisecond, nil)
+	require.NoError(t, err)
+}
+
+// TestRetryRefresh_ClampsInvalidBackoffs verifies zero or negative bounds
+// fall back to defaults instead of busy-looping (a 0-duration time.After
+// would otherwise fire immediately and spin the CPU).
+func TestRetryRefresh_ClampsInvalidBackoffs(t *testing.T) {
+	t.Parallel()
+	sr, _ := newFakeRegistry(t, []error{errors.New("once")})
+
+	// Cancel via context after a short window so we have a hard ceiling on
+	// how long this test can run, but expect success well before that.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Use 0 / -1 — should clamp to defaults (1s initial), but with only one
+	// failure the loop succeeds on the second attempt after ~1s.
+	start := time.Now()
+	err := sr.RetryRefresh(ctx, 0, -1, nil)
+	require.NoError(t, err)
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, 900*time.Millisecond, "should sleep about 1s with clamped default")
 }
 
 // TestStartAutoRefresh_ExitsOnContextCancel verifies the ticker loop exits

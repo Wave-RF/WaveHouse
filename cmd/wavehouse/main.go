@@ -114,12 +114,37 @@ func run() int {
 	}
 	defer func() { _ = chConn.Close() }()
 
-	// Schema discovery — discover ClickHouse table schemas on boot.
+	// Process-lifetime context — cancelled by the SIGINT/SIGTERM handler
+	// below. Created here (instead of further down) so the boot-time schema
+	// discovery retry goroutine ties cleanly to shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Schema discovery — non-fatal on boot. If the first Refresh fails
+	// (ClickHouse unreachable, database missing, etc.) we mark the binary
+	// degraded via bootState (which /health surfaces as 503 + diagnostic)
+	// and retry in the background with exponential backoff. The process
+	// still binds :8080 so operators can `curl /health` instead of grepping
+	// a restart-loop log. Once a Refresh succeeds, bootState flips to nil
+	// and /health returns 200.
+	bootState := api.NewBootState(nil)
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
-	if err := registry.Refresh(context.Background()); err != nil {
-		logger.Error("schema discovery failed on boot", "error", err)
-		return 1
+	if err := registry.Refresh(ctx); err != nil {
+		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
+		bootState.Set(fmt.Errorf("schema discovery: %w", err))
+		go func() {
+			retryErr := registry.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(attemptErr error) {
+				logger.Warn("schema discovery retry failed", "error", attemptErr)
+				bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
+			})
+			if retryErr != nil {
+				// ctx cancelled before success — process is shutting down.
+				return
+			}
+			logger.Info("schema discovery succeeded after retry, /health now 200")
+			bootState.Set(nil)
+		}()
 	}
 
 	// State directories — one configurable root, fixed subdir convention.
@@ -191,9 +216,6 @@ func run() int {
 	// Hub for streaming fan-out.
 	hub := api.NewHub()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Start schema auto-refresh.
 	go registry.StartAutoRefresh(ctx)
 
@@ -259,6 +281,9 @@ func run() int {
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
 	queryHandler.PolicyStore = policyStore
 
+	healthHandler := api.NewHealthHandler(chConn)
+	healthHandler.Boot = bootState
+
 	sseHandler := api.NewSSEHandler(hub, js)
 	sseHandler.PolicyStore = policyStore
 
@@ -270,7 +295,7 @@ func run() int {
 		Query:           queryHandler,
 		SSE:             sseHandler,
 		WS:              wsHandler,
-		Health:          api.NewHealthHandler(chConn),
+		Health:          healthHandler,
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
