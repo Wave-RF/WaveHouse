@@ -116,15 +116,38 @@ jobs:
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           SKIP_BOARD: ${{ env.SKIP_BOARD }}
         run: |
           # Honest wording: only claim board placement when we actually
           # did it. Reviewers were assigned regardless since that step
           # doesn't depend on the board token.
+          #
+          # Marker-comment upsert (same pattern as housekeeping.yml's
+          # title-lint comment): on every synchronize the workflow
+          # re-runs and finds the existing comment by its hidden marker,
+          # then edits it in place rather than posting a new one. The
+          # previous unconditional `gh pr comment` produced a fresh
+          # comment for every Dependabot push.
+          MARKER='<!-- dependabot-major-bump-comment -->'
           if [[ "$SKIP_BOARD" == "true" ]]; then
-            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned; board placement was skipped (PROJECT_BOARD_TOKEN not configured). See dependency changelog / release notes before merging."
+            BODY="$MARKER
+          Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned; board placement was skipped (PROJECT_BOARD_TOKEN not configured). See dependency changelog / release notes before merging."
           else
-            body="Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Added to the Task Board (Status: Ready) and reviewers assigned. See dependency changelog / release notes before merging."
+            BODY="$MARKER
+          Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Added to the Task Board (Status: Ready) and reviewers assigned. See dependency changelog / release notes before merging."
           fi
-          gh pr comment "$PR_URL" --body "$body"
+
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -n1)
+
+          if [[ -n "$EXISTING" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f "body=$BODY" > /dev/null
+            echo "Updated existing major-bump comment ($EXISTING)"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f "body=$BODY" > /dev/null
+            echo "Posted new major-bump comment"
+          fi
