@@ -89,14 +89,11 @@ curl -s -X POST http://localhost:8080/v1/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
-# Open an SSE stream for all tables (Ctrl+C to stop)
-curl -N http://localhost:8080/v1/stream/sse
-
-# Open an SSE stream for a specific table
-curl -N "http://localhost:8080/v1/stream/sse?topic=ingest.clicks"
+# Open an SSE stream for a specific table (Ctrl+C to stop)
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 
 # With gap-fill (replays events since the given timestamp, then switches to live)
-curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 
 # Health check (no auth required)
 curl http://localhost:8080/health

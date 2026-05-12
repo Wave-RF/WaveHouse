@@ -138,13 +138,13 @@ func TestWS_ApplyStreamPolicy_FiltersColumns(t *testing.T) {
 	}
 	raw, _ := json.Marshal(evt)
 
-	out := h.applyStreamPolicy(raw, "user", nil, "ingest.events")
+	out := h.applyStreamPolicy(raw, "user", nil, "events")
 	require.NotNil(t, out)
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(out, &got))
-	// WS wraps in topic envelope.
-	assert.Equal(t, "ingest.events", got["topic"])
+	// WS wraps in table envelope.
+	assert.Equal(t, "events", got["table"])
 	inner := got["data"].(map[string]any)
 	data := inner["data"].(map[string]any)
 	assert.Equal(t, "click", data["name"])
@@ -162,13 +162,13 @@ func TestWS_ApplyStreamPolicy_NoPolicy(t *testing.T) {
 	}
 	raw, _ := json.Marshal(evt)
 
-	out := h.applyStreamPolicy(raw, "", nil, "ingest.clicks")
+	out := h.applyStreamPolicy(raw, "", nil, "clicks")
 	require.NotNil(t, out)
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(out, &got))
-	// WS wraps in topic envelope.
-	assert.Equal(t, "ingest.clicks", got["topic"])
+	// WS wraps in table envelope.
+	assert.Equal(t, "clicks", got["table"])
 	inner := got["data"].(map[string]any)
 	assert.Equal(t, "clicks", inner["table_name"])
 }

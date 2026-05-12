@@ -3,7 +3,7 @@ import type { StreamTransport } from './controller.js';
 
 export interface WSOptions {
   baseURL: string;
-  topic: string;
+  table: string;
   since?: string;
   auth?: () => Promise<string> | string;
 }
@@ -48,7 +48,7 @@ export class WSTransport<T = Record<string, unknown>> implements StreamTransport
   private async _doConnect(): Promise<void> {
     const wsBase = this._opts.baseURL.replace(/^http/, 'ws');
     const url = new URL('/v1/stream/ws', wsBase);
-    url.searchParams.set('topic', this._opts.topic);
+    url.searchParams.set('table', this._opts.table);
     if (this._opts.since) {
       url.searchParams.set('since', this._opts.since);
     }

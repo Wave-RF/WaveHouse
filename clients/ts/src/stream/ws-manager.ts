@@ -14,14 +14,14 @@ interface Subscription {
  * Manages a single multiplexed WebSocket connection.
  *
  * Instead of one WebSocket per stream, all subscriptions share a single
- * connection. Topics are subscribed/unsubscribed via in-band JSON commands:
+ * connection. Tables are subscribed/unsubscribed via in-band JSON commands:
  *
- *   {"action":"subscribe","topic":"ingest.clicks"}
- *   {"action":"unsubscribe","topic":"ingest.clicks"}
+ *   {"action":"subscribe","table":"clicks"}
+ *   {"action":"unsubscribe","table":"clicks"}
  *
- * Incoming messages have a topic envelope:
+ * Incoming messages carry a table envelope:
  *
- *   {"topic":"ingest.clicks","data":{"table_name":"clicks",...}}
+ *   {"table":"clicks","data":{"table_name":"clicks",...}}
  */
 export class SharedWSManager {
   private _baseURL: string;
@@ -40,25 +40,25 @@ export class SharedWSManager {
   }
 
   /**
-   * Subscribe to a topic. Opens the WebSocket if not already connected.
+   * Subscribe to a table. Opens the WebSocket if not already connected.
    * Returns an unsubscribe function.
    */
   subscribe<T = Record<string, unknown>>(
-    topic: string,
+    table: string,
     callback: WSEventCallback<T>,
     onStatus?: WSStatusCallback,
     onError?: WSErrorCallback,
   ): () => void {
     const sub: Subscription = { callback, onStatus, onError };
 
-    let topicSubs = this._subs.get(topic);
-    const isNewTopic = !topicSubs || topicSubs.size === 0;
+    let tableSubs = this._subs.get(table);
+    const isNewTable = !tableSubs || tableSubs.size === 0;
 
-    if (!topicSubs) {
-      topicSubs = new Set();
-      this._subs.set(topic, topicSubs);
+    if (!tableSubs) {
+      tableSubs = new Set();
+      this._subs.set(table, tableSubs);
     }
-    topicSubs.add(sub);
+    tableSubs.add(sub);
 
     // Ensure connection is open.
     if (!this._ws && !this._closed) {
@@ -69,16 +69,16 @@ export class SharedWSManager {
       onStatus?.(this._connected ? 'live' : 'connecting');
     }
 
-    // Send subscribe command for new topics.
-    if (isNewTopic) {
-      this._send(JSON.stringify({ action: 'subscribe', topic }));
+    // Send subscribe command for new tables.
+    if (isNewTable) {
+      this._send(JSON.stringify({ action: 'subscribe', table }));
     }
 
     return () => {
-      topicSubs!.delete(sub);
-      if (topicSubs!.size === 0) {
-        this._subs.delete(topic);
-        this._send(JSON.stringify({ action: 'unsubscribe', topic }));
+      tableSubs!.delete(sub);
+      if (tableSubs!.size === 0) {
+        this._subs.delete(table);
+        this._send(JSON.stringify({ action: 'unsubscribe', table }));
       }
       // Close connection if no subscriptions remain.
       if (this._subs.size === 0) {
@@ -137,23 +137,23 @@ export class SharedWSManager {
       }
       this._pendingCommands = [];
 
-      // Re-subscribe all active topics.
-      for (const topic of this._subs.keys()) {
-        this._ws?.send(JSON.stringify({ action: 'subscribe', topic }));
+      // Re-subscribe all active tables.
+      for (const table of this._subs.keys()) {
+        this._ws?.send(JSON.stringify({ action: 'subscribe', table }));
       }
     };
 
     this._ws.onmessage = (e) => {
       try {
         const envelope = JSON.parse(e.data as string) as {
-          topic: string;
+          table: string;
           data: {
             table_name: string;
             received_timestamp: string;
             data: unknown;
           };
         };
-        if (!envelope.topic || !envelope.data) return;
+        if (!envelope.table || !envelope.data) return;
 
         const event: StreamEvent = {
           table: envelope.data.table_name,
@@ -161,21 +161,10 @@ export class SharedWSManager {
           data: envelope.data.data as Record<string, unknown>,
         };
 
-        // Dispatch to exact topic subscribers.
-        const exact = this._subs.get(envelope.topic);
-        if (exact) {
-          for (const sub of exact) {
+        const subs = this._subs.get(envelope.table);
+        if (subs) {
+          for (const sub of subs) {
             sub.callback(event);
-          }
-        }
-
-        // Dispatch to wildcard subscribers (e.g. "ingest.>").
-        for (const [pattern, subs] of this._subs) {
-          if (pattern === envelope.topic) continue; // already handled
-          if (matchTopicPattern(pattern, envelope.topic)) {
-            for (const sub of subs) {
-              sub.callback(event);
-            }
           }
         }
       } catch {
@@ -233,23 +222,4 @@ export class SharedWSManager {
       }
     }
   }
-}
-
-/**
- * Client-side NATS-style topic matching for dispatching messages.
- *  - `*` matches exactly one token
- *  - `>` as the last token matches one or more tokens
- */
-function matchTopicPattern(pattern: string, subject: string): boolean {
-  const pTokens = pattern.split('.');
-  const sTokens = subject.split('.');
-
-  for (let i = 0; i < pTokens.length; i++) {
-    if (pTokens[i] === '>') {
-      return i < sTokens.length;
-    }
-    if (i >= sTokens.length) return false;
-    if (pTokens[i] !== '*' && pTokens[i] !== sTokens[i]) return false;
-  }
-  return pTokens.length === sTokens.length;
 }

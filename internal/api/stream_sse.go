@@ -34,10 +34,12 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topic := r.URL.Query().Get("topic")
-	if topic == "" {
-		topic = "ingest.>"
+	table := r.URL.Query().Get("table")
+	if table == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
+		return
 	}
+	topic := "ingest." + table
 
 	// Resolve stream permissions for this request.
 	role := RoleFromContext(r.Context())

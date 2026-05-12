@@ -3,7 +3,7 @@ import type { StreamTransport } from './controller.js';
 
 export interface SSEOptions {
   baseURL: string;
-  topic: string;
+  table: string;
   since?: string;
 }
 
@@ -33,7 +33,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     }
 
     const url = new URL('/v1/stream/sse', this._opts.baseURL);
-    url.searchParams.set('topic', this._opts.topic);
+    url.searchParams.set('table', this._opts.table);
     if (this._opts.since) {
       url.searchParams.set('since', this._opts.since);
     }
