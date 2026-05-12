@@ -165,7 +165,7 @@ Bento ingest pipeline (StartIngestWorker):
   → On success:
     → Trigger Cache.InvalidateByTags([table_name]) 
     → (Purges all L1/L2 entries associated with that table)
-    → DoubleAck messages to NATS (confirmed persistence)
+    → Ack messages to NATS
   → On failure:
     → Route batch to DLQ output (subject: dlq.{table})
     → Ack to NATS to prevent infinite retry loops

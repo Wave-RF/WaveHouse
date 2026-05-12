@@ -51,7 +51,7 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 				l.cache.Del(key)
 				l.ttls.Delete(key)
 
-				// [SHOULD FIX]: Cleanup memory leak on natural expiry
+				// Cleanup memory leak on natural expiry
 				l.tagsMu.Lock()
 				if tags, exists := l.keyTags[key]; exists {
 					for _, tag := range tags {

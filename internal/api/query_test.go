@@ -163,3 +163,59 @@ func TestQueryCacheKey_Deterministic(t *testing.T) {
 	k4 := queryCacheKey("SELECT 2", nil)
 	assert.NotEqual(t, k1, k4)
 }
+
+func TestExtractCacheTags(t *testing.T) {
+	cases := []struct {
+		name     string
+		sql      string
+		expected []string
+	}{
+		{
+			name:     "happy path standard select",
+			sql:      "SELECT * FROM users",
+			expected: []string{"users"},
+		},
+		{
+			name:     "happy path multiple clauses",
+			sql:      "SELECT * FROM users JOIN clicks ON users.id = clicks.user_id",
+			expected: []string{"users", "clicks"},
+		},
+		{
+			name:     "comma separated tables (known limitation)",
+			sql:      "SELECT * FROM t1, t2",
+			expected: []string{"t1"}, // t2 is missed by current simple regex, documented stop-gap
+		},
+		{
+			name:     "cte alias captured",
+			sql:      "WITH cte AS (SELECT id FROM users) SELECT * FROM cte",
+			expected: []string{"users", "cte"},
+		},
+		{
+			name:     "subquery outer paren rejected, inner captured",
+			sql:      "SELECT * FROM (SELECT * FROM inner_tbl)",
+			expected: []string{"inner_tbl"},
+		},
+		{
+			name:     "quoted identifier rejected",
+			sql:      "SELECT * FROM \"my.table\"",
+			expected: nil,
+		},
+		{
+			name:     "mutations",
+			sql:      "UPDATE state SET x = 1; INSERT INTO events (id) VALUES (1)",
+			expected: []string{"state", "events"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := extractCacheTags(tc.sql)
+			if len(tc.expected) == 0 {
+				assert.Empty(t, actual)
+			} else {
+				// Use ElementsMatch so order doesn't fail the test
+				assert.ElementsMatch(t, tc.expected, actual)
+			}
+		})
+	}
+}

@@ -49,7 +49,6 @@ func (t *TieredCache) Get(ctx context.Context, key string) ([]byte, time.Duratio
 	return nil, 0, nil
 }
 
-// UPDATE: Accept tags and pass them down
 func (t *TieredCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
 	if err := t.l1.Set(ctx, key, value, ttl, tags); err != nil {
 		return err
@@ -60,7 +59,6 @@ func (t *TieredCache) Set(ctx context.Context, key string, value []byte, ttl tim
 	return nil
 }
 
-// UPDATE: Replace InvalidateByPrefix with InvalidateByTags
 func (t *TieredCache) InvalidateByTags(ctx context.Context, tags []string) error {
 	if err := t.l1.InvalidateByTags(ctx, tags); err != nil {
 		return err
