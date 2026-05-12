@@ -221,6 +221,21 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # One summary comment per PR — sticky so iteration history
+          # stays in one place rather than accreting "Claude reviewed
+          # again" comments per push. Specific findings go in inline
+          # review comments (see `claude_args` below + the prompt
+          # template) which become real review threads that count
+          # against the ruleset's `required_review_thread_resolution`
+          # — same blocking mechanism Gemini and Copilot's review
+          # comments use.
           use_sticky_comment: true
-          track_progress: true
+          # `claude_args` allows the inline-comment MCP tool plus the
+          # narrow `gh pr` reads the prompt instructs Claude to use.
+          # Without an explicit allow-list, Claude Code's default
+          # tool set doesn't include the inline-comment MCP tool, so
+          # the model falls back to writing everything into the
+          # sticky comment.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/issues/*/comments:*),Read,Glob,Grep"
           prompt: ${{ steps.prompt.outputs.content }}

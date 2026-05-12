@@ -115,21 +115,40 @@ Review against each of these, in this order:
 
 ## Output discipline
 
-- Post inline comments on specific lines where the issue is
-  concrete. Use top-level comments for architectural
-  concerns or praise.
-- In the summary, separate findings by severity. End with
-  **exactly one of**: `Ship it`, `Iterate`, or `Block`,
-  followed by the single most important thing the author
-  must address.
-- Use `Block` only when a CRITICAL/HIGH security finding,
-  data-loss risk, or broken core invariant is present. Use
-  `Iterate` for everything else that needs changes.
-- Don't repeat what the linter already catches (gofumpt,
-  govet, staticcheck, gosec, gocritic, errcheck, etc. — see
-  `.golangci.yml`). CI enforces those.
-- Don't suggest comments on self-explanatory code — this
-  project prefers well-named identifiers.
+**Use inline review comments for specific line-level
+findings.** Call `mcp__github_inline_comment__create_inline_comment`
+with `confirmed: true` for each concrete issue. These become
+real PR review threads that show next to the line in the diff,
+must be resolved before merge (the repo's ruleset has
+`required_review_thread_resolution: true`), and are the same
+mechanism Gemini Code Assist uses. *Do not* dump every
+finding into one giant prose blob — that pattern caused the
+sticky comment to bloat.
+
+**Use the sticky summary comment for the verdict only.** One
+short top-level comment with:
+  - A one-line headline grouping findings by severity (e.g.
+    "1 HIGH security, 2 MEDIUM correctness, 1 LOW docs").
+  - A pointer to read the inline threads for detail.
+  - The verdict line, **exactly one of**: `Ship it`,
+    `Iterate`, or `Block`, followed by the single most
+    important thing the author must address.
+
+Verdict rules:
+  - `Block` only when a CRITICAL/HIGH security finding,
+    data-loss risk, or broken core invariant is present.
+  - `Iterate` for everything else that needs changes.
+  - `Ship it` only if there are no findings worth resolving.
+
+What not to comment on:
+  - Anything the linter already catches (gofumpt, govet,
+    staticcheck, gosec, gocritic, errcheck, etc. — see
+    `.golangci.yml`). CI enforces those.
+  - Self-explanatory code — this project prefers well-named
+    identifiers over explanatory comments.
+  - Don't post `gh pr comment` floors of prose for findings
+    that belong on a specific line — use an inline comment
+    there instead.
 
 ## Noise filter (important)
 
