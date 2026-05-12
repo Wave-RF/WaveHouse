@@ -8,9 +8,8 @@
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
-    "preview": "astro preview",
-    "astro": "astro",
-    "cf:preview": "pnpm build && wrangler dev"
+    "preview": "wrangler dev",
+    "astro": "astro"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",
