@@ -143,6 +143,27 @@ jobs:
               ;;
           esac
 
+          # Self-modification gate. The Anthropic action runs a
+          # validation step that fails when its own workflow file or
+          # the prompt template is in the PR's diff (it parses them
+          # and gets confused by ones that aren't the live config).
+          # When the PR modifies either, skip the action entirely —
+          # the check still shows success because we exit 0 here, the
+          # *next* PR's run picks up the change, and we don't get a
+          # red Claude check on every PR-that-edits-Claude. Documented
+          # upstream-known limitation: anthropics/claude-code-action
+          # discussions around workflow-self-edit auto-fail.
+          self_mod_paths=$(gh pr view "$pr_num" -R "$REPO" --json files --jq '
+            .files[].path
+            | select(. == ".github/workflows/claude-review.yml"
+                  or . == ".github/prompts/pr-review.md")
+          ')
+          if [ -n "$self_mod_paths" ]; then
+            echo "::notice::PR #$pr_num modifies Claude's own workflow / prompt ($self_mod_paths). Skipping the action (it would self-fail on validation); the change will apply to the next PR's review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Trust gate. Fetch HEAD commit; check author and committer
           # logins against the repo's collaborator permission map.
           # `web-flow` is the GitHub Web UI's bot identity (in-browser
