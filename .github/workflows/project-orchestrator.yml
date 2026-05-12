@@ -63,8 +63,19 @@ on:
   # finished" signal. Use workflow_run instead — it fires regardless
   # of GITHUB_TOKEN provenance, and it's the documented way to chain
   # off another workflow completing.
+  #
+  # We listen for both `CI` and `Claude PR review` completion so the
+  # orchestrator re-evaluates after each. Bot-clean requires *all*
+  # listed checks (incl. Claude review) to be green, so:
+  #   - CI completes first → orchestrator fires → Claude still
+  #     pending → bot-clean false → skip.
+  #   - Claude review completes → orchestrator fires again →
+  #     all green → assign reviewer + set board state.
+  # If Claude fails or stays pending, the orchestrator just doesn't
+  # progress, which is the desired "wait for the AI to weigh in"
+  # behaviour.
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, "Claude PR review"]
     types: [completed]
 
 permissions:
@@ -240,18 +251,49 @@ jobs:
           # Admin approval is deliberately excluded — it opens only
           # after an admin reviews, which is the step this workflow
           # triggers. Including it here would self-reference.
-          # ci.yml is a single job named "CI" running the full make-ci
-          # pipeline (lint + test + build + SDK + integration + e2e).
-          # "PR housekeeping" is the merged label + title-lint check
-          # from housekeeping.yml. Keep this list in sync with the
-          # ruleset's required_status_checks and claude-review.yml's
-          # REQUIRED_CHECKS.
-          pr=$(gh pr view "$PR_NUM" -R "$REPO" --json statusCheckRollup)
-          for check in CI "PR housekeeping"; do
-            state=$(echo "$pr" | jq -r --arg n "$check" \
-              '[.statusCheckRollup[] | select(.name == $n)] | .[0].conclusion // "MISSING"')
-            if [[ "$state" != "SUCCESS" ]]; then
-              echo "Required check '$check' is '$state'; not bot-clean yet."
+          #   - "CI" is the single job from ci.yml running make-ci.
+          #   - "PR housekeeping" is the merged label + title-lint
+          #     check from housekeeping.yml.
+          #   - "Claude review" is the AI review job from
+          #     claude-review.yml. Waiting on it here is what gives
+          #     Claude time to post its findings before we ping a
+          #     human reviewer. The job posts conclusion=success
+          #     even when its in-script trust gate skips, so PRs
+          #     from drive-by contributors don't stall here.
+          # Keep this list in sync with the ruleset's
+          # required_status_checks (note: Claude review is *not*
+          # in the ruleset — it's advisory; the orchestrator just
+          # waits for it).
+          #
+          # Reads via REST `check-runs` (filter=latest by default —
+          # one row per check name) instead of `gh pr view --json
+          # statusCheckRollup`. statusCheckRollup makes GraphQL
+          # navigate checkSuite.workflowRun across every context,
+          # which fails with "Resource not accessible by integration"
+          # on PRs that include checks from other integrations
+          # (Gemini, Copilot, third-party statuses) — same regression
+          # claude-review.yml hit in #108. REST enum values are
+          # lowercase where GraphQL emits uppercase.
+          head_sha=$(gh pr view "$PR_NUM" -R "$REPO" --json headRefOid --jq '.headRefOid')
+          check_runs=$(gh api \
+            "repos/$REPO/commits/$head_sha/check-runs?per_page=100" \
+            --jq '.check_runs')
+          for check in CI "PR housekeeping" "Claude review"; do
+            entry=$(echo "$check_runs" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
+            if [ -z "$entry" ]; then
+              echo "Required check '$check' is 'missing'; not bot-clean yet."
+              echo "clean=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            status=$(echo "$entry" | jq -r '.status // empty')
+            conclusion=$(echo "$entry" | jq -r '.conclusion // empty')
+            if [ "$status" != "completed" ]; then
+              echo "Required check '$check' is '$status' (not completed); not bot-clean yet."
+              echo "clean=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$conclusion" != "success" ]; then
+              echo "Required check '$check' concluded '$conclusion'; not bot-clean yet."
               echo "clean=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
