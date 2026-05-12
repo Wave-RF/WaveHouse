@@ -96,17 +96,20 @@ func run() int {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
+	var promHandler http.Handler
 	if cfg.Observability.Enabled {
-		otelShutdown, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
-			Endpoint:         cfg.Observability.OTelAddr,
-			TracesEnabled:    cfg.Observability.Traces.Enabled,
-			TracesSampleRate: cfg.Observability.Traces.SampleRate,
-			MetricsEnabled:   cfg.Observability.Metrics.Enabled,
-			LogsEnabled:      cfg.Observability.Logs.Enabled,
+		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
+			Endpoint:                 cfg.Observability.OTelAddr,
+			TracesEnabled:            cfg.Observability.Traces.Enabled,
+			TracesSampleRate:         cfg.Observability.Traces.SampleRate,
+			MetricsEnabled:           cfg.Observability.Metrics.Enabled,
+			MetricsPrometheusEnabled: cfg.Observability.Metrics.Prometheus.Enabled,
+			LogsEnabled:              cfg.Observability.Logs.Enabled,
 		})
 		if err != nil {
 			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
 		} else {
+			promHandler = ph
 			defer func() {
 				// Bound shutdown so an unreachable collector doesn't hang
 				// process exit. The OTel SDK's batch processors don't fully
@@ -316,6 +319,27 @@ func run() int {
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,
 	}
+
+	// Prometheus /metrics routing: same-port → mount on API router,
+	// dedicated port → spin a sidecar HTTP server below.
+	promPath := cfg.Observability.Metrics.Prometheus.Path
+	promPort := cfg.Observability.Metrics.Prometheus.Port
+	var promSrv *http.Server
+	if promHandler != nil {
+		if promPort == 0 {
+			deps.MetricsHandler = promHandler
+			deps.MetricsPath = promPath
+		} else {
+			mux := http.NewServeMux()
+			mux.Handle(promPath, promHandler)
+			promSrv = &http.Server{
+				Addr:              fmt.Sprintf(":%d", promPort),
+				Handler:           mux,
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+		}
+	}
+
 	router := api.NewRouter(deps)
 
 	srv := &http.Server{
@@ -337,7 +361,21 @@ func run() int {
 		if err := srv.Shutdown(shutCtx); err != nil {
 			logger.Error("server shutdown error", "error", err)
 		}
+		if promSrv != nil {
+			if err := promSrv.Shutdown(shutCtx); err != nil {
+				logger.Error("prometheus server shutdown error", "error", err)
+			}
+		}
 	}()
+
+	if promSrv != nil {
+		go func() {
+			logger.Info("starting prometheus metrics server", "addr", promSrv.Addr, "path", promPath)
+			if err := promSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("prometheus server error", "error", err)
+			}
+		}()
+	}
 
 	logger.Info("starting server", "port", cfg.Server.Port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

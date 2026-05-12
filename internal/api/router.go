@@ -32,6 +32,11 @@ type Dependencies struct {
 	JS              jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel        *slog.LevelVar
+	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
+	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
+	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
+	MetricsHandler http.Handler
+	MetricsPath    string
 }
 
 // NewRouter creates the chi router with all routes.
@@ -69,6 +74,13 @@ func NewRouter(deps Dependencies) http.Handler {
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)
+
+	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
+	// AND prometheus.port is 0 (mount on this router). When prometheus.port
+	// is non-zero, main.go runs a dedicated listener instead and this is nil.
+	if deps.MetricsHandler != nil && deps.MetricsPath != "" {
+		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
+	}
 
 	// API v1 endpoints (auth middleware may be no-op if disabled).
 	r.Route("/v1", func(r chi.Router) {

@@ -278,6 +278,119 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 	assert.NoError(t, cfg.Validate())
 }
 
+func TestLoad_Defaults_PrometheusDisabled(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Observability.Metrics.Prometheus.Enabled)
+	assert.Equal(t, "/metrics", cfg.Observability.Metrics.Prometheus.Path)
+	assert.Equal(t, 0, cfg.Observability.Metrics.Prometheus.Port)
+}
+
+func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Observability: Observability{
+			Enabled: true,
+			Traces:  ObservabilityTraces{SampleRate: 0.10},
+			Logs:    ObservabilityLogs{SampleRate: 0.10},
+			Metrics: ObservabilityMetrics{
+				Enabled: true,
+				Prometheus: ObservabilityMetricsPrometheus{
+					Enabled: true,
+					Path:    "/metrics",
+					Port:    8080, // collides
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collides with server.port")
+}
+
+func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
+	t.Parallel()
+	for _, port := range []int{-1, 65536, 99999} {
+		cfg := Config{
+			Server:     Server{Port: 8080},
+			ClickHouse: ClickHouse{HTTPScheme: "http"},
+			Schema:     Schema{RefreshInterval: 60},
+			Observability: Observability{
+				Enabled: true,
+				Traces:  ObservabilityTraces{SampleRate: 0.10},
+				Logs:    ObservabilityLogs{SampleRate: 0.10},
+				Metrics: ObservabilityMetrics{
+					Enabled: true,
+					Prometheus: ObservabilityMetricsPrometheus{
+						Enabled: true,
+						Path:    "/metrics",
+						Port:    port,
+					},
+				},
+			},
+		}
+		err := cfg.Validate()
+		require.Error(t, err, "port %d should be rejected", port)
+		assert.Contains(t, err.Error(), "prometheus.port")
+	}
+}
+
+func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Observability: Observability{
+			Enabled: true,
+			Traces:  ObservabilityTraces{SampleRate: 0.10},
+			Logs:    ObservabilityLogs{SampleRate: 0.10},
+			Metrics: ObservabilityMetrics{
+				Enabled: true,
+				Prometheus: ObservabilityMetricsPrometheus{
+					Enabled: true,
+					Path:    "metrics", // missing leading slash
+					Port:    0,
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must start with '/'")
+}
+
+func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
+	t.Parallel()
+	// All sorts of invalid prometheus settings should be ignored when
+	// prometheus.enabled is false — operators iterating on yaml shouldn't
+	// get yelled at about unused fields.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Observability: Observability{
+			Enabled: true,
+			Traces:  ObservabilityTraces{SampleRate: 0.10},
+			Logs:    ObservabilityLogs{SampleRate: 0.10},
+			Metrics: ObservabilityMetrics{
+				Enabled: true,
+				Prometheus: ObservabilityMetricsPrometheus{
+					Enabled: false,
+					Path:    "garbage",
+					Port:    8080,
+				},
+			},
+		},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
 func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	t.Parallel()
 	cfg := Config{

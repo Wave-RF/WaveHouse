@@ -120,6 +120,9 @@ The master switch is `observability.enabled`. When `true`, each signal (traces/m
 | `observability.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `observability.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `observability.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
+| `observability.metrics.prometheus.enabled` | `WH_OTEL_METRICS_PROMETHEUS_ENABLED` | `false` | Also expose a `/metrics` endpoint in Prometheus exposition format. The same OTel `Meter()` API records both this and the OTLP push — they're two readers on one MeterProvider. Disabled by default; enabling adds an unauthenticated endpoint, so it's an explicit opt-in. Typical use case: Prometheus / Grafana Alloy scrapes WaveHouse directly instead of (or in addition to) the OTLP push to a collector. |
+| `observability.metrics.prometheus.path` | `WH_OTEL_METRICS_PROMETHEUS_PATH` | `/metrics` | URL path for the Prometheus endpoint. Must start with `/`. |
+| `observability.metrics.prometheus.port` | `WH_OTEL_METRICS_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
 | `observability.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling this leaves stdout logging untouched — the OTel logger provider is simply not registered. |
 | `observability.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for `DEBUG`/`INFO` records, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
 
@@ -184,7 +187,11 @@ observability:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
   metrics:
-    enabled: true
+    enabled: true        # OTLP push
+    prometheus:
+      enabled: false     # also expose /metrics for Prometheus scrape
+      path: /metrics
+      port: 0            # 0 = mount on server.port; non-zero = sidecar listener
   logs:
     enabled: true
     sample_rate: 1.0     # DEBUG/INFO OTLP rate; WARN+ always 100%, stdout always 100%

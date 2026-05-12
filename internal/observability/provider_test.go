@@ -37,7 +37,7 @@ func TestInitProvider_Shutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	shutdown, err := InitProvider(ctx, "wavehouse-test", ProviderConfig{
+	shutdown, promHandler, err := InitProvider(ctx, "wavehouse-test", ProviderConfig{
 		Endpoint:         lis.Addr().String(),
 		TracesEnabled:    true,
 		TracesSampleRate: 0.10,
@@ -46,6 +46,7 @@ func TestInitProvider_Shutdown(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, shutdown)
+	assert.Nil(t, promHandler, "prometheus exporter not requested → handler must be nil")
 
 	// Drain the pipeline. We tolerate flush errors here because the OTLP
 	// exporter can't actually reach our listener (we never accept on it), so

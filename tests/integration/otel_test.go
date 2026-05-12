@@ -17,7 +17,10 @@ package tests
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -46,24 +49,25 @@ func guardOTelGlobals(t *testing.T) {
 	})
 }
 
-// initAndShutdown installs the OTel pipeline with the given config, returns
-// the shutdown func. Caller is responsible for calling shutdown to drain
-// pending exports before asserting on the receiver.
-func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) func(context.Context) error {
+// initAndShutdown installs the OTel pipeline with the given config and
+// returns the shutdown func plus the Prometheus handler (non-nil only when
+// cfg.MetricsPrometheusEnabled is true). Caller is responsible for calling
+// shutdown to drain pending exports before asserting on the receiver.
+func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) (func(context.Context) error, http.Handler) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	shutdown, err := observability.InitProvider(ctx, "wavehouse-test", cfg)
+	shutdown, promHandler, err := observability.InitProvider(ctx, "wavehouse-test", cfg)
 	require.NoError(t, err)
 	require.NotNil(t, shutdown)
-	return shutdown
+	return shutdown, promHandler
 }
 
 func TestOTel_TraceSampling_FullRate(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
 
-	shutdown := initAndShutdown(t, observability.ProviderConfig{
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:         r.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
@@ -87,7 +91,7 @@ func TestOTel_TraceSampling_HalfRate(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
 
-	shutdown := initAndShutdown(t, observability.ProviderConfig{
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:         r.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 0.5,
@@ -116,7 +120,7 @@ func TestOTel_TraceSampling_ZeroRate(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
 
-	shutdown := initAndShutdown(t, observability.ProviderConfig{
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:         r.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 0.0,
@@ -142,7 +146,7 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 
 	// Logs path: enable the OTel logger pipeline first, then build the
 	// slog logger that fans out to (stdout, OTLP) and sample DEBUG/INFO.
-	shutdown := initAndShutdown(t, observability.ProviderConfig{
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:    r.Addr(),
 		LogsEnabled: true,
 	})
@@ -174,7 +178,7 @@ func TestOTel_PerSignal_TracesOnly(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
 
-	shutdown := initAndShutdown(t, observability.ProviderConfig{
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:         r.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
@@ -197,11 +201,56 @@ func TestOTel_PerSignal_TracesOnly(t *testing.T) {
 	assert.Zero(t, r.LogCount(), "logs disabled — no log records should appear")
 }
 
+func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
+	guardOTelGlobals(t)
+	r := testutil.NewFakeOTLP(t)
+
+	shutdown, promHandler := initAndShutdown(t, observability.ProviderConfig{
+		Endpoint:                 r.Addr(),
+		MetricsEnabled:           true,
+		MetricsPrometheusEnabled: true,
+	})
+	t.Cleanup(func() {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer drainCancel()
+		_ = shutdown(drainCtx)
+	})
+	require.NotNil(t, promHandler, "prometheus handler should be non-nil when MetricsPrometheusEnabled=true")
+
+	// Record a known custom metric so we can assert it appears at /metrics.
+	// OTel→Prometheus name translation: dots/dashes become underscores,
+	// counter suffix `_total` is appended automatically.
+	meter := otel.GetMeterProvider().Meter("wavehouse-test")
+	counter, err := meter.Int64Counter("test_widget_received")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 7)
+
+	// Scrape via httptest. We don't go over the wire; the handler is the
+	// same one main.go would mount on the API router or sidecar listener.
+	server := httptest.NewServer(promHandler)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	bodyStr := string(body)
+	// Counter ending in _total is the standard Prometheus convention; the
+	// OTel exporter applies it automatically.
+	assert.Contains(t, bodyStr, "test_widget_received_total", "/metrics must list the custom counter we recorded")
+	assert.Contains(t, bodyStr, "# HELP", "Prometheus format includes HELP lines")
+	assert.Contains(t, bodyStr, "# TYPE", "Prometheus format includes TYPE lines")
+}
+
 func TestOTel_PerSignal_LogsOnly(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
 
-	shutdown := initAndShutdown(t, observability.ProviderConfig{
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:       r.Addr(),
 		TracesEnabled:  false,
 		MetricsEnabled: false,
@@ -241,7 +290,7 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	shutdown, err := observability.InitProvider(ctx, "wavehouse-test", cfg)
+	shutdown, _, err := observability.InitProvider(ctx, "wavehouse-test", cfg)
 	require.NoError(t, err, "InitProvider must not fail on unreachable endpoint")
 	require.NotNil(t, shutdown)
 

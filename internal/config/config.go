@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -42,7 +43,22 @@ type ObservabilityTraces struct {
 }
 
 type ObservabilityMetrics struct {
-	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Enabled    bool                           `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Prometheus ObservabilityMetricsPrometheus `yaml:"prometheus"`
+}
+
+// ObservabilityMetricsPrometheus controls a Prometheus exposition endpoint
+// served alongside (or independently of) the OTLP push exporter. The same
+// OTel meter API records both; the Prometheus exporter is an additional
+// Reader on the MeterProvider. Disabled by default.
+//
+// Port `0` mounts the endpoint on the existing API server router. A non-zero
+// port spins up a dedicated HTTP listener — useful for firewalling metrics
+// off the public API surface in production.
+type ObservabilityMetricsPrometheus struct {
+	Enabled bool   `yaml:"enabled" env:"WH_OTEL_METRICS_PROMETHEUS_ENABLED" env-default:"false"`
+	Path    string `yaml:"path" env:"WH_OTEL_METRICS_PROMETHEUS_PATH" env-default:"/metrics"`
+	Port    int    `yaml:"port" env:"WH_OTEL_METRICS_PROMETHEUS_PORT" env-default:"0"`
 }
 
 // ObservabilityLogs sample rate applies to OTLP export of DEBUG/INFO only.
@@ -157,6 +173,18 @@ func (c *Config) Validate() error {
 		}
 		if r := c.Observability.Logs.SampleRate; r < 0 || r > 1 {
 			return fmt.Errorf("observability.logs.sample_rate %g out of range [0.0, 1.0]", r)
+		}
+		if c.Observability.Metrics.Enabled && c.Observability.Metrics.Prometheus.Enabled {
+			p := c.Observability.Metrics.Prometheus
+			if p.Port < 0 || p.Port > 65535 {
+				return fmt.Errorf("observability.metrics.prometheus.port %d out of range [0, 65535]", p.Port)
+			}
+			if p.Port != 0 && p.Port == c.Server.Port {
+				return fmt.Errorf("observability.metrics.prometheus.port collides with server.port (%d); use 0 to mount on the API server or pick a different port", p.Port)
+			}
+			if !strings.HasPrefix(p.Path, "/") {
+				return fmt.Errorf("observability.metrics.prometheus.path %q must start with '/'", p.Path)
+			}
 		}
 	}
 
