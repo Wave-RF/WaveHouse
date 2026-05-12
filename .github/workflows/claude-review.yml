@@ -142,10 +142,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Read the PR's current state in one round-trip: draft,
-          # author, association, head SHA, and the full check rollup.
+          # Read draft / author / head SHA / check rollup via gh pr view.
+          # author_association is *not* a valid `gh pr view --json` field
+          # (it's REST-only), so fetch it separately from the REST PR
+          # endpoint after the early-exit gates pass.
           pr=$(gh pr view "$PR_NUM" -R "$REPO" \
-            --json isDraft,author,authorAssociation,headRefOid,statusCheckRollup)
+            --json isDraft,author,headRefOid,statusCheckRollup)
 
           if [ "$(echo "$pr" | jq -r '.isDraft')" = "true" ]; then
             echo "::notice::PR #$PR_NUM is draft; skipping review."
@@ -158,7 +160,7 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          association=$(echo "$pr" | jq -r '.authorAssociation')
+          association=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '.author_association')
           # CONTRIBUTOR is included because webhook payloads report users
           # with *private* org membership as CONTRIBUTOR (not MEMBER) even
           # when the REST API reports them as MEMBER.
