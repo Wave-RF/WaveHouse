@@ -1,4 +1,10 @@
-# 🏖️ WaveHouse
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/branding/wavehouse-mark-dark.svg">
+    <img src="docs/src/assets/branding/wavehouse-mark-light.svg" alt="" height="36" width="36">
+  </picture>
+  WaveHouse
+</h1>
 
 [![CI](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml)
 [![Coverage](https://github.com/Wave-RF/WaveHouse/blob/badges/.badges/main/coverage.svg?raw=true)](https://github.com/Wave-RF/WaveHouse/actions)

@@ -380,6 +380,16 @@ build-docs: install-docs ## Build docs site for production → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@cd $(DOCS_DIR) && $(PNPM) build
 
+# Single-source-of-truth logo pipeline. Edit scripts/branding/mark.svg (the
+# path) and run `make branding` to regenerate favicon.{svg,ico},
+# apple-touch-icon.png, og.png, and the Starlight nav light/dark SVGs.
+# Requires librsvg (rsvg-convert) + ImageMagick 7 (magick) — `brew install
+# librsvg imagemagick`. Not part of `build-docs`: derived assets are
+# committed so contributors don't need the raster toolchain to build docs.
+.PHONY: branding
+branding: ## Regenerate all logo/favicon/OG assets from scripts/branding/mark.svg
+	@scripts/branding/generate.sh
+
 ##@ Test
 
 # Each Go test target writes covdata to tmp/coverage/<suite>/data/ and
