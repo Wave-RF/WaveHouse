@@ -25,6 +25,7 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"go.opentelemetry.io/otel"
 
@@ -454,12 +455,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-//
-// NOTE: Bento components are registered globally. The ClickHouse and NATS
-// configurations passed to this function are frozen during the first call per
-// process. Subsequent calls in the same process will silently use the original
-// configuration for the output plugins.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -475,7 +471,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, streamName string, ch
 	setupCtx, setupCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer setupCancel()
 
-	cons, err := js.CreateOrUpdateConsumer(setupCtx, streamName, jetstream.ConsumerConfig{
+	cons, err := js.CreateOrUpdateConsumer(setupCtx, mq.StreamName(), jetstream.ConsumerConfig{
 		Durable:       "buffer-consumer",
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,

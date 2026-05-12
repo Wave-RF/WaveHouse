@@ -28,7 +28,6 @@ What actually happened.
 ## Environment
 
 - **WaveHouse version**: (e.g., v0.1.0 or commit SHA)
-- **Deployment mode**: standalone / clustered
 - **OS**: (e.g., Linux, macOS)
 - **Go version** (if building from source):
 

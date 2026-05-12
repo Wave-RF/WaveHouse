@@ -1,0 +1,10 @@
+{
+  "lsp": {
+    "gopls": {
+      "initialization_options": {
+        "build.buildFlags": ["-tags=integration"],
+        "formatting.gofumpt": true,
+      },
+    },
+  },
+}

@@ -73,7 +73,18 @@ type Subscriber interface {
 	Close() error
 }
 
-// StreamName returns the JetStream stream name used by all MQ implementations.
+// StreamName returns the primary JetStream stream name. Hardcoded — the
+// embedded NATS server is private to the WaveHouse process, so there's no
+// multi-tenant case to namespace against. Kept as a function (rather than
+// a const) so all callers go through one symbol; future migrations could
+// swap the constant out without breaking the API surface.
 func StreamName() string {
 	return "WAVEHOUSE"
+}
+
+// DLQStreamName returns the dead-letter-queue JetStream stream name. Used
+// for failed ClickHouse batch inserts (see `internal/api/dlq.go`). Same
+// rationale as StreamName for being hardcoded.
+func DLQStreamName() string {
+	return "WAVEHOUSE_DLQ"
 }

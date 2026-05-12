@@ -41,16 +41,17 @@ func (s *slogNATSLogger) Tracef(format string, v ...any) {
 
 // EmbeddedNATS runs an in-process NATS server with JetStream.
 type EmbeddedNATS struct {
-	server     *natsserver.Server
-	conn       *nats.Conn
-	js         jetstream.JetStream
-	streamName string
+	server *natsserver.Server
+	conn   *nats.Conn
+	js     jetstream.JetStream
 }
 
 // NewEmbedded starts an embedded NATS server with JetStream enabled.
 // An optional *slog.Logger can be passed to control server log output;
-// if omitted, slog.Default() is used.
-func NewEmbedded(storeDir, streamName string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
+// if omitted, slog.Default() is used. The stream name is fixed (see
+// StreamName / DLQStreamName) — the embedded server is private to this
+// process, so there's no namespacing to do.
+func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*EmbeddedNATS, error) {
 	l := slog.Default()
 	if len(logger) > 0 && logger[0] != nil {
 		l = logger[0]
@@ -92,7 +93,7 @@ func NewEmbedded(storeDir, streamName string, maxBytes int64, logger ...*slog.Lo
 	// ClickHouse/NATS disk. DiscardNew rejects new messages when full,
 	// propagating backpressure to the upstream API.
 	_, err = js.CreateOrUpdateStream(context.Background(), jetstream.StreamConfig{
-		Name:      streamName,
+		Name:      StreamName(),
 		Subjects:  []string{"ingest.>"},
 		Retention: jetstream.LimitsPolicy,
 		MaxBytes:  maxBytes,
@@ -104,7 +105,7 @@ func NewEmbedded(storeDir, streamName string, maxBytes int64, logger ...*slog.Lo
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
 
-	return &EmbeddedNATS{server: ns, conn: nc, js: js, streamName: streamName}, nil
+	return &EmbeddedNATS{server: ns, conn: nc, js: js}, nil
 }
 
 func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte) error {
@@ -117,7 +118,7 @@ func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte)
 }
 
 func (e *EmbeddedNATS) Subscribe(ctx context.Context, subject, consumerName string, handler func(msg *Message) error) error {
-	cons, err := e.js.CreateOrUpdateConsumer(ctx, e.streamName, jetstream.ConsumerConfig{
+	cons, err := e.js.CreateOrUpdateConsumer(ctx, StreamName(), jetstream.ConsumerConfig{
 		Durable:       consumerName,
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,

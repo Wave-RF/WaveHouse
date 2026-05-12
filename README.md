@@ -26,16 +26,11 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
 * **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
 
-## 🚀 Deployment Modes
+## 🛠️ Quick Start
 
-WaveHouse is designed using a clean architecture that allows it to run anywhere, from a laptop to a multi-region cloud.
+Pick whichever flavour fits — Docker, prebuilt binary, or `go install`. Each one ends with WaveHouse listening on `http://localhost:8080`.
 
-| Mode | Binaries | External Dependencies | Use Case |
-| ---- | -------- | --------------------- | -------- |
-| **Standalone** | `wavehouse` | ClickHouse only | Local dev, single-server |
-| **Clustered** | `wavehouse-api` + `wavehouse-worker` | ClickHouse, NATS, Redis, ScyllaDB | Horizontal scaling, production |
-
-## 🛠️ Quick Start (Standalone)
+### A. Docker Compose (recommended for first-time)
 
 The easiest way to see WaveHouse in action. Requires Docker.
 
@@ -79,29 +74,51 @@ curl -N http://localhost:8080/v1/stream/sse
 
 WaveHouse is now accepting API requests on `http://localhost:8080`.
 
-## 🚀 Quick Start (Clustered)
+### B. Prebuilt container image
 
-The full distributed stack with load balancing, NATS, Redis, and ScyllaDB:
+Skip the source clone — pull from GHCR:
 
 ```bash
-# Start everything: Caddy LB, ClickHouse, NATS, Redis, ScyllaDB, 2x API, 2x worker
-docker compose -f deployments/compose/cluster.yaml up -d
+# Tagged release (recommended for production)
+docker pull ghcr.io/wave-rf/wavehouse:latest
 
-# Create your tables in ClickHouse, then WaveHouse discovers them automatically.
-# See docs/deployment.md for full setup instructions.
+# Or rolling main-branch dev build
+docker pull ghcr.io/wave-rf/wavehouse:dev
 ```
 
-The API is available behind Caddy at `http://localhost` (port 80).
+Tagged images are built by `release.yml` on every `v*` git tag (`:latest`, `:vX.Y.Z`). Dev images are built by `publish-dev.yml` on every push to `main` (`:dev`, `:dev-<sha>`); old `:dev-<sha>` tags are pruned weekly by `cleanup-ghcr.yml`.
+
+### C. `go install` / `go run` (binary, no Docker)
+
+If you have Go 1.26+ installed:
+
+```bash
+# Install the latest tagged release into $GOBIN
+go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
+
+# Or run directly without installing
+go run github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
+
+# Or pin to a specific version
+go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@v0.1.0
+```
+
+You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/configuration.md).
+
+WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/sdk.md) is the supported integration surface.
 
 ## 💻 Local Development
+
+You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 20+, and pnpm 10+** on your PATH — see [docs/development.md § Prerequisites](docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
 
 For building and testing WaveHouse locally with hot-reload:
 
 ```bash
-# Install dependencies
-go mod download
+# One-time bootstrap: installs golangci-lint into .bin/, downloads Go modules,
+# and runs pnpm install for the SDK + E2E harness.
+make tools
 
-# Start ClickHouse (standalone mode needs nothing else)
+# Start ClickHouse
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
 
 # Create your tables in ClickHouse, then:
@@ -109,8 +126,6 @@ make dev
 ```
 
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
-
-For clustered local development (run API + worker against external deps), see [docs/development.md](docs/development.md).
 
 ## 🤝 Contributing
 
@@ -121,7 +136,7 @@ We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md]
 * [Architecture](docs/architecture.md) — System design, data flows, and package overview
 * [API Reference](docs/api.md) — All endpoints, authentication, request/response formats
 * [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/deployment.md) — Standalone, clustered, Docker, and release guide
+* [Deployment](docs/deployment.md) — Standalone, (future) clustered, Docker, and release guide
 * [Development](docs/development.md) — Building, testing, linting, and project structure
 * [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
 

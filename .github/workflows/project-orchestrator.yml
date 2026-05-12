@@ -42,7 +42,7 @@ name: Project orchestrator
 #   Review dismissed:
 #     → re-evaluate (prior admin approval may now be invalid).
 #
-# Bidirectional manual-move sync lives in board-state-sync.yml.
+# Manual board moves are not auto-mirrored — see AGENTS.md §Task Board.
 #
 # Dependabot PRs skip this workflow — they go through
 # dependabot-automerge.yml. Major-version Dependabot bumps get their
@@ -78,16 +78,8 @@ concurrency:
   group: project-orchestrator-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
   cancel-in-progress: false
 
-env:
-  PROJECT_OWNER: Wave-RF
-  PROJECT_NUMBER: "7"
-  PROJECT_ID: PVT_kwDOCdKSOc4BUEKD
-  STATUS_FIELD_ID: PVTSSF_lADOCdKSOc4BUEKDzhBO0l8
-  STATUS_READY: "61e4505c"
-  STATUS_IN_PROGRESS: "47fc9ee4"
-  STATUS_IN_REVIEW: "df73e18b"
-  STATUS_DONE: "98236657"
-  STATUS_BACKLOG: "f75ad846"
+# Project IDs and admin list live in .github/board-config.env — loaded
+# by the first step of the orchestrate job below.
 
 jobs:
   orchestrate:
@@ -101,8 +93,9 @@ jobs:
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.event == 'pull_request'
     runs-on: [wave-rf-runners]
+    timeout-minutes: 15
     steps:
-      - name: Checkout main (trusted composite-action source)
+      - name: Checkout main (trusted composite-action + board-config source)
         # Security: pull_request_target and workflow_run events would
         # default to checking out the PR's merge/head SHA. If we then
         # did `uses: ./.github/actions/...`, a malicious PR could
@@ -110,14 +103,17 @@ jobs:
         # execute with PROJECT_BOARD_TOKEN + write-scoped GITHUB_TOKEN
         # in scope — the classic pull_request_target attack. Pinning
         # the checkout ref to `main` always reads composite actions
-        # from trusted code regardless of event. persist-credentials:
-        # false further reduces exposure since we don't push from
-        # this workflow. (Copilot flagged.)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # AND .github/board-config.env from trusted code regardless of
+        # event. persist-credentials: false further reduces exposure
+        # since we don't push from this workflow. (Copilot flagged.)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Load board config
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
       - name: Guard — require PROJECT_BOARD_TOKEN
         env:
@@ -244,8 +240,14 @@ jobs:
           # Admin approval is deliberately excluded — it opens only
           # after an admin reviews, which is the step this workflow
           # triggers. Including it here would self-reference.
+          # ci.yml is a single job named "CI" running the full make-ci
+          # pipeline (lint + test + build + SDK + integration + e2e).
+          # "PR housekeeping" is the merged label + title-lint check
+          # from housekeeping.yml. Keep this list in sync with the
+          # ruleset's required_status_checks and claude-review.yml's
+          # REQUIRED_CHECKS.
           pr=$(gh pr view "$PR_NUM" -R "$REPO" --json statusCheckRollup)
-          for check in Check Build Validate Lint Test "Integration Tests" "SDK Tests"; do
+          for check in CI "PR housekeeping"; do
             state=$(echo "$pr" | jq -r --arg n "$check" \
               '[.statusCheckRollup[] | select(.name == $n)] | .[0].conclusion // "MISSING"')
             if [[ "$state" != "SUCCESS" ]]; then
@@ -296,25 +298,34 @@ jobs:
         run: |
           # Per the state-machine spec (AGENTS.md §Task Board state
           # machine), the PR card has *one* reviewer-assignee — "the
-          # non-author admin" (singular). Three cases:
-          #   - author is Eric → reviewer is Taite.
-          #   - author is Taite → reviewer is Eric.
+          # non-author admin" (singular). Two cases:
+          #   - author is an admin → reviewer is one of the other admins
+          #     (first non-self in $ADMINS order).
           #   - author is anyone else (external contributor, or future
           #     non-admin committers) → pick one admin deterministically
-          #     by PR-number parity so load spreads evenly over time.
+          #     by PR-number modulo so load spreads over time.
           # Copilot flagged the prior "both admins" behaviour as
           # inconsistent with the single-reviewer contract.
-          case "$PR_AUTHOR" in
-            EricAndrechek) picked="taitelee" ;;
-            taitelee)      picked="EricAndrechek" ;;
-            *)
-              if [ $((PR_NUM % 2)) -eq 0 ]; then
-                picked="EricAndrechek"
-              else
-                picked="taitelee"
+          IFS=',' read -ra admin_list <<< "$ADMINS"
+
+          picked=""
+          is_admin=false
+          for admin in "${admin_list[@]}"; do
+            [ "$admin" = "$PR_AUTHOR" ] && is_admin=true
+          done
+
+          if [ "$is_admin" = "true" ]; then
+            for admin in "${admin_list[@]}"; do
+              if [ "$admin" != "$PR_AUTHOR" ]; then
+                picked="$admin"
+                break
               fi
-              ;;
-          esac
+            done
+          else
+            idx=$(( PR_NUM % ${#admin_list[@]} ))
+            picked="${admin_list[$idx]}"
+          fi
+
           echo "reviewers=$picked" >> "$GITHUB_OUTPUT"
 
       - name: Check current PR card Status (reeval guard)
@@ -333,52 +344,23 @@ jobs:
           # display name (Copilot R3) so a rename on the project UI
           # doesn't silently break the guard.
           #
-          # Explicit GraphQL-error check (Copilot R8): without strict
-          # mode + this check, a failed gh api would yield an empty
-          # `current_option`, and the "[ -z ] || [ = Backlog ]" branch
-          # below would incorrectly mark promote=true — silently
-          # promoting a card we couldn't actually read. Now any
-          # .errors in the response fails this step loudly.
+          # The fetch + GraphQL-error check is in board-fetch-item.sh;
+          # if it exits non-zero, set -e fails this step loudly (a
+          # failed read must NOT silently fall through to "promote=true",
+          # which would yank an unread card — Copilot R8).
           pr_url="https://github.com/$REPO/pull/$PR_NUM"
-          resp=$(gh api graphql -f query='query($url: URI!) {
-              resource(url: $url) {
-                ... on PullRequest {
-                  projectItems(first: 20) {
-                    nodes {
-                      project { number }
-                      fieldValueByName(name: "Status") {
-                        ... on ProjectV2ItemFieldSingleSelectValue { optionId name }
-                      }
-                    }
-                  }
-                }
-              }
-            }' -F url="$pr_url")
-
-          graphql_errors=$(echo "$resp" | jq -c '.errors // empty')
-          if [ -n "$graphql_errors" ]; then
-            echo "::error::GraphQL error querying PR card Status: $graphql_errors"
-            exit 1
-          fi
+          IFS=$'\t' read -r item_id current_option current_name < <(
+            .github/scripts/board-fetch-item.sh url "$pr_url" "$PROJECT_NUMBER"
+          )
 
           # Distinguish "card not on board" from "on board, empty
           # Status" from "on board, Backlog" from "on board, other".
-          # Empty-card (no matching project item) is OK to promote —
-          # the subsequent Upsert step adds it + sets Ready. Only the
-          # "on board, other" case should short-circuit.
-          on_board=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-            [.data.resource.projectItems.nodes[]? | select(.project.number == ($n | tonumber))] | length')
-          current_option=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-            .data.resource.projectItems.nodes[]?
-            | select(.project.number == ($n | tonumber))
-            | .fieldValueByName.optionId // ""' | head -n1)
-          current_name=$(echo "$resp" | jq -r --arg n "$PROJECT_NUMBER" '
-            .data.resource.projectItems.nodes[]?
-            | select(.project.number == ($n | tonumber))
-            | .fieldValueByName.name // ""' | head -n1)
-
-          if [ "$on_board" = "0" ] || [ -z "$current_option" ] || [ "$current_option" = "$STATUS_BACKLOG" ]; then
-            echo "PR card Status is '${current_name:-<unset>}' (option '$current_option', on_board=$on_board) — ok to promote."
+          # Empty item_id ⇒ no project item ⇒ OK to promote (Upsert step
+          # adds it + sets Ready). Empty option / Backlog also promote.
+          # Only "on board, other" (In progress / In review / Done)
+          # short-circuits.
+          if [ -z "$item_id" ] || [ -z "$current_option" ] || [ "$current_option" = "$STATUS_BACKLOG" ]; then
+            echo "PR card Status is '${current_name:-<unset>}' (option '$current_option', on_board=$([ -n "$item_id" ] && echo 1 || echo 0)) — ok to promote."
             echo "promote=true" >> "$GITHUB_OUTPUT"
           else
             echo "PR card Status is '$current_name' (option $current_option) — leaving alone."

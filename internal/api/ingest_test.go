@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -413,4 +414,26 @@ func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestIngest_ReservedFieldRejected(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub)
+
+	// Create a payload that illegally includes the reserved field
+	payload := map[string]any{
+		"page":               "/home",
+		"received_timestamp": "2026-05-11T12:00:00Z",
+	}
+
+	req := ingestRequest(t, "clicks", payload)
+	w := httptest.NewRecorder()
+
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "Expected 400 Bad Request when reserved field is present")
+
+	expectedJSON := `{"error":"payload cannot contain reserved field 'received_timestamp'"}`
+	assert.JSONEq(t, expectedJSON, strings.TrimSpace(w.Body.String()), "Expected specific JSON error message")
 }

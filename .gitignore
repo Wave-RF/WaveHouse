@@ -1,5 +1,4 @@
 # Binaries
-bin/
 *.exe
 *.exe~
 *.dll
@@ -10,6 +9,19 @@ bin/
 tmp/
 dist/
 
+# Build directories
+build/
+bin/
+
+# Stray binaries from `go build ./scripts/<name>` — Go helpers under scripts/
+# are meant to be run via `go run` (the Makefile drives them that way), but a
+# direct `go build ./scripts/cov` would drop the binary at the repo root
+# because Go uses the package's directory basename as the output name.
+# `go build ./...` of multiple main packages already discards outputs, so
+# this only catches the explicit single-package case. One line per helper.
+/orchestrator
+/cov
+
 # Data directories (runtime)
 data/
 
@@ -17,12 +29,21 @@ data/
 *.test
 *.out
 
+# Coverage outputs
+coverage.txt
+coverage.out
+# vitest's default coverage dir, used when `pnpm test:coverage` runs
+# without SDK_COVERAGE_DIR set (i.e. directly inside clients/ts/).
+coverage/
+clients/ts/coverage/
+
+# Local Tooling directory
+tools/
+.bin/
+
 # Dependency directories
 vendor/
 node_modules/
-
-# E2E test state
-tests/sdk/.setup-state.json
 
 # IDE / Editor
 .idea/
@@ -38,6 +59,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+!.github/board-config.env
 
 # Debug
 __debug_bin*

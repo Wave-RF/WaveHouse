@@ -1,0 +1,23 @@
+{
+  "private": true,
+  "name": "wavehouse-e2e",
+  "packageManager": "pnpm@10.33.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@wavehouse/sdk": "file:../../../clients/ts"
+  },
+  "devDependencies": {
+    "eventsource": "^4.1.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
