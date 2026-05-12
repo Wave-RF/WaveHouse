@@ -41,8 +41,8 @@ name: Claude PR review
 #   - bot accounts other than Dependabot (filtered at workflow level)
 # When the gate decides to skip, the job still completes with
 # conclusion=success (the gate step exits 0). That keeps the
-# "Claude review" check present on the PR and lets the orchestrator's
-# bot-clean wait succeed.
+# "Claude review" check present on the PR so reviewers can see at
+# a glance that the workflow ran.
 #
 # Prompt structure follows Anthropic's canonical pr-review-comprehensive
 # template — see `.github/prompts/pr-review.md`. The header block we
@@ -83,10 +83,8 @@ concurrency:
 
 jobs:
   review:
-    # The check name on the PR is the *job* name. "Claude review" is
-    # what shows up in the Checks panel and what the orchestrator's
-    # bot-clean step looks for. Keep this string and orchestrator's
-    # required-checks list in sync.
+    # The check name on the PR is the *job* name. "Claude review"
+    # is what shows up in the Checks panel.
     name: Claude review
     # Workflow-level cheap filter: skip Dependabot (handled by
     # dependabot-automerge.yml) and clearly-untrusted issue_comment

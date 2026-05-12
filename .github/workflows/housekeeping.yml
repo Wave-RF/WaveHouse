@@ -24,17 +24,6 @@ on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize, ready_for_review]
 
-env:
-  # Admins eligible to review. Inlined here (rather than read from
-  # .github/board-config.env) to mirror admin-approval.yml's pattern
-  # — checkout + grep added latency for a two-element list. If we ever
-  # have more admins, move both to board-config.env.
-  # Comma-separated, order-stable: external-author PRs pick admin by
-  # PR_NUM % len(admins), so changing order shuffles assignments for
-  # already-open PRs on next housekeeping run. Acceptable since the
-  # composite is idempotent.
-  ADMINS: "EricAndrechek,taitelee"
-
 permissions:
   # `issues: write` is required for /repos/.../issues/{num}/comments
   # (the sticky-comment endpoint) — PRs are issues at the REST layer
@@ -55,6 +44,22 @@ jobs:
     runs-on: [wave-rf-runners]
     timeout-minutes: 5
     steps:
+      - name: Checkout main (board-config + composite-action source)
+        # pull_request_target defaults to base, but make the checkout
+        # explicit so `./.github/actions/assign-and-request-review`
+        # resolves and the next step can read board-config.env.
+        # persist-credentials: false — housekeeping doesn't push.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Load board config
+        # ADMINS (comma-separated) for the reviewer-assign step. Project
+        # IDs in the same file are loaded but unused here — harmless.
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
+
       # --- Path-based labeling -----------------------------------------
       # actions/labeler reads .github/labeler.yml from the BASE branch
       # (main) and applies labels based on the PR's changed files.

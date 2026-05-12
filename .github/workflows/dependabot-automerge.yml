@@ -50,6 +50,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Load board config
+        # Loads ADMINS (comma-separated) from board-config.env, used by
+        # the major-bump reviewer-assign step below. board-config.env is
+        # the single source of truth for the admin set (with
+        # admin-approval.yml's documented inline-copy exception).
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
+
       - name: Fetch Dependabot metadata
         id: meta
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
@@ -72,14 +79,16 @@ jobs:
 
       - name: Assign + request review from both admins (major bump)
         # Dependabot is the author — assign both admins so whoever
-        # picks it up first can action.
+        # picks it up first can action. ADMINS comes from
+        # board-config.env (comma-separated); the composite expects
+        # space-separated, so `replace()` does the conversion inline.
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         uses: ./.github/actions/assign-and-request-review
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repo: ${{ github.repository }}
           pr-number: ${{ github.event.pull_request.number }}
-          reviewers: EricAndrechek taitelee
+          reviewers: ${{ replace(env.ADMINS, ',', ' ') }}
 
       - name: Comment on major bumps
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
