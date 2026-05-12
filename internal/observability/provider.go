@@ -60,8 +60,8 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		return err
 	}
 
-	handleErr := func(inErr error) {
-		_ = errors.Join(inErr, shutdown(ctx))
+	handleErr := func(_ error) {
+		_ = shutdown(ctx)
 	}
 
 	res, err := resource.New(ctx,
