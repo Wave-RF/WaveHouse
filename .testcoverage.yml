@@ -3,9 +3,11 @@
 
 # The merged-suites profile produced by `scripts/cov merge` at the end of
 # `make ci`. Contains unit + integration + e2e coverage stitched together,
-# so the `threshold.total` below (80%) applies to the *project-wide* number
-# the badge advertises, not just unit coverage (which is ~73% on its own
-# and would fail the 80% gate misleadingly).
+# so `threshold.total` below applies to the *project-wide* number the
+# badge advertises rather than unit coverage alone — unit covers only the
+# packages under `./internal/...` exercised by `*_test.go` files, which
+# falls below the total threshold; merged coverage adds the
+# integration- and e2e-only paths and clears it.
 profile: tmp/coverage/total/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
