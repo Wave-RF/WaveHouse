@@ -67,16 +67,14 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 
 func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
 	for _, tag := range tags {
-		if keysMap, ok := l.tagsMap.Load(tag); ok {
-			// Iterate through all keys associated with this tag
+		// Atomically remove the map from the index before iterating
+		if keysMap, ok := l.tagsMap.LoadAndDelete(tag); ok {
 			keysMap.(*sync.Map).Range(func(key, _ any) bool {
 				k := key.(string)
 				l.cache.Del(k)
 				l.ttls.Delete(k)
 				return true
 			})
-			// Clear the tag index entirely
-			l.tagsMap.Delete(tag)
 		}
 	}
 	return nil

@@ -17,11 +17,33 @@ import (
 	"github.com/google/uuid"
 )
 
-// Regex to detect mutating queries and extract table names
+// Regex to detect mutating queries
+var mutationRe = regexp.MustCompile(`(?i)^\s*(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)`)
+
+// Unified table extraction regex
 var (
-	mutationRe         = regexp.MustCompile(`(?i)^\s*(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)`)
-	extractTablesRawRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
+	tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
+	safeIdentifierRe  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 )
+
+// extractCacheTags parses raw SQL to find table names, dedupes them, and validates
+// them against safe identifier rules to comply with repository security standards.
+func extractCacheTags(sql string) []string {
+	matches := tableExtractionRe.FindAllStringSubmatch(sql, -1)
+	var tags []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) > 1 {
+			tbl := m[1]
+			// Validate safe identifier before using it as a cache tag
+			if !seen[tbl] && safeIdentifierRe.MatchString(tbl) {
+				seen[tbl] = true
+				tags = append(tags, tbl)
+			}
+		}
+	}
+	return tags
+}
 
 // QueryHandler handles POST /v1/query.
 type QueryHandler struct {
@@ -84,21 +106,9 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CRUDE INVALIDATION STOP-GAP:
 	// If this raw SQL was a mutation, extract the table names and invalidate them.
 	if h.Cache != nil && mutationRe.MatchString(req.SQL) {
-		matches := extractTablesRawRe.FindAllStringSubmatch(req.SQL, -1)
-		var tags []string
-		seen := make(map[string]bool)
-		for _, m := range matches {
-			if len(m) > 1 {
-				tbl := m[1]
-				if !seen[tbl] {
-					seen[tbl] = true
-					tags = append(tags, tbl)
-				}
-			}
-		}
+		tags := extractCacheTags(req.SQL)
 		if len(tags) > 0 {
 			_ = h.Cache.InvalidateByTags(r.Context(), tags)
 		}
