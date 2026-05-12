@@ -328,14 +328,58 @@ func TestJsInput_Read_DeleteExecError(t *testing.T) {
 	iter.msgs <- delMsg
 	iter.msgs <- insertMsg
 
-	input := &jsInput{iter: iter, chConn: conn}
+	js := &bentoMockJS{}
+	input := &jsInput{iter: iter, chConn: conn, js: js}
 	msg, _, err := input.Read(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "execute delete: db error")
-	assert.Nil(t, msg)
+	require.NoError(t, err, "delete error should be handled as permanent (no error returned)")
+	require.NotNil(t, msg, "Read should advance to the next message after a failed delete")
 
-	// On exec error, message should be Nak'd for retry.
-	assert.True(t, delMsg.naked, "delete message should be nak'd on exec error")
+	// Permanent-fail policy: original envelope routed to dlq.<table>, message DoubleAck'd, not Nak'd.
+	assert.False(t, delMsg.naked, "delete message must not be Nak'd (would cause infinite retry)")
+	assert.True(t, delMsg.doubleAcked, "delete message should be DoubleAck'd after routing to DLQ")
+
+	require.Len(t, js.published, 1, "failed delete should be published to DLQ exactly once")
+	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
+	assert.JSONEq(t, string(delData), string(js.published[0].Data), "DLQ payload should preserve the original delete envelope")
+
+	// Next message in queue should be the follow-up insert.
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table)
+}
+
+func TestJsInput_Read_DeleteExecErrorDLQPublishFails(t *testing.T) {
+	t.Parallel()
+	// Even when the DLQ publish itself fails (NATS unavailable), the worker must
+	// still DoubleAck the message — Nak'ing here would re-create the infinite
+	// retry loop that the permanent-fail policy is designed to prevent.
+	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "fail"}
+	delData, _ := json.Marshal(del)
+	delMsg := &bentoMockMsg{data: delData}
+
+	good := EventMessage{TableName: "events", Data: map[string]any{"id": "1"}}
+	goodData, _ := json.Marshal(good)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	conn := &bentoMockConn{
+		execFn: func(context.Context, string, ...any) error { return errors.New("syntax error") },
+	}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- delMsg
+	iter.msgs <- goodMsg
+
+	js := &bentoMockJSWithError{publishErr: errors.New("NATS unavailable")}
+	input := &jsInput{iter: iter, chConn: conn, js: js}
+
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+
+	assert.False(t, delMsg.naked, "delete must not be Nak'd even when DLQ publish fails")
+	assert.True(t, delMsg.doubleAcked, "delete must still be DoubleAck'd to avoid infinite redelivery")
+
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table)
 }
 
 func TestJsInput_Read_DeleteDrainSuccess(t *testing.T) {
