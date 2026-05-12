@@ -508,25 +508,33 @@ func TestRetryRefresh_NilOnAttemptIsSafe(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestRetryRefresh_ClampsInvalidBackoffs verifies zero or negative bounds
-// fall back to defaults instead of busy-looping (a 0-duration time.After
-// would otherwise fire immediately and spin the CPU).
-func TestRetryRefresh_ClampsInvalidBackoffs(t *testing.T) {
+// TestClampBackoff exercises the busy-loop guard directly without observing
+// real wall-clock sleeps. RetryRefresh delegates to this helper, so the
+// behavioural guarantee ("zero/negative bounds fall back to a 1s default
+// rather than spinning the CPU") is locked in here instead of by sleeping
+// 1s in a unit test.
+func TestClampBackoff(t *testing.T) {
 	t.Parallel()
-	sr, _ := newFakeRegistry(t, []error{errors.New("once")})
-
-	// Cancel via context after a short window so we have a hard ceiling on
-	// how long this test can run, but expect success well before that.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Use 0 / -1 — should clamp to defaults (1s initial), but with only one
-	// failure the loop succeeds on the second attempt after ~1s.
-	start := time.Now()
-	err := sr.RetryRefresh(ctx, 0, -1, nil)
-	require.NoError(t, err)
-	elapsed := time.Since(start)
-	assert.GreaterOrEqual(t, elapsed, 900*time.Millisecond, "should sleep about 1s with clamped default")
+	tests := []struct {
+		name           string
+		initial, maxIn time.Duration
+		wantI, wantM   time.Duration
+	}{
+		{"zero initial clamps to 1s", 0, 5 * time.Second, time.Second, 5 * time.Second},
+		{"negative initial clamps to 1s", -1, 5 * time.Second, time.Second, 5 * time.Second},
+		{"zero max widens to initial", 100 * time.Millisecond, 0, 100 * time.Millisecond, 100 * time.Millisecond},
+		{"max smaller than initial widens to initial", 2 * time.Second, time.Second, 2 * time.Second, 2 * time.Second},
+		{"positive bounds pass through", 100 * time.Millisecond, time.Second, 100 * time.Millisecond, time.Second},
+		{"both non-positive falls back to default", 0, -1, time.Second, time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			i, m := clampBackoff(tt.initial, tt.maxIn)
+			assert.Equal(t, tt.wantI, i)
+			assert.Equal(t, tt.wantM, m)
+		})
+	}
 }
 
 // TestStartAutoRefresh_ExitsOnContextCancel verifies the ticker loop exits

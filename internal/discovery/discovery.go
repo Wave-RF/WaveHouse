@@ -113,6 +113,20 @@ func (sr *SchemaRegistry) List() []*TableSchema {
 	return result
 }
 
+// clampBackoff guards RetryRefresh against busy-looping when callers pass
+// zero/negative durations. Any non-positive initialBackoff falls back to 1s,
+// and maxBackoff is widened to at least initialBackoff. Extracted so the
+// clamp behaviour is unit-testable without observing real wall-clock sleeps.
+func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time.Duration) {
+	if initialBackoff <= 0 {
+		initialBackoff = time.Second
+	}
+	if maxBackoff < initialBackoff {
+		maxBackoff = initialBackoff
+	}
+	return initialBackoff, maxBackoff
+}
+
 // RetryRefresh repeatedly calls Refresh with exponential backoff until it
 // succeeds or ctx is cancelled. onAttempt is invoked after each failed
 // attempt with the resulting error, letting callers surface the latest
@@ -121,14 +135,9 @@ func (sr *SchemaRegistry) List() []*TableSchema {
 // The first attempt fires immediately. After a failure the loop sleeps for
 // initialBackoff, then doubles up to maxBackoff between attempts. Returns
 // nil on success or ctx.Err() on cancellation. Zero/negative bounds are
-// clamped to sensible defaults rather than busy-looping.
+// clamped via clampBackoff rather than busy-looping.
 func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(err error)) error {
-	if initialBackoff <= 0 {
-		initialBackoff = time.Second
-	}
-	if maxBackoff < initialBackoff {
-		maxBackoff = initialBackoff
-	}
+	initialBackoff, maxBackoff = clampBackoff(initialBackoff, maxBackoff)
 	backoff := initialBackoff
 	for {
 		if err := sr.Refresh(ctx); err == nil {
