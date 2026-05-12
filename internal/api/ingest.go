@@ -69,6 +69,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, exists := data["received_timestamp"]; exists {
+		slog.WarnContext(ctx, "payload contains reserved field", "field", "received_timestamp", "table", table)
+		writeJSONError(w, http.StatusBadRequest, "payload cannot contain reserved field 'received_timestamp'")
+		return
+	}
+
 	if err := discovery.Validate(schema, data); err != nil {
 		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, err.Error())

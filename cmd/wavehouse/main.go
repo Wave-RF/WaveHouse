@@ -207,9 +207,14 @@ func run() int {
 		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
+		cfg.ClickHouse.HTTPScheme,
 		cfg.ClickHouse.Username,
 		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,
+		func(fatalErr error) {
+			slog.Error("ingest worker died, initiating graceful shutdown", "error", fatalErr)
+			cancel()
+		},
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)
@@ -222,11 +227,15 @@ func run() int {
 	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			msg.Ack()
+			if err := msg.Ack(); err != nil {
+				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
+			}
 			return nil
 		}
 		hub.Broadcast(msg.Subject, msg)
-		msg.Ack()
+		if err := msg.Ack(); err != nil {
+			slog.Warn("failed to ack message from embedded hub bridge", "error", err)
+		}
 		return nil
 	}); err != nil {
 		logger.Error("hub bridge start", "error", err)

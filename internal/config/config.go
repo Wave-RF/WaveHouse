@@ -34,11 +34,12 @@ type Server struct {
 }
 
 type ClickHouse struct {
-	Addr     string `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
-	HTTPPort string `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
-	Database string `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
-	Username string `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
-	Password string `yaml:"password" env:"WH_CH_PASSWORD"`
+	Addr       string `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
+	HTTPPort   string `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
+	HTTPScheme string `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
+	Database   string `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
+	Username   string `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
+	Password   string `yaml:"password" env:"WH_CH_PASSWORD"`
 }
 
 type MQ struct {
@@ -94,6 +95,10 @@ type DLQ struct {
 
 // Validate checks the loaded configuration for logical consistency.
 func (c *Config) Validate() error {
+	if c.ClickHouse.HTTPScheme != "http" && c.ClickHouse.HTTPScheme != "https" {
+		return fmt.Errorf("clickhouse.http_scheme must be 'http' or 'https'")
+	}
+
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d out of range 1-65535", c.Server.Port)
 	}
