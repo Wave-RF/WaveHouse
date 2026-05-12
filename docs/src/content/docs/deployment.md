@@ -307,7 +307,7 @@ When `dlq.enabled` is `true` (default), failed batch inserts are published to th
 
 ## Observability (SigNoz)
 
-Set `observability.enabled: true` (or `WH_OBSERVABILITY_ENABLED=true`) and point `observability.otel_addr` at a reachable OTLP gRPC endpoint to export traces, metrics, and logs. When the collector is unreachable WaveHouse logs the error and falls back to stdout — startup is never blocked on the collector.
+Set `observability.enabled: true` (or `WH_OBSERVABILITY_ENABLED=true`) and point `observability.otel_addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. The logger fans out to both stdout and OTLP, so stdout output never disappears. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
 `deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally (ClickHouse + query service + OTel collector at `:4317`). Bring it up:
 

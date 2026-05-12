@@ -111,7 +111,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `observability.enabled` | `WH_OBSERVABILITY_ENABLED` | `false` | Enable the OpenTelemetry pipeline. When `true`, traces, metrics, and logs are exported to the collector at `otel_addr` via OTLP gRPC. When initialization fails (collector unreachable, etc.), the process logs the error and falls back to stdout logging — it does not abort startup. |
+| `observability.enabled` | `WH_OBSERVABILITY_ENABLED` | `false` | Enable the OpenTelemetry pipeline. When `true`, traces, metrics, and logs are exported to the collector at `otel_addr` via OTLP gRPC. Stdout is always active — the logger fans out to both stdout and the OTLP exporter — so logs never disappear regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup; transient export errors are surfaced via the OTel SDK's error handler. The `if err != nil` fallback in `main.go` only fires for genuine init errors (malformed options, resource construction failure). |
 | `observability.otel_addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | OTLP gRPC endpoint for the OpenTelemetry collector. Used only when `observability.enabled` is `true`. See `deployments/signoz/` for a local collector setup. |
 
 ### Logging
