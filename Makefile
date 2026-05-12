@@ -191,8 +191,9 @@ dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on 
 	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
 	@$(AIR) -c .air.toml
 
-# Docs site dev/preview servers — long-running, blocking. Astro defaults to
-# :4321 for dev and :4322 for preview, so they coexist with `make dev` on :8080.
+# Docs site dev/preview servers — long-running, blocking. Astro dev defaults
+# to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
+# `make dev` on :8080.
 .PHONY: dev-docs
 dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
 	@cd $(DOCS_DIR) && $(PNPM) dev
