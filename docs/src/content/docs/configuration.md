@@ -107,6 +107,19 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | -------- | ------- | ------- | ----------- |
 | `pipes.dir` | `WH_PIPES_DIR` | *(empty)* | Optional bootstrap source for named query pipes. When set, `.sql` files in this directory are loaded into the NATS KV pipe store on startup. The directory is **read-only at runtime** — it's a seed, not authoritative storage. After bootstrap, the API and KV are the source of truth (runtime pipe edits go through the API, not the files). Empty default skips bootstrap entirely. Mount read-only in containers (e.g. `./my-pipes:/app/pipes:ro`). |
 
+### Observability
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `observability.enabled` | `WH_OBSERVABILITY_ENABLED` | `false` | Enable the OpenTelemetry pipeline. When `true`, traces, metrics, and logs are exported to the collector at `otel_addr` via OTLP gRPC. When initialization fails (collector unreachable, etc.), the process logs the error and falls back to stdout logging — it does not abort startup. |
+| `observability.otel_addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | OTLP gRPC endpoint for the OpenTelemetry collector. Used only when `observability.enabled` is `true`. See `deployments/signoz/` for a local collector setup. |
+
+### Logging
+
+| Env Var | Default | Description |
+| ------- | ------- | ----------- |
+| `WH_LOG_LEVEL` | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARN`, `ERROR`. Applies to both stdout and (when observability is enabled) the OTLP log exporter. |
+
 ## Example Config File
 
 ```yaml
@@ -154,4 +167,8 @@ policy:
 
 pipes:
   dir: ""                # empty = skip bootstrap; set + read-only mount to seed pipes
+
+observability:
+  enabled: false         # set true to export traces/metrics/logs via OTLP gRPC
+  otel_addr: 127.0.0.1:4317
 ```

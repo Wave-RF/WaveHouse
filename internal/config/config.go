@@ -14,17 +14,17 @@ type Config struct {
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.
-	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
-	Server     Server     `yaml:"server"`
-	ClickHouse ClickHouse `yaml:"clickhouse"`
-	MQ         MQ         `yaml:"mq"`
-	Dedupe     Dedupe     `yaml:"dedupe"`
-	Cache      Cache      `yaml:"cache"`
-	Auth       Auth       `yaml:"auth"`
-	Schema     Schema     `yaml:"schema"`
-	DLQ        DLQ        `yaml:"dlq"`
-	Policy     Policy     `yaml:"policy"`
-	Pipes      Pipes      `yaml:"pipes"`
+	DataDir       string        `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	Server        Server        `yaml:"server"`
+	ClickHouse    ClickHouse    `yaml:"clickhouse"`
+	MQ            MQ            `yaml:"mq"`
+	Dedupe        Dedupe        `yaml:"dedupe"`
+	Cache         Cache         `yaml:"cache"`
+	Auth          Auth          `yaml:"auth"`
+	Schema        Schema        `yaml:"schema"`
+	DLQ           DLQ           `yaml:"dlq"`
+	Policy        Policy        `yaml:"policy"`
+	Pipes         Pipes         `yaml:"pipes"`
 	Observability Observability `yaml:"observability"`
 }
 

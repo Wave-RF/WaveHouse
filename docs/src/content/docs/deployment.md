@@ -305,6 +305,20 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 When `dlq.enabled` is `true` (default), failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
 
+## Observability (SigNoz)
+
+Set `observability.enabled: true` (or `WH_OBSERVABILITY_ENABLED=true`) and point `observability.otel_addr` at a reachable OTLP gRPC endpoint to export traces, metrics, and logs. When the collector is unreachable WaveHouse logs the error and falls back to stdout — startup is never blocked on the collector.
+
+`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally (ClickHouse + query service + OTel collector at `:4317`). Bring it up:
+
+```bash
+docker compose -f deployments/signoz/docker-compose.yaml up -d
+```
+
+ClickHouse credentials inside the SigNoz stack default to `default` / `password`. To override, copy `deployments/signoz/.env.example` to `deployments/signoz/.env` and set `SIGNOZ_CH_USER` / `SIGNOZ_CH_PASSWORD`. The `.env` file is gitignored.
+
+The SigNoz UI is exposed on `http://localhost:3301`. Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` (the default).
+
 ## Resetting Data in Development
 
 ### Option 1: Drop and Recreate Tables

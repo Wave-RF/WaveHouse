@@ -77,7 +77,7 @@ func run() int {
 
 	ctx := context.Background()
 	serviceName := "wavehouse"
-	
+
 	var level slog.Level
 	switch os.Getenv("WH_LOG_LEVEL") {
 	case "DEBUG":
@@ -102,9 +102,6 @@ func run() int {
 				_ = otelShutdown(context.Background())
 			}()
 
-			logLevel := &slog.LevelVar{}
-			logLevel.Set(slog.LevelInfo)
-			
 			otelLogger := observability.NewLogger(serviceName, logLevel, true)
 			logger = otelLogger.With(
 				"version", Version,

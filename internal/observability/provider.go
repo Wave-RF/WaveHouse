@@ -108,9 +108,7 @@ func InitProvider(ctx context.Context, serviceName, endpoint string) (func(conte
 		log.WithResource(res),
 	)
 	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-	
 	global.SetLoggerProvider(loggerProvider)
-	// --- END PASTE ---
 
 	if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {
 		handleErr(err)
