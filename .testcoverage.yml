@@ -1,7 +1,12 @@
 # Configuration for the vladopajic/go-test-coverage CI action.
 # Docs: https://github.com/vladopajic/go-test-coverage
 
-profile: tmp/coverage/unit/coverage.txt
+# The merged-suites profile produced by `scripts/cov merge` at the end of
+# `make ci`. Contains unit + integration + e2e coverage stitched together,
+# so the `threshold.total` below (80%) applies to the *project-wide* number
+# the badge advertises, not just unit coverage (which is ~73% on its own
+# and would fail the 80% gate misleadingly).
+profile: tmp/coverage/total/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
 # Default threshold for go-test-coverage's own gate (used by the badge-publish
