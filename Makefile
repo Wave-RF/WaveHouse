@@ -541,9 +541,9 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 #   clean-all    everything above + data/ + docker volumes (full reset)
 
 .PHONY: clean
-clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/)
+clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ dist/ clients/ts/dist/
+	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/
 
 .PHONY: clean-test
 clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)

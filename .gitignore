@@ -71,6 +71,7 @@ __debug_bin*
 docs/.astro/
 docs/.env.production
 docs/.wrangler/
+docs/dist/
 
 # pnpm
 pnpm-debug.log*
