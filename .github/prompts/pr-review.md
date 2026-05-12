@@ -125,20 +125,38 @@ mechanism Gemini Code Assist uses. *Do not* dump every
 finding into one giant prose blob — that pattern caused the
 sticky comment to bloat.
 
+**Tag every inline comment with exactly one severity** at the
+start of the body: `[MUST]`, `[SHOULD]`, or `[MAY]`. This
+matches `.gemini/styleguide.md` so both reviewers speak the
+same language and the author can filter on tag.
+
+  - `[MUST]` — correctness bug, security issue, broken
+    invariant, missing required documentation sync. The PR
+    can't merge until this is addressed.
+  - `[SHOULD]` — quality / maintainability issue the author
+    should fix, but isn't a release blocker if they push back
+    with reasoning.
+  - `[MAY]` — minor suggestion, style nit, alternative
+    approach. Take or leave.
+
 **Use the sticky summary comment for the verdict only.** One
 short top-level comment with:
   - A one-line headline grouping findings by severity (e.g.
-    "1 HIGH security, 2 MEDIUM correctness, 1 LOW docs").
+    "2 [MUST], 1 [SHOULD], 0 [MAY]").
   - A pointer to read the inline threads for detail.
   - The verdict line, **exactly one of**: `Ship it`,
     `Iterate`, or `Block`, followed by the single most
     important thing the author must address.
 
-Verdict rules:
-  - `Block` only when a CRITICAL/HIGH security finding,
-    data-loss risk, or broken core invariant is present.
-  - `Iterate` for everything else that needs changes.
-  - `Ship it` only if there are no findings worth resolving.
+Verdict rules (matched to the styleguide):
+  - `Block` — a `[MUST]` finding that's a CRITICAL/HIGH
+    security issue, data-loss risk, or broken core
+    invariant. Cannot proceed without addressing.
+  - `Iterate` — one or more `[MUST]` findings that aren't
+    `Block`-level, or multiple `[SHOULD]` findings that
+    collectively need a pass.
+  - `Ship it` — no `[MUST]`s and few or no `[SHOULD]`s.
+    `[MAY]` findings alone don't preclude `Ship it`.
 
 What not to comment on:
   - Anything the linter already catches (gofumpt, govet,
