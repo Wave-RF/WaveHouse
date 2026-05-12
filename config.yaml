@@ -10,9 +10,9 @@ server:
     - "*"
 
 observability:
-  enabled: true
+  enabled: false         # set true to export traces/metrics/logs via OTLP gRPC
   otel_addr: "127.0.0.1:4317"
-  
+
 clickhouse:
   addr: localhost:9000
   http_port: 8123

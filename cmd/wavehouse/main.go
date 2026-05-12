@@ -93,6 +93,9 @@ func run() int {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
 
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
+
 	if cfg.Observability.Enabled {
 		otelShutdown, err := observability.InitProvider(ctx, serviceName, cfg.Observability.OTelAddr)
 		if err != nil {
