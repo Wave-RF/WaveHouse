@@ -10,9 +10,13 @@ import (
 
 // LocalCache is an L1 in-process cache backed by Ristretto.
 type LocalCache struct {
-	cache   *ristretto.Cache[string, []byte]
-	ttls    sync.Map // key -> expiry time.Time
-	tagsMap sync.Map // tag (string) -> *sync.Map (key -> struct{})
+	cache *ristretto.Cache[string, []byte]
+	ttls  sync.Map // key -> expiry time.Time
+
+	// tagsMu guards tagsMap and keyTags to prevent TOCTOU races during Set/Invalidate
+	tagsMu  sync.RWMutex
+	tagsMap map[string]map[string]struct{} // tag -> set of keys
+	keyTags map[string][]string            // key -> list of tags (for leak cleanup)
 }
 
 // NewLocal creates a new Ristretto-backed local cache.
@@ -25,7 +29,11 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LocalCache{cache: c}, nil
+	return &LocalCache{
+		cache:   c,
+		tagsMap: make(map[string]map[string]struct{}),
+		keyTags: make(map[string][]string),
+	}, nil
 }
 
 func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
@@ -42,6 +50,22 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 			if remaining <= 0 {
 				l.cache.Del(key)
 				l.ttls.Delete(key)
+
+				// [SHOULD FIX]: Cleanup memory leak on natural expiry
+				l.tagsMu.Lock()
+				if tags, exists := l.keyTags[key]; exists {
+					for _, tag := range tags {
+						if keys, ok := l.tagsMap[tag]; ok {
+							delete(keys, key)
+							if len(keys) == 0 {
+								delete(l.tagsMap, tag)
+							}
+						}
+					}
+					delete(l.keyTags, key)
+				}
+				l.tagsMu.Unlock()
+
 				return nil, 0, nil
 			}
 		}
@@ -57,24 +81,45 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	}
 	l.ttls.Store(key, exp)
 
-	// Register key under each tag
+	// Acquire lock for the entire tag registration block
+	l.tagsMu.Lock()
+	defer l.tagsMu.Unlock()
+
+	// Clean up old tags if we are overwriting an existing key
+	if oldTags, exists := l.keyTags[key]; exists {
+		for _, oldTag := range oldTags {
+			if m, ok := l.tagsMap[oldTag]; ok {
+				delete(m, key)
+				if len(m) == 0 {
+					delete(l.tagsMap, oldTag)
+				}
+			}
+		}
+	}
+
+	l.keyTags[key] = tags
 	for _, tag := range tags {
-		m, _ := l.tagsMap.LoadOrStore(tag, &sync.Map{})
-		m.(*sync.Map).Store(key, struct{}{})
+		if l.tagsMap[tag] == nil {
+			l.tagsMap[tag] = make(map[string]struct{})
+		}
+		l.tagsMap[tag][key] = struct{}{}
 	}
 	return nil
 }
 
 func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
+	// Hold lock for the entire invalidation sweep to block concurrent Sets
+	l.tagsMu.Lock()
+	defer l.tagsMu.Unlock()
+
 	for _, tag := range tags {
-		// Atomically remove the map from the index before iterating
-		if keysMap, ok := l.tagsMap.LoadAndDelete(tag); ok {
-			keysMap.(*sync.Map).Range(func(key, _ any) bool {
-				k := key.(string)
+		if keys, ok := l.tagsMap[tag]; ok {
+			for k := range keys {
 				l.cache.Del(k)
 				l.ttls.Delete(k)
-				return true
-			})
+				delete(l.keyTags, k)
+			}
+			delete(l.tagsMap, tag)
 		}
 	}
 	return nil

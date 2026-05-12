@@ -192,8 +192,9 @@ Executes a SQL query directly against ClickHouse. Results are cached using a two
 
 The response includes a cache header:
 
-- `X-Cache: HIT` — served from cache
-- `X-Cache: MISS` — fetched from ClickHouse
+- `X-Cache: BYPASS` — the query bypassed the cache to ensure consistency (Standard for raw SQL)
+- `X-Cache: HIT` — served from cache (Standard for Pipes and Structured Queries)
+- `X-Cache: MISS` — fetched from ClickHouse and subsequently cached
 
 **Error responses:**
 

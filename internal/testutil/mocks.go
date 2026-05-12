@@ -103,15 +103,20 @@ func (m *MockDeduplicator) Close() error { return nil }
 // Ensure MockCache implements cache.Cache at compile time.
 var _ cache.Cache = (*MockCache)(nil)
 
+type mockEntry struct {
+	data []byte
+	tags []string
+}
+
 // MockCache implements cache.Cache for testing.
 type MockCache struct {
 	mu    sync.Mutex
-	store map[string][]byte
-	Err   error // if set, all operations return this error
+	store map[string]mockEntry
+	Err   error
 }
 
 func NewMockCache() *MockCache {
-	return &MockCache{store: make(map[string][]byte)}
+	return &MockCache{store: make(map[string]mockEntry)}
 }
 
 func (m *MockCache) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
@@ -124,7 +129,7 @@ func (m *MockCache) Get(_ context.Context, key string) ([]byte, time.Duration, e
 	if !ok {
 		return nil, 0, nil
 	}
-	return v, 300 * time.Second, nil
+	return v.data, 300 * time.Second, nil
 }
 
 func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Duration, tags []string) error {
@@ -133,7 +138,7 @@ func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Dura
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.store[key] = value
+	m.store[key] = mockEntry{data: value, tags: tags}
 	return nil
 }
 
@@ -143,8 +148,18 @@ func (m *MockCache) InvalidateByTags(_ context.Context, tags []string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// For the mock, we can just clear the whole store or match specific logic
-	m.store = make(map[string][]byte)
+
+	for key, entry := range m.store {
+		for _, targetTag := range tags {
+			for _, entryTag := range entry.tags {
+				if targetTag == entryTag {
+					delete(m.store, key)
+					goto NextKey // Skip checking other tags for this key once deleted
+				}
+			}
+		}
+	NextKey:
+	}
 	return nil
 }
 

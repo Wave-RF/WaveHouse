@@ -19,6 +19,7 @@ type memCache struct {
 type cacheEntry struct {
 	data []byte
 	ttl  time.Duration
+	tags []string
 }
 
 func newMemCache() *memCache { return &memCache{store: make(map[string]cacheEntry)} }
@@ -35,7 +36,7 @@ func (m *memCache) Get(_ context.Context, key string) ([]byte, time.Duration, er
 
 func (m *memCache) Set(_ context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
 	m.mu.Lock()
-	m.store[key] = cacheEntry{data: value, ttl: ttl}
+	m.store[key] = cacheEntry{data: value, ttl: ttl, tags: tags}
 	m.mu.Unlock()
 	return nil
 }
@@ -43,10 +44,16 @@ func (m *memCache) Set(_ context.Context, key string, value []byte, ttl time.Dur
 func (m *memCache) InvalidateByTags(_ context.Context, tags []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for k := range m.store {
-		// For a simple test mock, we can just clear everything
-		// or check if any tag is relevant.
-		delete(m.store, k)
+	for k, entry := range m.store {
+		for _, targetTag := range tags {
+			for _, entryTag := range entry.tags {
+				if targetTag == entryTag {
+					delete(m.store, k)
+					goto NextKey
+				}
+			}
+		}
+	NextKey:
 	}
 	return nil
 }

@@ -99,9 +99,9 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `cache/` — Two-Tier Caching
 
-- **cache.go** — `Cache` interface: `Get`, `Set`, `Close`.
-- **local.go** — L1 in-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
-- **tiered.go** — Combines L1 + L2 with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses.
+- **cache.go** — `Cache` interface: `Get`, `Set` (with tags), `InvalidateByTags`, and `Close`.
+- **local.go** — L1 in-process cache using [Ristretto](https://github.com/dgraph-io/ristretto). It maintains a thread-safe `tagsMap` that links database table names to specific cache keys. This allows for granular invalidation without clearing the entire cache.
+- **tiered.go** — Combines L1 + L2. In standalone mode, it manages the synchronous invalidation signal from the ingest worker to the L1 tier.
 
 ### `config/` — Configuration
 
@@ -162,8 +162,13 @@ Bento ingest pipeline (StartIngestWorker):
   → Validate table name against safeIdentifierRe
   → Batch events per table, bulk INSERT to ClickHouse
   → Delete actions handled inline (chConn.Exec)
-  → On success: Ack messages
-  → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
+  → On success:
+    → Trigger Cache.InvalidateByTags([table_name]) 
+    → (Purges all L1/L2 entries associated with that table)
+    → DoubleAck messages to NATS (confirmed persistence)
+  → On failure:
+    → Route batch to DLQ output (subject: dlq.{table})
+    → Ack to NATS to prevent infinite retry loops
 
 Active Sweeper (async goroutine, every 60s):
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)
@@ -175,14 +180,22 @@ Active Sweeper (async goroutine, every 60s):
 ### Query Path
 
 ```text
-Client POST /v1/query
+Client POST /v1/query (Raw SQL)
+  → Optional JWT auth middleware
+  → Execute query directly on ClickHouse (Cache Bypass)
+  → If SQL is a mutation (INSERT/UPDATE/DELETE):
+    → Extract table names
+    → Trigger InvalidateByTags across Cache tiers
+  → Return result (X-Cache: BYPASS header)
+
+Client POST /v1/tables/{table}/query (Structured) or /v1/pipes/{name}
   → Optional JWT auth middleware
   → Check tiered cache (L1 → L2)
   → Cache HIT: return cached result (X-Cache: HIT header)
   → Cache MISS:
-    → Execute query directly on ClickHouse
-    → Convert UUID/DateTime types to strings
-    → Store result in L1 + L2
+    → Execute query on ClickHouse
+    → Extract table tags from SQL
+    → Store result in L1 + L2 associated with table tags
     → Return result (X-Cache: MISS header)
 ```
 
