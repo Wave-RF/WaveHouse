@@ -205,6 +205,7 @@ func run() int {
 		ctx,
 		embeddedMQ.NatsConn(),
 		chConn,
+		tiered,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.HTTPScheme,

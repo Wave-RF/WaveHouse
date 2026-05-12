@@ -162,10 +162,14 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
+	l1, _ := cache.NewLocal(1024 * 1024)
+	tiered := cache.NewTiered(l1, nil)
+
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
 		ch.conn,
+		tiered,
 		ch.nativeAddr(),
 		ch.httpPort,
 		"http",

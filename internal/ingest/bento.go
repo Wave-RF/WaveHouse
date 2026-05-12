@@ -27,8 +27,9 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
-	"go.opentelemetry.io/otel"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -302,6 +303,7 @@ type clickhouseOutput struct {
 	user       string
 	password   string
 	db         string
+	apiCache   *cache.TieredCache
 }
 
 func (c *clickhouseOutput) Connect(ctx context.Context) error { return nil }
@@ -448,6 +450,10 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return err
 	}
 
+	if c.apiCache != nil {
+		_ = c.apiCache.InvalidateByTags(ctx, []string{tableName})
+	}
+
 	return nil
 }
 
@@ -455,7 +461,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, apiCache *cache.TieredCache, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -518,6 +524,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 					user:       chUser,
 					password:   chPassword,
 					db:         chDB,
+					apiCache:   apiCache,
 				}, service.BatchPolicy{}, 1, nil
 			},
 		); err != nil {

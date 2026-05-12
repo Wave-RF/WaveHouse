@@ -146,7 +146,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, data, ttl, []string{table})
 		}
 		return data, nil
 	})

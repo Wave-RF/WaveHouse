@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"regexp"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -16,6 +17,10 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
+
+// Regex to detect mutating queries and extract table names
+var mutationRe = regexp.MustCompile(`(?i)^\s*(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)`)
+var extractTablesRawRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
 
 // QueryHandler handles POST /v1/query.
 type QueryHandler struct {
@@ -40,7 +45,6 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if h.PolicyStore != nil {
 		role := RoleFromContext(r.Context())
 		if role != "" && role != "admin" && role != "service" {
-			// Check if the role has raw_sql permission on any table.
 			p := h.PolicyStore.Get()
 			if p != nil {
 				claims, _ := ClaimsFromContext(r.Context())
@@ -70,45 +74,45 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := queryCacheKey(req.SQL, req.Params)
+	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 
-	// Try cache.
-	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data)
-			return
+	// Execute immediately (Bypassing the Cache)
+	result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// CRUDE INVALIDATION STOP-GAP:
+	// If this raw SQL was a mutation, extract the table names and invalidate them.
+	if h.Cache != nil && mutationRe.MatchString(req.SQL) {
+		matches := extractTablesRawRe.FindAllStringSubmatch(req.SQL, -1)
+		var tags []string
+		seen := make(map[string]bool)
+		for _, m := range matches {
+			if len(m) > 1 {
+				tbl := m[1]
+				if !seen[tbl] {
+					seen[tbl] = true
+					tags = append(tags, tbl)
+				}
+			}
+		}
+		if len(tags) > 0 {
+			_ = h.Cache.InvalidateByTags(r.Context(), tags)
 		}
 	}
 
-	// Execute query with singleflight to protect ClickHouse from thundering herds.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
-		if err != nil {
-			return nil, err
-		}
-
-		data, err := json.Marshal(result)
-		if err != nil {
-			return nil, err
-		}
-
-		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
-		}
-		return data, nil
-	})
+	data, err := json.Marshal(result)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte))
+	w.Header().Set("X-Cache", "BYPASS")
+	_, _ = w.Write(data)
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {

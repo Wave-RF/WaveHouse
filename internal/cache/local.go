@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -11,8 +10,9 @@ import (
 
 // LocalCache is an L1 in-process cache backed by Ristretto.
 type LocalCache struct {
-	cache *ristretto.Cache[string, []byte]
-	ttls  sync.Map // key -> expiry time.Time
+	cache   *ristretto.Cache[string, []byte]
+	ttls    sync.Map // key -> expiry time.Time
+	tagsMap sync.Map // tag (string) -> *sync.Map (key -> struct{})
 }
 
 // NewLocal creates a new Ristretto-backed local cache.
@@ -37,7 +37,6 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 	var remaining time.Duration
 	if expVal, ok := l.ttls.Load(key); ok {
 		exp := expVal.(time.Time)
-		// Only calculate remaining TTL if it was given an expiration (non-zero time)
 		if !exp.IsZero() {
 			remaining = time.Until(exp)
 			if remaining <= 0 {
@@ -50,30 +49,39 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 	return val, remaining, nil
 }
 
-func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
+func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
 	l.cache.SetWithTTL(key, value, int64(len(value)), ttl)
 	var exp time.Time
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
 	}
 	l.ttls.Store(key, exp)
+
+	// Register key under each tag
+	for _, tag := range tags {
+		m, _ := l.tagsMap.LoadOrStore(tag, &sync.Map{})
+		m.(*sync.Map).Store(key, struct{}{})
+	}
 	return nil
 }
 
-func (l *LocalCache) InvalidateByPrefix(_ context.Context, prefix string) error {
-	l.ttls.Range(func(key, value any) bool {
-		k := key.(string)
-		if strings.HasPrefix(k, prefix) {
-			l.cache.Del(k)
-			l.ttls.Delete(k)
+func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
+	for _, tag := range tags {
+		if keysMap, ok := l.tagsMap.Load(tag); ok {
+			// Iterate through all keys associated with this tag
+			keysMap.(*sync.Map).Range(func(key, _ any) bool {
+				k := key.(string)
+				l.cache.Del(k)
+				l.ttls.Delete(k)
+				return true
+			})
+			// Clear the tag index entirely
+			l.tagsMap.Delete(tag)
 		}
-		return true // continue iteration
-	})
+	}
 	return nil
 }
 
-// Wait blocks until all buffered writes have been applied.
-// Exposed for testing; production callers rarely need this.
 func (l *LocalCache) Wait() {
 	l.cache.Wait()
 }

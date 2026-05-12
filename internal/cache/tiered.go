@@ -32,7 +32,8 @@ func (t *TieredCache) Get(ctx context.Context, key string) ([]byte, time.Duratio
 			val, ttl, err := t.l2.Get(ctx, key)
 			if err == nil && val != nil {
 				// Backfill L1 with remaining TTL from L2.
-				_ = t.l1.Set(ctx, key, val, ttl)
+				// Note: We don't have the original tags here, but L2 is out-of-scope for v1 Standalone.
+				_ = t.l1.Set(ctx, key, val, ttl, nil)
 				return &cacheResult{data: val, ttl: ttl}, nil
 			}
 		}
@@ -48,23 +49,24 @@ func (t *TieredCache) Get(ctx context.Context, key string) ([]byte, time.Duratio
 	return nil, 0, nil
 }
 
-func (t *TieredCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
-	if err := t.l1.Set(ctx, key, value, ttl); err != nil {
+// UPDATE: Accept tags and pass them down
+func (t *TieredCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
+	if err := t.l1.Set(ctx, key, value, ttl, tags); err != nil {
 		return err
 	}
 	if t.l2 != nil {
-		return t.l2.Set(ctx, key, value, ttl)
+		return t.l2.Set(ctx, key, value, ttl, tags)
 	}
 	return nil
 }
 
-// InvalidateByPrefix clears matching keys from all active tiers.
-func (t *TieredCache) InvalidateByPrefix(ctx context.Context, prefix string) error {
-	if err := t.l1.InvalidateByPrefix(ctx, prefix); err != nil {
+// UPDATE: Replace InvalidateByPrefix with InvalidateByTags
+func (t *TieredCache) InvalidateByTags(ctx context.Context, tags []string) error {
+	if err := t.l1.InvalidateByTags(ctx, tags); err != nil {
 		return err
 	}
 	if t.l2 != nil {
-		return t.l2.InvalidateByPrefix(ctx, prefix)
+		return t.l2.InvalidateByTags(ctx, tags)
 	}
 	return nil
 }

@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -128,30 +127,25 @@ func (m *MockCache) Get(_ context.Context, key string) ([]byte, time.Duration, e
 	return v, 300 * time.Second, nil
 }
 
-func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Duration) error {
-	if m.Err != nil {
-		return m.Err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store[key] = value
-	return nil
+func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Duration, tags []string) error {
+    if m.Err != nil {
+        return m.Err
+    }
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.store[key] = value
+    return nil
 }
 
-func (m *MockCache) InvalidateByPrefix(_ context.Context, prefix string) error {
-	if m.Err != nil {
-		return m.Err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Iterate through all keys in the mock store
-	for key := range m.store {
-		// If the key starts with the prefix, delete it
-		if strings.HasPrefix(key, prefix) {
-			delete(m.store, key)
-		}
-	}
-	return nil
+func (m *MockCache) InvalidateByTags(_ context.Context, tags []string) error {
+    if m.Err != nil {
+        return m.Err
+    }
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    // For the mock, we can just clear the whole store or match specific logic
+    m.store = make(map[string][]byte) 
+    return nil
 }
 
 func (m *MockCache) Close() error { return nil }

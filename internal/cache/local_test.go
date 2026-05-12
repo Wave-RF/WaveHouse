@@ -28,7 +28,7 @@ func TestLocalCache_SetAndGet(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	err = c.Set(ctx, "key1", []byte("hello"), 10*time.Second)
+	err = c.Set(ctx, "key1", []byte("hello"), 10*time.Second, nil)
 	assert.NoError(t, err)
 
 	// Ristretto uses async admission — wait briefly for it to be admitted.
@@ -48,7 +48,7 @@ func TestLocalCache_ExpiredKey(t *testing.T) {
 
 	ctx := context.Background()
 	// Set with very short TTL.
-	err = c.Set(ctx, "expires", []byte("data"), 1*time.Millisecond)
+	err = c.Set(ctx, "expires", []byte("data"), 1*time.Millisecond, nil)
 	assert.NoError(t, err)
 
 	// Ensure async admission completes, then wait for expiry.
@@ -67,9 +67,9 @@ func TestLocalCache_Overwrite(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	require.NoError(t, c.Set(ctx, "key", []byte("v1"), 10*time.Second))
+	require.NoError(t, c.Set(ctx, "key", []byte("v1"), 10*time.Second, nil))
 	c.Wait()
-	require.NoError(t, c.Set(ctx, "key", []byte("v2"), 10*time.Second))
+	require.NoError(t, c.Set(ctx, "key", []byte("v2"), 10*time.Second, nil))
 	c.Wait()
 
 	val, _, err := c.Get(ctx, "key")
@@ -84,7 +84,7 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	err = c.Set(ctx, "notimed", []byte("data"), 0)
+	err = c.Set(ctx, "notimed", []byte("data"), 0, nil)
 	assert.NoError(t, err)
 
 	time.Sleep(10 * time.Millisecond)
@@ -97,27 +97,26 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 	}
 }
 
-func TestLocalCache_InvalidateByPrefix(t *testing.T) {
-	t.Parallel()
-	c, err := NewLocal(1 << 20)
-	require.NoError(t, err)
-	defer func() { _ = c.Close() }()
+func TestLocalCache_InvalidateByTags(t *testing.T) {
+    t.Parallel()
+    c, err := NewLocal(1 << 20)
+    require.NoError(t, err)
+    defer func() { _ = c.Close() }()
 
-	ctx := context.Background()
-	// Set two keys matching the prefix (one with TTL, one without)
-	require.NoError(t, c.Set(ctx, "query:clicks:123", []byte("val1"), 10*time.Second))
-	require.NoError(t, c.Set(ctx, "query:clicks:456", []byte("val2"), 0))
-	
-	// Set a key that SHOULD NOT be affected
-	require.NoError(t, c.Set(ctx, "query:users:789", []byte("val3"), 10*time.Second))
+    ctx := context.Background()
+    
+    // Pass the table names as the tags slice
+    require.NoError(t, c.Set(ctx, "query:clicks:123", []byte("val1"), 10*time.Second, []string{"clicks"}))
+    require.NoError(t, c.Set(ctx, "query:clicks:456", []byte("val2"), 0, []string{"clicks"}))
+    
+    // This key belongs to 'users', so it won't be wiped when we invalidate 'clicks'
+    require.NoError(t, c.Set(ctx, "query:users:789", []byte("val3"), 10*time.Second, []string{"users"}))
 
-	// Wait for async admission
-	c.Wait()
-	time.Sleep(10 * time.Millisecond)
+    c.Wait()
 
-	// Wipe out the clicks table cache
-	err = c.InvalidateByPrefix(ctx, "query:clicks:")
-	assert.NoError(t, err)
+    // Wipe out the clicks table cache
+    err = c.InvalidateByTags(ctx, []string{"clicks"})
+    assert.NoError(t, err)
 
 	// Verify the target keys are gone
 	val1, _, _ := c.Get(ctx, "query:clicks:123")

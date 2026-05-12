@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -12,6 +13,25 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
+
+// Naive regex to extract table names from queries
+var extractTablesRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
+
+func extractTables(sql string) []string {
+	matches := extractTablesRe.FindAllStringSubmatch(sql, -1)
+	var tables []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) > 1 {
+			tbl := m[1]
+			if !seen[tbl] {
+				seen[tbl] = true
+				tables = append(tables, tbl)
+			}
+		}
+	}
+	return tables
+}
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
@@ -134,7 +154,6 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
@@ -151,7 +170,9 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
+			// Extract tags and assign to the cache entry
+			tags := extractTables(sql)
+			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL, tags)
 		}
 		return data, nil
 	})
