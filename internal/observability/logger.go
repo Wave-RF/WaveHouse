@@ -29,6 +29,21 @@ func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
+// otlpSamplerFn returns the per-record sample rate for the OTLP log exporter.
+// WARN+ records always return 1.0 (non-configurable safety floor — silently
+// dropping errors during incidents would be a worse failure mode than the
+// cost of forwarding them all). DEBUG/INFO records return otlpSampleRate.
+// Extracted from NewLogger so the policy is unit-testable independently of
+// the surrounding slogmulti / slogsampling plumbing.
+func otlpSamplerFn(otlpSampleRate float64) func(context.Context, slog.Record) float64 {
+	return func(_ context.Context, r slog.Record) float64 {
+		if r.Level >= slog.LevelWarn {
+			return 1.0
+		}
+		return otlpSampleRate
+	}
+}
+
 // NewLogger creates a production-ready logger with component tags and trace
 // support. otlpSampleRate (in [0.0, 1.0]) caps OTLP export of DEBUG/INFO
 // records; WARN/ERROR always export at 100% — dropping them silently during
@@ -50,12 +65,7 @@ func NewLogger(component string, level *slog.LevelVar, isJSON bool, otlpSampleRa
 	otelHandler := otelslog.NewHandler(component, otelslog.WithLoggerProvider(global.GetLoggerProvider()))
 
 	sampler := slogsampling.CustomSamplingOption{
-		Sampler: func(_ context.Context, r slog.Record) float64 {
-			if r.Level >= slog.LevelWarn {
-				return 1.0
-			}
-			return otlpSampleRate
-		},
+		Sampler: otlpSamplerFn(otlpSampleRate),
 	}.NewMiddleware()
 
 	handler := slogmulti.Fanout(
