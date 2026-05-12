@@ -39,7 +39,7 @@ func TestEmbeddedNATS_PublishSubscribe(t *testing.T) {
 		mu.Lock()
 		received[msg.Subject] = msg.Data
 		mu.Unlock()
-		msg.Ack()
+		_ = msg.Ack()
 		select {
 		case done <- struct{}{}:
 		default:
@@ -85,14 +85,16 @@ func TestEmbeddedNATS_SubscribeCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	err := e.Subscribe(ctx, "ingest.cancel.x", "cancel-consumer", func(msg *Message) error {
-		msg.Ack()
+		// Clean, idiomatic, and blocks until cancellation
+		<-ctx.Done()
 		return nil
 	})
 	require.NoError(t, err)
+
 	cancel()
-	// No assertion beyond "doesn't hang" — giving the background goroutine a
-	// moment to observe ctx.Done() is enough.
-	time.Sleep(50 * time.Millisecond)
+
+	// Deterministically wait for the context to finish
+	<-ctx.Done()
 }
 
 // slogNATSLogger is exercised by NewEmbedded setup, but the individual

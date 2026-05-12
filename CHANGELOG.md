@@ -23,7 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Composite actions for board operations** (`.github/actions/board-upsert-status`, `.github/actions/assign-and-request-review`, `.github/actions/set-linked-issues-status`): reusable building blocks for idempotent "upsert item on the Task Board + set Status," "assign PR reviewers + request their review as a pair," and "mirror status to all linked issues" across workflows. Replaces ~200 lines of duplicated GraphQL/gh-project bash between `project-orchestrator.yml` and `dependabot-automerge.yml`, and gives the new `board-state-sync.yml` a single place to debug board interactions.
 - **Bidirectional board state sync** (`.github/workflows/board-state-sync.yml`): when a human manually moves a card's Status on the Task Board UI, mirrors the change to the linked PR/Issue. Uses the `projects_v2_item: edited` event + `changes.field_value` payload to detect Status changes specifically; guards against ping-pong loops by no-oping when the target counterpart is already in the expected mirrored state. Mapping: PR Ready ↔ Issue In review, PR In review ↔ Issue Ready, both Done together. In progress on one side doesn't clobber the other (manual mid-review state, preserved).
 - **Dependabot major-bump Task Board placement** (`.github/workflows/dependabot-automerge.yml`): on a held major-version bump, the workflow now adds the PR to the board with Status=Ready and assigns both admins + requests review — parity with the `reeval` path for non-Dependabot PRs, so major bumps don't vanish into the PR list.
-- **`workflow_dispatch` manual trigger on `ci.yml`**: lets us re-run CI on demand for any branch via `gh workflow run CI --ref <branch>`. Added after PR #79 hit a GitHub-side anomaly where `pull_request` events stopped firing for a single PR's branch (the rest of the repo was unaffected); merging from main re-engaged event delivery, but the manual trigger is a useful escape hatch in general.
+- **`workflow_dispatch` manual trigger on `ci.yml`**: lets us re-run CI on demand for any branch via `gh workflow run CI --ref <branch>`. Added after PR #79 hit a GitHub-side anomaly where `pull_request` events stopped firing for a single PR's branch.
+
+### Changed
+- **Breaking:** `mq.Message.Ack()` and `mq.Message.Nak()` now return `error` (previously no return value) and no longer accept a `context.Context`.
+- **Breaking:** Added `mq.Message.DoubleAck(ctx context.Context) error` for synchronous, server-confirmed acknowledgments. Use this for critical ingest paths (ClickHouse writes).
+- Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation before finalizing batches.
+- Ingest worker now strictly enforces `insert` and `delete` actions; unrecognized actions are safely rejected to the DLQ.
 
 ### Fixed
 
@@ -33,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`admin-approval.yml` required-check staying red after a valid admin approval** (`.github/workflows/admin-approval.yml`): two independent causes, both fixed.
   - `concurrency.cancel-in-progress: true` was producing CANCELLED check runs when a second event (e.g., a bot comment) fired while the approval-triggered run was still executing. Cancelled check runs aren't SUCCESS or FAILURE; the ruleset treated them as not-passing. Changed to `cancel-in-progress: false` so runs queue and complete sequentially — an extra few seconds of latency is far cheaper than a stuck merge gate.
   - Added a fast-path: when the triggering event *is* an admin's APPROVED review, trust `github.event.review.state == 'approved'` + `review.user.login` directly instead of round-tripping through `GET /pulls/{n}/reviews`. The reviews API has observable lag after `pull_request_review.submitted` — the API can take 1–2 seconds to reflect a new review, and the workflow was sometimes polling before that. The slow path (reviews API) retries up to 3× with 2-second backoff for events that aren't themselves a review submit.
+- **Restored** `received_timestamp` injection in Bento ingest pipeline: Fixed a regression where the API-receipt timestamp was lost during the transition to the custom Bento worker. The `jsInput` now captures `received_timestamp` from the NATS envelope and the `clickhouseOutput` safely injects it into the JSON payload via byte-splicing before ClickHouse insertion, ensuring time-series query accuracy.
 
 ### Changed
 
