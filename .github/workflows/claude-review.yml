@@ -1,32 +1,56 @@
 name: Claude PR review
 
-# The single Claude workflow on this repo. Auto-reviews trusted-author
-# PRs after CI completes, and accepts manual re-review requests via
-# `@claude` / `/review` comments and the workflow_dispatch button.
-# (Was previously split with `claude-agent.yml`; the agent's
-# code-modifying capability was dropped in favour of a single
-# review-only workflow with a smaller blast radius.)
+# Auto-reviews PRs whose HEAD commit was authored or pushed by someone
+# with repo permission. Accepts manual re-review via `@claude` /
+# `/review` comments and the workflow_dispatch button.
 #
 # Triggers:
-#   workflow_run     — fires after every successful CI run on a PR.
-#                      Reviews update the same sticky comment on every
-#                      run so iteration history stays in one place.
-#   issue_comment    — manual re-trigger when a trusted reviewer types
-#                      `@claude` or `/review` in a PR comment.
-#   workflow_dispatch — UI / `gh workflow run` escape hatch with an
-#                      explicit PR-number input.
+#   pull_request        — fires on every PR open/sync/reopen/
+#                         ready-for-review immediately, not after CI.
+#                         The job's check appears in the PR's Checks
+#                         panel natively — no manual status posting.
+#                         `pull_request_target` doesn't work here:
+#                         the Anthropic action's OIDC token exchange
+#                         rejects pull_request_target's OIDC claims
+#                         (upstream issue #713). With `pull_request`,
+#                         secrets are *not* available for fork PRs —
+#                         that means Claude can't auto-review a PR
+#                         from a drive-by contributor, but it also
+#                         means the action can never run with PR-
+#                         supplied code holding write tokens.
+#                         Internal PRs (the dominant case) work fine
+#                         because secrets are accessible.
+#   issue_comment       — manual re-trigger when a trusted reviewer
+#                         types `@claude` or `/review` in a PR
+#                         comment.
+#   workflow_dispatch   — UI / `gh workflow run` escape hatch with
+#                         an explicit PR-number input.
 #
-# Trust gating: only OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR
-# can trigger Claude (covers Eric, Taite, John, Leo + any future
-# org members; excludes drive-by fork PRs and Dependabot). The gate
-# is enforced inside the job so all three trigger paths share one
-# code path.
+# Trust gate: the HEAD commit's GitHub author OR committer must have
+# at least *read* permission on the repo. "Author" is who wrote the
+# code; "committer" is who applied/pushed it. Accepting either covers:
+#   - normal push (author == committer == trusted user)
+#   - GitHub Web UI commits (author = user, committer = web-flow)
+#   - admin pushing a fixup onto a fork PR (author = external,
+#     committer = admin) — this is the case where the previous
+#     author-only gate skipped Claude even after a trusted user
+#     pushed code.
+# Fails on:
+#   - fork PR where neither author nor committer is a collaborator
+#     (drive-by contributor)
+#   - bot accounts other than Dependabot (filtered at workflow level)
+# When the gate decides to skip, the job still completes with
+# conclusion=success (the gate step exits 0). That keeps the
+# "Claude review" check present on the PR and lets the orchestrator's
+# bot-clean wait succeed.
 #
 # Prompt structure follows Anthropic's canonical pr-review-comprehensive
 # template — see `.github/prompts/pr-review.md`. The header block we
 # prepend ("REPO: ... PR NUMBER: ...") tells Claude which PR to read
 # the full context of (diff, prior comments, prior reviews, linked
-# issues).
+# issues). The action fetches diff/comments via GitHub API; the PR
+# HEAD checkout is what lets it run local git commands against the
+# changed files.
 #
 # Gemini Code Assist (installed as a GitHub App) also reviews PRs. The
 # two reviewers operate independently and their outputs are both
@@ -34,9 +58,8 @@ name: Claude PR review
 # review-thread resolution) is the actual merge gate.
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -46,38 +69,40 @@ on:
         required: true
         type: string
 
-# Dedup per PR — the upstream CI's workflow_run + a manual `/review`
-# comment in quick succession could otherwise schedule overlapping
-# reviews. PR-number reachable from each event payload before any
-# step runs.
+# Dedup per PR. PR number reachable from each event payload before
+# any step runs. Fast-follow human action (new push, /review comment)
+# cancels an in-flight review against the now-stale HEAD. Bot-triggered
+# events do NOT cancel — otherwise Claude's own sticky comment fires
+# an `issue_comment created` webhook that would cancel the in-flight
+# review-run as it's still finishing posting. The new bot-triggered
+# run is filtered out at the job-level `if:` anyway, so making it
+# non-cancelling here just lets the original run complete.
 concurrency:
-  group: claude-review-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number || github.run_id }}
-  cancel-in-progress: true
+  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: ${{ github.event.sender.type != 'Bot' }}
 
 jobs:
   review:
-    name: Review
-    # Workflow-level gate: short-circuit untrusted / non-PR / red-CI
-    # invocations before spinning up a runner pod. The job-level
-    # `if:` covers each trigger path independently:
-    #
-    #   workflow_run → only when triggered by a successful CI on a
-    #                  pull_request event (skip CI for push:main and
-    #                  failed CI runs)
-    #   issue_comment → only on PR comments (issue.pull_request != null)
-    #                   that mention @claude or /review, from a trusted
-    #                   actor
-    #   workflow_dispatch → always (manual escape hatch)
+    # The check name on the PR is the *job* name. "Claude review" is
+    # what shows up in the Checks panel and what the orchestrator's
+    # bot-clean step looks for. Keep this string and orchestrator's
+    # required-checks list in sync.
+    name: Claude review
+    # Workflow-level cheap filter: skip Dependabot (handled by
+    # dependabot-automerge.yml) and clearly-untrusted issue_comment
+    # invocations. The HEAD-committer permission check is in-script
+    # so we catch "admin pushed onto an external author's PR" —
+    # webhook author_association would still report the original
+    # opener and miss this.
     if: |
       (
-        github.event_name == 'workflow_run'
-          && github.event.workflow_run.event == 'pull_request'
-          && github.event.workflow_run.conclusion == 'success'
+        github.event_name == 'pull_request'
+        && github.event.pull_request.user.login != 'dependabot[bot]'
       ) || (
         github.event_name == 'issue_comment'
-          && github.event.issue.pull_request != null
-          && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/review'))
-          && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association)
+        && github.event.issue.pull_request != null
+        && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/review'))
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association)
       ) || (
         github.event_name == 'workflow_dispatch'
       )
@@ -87,143 +112,87 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      checks: read
       id-token: write
     steps:
-      - name: Resolve PR number
-        id: pr
+      - name: Resolve PR + verify HEAD committer is trusted
+        id: gate
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          WORKFLOW_RUN_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          PR_EVENT_NUM: ${{ github.event.pull_request.number }}
+          PR_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ISSUE_COMMENT_PR: ${{ github.event.issue.number }}
           DISPATCH_PR: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
+
+          # Resolve PR number + HEAD SHA. pull_request gives us both
+          # in the webhook payload; the other paths need a
+          # `gh pr view` round-trip.
           case "$EVENT_NAME" in
-            workflow_run)
-              # Empty for fork PRs (workflow_run associates pull_requests
-              # only for same-repo PRs). We bail out cleanly below.
-              num="$WORKFLOW_RUN_PR"
+            pull_request)
+              pr_num="$PR_EVENT_NUM"
+              head_sha="$PR_EVENT_HEAD_SHA"
               ;;
             issue_comment)
-              num="$ISSUE_COMMENT_PR"
+              pr_num="$ISSUE_COMMENT_PR"
+              head_sha=$(gh pr view "$pr_num" -R "$REPO" --json headRefOid --jq '.headRefOid')
               ;;
             workflow_dispatch)
-              num="$DISPATCH_PR"
-              ;;
-            *)
-              num=""
-              ;;
-          esac
-          if [ -z "$num" ]; then
-            echo "::notice::No PR number resolved (fork PR? push event?); skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "num=$num" >> "$GITHUB_OUTPUT"
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      - name: Author trust gate + required-check snapshot
-        id: gate
-        if: steps.pr.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUM: ${{ steps.pr.outputs.num }}
-          EVENT_NAME: ${{ github.event_name }}
-          # Required checks from the `main branch protection` ruleset.
-          # Newline-separated so names with spaces ("PR housekeeping")
-          # round-trip correctly. Keep in sync with the ruleset's
-          # required_status_checks and project-orchestrator.yml's
-          # bot-clean check.
-          REQUIRED_CHECKS: |
-            CI
-            PR housekeeping
-        run: |
-          set -euo pipefail
-
-          # Read draft / author / head SHA / check rollup via gh pr view.
-          # author_association is *not* a valid `gh pr view --json` field
-          # (it's REST-only), so fetch it separately from the REST PR
-          # endpoint after the early-exit gates pass.
-          pr=$(gh pr view "$PR_NUM" -R "$REPO" \
-            --json isDraft,author,headRefOid,statusCheckRollup)
-
-          if [ "$(echo "$pr" | jq -r '.isDraft')" = "true" ]; then
-            echo "::notice::PR #$PR_NUM is draft; skipping review."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          author=$(echo "$pr" | jq -r '.author.login')
-          if [ "$author" = "dependabot" ] || [ "$author" = "dependabot[bot]" ]; then
-            echo "::notice::PR #$PR_NUM is from Dependabot; skipping review."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          association=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '.author_association')
-          # CONTRIBUTOR is included because webhook payloads report users
-          # with *private* org membership as CONTRIBUTOR (not MEMBER) even
-          # when the REST API reports them as MEMBER.
-          case "$association" in
-            OWNER|MEMBER|COLLABORATOR|CONTRIBUTOR) ;;
-            *)
-              echo "::notice::PR #$PR_NUM author $author has association $association; skipping (untrusted-actor gate)."
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
+              pr_num="$DISPATCH_PR"
+              head_sha=$(gh pr view "$pr_num" -R "$REPO" --json headRefOid --jq '.headRefOid')
               ;;
           esac
 
-          head_sha=$(echo "$pr" | jq -r '.headRefOid')
+          # Trust gate. Fetch HEAD commit; check author and committer
+          # logins against the repo's collaborator permission map.
+          # `web-flow` is the GitHub Web UI's bot identity (in-browser
+          # editor / suggestion-accept) and has no real permission —
+          # skip it as a trust signal. Permission lookup with the
+          # integration GITHUB_TOKEN works for collaborators (incl.
+          # private org members) where REST author_association would
+          # report NONE.
+          commit=$(gh api "repos/$REPO/commits/$head_sha")
+          author_login=$(echo "$commit" | jq -r '.author.login // empty')
+          committer_login=$(echo "$commit" | jq -r '.committer.login // empty')
+
+          trusted=false
+          trust_via=""
+          for candidate in "$author_login" "$committer_login"; do
+            [ -z "$candidate" ] && continue
+            [ "$candidate" = "web-flow" ] && continue
+            [ "$candidate" = "dependabot[bot]" ] && continue
+            perm=$(gh api "repos/$REPO/collaborators/$candidate/permission" --jq '.permission' 2>/dev/null || echo "none")
+            case "$perm" in
+              admin|maintain|write|triage|read)
+                trusted=true
+                trust_via="$candidate ($perm)"
+                break
+                ;;
+            esac
+          done
+
+          if [ "$trusted" != "true" ]; then
+            echo "::notice::HEAD $head_sha: author=$author_login committer=$committer_login — neither has repo permission. Skipping Claude review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::notice::HEAD trusted via $trust_via. Proceeding with Claude review."
+          echo "pr_num=$pr_num" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-
-          # Required-check snapshot — only enforced for workflow_run.
-          # On manual triggers (issue_comment, workflow_dispatch) we
-          # honour the explicit ask even if CI is still red or running;
-          # the human has already decided they want a review.
-          if [ "$EVENT_NAME" = "workflow_run" ]; then
-            rollup=$(echo "$pr" | jq -c '.statusCheckRollup')
-            mapfile -t CHECKS < <(printf '%s\n' "$REQUIRED_CHECKS" | awk 'NF')
-
-            for check in "${CHECKS[@]}"; do
-              entry=$(echo "$rollup" | jq -c --arg n "$check" '.[] | select(.name == $n)' | head -n1)
-              if [ -z "$entry" ]; then
-                echo "::notice::Required check '$check' not yet present on PR #$PR_NUM; will retry on next workflow_run."
-                echo "skip=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              status=$(echo "$entry" | jq -r '.status // empty')
-              conclusion=$(echo "$entry" | jq -r '.conclusion // empty')
-              if [ "$status" != "COMPLETED" ]; then
-                echo "::notice::Required check '$check' is $status (not COMPLETED); will retry on next workflow_run."
-                echo "skip=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              case "$conclusion" in
-                SUCCESS|NEUTRAL|SKIPPED) ;;
-                FAILURE|CANCELLED|TIMED_OUT|STARTUP_FAILURE|ACTION_REQUIRED|STALE)
-                  echo "::notice::Required check '$check' concluded $conclusion; skipping Claude review (no point reviewing red CI)."
-                  echo "skip=true" >> "$GITHUB_OUTPUT"
-                  exit 0
-                  ;;
-                *)
-                  echo "::warning::Required check '$check' has unrecognised conclusion '$conclusion'; skipping defensively."
-                  echo "skip=true" >> "$GITHUB_OUTPUT"
-                  exit 0
-                  ;;
-              esac
-            done
-          fi
-
-          echo "Proceeding with Claude review (event: $EVENT_NAME)."
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.skip != 'true'
         with:
-          # workflow_run / issue_comment / workflow_dispatch all default
-          # to checking out the default branch. Pin to the PR's head
-          # SHA so the diff Claude reviews matches the SHA that
-          # actually passed CI.
+          # pull_request defaults to checking out the PR's merge ref
+          # (a temporary merge of PR HEAD into base). Pin to the PR
+          # HEAD SHA explicitly so claude-code-action sees exactly
+          # the user's commit, not a merge artefact. The trust gate
+          # above ensures only commits from repo-permissioned users
+          # land here.
           ref: ${{ steps.gate.outputs.head_sha }}
           fetch-depth: 1
 
@@ -236,7 +205,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         env:
           REPO: ${{ github.repository }}
-          PR_NUM: ${{ steps.pr.outputs.num }}
+          PR_NUM: ${{ steps.gate.outputs.pr_num }}
         run: |
           set -euo pipefail
           {
