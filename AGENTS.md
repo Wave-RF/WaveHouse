@@ -19,7 +19,7 @@ Ten internal packages under `internal/`:
 - **`config/`** — YAML + env var config loading (cleanenv)
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) — optional, controlled by `dedupe.enabled`
 - **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
-- **`ingest/`** — Bento-based ingest pipeline (`bento.go`: JetStream input → per-table batch INSERT with DLQ output, plus delete handling) + `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
+- **`ingest/`** — Bento-based ingest pipeline (`bento.go`: JetStream input → per-table batch INSERT with DLQ output, plus inline delete handling — failed deletes route to `dlq.<table>` and `DoubleAck` rather than `Nak`, to break the infinite-redelivery loop that a deterministic delete error would otherwise produce) + `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
 - **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
