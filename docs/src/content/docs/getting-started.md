@@ -11,7 +11,7 @@ Run WaveHouse locally in under five minutes. WaveHouse ships as a single binary 
 
 - **Docker** — for running ClickHouse (and optionally WaveHouse itself).
 - **curl** and **jq** (optional) — for poking the API.
-- **Go 1.25+** — only required if you want to build from source; skip it for the Docker path below.
+- **Go 1.26+** — only required if you want to build from source; skip it for the Docker path below.
 
 ## 1. Start WaveHouse
 

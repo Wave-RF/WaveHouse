@@ -5,7 +5,7 @@
       "name": "Docs: Astro dev server",
       "type": "node-terminal",
       "request": "launch",
-      "cwd": "${workspaceFolder}/site",
+      "cwd": "${workspaceFolder}/docs",
       "command": "pnpm dev"
     }
   ]

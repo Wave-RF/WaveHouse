@@ -29,7 +29,7 @@ updates:
 
   # Docs site (npm)
   - package-ecosystem: npm
-    directory: /site
+    directory: /docs
     schedule:
       interval: weekly
       day: monday

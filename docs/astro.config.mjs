@@ -61,8 +61,8 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
           // submitted to Wikipedia. Unambiguous hits land cleanly in
           // glossary.json with the article title + extract; everything is
           // logged loudly so we can git-diff every auto-add. Cache lives
-          // at glossary-cache.json — clear it (or run `make
-          // refresh-glossary`) to re-fetch every entry from Wikipedia.
+          // at glossary-cache.json — clear it (or run `pnpm
+          // glossary:refresh`) to re-fetch every entry from Wikipedia.
           lint: {
             autoDiscover: true,
             // Acronyms whose Wikipedia search hits a disambiguation page
