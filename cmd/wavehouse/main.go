@@ -108,7 +108,12 @@ func run() int {
 			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
 		} else {
 			defer func() {
-				_ = otelShutdown(context.Background())
+				// Bound shutdown so an unreachable collector doesn't hang
+				// process exit. The OTel SDK's batch processors don't fully
+				// honor the context deadline during gRPC retry/backoff.
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = otelShutdown(ctx)
 			}()
 
 			otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.Observability.Logs.SampleRate)
