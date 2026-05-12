@@ -32,13 +32,13 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.Equal(t, 300, cfg.Cache.DefaultTTL)
-	assert.False(t, cfg.Observability.Enabled)
-	assert.Equal(t, "127.0.0.1:4317", cfg.Observability.OTelAddr)
-	assert.True(t, cfg.Observability.Traces.Enabled)
-	assert.InEpsilon(t, 1.0, cfg.Observability.Traces.SampleRate, 0.0001)
-	assert.True(t, cfg.Observability.Metrics.Enabled)
-	assert.True(t, cfg.Observability.Logs.Enabled)
-	assert.InEpsilon(t, 1.0, cfg.Observability.Logs.SampleRate, 0.0001)
+	assert.False(t, cfg.OTel.Enabled)
+	assert.Equal(t, "127.0.0.1:4317", cfg.OTel.Addr)
+	assert.True(t, cfg.OTel.Traces.Enabled)
+	assert.InEpsilon(t, 1.0, cfg.OTel.Traces.SampleRate, 0.0001)
+	assert.True(t, cfg.OTel.Metrics.Enabled)
+	assert.True(t, cfg.OTel.Logs.Enabled)
+	assert.InEpsilon(t, 1.0, cfg.OTel.Logs.SampleRate, 0.0001)
 }
 
 func TestLoad_FromYAML(t *testing.T) {
@@ -231,10 +231,10 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 			Server:     Server{Port: 8080},
 			ClickHouse: ClickHouse{HTTPScheme: "http"},
 			Schema:     Schema{RefreshInterval: 60},
-			Observability: Observability{
+			OTel: OTel{
 				Enabled: true,
-				Traces:  ObservabilityTraces{Enabled: true, SampleRate: rate},
-				Logs:    ObservabilityLogs{Enabled: true, SampleRate: 0.10},
+				Traces:  OTelTraces{Enabled: true, SampleRate: rate},
+				Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
 			},
 		}
 		err := cfg.Validate()
@@ -249,10 +249,10 @@ func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		Observability: Observability{
+		OTel: OTel{
 			Enabled: true,
-			Traces:  ObservabilityTraces{Enabled: true, SampleRate: 0.10},
-			Logs:    ObservabilityLogs{Enabled: true, SampleRate: 1.5},
+			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
+			Logs:    OTelLogs{Enabled: true, SampleRate: 1.5},
 		},
 	}
 	err := cfg.Validate()
@@ -269,10 +269,10 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		Observability: Observability{
+		OTel: OTel{
 			Enabled: false,
-			Traces:  ObservabilityTraces{SampleRate: 99},
-			Logs:    ObservabilityLogs{SampleRate: -1},
+			Traces:  OTelTraces{SampleRate: 99},
+			Logs:    OTelLogs{SampleRate: -1},
 		},
 	}
 	assert.NoError(t, cfg.Validate())
@@ -283,9 +283,9 @@ func TestLoad_Defaults_PrometheusDisabled(t *testing.T) {
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
 
-	assert.False(t, cfg.Observability.Metrics.Prometheus.Enabled)
-	assert.Equal(t, "/metrics", cfg.Observability.Metrics.Prometheus.Path)
-	assert.Equal(t, 0, cfg.Observability.Metrics.Prometheus.Port)
+	assert.False(t, cfg.OTel.Metrics.Prometheus.Enabled)
+	assert.Equal(t, "/metrics", cfg.OTel.Metrics.Prometheus.Path)
+	assert.Equal(t, 0, cfg.OTel.Metrics.Prometheus.Port)
 }
 
 func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
@@ -294,13 +294,13 @@ func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		Observability: Observability{
+		OTel: OTel{
 			Enabled: true,
-			Traces:  ObservabilityTraces{SampleRate: 0.10},
-			Logs:    ObservabilityLogs{SampleRate: 0.10},
-			Metrics: ObservabilityMetrics{
+			Traces:  OTelTraces{SampleRate: 0.10},
+			Logs:    OTelLogs{SampleRate: 0.10},
+			Metrics: OTelMetrics{
 				Enabled: true,
-				Prometheus: ObservabilityMetricsPrometheus{
+				Prometheus: OTelMetricsPrometheus{
 					Enabled: true,
 					Path:    "/metrics",
 					Port:    8080, // collides
@@ -320,13 +320,13 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 			Server:     Server{Port: 8080},
 			ClickHouse: ClickHouse{HTTPScheme: "http"},
 			Schema:     Schema{RefreshInterval: 60},
-			Observability: Observability{
+			OTel: OTel{
 				Enabled: true,
-				Traces:  ObservabilityTraces{SampleRate: 0.10},
-				Logs:    ObservabilityLogs{SampleRate: 0.10},
-				Metrics: ObservabilityMetrics{
+				Traces:  OTelTraces{SampleRate: 0.10},
+				Logs:    OTelLogs{SampleRate: 0.10},
+				Metrics: OTelMetrics{
 					Enabled: true,
-					Prometheus: ObservabilityMetricsPrometheus{
+					Prometheus: OTelMetricsPrometheus{
 						Enabled: true,
 						Path:    "/metrics",
 						Port:    port,
@@ -346,13 +346,13 @@ func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		Observability: Observability{
+		OTel: OTel{
 			Enabled: true,
-			Traces:  ObservabilityTraces{SampleRate: 0.10},
-			Logs:    ObservabilityLogs{SampleRate: 0.10},
-			Metrics: ObservabilityMetrics{
+			Traces:  OTelTraces{SampleRate: 0.10},
+			Logs:    OTelLogs{SampleRate: 0.10},
+			Metrics: OTelMetrics{
 				Enabled: true,
-				Prometheus: ObservabilityMetricsPrometheus{
+				Prometheus: OTelMetricsPrometheus{
 					Enabled: true,
 					Path:    "metrics", // missing leading slash
 					Port:    0,
@@ -374,13 +374,13 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		Observability: Observability{
+		OTel: OTel{
 			Enabled: true,
-			Traces:  ObservabilityTraces{SampleRate: 0.10},
-			Logs:    ObservabilityLogs{SampleRate: 0.10},
-			Metrics: ObservabilityMetrics{
+			Traces:  OTelTraces{SampleRate: 0.10},
+			Logs:    OTelLogs{SampleRate: 0.10},
+			Metrics: OTelMetrics{
 				Enabled: true,
-				Prometheus: ObservabilityMetricsPrometheus{
+				Prometheus: OTelMetricsPrometheus{
 					Enabled: false,
 					Path:    "garbage",
 					Port:    8080,

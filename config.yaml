@@ -9,9 +9,9 @@ server:
   cors_allowed_origins:
     - "*"
 
-observability:
+otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
-  otel_addr: "127.0.0.1:4317"
+  addr: "127.0.0.1:4317"
   traces:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS

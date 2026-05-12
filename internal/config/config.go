@@ -15,58 +15,60 @@ type Config struct {
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.
-	DataDir       string        `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
-	Server        Server        `yaml:"server"`
-	ClickHouse    ClickHouse    `yaml:"clickhouse"`
-	MQ            MQ            `yaml:"mq"`
-	Dedupe        Dedupe        `yaml:"dedupe"`
-	Cache         Cache         `yaml:"cache"`
-	Auth          Auth          `yaml:"auth"`
-	Schema        Schema        `yaml:"schema"`
-	DLQ           DLQ           `yaml:"dlq"`
-	Policy        Policy        `yaml:"policy"`
-	Pipes         Pipes         `yaml:"pipes"`
-	Observability Observability `yaml:"observability"`
+	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	Server     Server     `yaml:"server"`
+	ClickHouse ClickHouse `yaml:"clickhouse"`
+	MQ         MQ         `yaml:"mq"`
+	Dedupe     Dedupe     `yaml:"dedupe"`
+	Cache      Cache      `yaml:"cache"`
+	Auth       Auth       `yaml:"auth"`
+	Schema     Schema     `yaml:"schema"`
+	DLQ        DLQ        `yaml:"dlq"`
+	Policy     Policy     `yaml:"policy"`
+	Pipes      Pipes      `yaml:"pipes"`
+	OTel       OTel       `yaml:"otel"`
 }
 
-type Observability struct {
-	Enabled  bool                 `yaml:"enabled" env:"WH_OBSERVABILITY_ENABLED" env-default:"false"`
-	OTelAddr string               `yaml:"otel_addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
-	Traces   ObservabilityTraces  `yaml:"traces"`
-	Metrics  ObservabilityMetrics `yaml:"metrics"`
-	Logs     ObservabilityLogs    `yaml:"logs"`
+// OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
+// when false, no signals are initialized regardless of the per-signal toggles.
+type OTel struct {
+	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
+	Addr    string      `yaml:"addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
+	Traces  OTelTraces  `yaml:"traces"`
+	Metrics OTelMetrics `yaml:"metrics"`
+	Logs    OTelLogs    `yaml:"logs"`
 }
 
-type ObservabilityTraces struct {
+type OTelTraces struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
 }
 
-type ObservabilityMetrics struct {
-	Enabled    bool                           `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
-	Prometheus ObservabilityMetricsPrometheus `yaml:"prometheus"`
+type OTelMetrics struct {
+	Enabled    bool                  `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Prometheus OTelMetricsPrometheus `yaml:"prometheus"`
 }
 
-// ObservabilityMetricsPrometheus controls a Prometheus exposition endpoint
-// served alongside (or independently of) the OTLP push exporter. The same
-// OTel meter API records both; the Prometheus exporter is an additional
-// Reader on the MeterProvider. Disabled by default.
+// OTelMetricsPrometheus controls a Prometheus exposition endpoint served
+// alongside (or independently of) the OTLP push exporter. The same OTel
+// meter API records both; the Prometheus exporter is an additional Reader
+// on the MeterProvider. Disabled by default.
 //
 // Port `0` mounts the endpoint on the existing API server router. A non-zero
 // port spins up a dedicated HTTP listener — useful for firewalling metrics
 // off the public API surface in production.
-type ObservabilityMetricsPrometheus struct {
+type OTelMetricsPrometheus struct {
 	Enabled bool   `yaml:"enabled" env:"WH_OTEL_METRICS_PROMETHEUS_ENABLED" env-default:"false"`
 	Path    string `yaml:"path" env:"WH_OTEL_METRICS_PROMETHEUS_PATH" env-default:"/metrics"`
 	Port    int    `yaml:"port" env:"WH_OTEL_METRICS_PROMETHEUS_PORT" env-default:"0"`
 }
 
-// ObservabilityLogs sample rate applies to OTLP export of DEBUG/INFO only.
+// OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
 // WARN and ERROR always export at 100% — dropping them silently during
 // incidents is too dangerous to expose as a knob. Stdout receives 100% of
 // records regardless of this rate (sampling for scraped-log pipelines like
 // Loki/Promtail belongs at the scraper, not the application).
-type ObservabilityLogs struct {
+type OTelLogs struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
 }
@@ -167,23 +169,23 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
 	}
 
-	if c.Observability.Enabled {
-		if r := c.Observability.Traces.SampleRate; r < 0 || r > 1 {
-			return fmt.Errorf("observability.traces.sample_rate %g out of range [0.0, 1.0]", r)
+	if c.OTel.Enabled {
+		if r := c.OTel.Traces.SampleRate; r < 0 || r > 1 {
+			return fmt.Errorf("otel.traces.sample_rate %g out of range [0.0, 1.0]", r)
 		}
-		if r := c.Observability.Logs.SampleRate; r < 0 || r > 1 {
-			return fmt.Errorf("observability.logs.sample_rate %g out of range [0.0, 1.0]", r)
+		if r := c.OTel.Logs.SampleRate; r < 0 || r > 1 {
+			return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
 		}
-		if c.Observability.Metrics.Enabled && c.Observability.Metrics.Prometheus.Enabled {
-			p := c.Observability.Metrics.Prometheus
+		if c.OTel.Metrics.Enabled && c.OTel.Metrics.Prometheus.Enabled {
+			p := c.OTel.Metrics.Prometheus
 			if p.Port < 0 || p.Port > 65535 {
-				return fmt.Errorf("observability.metrics.prometheus.port %d out of range [0, 65535]", p.Port)
+				return fmt.Errorf("otel.metrics.prometheus.port %d out of range [0, 65535]", p.Port)
 			}
 			if p.Port != 0 && p.Port == c.Server.Port {
-				return fmt.Errorf("observability.metrics.prometheus.port collides with server.port (%d); use 0 to mount on the API server or pick a different port", p.Port)
+				return fmt.Errorf("otel.metrics.prometheus.port collides with server.port (%d); use 0 to mount on the API server or pick a different port", p.Port)
 			}
 			if !strings.HasPrefix(p.Path, "/") {
-				return fmt.Errorf("observability.metrics.prometheus.path %q must start with '/'", p.Path)
+				return fmt.Errorf("otel.metrics.prometheus.path %q must start with '/'", p.Path)
 			}
 		}
 	}

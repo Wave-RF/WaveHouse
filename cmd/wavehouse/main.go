@@ -97,14 +97,14 @@ func run() int {
 	slog.SetDefault(logger)
 
 	var promHandler http.Handler
-	if cfg.Observability.Enabled {
+	if cfg.OTel.Enabled {
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
-			Endpoint:                 cfg.Observability.OTelAddr,
-			TracesEnabled:            cfg.Observability.Traces.Enabled,
-			TracesSampleRate:         cfg.Observability.Traces.SampleRate,
-			MetricsEnabled:           cfg.Observability.Metrics.Enabled,
-			MetricsPrometheusEnabled: cfg.Observability.Metrics.Prometheus.Enabled,
-			LogsEnabled:              cfg.Observability.Logs.Enabled,
+			Endpoint:                 cfg.OTel.Addr,
+			TracesEnabled:            cfg.OTel.Traces.Enabled,
+			TracesSampleRate:         cfg.OTel.Traces.SampleRate,
+			MetricsEnabled:           cfg.OTel.Metrics.Enabled,
+			MetricsPrometheusEnabled: cfg.OTel.Metrics.Prometheus.Enabled,
+			LogsEnabled:              cfg.OTel.Logs.Enabled,
 		})
 		if err != nil {
 			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
@@ -119,14 +119,14 @@ func run() int {
 				_ = otelShutdown(ctx)
 			}()
 
-			otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.Observability.Logs.SampleRate)
+			otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.OTel.Logs.SampleRate)
 			logger = otelLogger.With(
 				"version", Version,
 				"build_time", BuildTime,
 				"git_commit", GitCommit,
 			)
 			slog.SetDefault(logger)
-			logger.Info("observability pipeline established", "endpoint", cfg.Observability.OTelAddr)
+			logger.Info("observability pipeline established", "endpoint", cfg.OTel.Addr)
 		}
 	}
 
@@ -322,8 +322,8 @@ func run() int {
 
 	// Prometheus /metrics routing: same-port → mount on API router,
 	// dedicated port → spin a sidecar HTTP server below.
-	promPath := cfg.Observability.Metrics.Prometheus.Path
-	promPort := cfg.Observability.Metrics.Prometheus.Port
+	promPath := cfg.OTel.Metrics.Prometheus.Path
+	promPort := cfg.OTel.Metrics.Prometheus.Port
 	var promSrv *http.Server
 	if promHandler != nil {
 		if promPort == 0 {

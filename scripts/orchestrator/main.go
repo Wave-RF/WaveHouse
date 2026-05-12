@@ -159,7 +159,7 @@ func run() error {
 		// Exercise the OTel branch in coverage. gRPC exporters are lazy
 		// (no collector needs to be reachable for init to succeed), so
 		// this is safe in the e2e harness even without a SigNoz instance.
-		"WH_OBSERVABILITY_ENABLED=true",
+		"WH_OTEL_ENABLED=true",
 		"WH_OTEL_ADDR=127.0.0.1:4317",
 	)
 	if verbose {
