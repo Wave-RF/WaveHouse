@@ -40,7 +40,7 @@ importers:
         version: 0.14.1(@astrojs/starlight@0.38.3(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)))
       starlight-llm-tools:
         specifier: github:Wave-RF/starlight-llm-tools
-        version: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/1bebde85182d0840ac3a519bdaed8735574db6e1(@astrojs/starlight@0.38.3(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)))(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0))
+        version: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e(@astrojs/starlight@0.38.3(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)))(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0))
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
@@ -2439,9 +2439,9 @@ packages:
     peerDependencies:
       '@astrojs/starlight': '>=0.38.0'
 
-  starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/1bebde85182d0840ac3a519bdaed8735574db6e1:
-    resolution: {tarball: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/1bebde85182d0840ac3a519bdaed8735574db6e1}
-    version: 0.2.0
+  starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e:
+    resolution: {tarball: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e}
+    version: 0.3.0
     engines: {node: '>=18.0.0'}
     peerDependencies:
       '@astrojs/starlight': '>=0.36.0'
@@ -5874,7 +5874,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/1bebde85182d0840ac3a519bdaed8735574db6e1(@astrojs/starlight@0.38.3(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)))(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)):
+  starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e(@astrojs/starlight@0.38.3(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)))(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)):
     dependencies:
       '@astrojs/starlight': 0.38.3(astro@6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0))
       astro: 6.1.7(@types/node@24.12.2)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)
