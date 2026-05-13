@@ -4,64 +4,47 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Default `pull_request` types are [opened, synchronize, reopened] which
-    # do NOT include `ready_for_review`. Without it, flipping a PR from draft
-    # → ready doesn't re-trigger CI, so the suite silently skips on the
-    # existing run. Adding `ready_for_review` ensures a full CI pass at the
-    # moment the PR becomes review-ready.
+    # `ready_for_review` isn't in the default trigger set — without it,
+    # draft → ready transitions don't re-trigger CI.
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
-  # Manual escape hatch for re-running CI on demand (e.g. when GitHub
-  # silently drops a `synchronize` event on a long-lived branch). Run via
-  # `gh workflow run CI --ref <branch>`.
+  # Manual re-run escape hatch — `gh workflow run CI --ref <branch>`.
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# PR pushes: cancel any in-flight run for the same PR (only the latest commit
-# matters). Main pushes: don't cancel — let runs queue serially in the same
-# group so every commit on main produces a clean run history rather than
-# losing a mid-flight run to a follow-up commit.
+# PR pushes: cancel in-flight, only the latest commit matters. Main pushes:
+# queue serially so every commit gets its own run.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   ci:
-    # Single-job pipeline. `make ci` runs every gate in one process so
-    # the Go build cache, pnpm store, golangci cache, and coverage-
-    # instrumented binary all stay hot across phases without
-    # artifact upload/download between jobs. Parallelism lives inside
-    # the Makefile.
+    # Single job: `make ci` runs every gate in one process so caches and
+    # build artifacts stay hot across phases. Parallelism lives in the
+    # Makefile.
     name: CI
     runs-on: [wave-rf-runners]
-    # Warm cache: ~2 min. Cold key change: ~5-8 min. 45 leaves headroom
-    # for cold caches + slow E2E without letting a hung runner sit.
+    # Warm: ~2 min. Cold: ~5-8 min. 45 leaves headroom + a hung-job cap.
     timeout-minutes: 45
     steps:
-      # Composite actions can't self-checkout — repo must land first
-      # so the `./.github/actions/setup-env` path resolves.
+      # Composite actions can't self-checkout — checkout first.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - id: setup
         uses: ./.github/actions/setup-env
 
       - name: Run CI pipeline
-        # `make ci` runs verify + every build variant + unit tests + SDK
-        # tests in parallel (under -j 4), then test-integration → test-e2e
-        # → cov sequentially. Mirrors local `make ci` exactly.
+        # Verify + builds + unit/SDK tests in parallel, then integration →
+        # e2e → cov sequentially. Mirrors local `make ci` exactly.
         run: make ci
 
-      # Saves run on every branch, gated on `*-cache-hit != 'true'` so
-      # a same-key re-push is a no-op. Cross-PR sharing happens
-      # naturally: actions/cache saves under the workflow's ref scope,
-      # and each PR's `refs/pull/N/merge` inherits the base ref's
-      # cache, so a main-push save warms every PR's restore and PRs
-      # sharing key tuples warm each other.
-      #
-      # Three saves mirror the three restores in setup-env — keep
-      # paths and keys in sync.
+      # Saves run on every branch, gated on `*-cache-hit != 'true'` so a
+      # same-key re-push is a no-op. PRs inherit main's cache scope, so a
+      # main-push save warms every PR. Three saves mirror three restores
+      # in setup-env — keep paths and keys in sync.
       - name: Save Go module + build cache
         if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -80,17 +63,14 @@ jobs:
             ~/.cache/golangci-lint
           key: golangci-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yml') }}
 
-      # Keep the store from growing monotonically as transitive deps
-      # churn — `pnpm store prune` drops entries not linked from any
-      # workspace project's node_modules. Restore-keys fall-through
-      # still works on the pruned store.
+      # Drop store entries unreferenced by any workspace project before
+      # save, so the cache doesn't grow unboundedly as deps churn.
       - name: Prune pnpm store before save
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
         shell: bash
         run: pnpm store prune
 
-      # Path comes from setup-env's `pnpm store path` resolution — see the
-      # composite for why we can't hard-code ~/.local/share/pnpm/store.
+      # Path resolved dynamically — see setup-env header.
       - name: Save pnpm store cache
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -98,9 +78,8 @@ jobs:
           path: ${{ steps.setup.outputs.pnpm-store-path }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
 
-      # Coverage summary in the run's job summary panel. The merged
-      # profile is the only published surface for coverage data today —
-      # see issue #133 for the post-OSS-launch decision (Codecov etc).
+      # Coverage in the job-summary panel. See #133 for post-launch
+      # reporting decisions.
       - name: Coverage summary
         if: always()
         run: |

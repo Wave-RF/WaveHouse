@@ -1,19 +1,14 @@
 name: Cleanup GHCR dev tags
 
-# Weekly housekeeping for `ghcr.io/wave-rf/wavehouse`. Prunes immutable
-# `:dev-<sha>` tags older than 30 days, but always keeps the newest 5
-# regardless of age. Tagged releases (`latest`, `vX.Y.Z`) and the rolling
-# `:dev` pointer are never touched.
+# Weekly prune of immutable `:dev-<sha>` tags older than 30 days,
+# always keeping the newest 5. Tagged releases (`latest`, `vX.Y.Z`)
+# and the rolling `:dev` pointer are never touched.
 #
-# Why custom logic vs GHCR's built-in retention rules: the built-in
-# retention is per-package and date-only, can't combine "newest N OR
-# within X days" or filter by tag pattern. We need both: keep recent
-# debug history (the count guard) AND auto-prune long tail (the age
-# guard). One bash + jq script does it.
+# Custom logic because GHCR's built-in retention is date-only and
+# can't combine "newest N OR within X days" or filter by tag
+# pattern.
 on:
   schedule:
-    # Every Monday 03:00 UTC. Off-peak; ~1 build/main-push, so the
-    # weekly cadence is plenty.
     - cron: "0 3 * * 1"
   workflow_dispatch:
 
@@ -36,7 +31,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fetch every version (paginated) into a single JSON array.
           all=$(gh api --paginate \
             "/orgs/${ORG}/packages/container/${PACKAGE}/versions" \
             | jq -s 'add')
@@ -44,9 +38,9 @@ jobs:
           total=$(echo "$all" | jq 'length')
           echo "Total versions in registry: ${total}"
 
-          # Candidates for cleanup: versions tagged with at least one
-          # `dev-<hex>` tag AND no protected tag (`latest`, `dev`, or
-          # `vX.Y.Z`). Sorted newest-first so we can slice off the head.
+          # Candidates: versions tagged with at least one `dev-<hex>`
+          # tag AND no protected tag. Sorted newest-first so we slice
+          # off the head.
           candidates=$(echo "$all" | jq -c '
             map(select(
               ((.metadata.container.tags // []) | length > 0) and
@@ -63,9 +57,9 @@ jobs:
           eligible=$(echo "$candidates" | jq 'length')
           echo "Cleanup candidates (dev-<sha> only): ${eligible}"
 
-          # Cutoff: anything older than MAX_AGE_DAYS is eligible to delete,
-          # but we always keep KEEP_NEWEST regardless of age. Both guards
-          # apply: a 60-day-old tag is preserved if it's in the newest 5.
+          # Both guards apply: anything older than MAX_AGE_DAYS is
+          # eligible, but the newest KEEP_NEWEST are preserved
+          # regardless of age.
           cutoff=$(date -u -d "${MAX_AGE_DAYS} days ago" +%s)
           to_delete=$(echo "$candidates" | jq -c \
             --argjson keep "${KEEP_NEWEST}" \
