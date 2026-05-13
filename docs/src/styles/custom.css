@@ -1,0 +1,90 @@
+/* WaveHouse brand colors mapped to Starlight theme.
+ *
+ * Starlight uses SEMANTIC color names — the scale inverts between themes:
+ *   Dark mode:  "white" = light text,   "black" = dark background
+ *   Light mode: "white" = dark text,    "black" = light background
+ */
+
+/* Dark mode (Starlight's default) */
+:root {
+  --sl-color-accent-low: #1a3a3f;
+  --sl-color-accent: #5bbfcf;
+  --sl-color-accent-high: #d0ebf3;
+
+  --sl-color-white: #f8f9fa;
+  --sl-color-gray-1: #e8ecf0;
+  --sl-color-gray-2: #c2c9d1;
+  --sl-color-gray-3: #8e99a4;
+  --sl-color-gray-4: #576270;
+  --sl-color-gray-5: #3d4752;
+  --sl-color-gray-6: #333333;
+  --sl-color-black: #1a1a1a;
+
+  --sl-font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --sl-font-heading: "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  /* SVG layer helpers (used by inline SVGs in /assets/svg/*). */
+  --svg-layer-dark: #0e7f8f;
+  --svg-layer-light: #b8e3e8;
+}
+
+/* Light mode — inverted gray scale, darker accent for contrast */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #d4f0f5;
+  --sl-color-accent: #0e7f8f;
+  --sl-color-accent-high: #164349;
+
+  --sl-color-white: #1a1a1a;
+  --sl-color-gray-1: #333333;
+  --sl-color-gray-2: #3d4752;
+  --sl-color-gray-3: #576270;
+  --sl-color-gray-4: #8e99a4;
+  --sl-color-gray-5: #c2c9d1;
+  --sl-color-gray-6: #e8ecf0;
+  --sl-color-black: #f8f9fa;
+}
+
+/* macOS-style colored dots for terminal code blocks */
+.expressive-code .frame.is-terminal figcaption.header::before {
+  background: #ff5f57 !important;
+  border-radius: 50% !important;
+  width: 12px !important;
+  height: 12px !important;
+  box-shadow: 20px 0 0 #febc2e, 40px 0 0 #28c840 !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+
+/* SVG diagram classes used by inline SVG figures under src/assets/svg/. */
+.svg-layer-light { fill: var(--svg-layer-light); }
+.svg-layer-dark { fill: var(--svg-layer-dark); }
+.svg-layer-stroke { stroke: none; }
+.svg-text-white { fill: white; }
+.svg-text-black { fill: black; }
+.svg-title { fill: var(--sl-color-text); }
+.svg-circle { fill: var(--svg-layer-light); }
+.svg-text-circle { fill: black; }
+.svg-bounding-box {
+  fill: none;
+  stroke: var(--sl-color-text);
+  stroke-width: 2;
+  stroke-dasharray: 4, 4;
+}
+.svg-line {
+  stroke: var(--sl-color-text);
+  stroke-width: 1;
+}
+
+/* Generous heading spacing — consistent with the docs' deck feel */
+.sl-markdown-content :is(h2, h3, h4) {
+  scroll-margin-top: 2rem;
+}
+.sl-markdown-content h2 {
+  margin-top: 3.5rem;
+}
+.sl-markdown-content h3 {
+  margin-top: 2.5rem;
+}
+.sl-markdown-content h4 {
+  margin-top: 2rem;
+}

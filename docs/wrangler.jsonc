@@ -1,0 +1,15 @@
+{
+  // Cloudflare Workers + Static Assets. Astro builds the site to ./dist
+  // and the worker in worker/index.ts (using cloudflare-md-router) handles
+  // Accept-header / user-agent routing before falling through to ASSETS.
+  "name": "wavehouse-docs",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "html_handling": "drop-trailing-slash",
+    "run_worker_first": true
+  }
+}
