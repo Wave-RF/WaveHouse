@@ -172,7 +172,9 @@ func run() int {
 	// and retry in the background with exponential backoff. The process
 	// still binds :8080 so operators can `curl /health` instead of grepping
 	// a restart-loop log. Once a Refresh succeeds, bootState flips to nil
-	// and /health returns 200.
+	// and /health returns 200. The periodic auto-refresh ticker is started
+	// only after the first successful Refresh (sync or retry) so it never
+	// races RetryRefresh on Refresh calls or on bootState writes.
 	bootState := api.NewBootState(nil)
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
@@ -190,7 +192,10 @@ func run() int {
 			}
 			logger.Info("schema discovery succeeded after retry, /health now 200")
 			bootState.Set(nil)
+			go registry.StartAutoRefresh(ctx)
 		}()
+	} else {
+		go registry.StartAutoRefresh(ctx)
 	}
 
 	// State directories — one configurable root, fixed subdir convention.
@@ -267,9 +272,6 @@ func run() int {
 
 	// Hub for streaming fan-out.
 	hub := api.NewHub()
-
-	// Start schema auto-refresh.
-	go registry.StartAutoRefresh(ctx)
 
 	// Start policy watch for cluster-wide updates.
 	go policyStore.Watch(ctx)

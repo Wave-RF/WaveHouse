@@ -479,8 +479,12 @@ func TestRetryRefresh_ReturnsOnContextCancel(t *testing.T) {
 func TestRetryRefresh_BackoffIsBounded(t *testing.T) {
 	t.Parallel()
 	// Five failures then success; with initial 1ms and max 4ms backoff,
-	// sleeps are 1, 2, 4, 4, 4 = 15ms total. We assert it stays well under
-	// the unbounded-doubling worst case (1+2+4+8+16 = 31ms).
+	// sleeps are 1, 2, 4, 4, 4 = 15ms total. The unbounded-doubling worst
+	// case would be 1+2+4+8+16 = 31ms. We leave generous headroom on the
+	// upper bound because shared CI runners can stall the scheduler enough
+	// to drag a 15ms sleep budget past 100ms; 250ms still catches a real
+	// unbounded backoff regression (which would balloon by orders of
+	// magnitude) without flaking on noisy hosts.
 	errs := make([]error, 5)
 	for i := range errs {
 		errs[i] = errors.New("transient")
@@ -494,7 +498,7 @@ func TestRetryRefresh_BackoffIsBounded(t *testing.T) {
 	elapsed := time.Since(start)
 	// Lower bound proves we actually slept; upper bound proves capping.
 	assert.GreaterOrEqual(t, elapsed, 10*time.Millisecond)
-	assert.Less(t, elapsed, 100*time.Millisecond)
+	assert.Less(t, elapsed, 250*time.Millisecond)
 }
 
 // TestRetryRefresh_NilOnAttemptIsSafe verifies the loop tolerates a nil

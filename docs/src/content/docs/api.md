@@ -90,7 +90,7 @@ Returns `200 OK` once the gateway has discovered ClickHouse table schemas at lea
 
 Status code: `503 Service Unavailable`
 
-The boot-degraded response lets an operator `curl /health` to learn why the gateway hasn't bound traffic yet, instead of grepping a restart-loop log. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
+The boot-degraded response lets an operator `curl /health` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
 
 ---
 
