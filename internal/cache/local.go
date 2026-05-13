@@ -136,10 +136,16 @@ func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
 
 	for _, tag := range tags {
 		if keys, ok := l.tagsMap[tag]; ok {
+			// Snapshot the keys first to avoid fragile iteration invariants
+			// while deleting from the same interconnected maps
+			toDelete := make([]string, 0, len(keys))
 			for k := range keys {
+				toDelete = append(toDelete, k)
+			}
+
+			for _, k := range toDelete {
 				l.cache.Del(k)
 				l.ttls.Delete(k)
-				// [MUST FIX]: Remove the key from ALL its associated tags to prevent ghost entries
 				l.removeKeyFromTagsLocked(k)
 			}
 		}

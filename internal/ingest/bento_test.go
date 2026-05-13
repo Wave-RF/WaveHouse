@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -126,7 +127,7 @@ func TestSafeIdentifierRe(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := safeIdentifierRe.MatchString(tt.input)
+			got := query.SafeIdentifierRe.MatchString(tt.input)
 			assert.Equal(t, tt.valid, got)
 		})
 	}

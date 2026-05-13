@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,15 +27,13 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// safeIdentifierRe matches safe SQL identifiers to prevent injection.
-var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
 	bentoMeter              = otel.Meter("wavehouse-bento")
@@ -104,7 +101,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		// Validate table name to prevent SQL injection.
-		if !safeIdentifierRe.MatchString(raw.TableName) {
+		if !query.SafeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
 			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
@@ -321,7 +318,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return fmt.Errorf("missing table_name in message metadata")
 	}
 
-	if !safeIdentifierRe.MatchString(tableName) {
+	if !query.SafeIdentifierRe.MatchString(tableName) {
 		return fmt.Errorf("invalid table name: %q", tableName)
 	}
 
@@ -457,6 +454,8 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	return nil
 }
 
+var activeCache atomic.Pointer[cache.TieredCache]
+
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
@@ -468,6 +467,11 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 	}
 
 	logger := slog.Default().With("component", "bento")
+
+	// Store the newest cache pointer every time this is called
+	if apiCache != nil {
+		activeCache.Store(apiCache)
+	}
 
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -524,7 +528,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 					user:       chUser,
 					password:   chPassword,
 					db:         chDB,
-					apiCache:   apiCache,
+					apiCache:   activeCache.Load(),
 				}, service.BatchPolicy{}, 1, nil
 			},
 		); err != nil {

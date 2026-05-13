@@ -14,20 +14,14 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/google/uuid"
 )
 
-// Regex to detect mutating queries
-var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b`)
+var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
 
-// Unified table extraction regex
-var (
-	tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
-	safeIdentifierRe  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
-)
+var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE)\b`)
 
-// extractCacheTags parses raw SQL to find table names, dedupes them, and validates
-// them against safe identifier rules to comply with repository security standards.
 func extractCacheTags(sql string) []string {
 	matches := tableExtractionRe.FindAllStringSubmatch(sql, -1)
 	var tags []string
@@ -35,8 +29,7 @@ func extractCacheTags(sql string) []string {
 	for _, m := range matches {
 		if len(m) > 1 {
 			tbl := m[1]
-			// Validate safe identifier before using it as a cache tag
-			if !seen[tbl] && safeIdentifierRe.MatchString(tbl) {
+			if !seen[tbl] && query.SafeIdentifierRe.MatchString(tbl) {
 				seen[tbl] = true
 				tags = append(tags, tbl)
 			}
