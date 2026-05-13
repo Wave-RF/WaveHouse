@@ -134,6 +134,8 @@ make dev
 
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
 
+**With observability:** `make dev-obs` is the same as `make dev`, plus a local [SigNoz](https://signoz.io/) stack on `http://localhost:3301` with WaveHouse already pointed at its OTLP collector. See [docs/development.md § Running with observability](docs/src/content/docs/development.md#running-with-observability--make-dev-obs).
+
 ## 🤝 Contributing
 
 We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to structure your code and run the integration test suites.

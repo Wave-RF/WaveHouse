@@ -4,14 +4,14 @@ Running log of issues found while deploying/operating WaveHouse. Newest first.
 
 ---
 
-## 1. SigNoz compose stack (`deployments/signoz/docker-compose.yaml`) fails to start — RESOLVED
+## 1. SigNoz compose stack (`deployments/signoz/compose.yaml`) fails to start — RESOLVED
 
 **Found:** 2026-05-12, bringing the bundled SigNoz stack up locally on OrbStack.
 **Fixed:** 2026-05-12 — `deployments/signoz/` rebuilt from the upstream SigNoz
 `deploy/docker/docker-compose.yaml` (SigNoz `v0.122.0` / `signoz-otel-collector
 v0.144.3`), trimmed to a single node.
 
-**Symptom (before):** `docker compose -f deployments/signoz/docker-compose.yaml up -d`
+**Symptom (before):** `docker compose -f deployments/signoz/compose.yaml up -d`
 → `signoz-migrator` exits 1; consequently `signoz` (query-service) and
 `signoz-otel-collector` never start (both `depends_on: migrator:
 service_completed_successfully`). Only `signoz-clickhouse` stays up.
@@ -128,7 +128,7 @@ query system.columns: code: 516, message: default: Authentication failed: passwo
 ```
 
 **Cause:** `deployments/compose/standalone.yaml` and
-`deployments/signoz/docker-compose.yaml` both define a service named `clickhouse`.
+`deployments/signoz/compose.yaml` both define a service named `clickhouse`.
 On a container attached to both networks, the unqualified hostname `clickhouse` is
 ambiguous, and WaveHouse can end up dialing SigNoz's ClickHouse — which is
 configured with a non-empty password (`SIGNOZ_CH_PASSWORD`, default `password`),

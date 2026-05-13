@@ -3,8 +3,9 @@
 # (SigNoz v0.122.0 / signoz-otel-collector v0.144.3), trimmed to a single node
 # and adapted to this repo's layout.
 #
-# Bring it up:
-#   docker compose -f deployments/signoz/docker-compose.yaml up -d
+# Bring it up (via the Makefile wrapper, or directly):
+#   make signoz-up
+#   docker compose -f deployments/signoz/compose.yaml up -d
 #
 # UI:        http://localhost:3301   (host 3301 → container 8080; WaveHouse owns 8080)
 # OTLP gRPC: localhost:4317          (point WaveHouse at it: WH_OTEL_ADDR=127.0.0.1:4317,
@@ -15,10 +16,12 @@
 # One-shot init containers (normal to see them as `Exited (0)`):
 #   - init-clickhouse: fetches the histogramQuantile UDF binary ClickHouse loads
 #   - signoz-telemetrystore-migrator: creates the signoz_* ClickHouse schema, then exits
+#
+# Dev posture only — no resource limits set. For prod, add
+# `deploy.resources.limits.{memory,cpus}` to clickhouse + signoz +
+# otel-collector (the trace ingest path can be hungry under load).
 
 x-common: &common
-  networks:
-    - signoz-net
   restart: unless-stopped
   logging:
     options:
@@ -57,7 +60,6 @@ services:
   init-clickhouse:
     <<: *common
     image: clickhouse/clickhouse-server:25.5.6
-    container_name: signoz-init-clickhouse
     restart: on-failure
     command:
       - bash
@@ -77,7 +79,6 @@ services:
   zookeeper-1:
     <<: *common
     image: signoz/zookeeper:3.7.1
-    container_name: signoz-zookeeper-1
     user: root
     environment:
       - ZOO_SERVER_ID=1
@@ -95,7 +96,6 @@ services:
 
   clickhouse:
     <<: *clickhouse-defaults
-    container_name: signoz-clickhouse
     # Ports are intentionally not published — this ClickHouse is internal to
     # SigNoz. (WaveHouse has its own ClickHouse in deployments/compose/.)
     volumes:
@@ -107,9 +107,17 @@ services:
       - clickhouse:/var/lib/clickhouse/
 
   signoz:
-    <<: *db-depend
+    <<: *common
+    # Wait for the migrator to complete — not just ClickHouse to be healthy.
+    # The signoz query service reads `signoz_*` tables that the migrator
+    # creates; on a cold start those tables don't exist yet, so without
+    # this dep the UI boots into a confused state.
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      signoz-telemetrystore-migrator:
+        condition: service_completed_successfully
     image: signoz/signoz:v0.122.0
-    container_name: signoz
     ports:
       - "3301:8080" # UI + API (8080 in the container; published on 3301 — WaveHouse owns host 8080)
     volumes:
@@ -126,9 +134,18 @@ services:
       retries: 3
 
   otel-collector:
-    <<: *db-depend
+    <<: *common
+    # Wait for the migrator to complete. The collector's entrypoint runs
+    # `migrate sync check` before starting; on a cold start with no schema
+    # it loops forever ("Database signoz_traces does not exist") and never
+    # flips healthy — `--wait` then times out. The migrator is what creates
+    # signoz_traces in the first place.
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      signoz-telemetrystore-migrator:
+        condition: service_completed_successfully
     image: signoz/signoz-otel-collector:v0.144.3
-    container_name: signoz-otel-collector
     entrypoint: ["/bin/sh"]
     command:
       - -c
@@ -148,11 +165,21 @@ services:
     ports:
       - "4317:4317" # OTLP gRPC receiver — WaveHouse pushes here
       - "4318:4318" # OTLP HTTP receiver
+    # Probes the health_check extension declared in otel-collector-config.yaml
+    # (`extensions.health_check.endpoint: 0.0.0.0:13133`). The endpoint serves
+    # 200 OK once the pipeline is fully built and ready to accept telemetry.
+    # The signoz/signoz-otel-collector image ships without curl or wget, but
+    # has bash — so we hand-roll an HTTP probe via /dev/tcp and grep the
+    # status line. Port 13133 is internal (not published).
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/13133 && printf 'GET / HTTP/1.0\r\n\r\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   signoz-telemetrystore-migrator:
     <<: *db-depend
     image: signoz/signoz-otel-collector:v0.144.3
-    container_name: signoz-telemetrystore-migrator
     restart: on-failure
     entrypoint: ["/bin/sh"]
     command:
@@ -166,10 +193,6 @@ services:
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
       - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
-
-networks:
-  signoz-net:
-    name: signoz-net
 
 volumes:
   clickhouse:
