@@ -114,19 +114,21 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
 
-	if ttl > 0 {
-		l.ttls.Store(key, exp)
-	}
+	if admitted {
+		if ttl > 0 {
+			l.ttls.Store(key, exp)
+		}
 
-	l.removeKeyFromTagsLocked(key)
+		l.removeKeyFromTagsLocked(key)
 
-	if admitted && len(tags) > 0 {
-		l.keyTags[key] = tags
-		for _, tag := range tags {
-			if l.tagsMap[tag] == nil {
-				l.tagsMap[tag] = make(map[string]struct{})
+		if len(tags) > 0 {
+			l.keyTags[key] = tags
+			for _, tag := range tags {
+				if l.tagsMap[tag] == nil {
+					l.tagsMap[tag] = make(map[string]struct{})
+				}
+				l.tagsMap[tag][key] = struct{}{}
 			}
-			l.tagsMap[tag][key] = struct{}{}
 		}
 	}
 

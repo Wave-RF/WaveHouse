@@ -162,7 +162,11 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
-	l1, _ := cache.NewLocal(1024 * 1024)
+	l1, err := cache.NewLocal(1024 * 1024)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: new local cache: %v\n", err)
+		return 1, cleanup
+	}
 	tiered := cache.NewTiered(l1, nil)
 
 	if _, err := ingest.StartIngestWorker(
