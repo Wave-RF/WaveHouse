@@ -67,7 +67,7 @@ jobs:
 
       - name: Classify with GitHub Models
         id: classify
-        uses: actions/ai-inference@af6ad2c4ac4edf01884054fc3a6caa6d2567c13a # v2.0.8
+        uses: actions/ai-inference@17ff458cb182449bbb2e43701fcd98f6af8f6570 # v2.1.0
         with:
           model: openai/gpt-4o-mini
           # 400 leaves headroom for multi-area classifications + flags
