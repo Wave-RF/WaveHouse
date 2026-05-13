@@ -77,10 +77,20 @@ jobs:
         id: check
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           # Max length matches the conventional 72-char git subject cap;
           # PR titles become the squash-merge subject on main, and longer
           # subjects mangle `git log --oneline`, GitHub's PR list, and
           # most commit-graph viewers.
+          #
+          # Dependabot's grouped-update titles routinely exceed this cap
+          # (e.g. `deps: bump github.com/nats-io/nats.go from 1.51.0 to
+          # 1.52.0 in the go-deps group` is 80 chars). Dependabot's
+          # title format isn't configurable, so we exempt its PRs from
+          # the length check rather than renaming every bump by hand.
+          # The Conventional Commits format regex is still enforced —
+          # Dependabot already uses lowercase `deps:` / `ci:` / `docs:`
+          # prefixes, so the regex passes naturally.
           MAX_LEN: "72"
         run: |
           # Type list — keep in sync with CONTRIBUTING.md.
@@ -93,12 +103,21 @@ jobs:
           # silent on subject capitalization.
           pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
-          if [[ ${#PR_TITLE} -gt $MAX_LEN ]]; then
+          is_dependabot=false
+          if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
+            is_dependabot=true
+          fi
+
+          if [[ "$is_dependabot" != "true" && ${#PR_TITLE} -gt $MAX_LEN ]]; then
             echo "passed=false" >> "$GITHUB_OUTPUT"
             echo "::error::PR title is ${#PR_TITLE} chars (max $MAX_LEN): $PR_TITLE"
           elif [[ "$PR_TITLE" =~ $pattern ]]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
-            echo "PR title OK: $PR_TITLE"
+            if [[ "$is_dependabot" == "true" && ${#PR_TITLE} -gt $MAX_LEN ]]; then
+              echo "::notice::Dependabot PR title is ${#PR_TITLE} chars (exempt from $MAX_LEN cap): $PR_TITLE"
+            else
+              echo "PR title OK: $PR_TITLE"
+            fi
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
             echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"

@@ -26,10 +26,16 @@ name: Admin approval
 # The workflow itself always exits 0; the commit status is the source
 # of truth. Required by ruleset 15353356 by name "Admin approval".
 #
-# Dependabot PRs bypass this check entirely (status is posted as
-# success without any review check). Patch / minor bumps are merged
-# hands-off via dependabot-automerge.yml; major bumps still get
-# human eyes through the same workflow's Ready-board path.
+# Dependabot patch/minor bumps bypass this check (status posted as
+# success without a review check) — dependabot-automerge.yml's
+# bot-approval + classification gates the auto-merge. Major bumps
+# are NOT bypassed: they fall through to the same admin-review
+# evaluation as human PRs. This closed a hole where any APPROVED
+# review (e.g. from CodeRabbit) could merge a major Dependabot bump
+# without admin involvement — see issue #130 and PR #127 for the
+# trigger. The ruleset's `required_approving_review_count` is set
+# to 0; this status check is the single admin-review gate, so any
+# bot's APPROVED review is no longer load-bearing.
 
 on:
   pull_request:
@@ -85,6 +91,19 @@ jobs:
     runs-on: [wave-rf-runners]
     timeout-minutes: 5
     steps:
+      # Fetch Dependabot's update-type so the bypass below can scope
+      # itself to patch/minor only. Gated on Dependabot author —
+      # fetch-metadata errors on non-Dependabot PRs. continue-on-error
+      # is fail-safe: if metadata can't be read, UPDATE_TYPE will be
+      # empty and the bypass below won't fire, so the PR falls through
+      # to admin review. A blocked PR is recoverable; an
+      # erroneously-merged major bump is not.
+      - name: Fetch Dependabot metadata
+        id: meta
+        if: github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'app/dependabot'
+        continue-on-error: true
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
       - name: Evaluate admin approval and post commit status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -96,6 +115,11 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
           REVIEW_AUTHOR: ${{ github.event.review.user.login }}
+          # Empty when fetch-metadata was skipped (non-Dependabot PR)
+          # or errored (metadata-fetch failure on a Dependabot PR). The
+          # bypass below treats empty the same as "not patch/minor" —
+          # fall through to admin review.
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type || '' }}
           # Build a link back to this run so the commit status's
           # target_url surfaces the approval logic if anyone clicks
           # the status's "Details" link.
@@ -118,15 +142,28 @@ jobs:
             echo "Posted commit status: state=$state context='Admin approval' description='$description'"
           }
 
-          # Dependabot bypass — dependabot-automerge.yml handles these.
+          # Dependabot bypass — only for patch/minor bumps, which
+          # dependabot-automerge.yml handles hands-off. Major bumps,
+          # unknown update-types, and empty UPDATE_TYPE (metadata
+          # fetch failure) fall through to admin-review evaluation,
+          # same path as a human PR. See issue #130: an APPROVED
+          # review from CodeRabbit was satisfying the count rule on
+          # major bumps, and the unconditional bypass here was
+          # satisfying this status check — together that let majors
+          # merge with no admin involvement.
+          #
           # Match both login shapes ("dependabot[bot]" is the standard
           # user-context login; "app/dependabot" shows up in some GH
           # API / app contexts). Keeping both keeps this check aligned
           # with dependabot-automerge.yml's bypass.
           if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
-            echo "::notice::Dependabot PR — bypassing admin approval (handled by dependabot-automerge workflow)."
-            post_status success "Dependabot PR — bypassed"
-            exit 0
+            if [[ "$UPDATE_TYPE" == "version-update:semver-patch" || "$UPDATE_TYPE" == "version-update:semver-minor" ]]; then
+              short_type="${UPDATE_TYPE#version-update:semver-}"
+              echo "::notice::Dependabot $short_type bump — bypassing admin approval (handled by dependabot-automerge workflow)."
+              post_status success "Dependabot $short_type — bypassed"
+              exit 0
+            fi
+            echo "::notice::Dependabot PR with update-type='$UPDATE_TYPE' — not auto-bypassed; falling through to admin review."
           fi
 
           # Admin list comes from .github/board-config.env (loaded into
