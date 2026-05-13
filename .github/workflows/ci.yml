@@ -21,7 +21,7 @@ permissions:
 
 # PR pushes: cancel any in-flight run for the same PR (only the latest commit
 # matters). Main pushes: don't cancel — let runs queue serially in the same
-# group so every commit on main produces a clean coverage badge instead of
+# group so every commit on main produces a clean run history rather than
 # losing a mid-flight run to a follow-up commit.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -131,9 +131,12 @@ jobs:
           path: ${{ steps.setup.outputs.pnpm-store-path }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
 
-      # Coverage summary in the run's job summary panel. Was previously in
-      # the `test` job; preserved here so the per-run "## Test Coverage"
-      # block in the GH Actions UI doesn't disappear with the job collapse.
+      # Coverage summary in the run's job summary panel. The merged
+      # coverage profile that produces this view is the only published
+      # surface for coverage data today — no README badge, no external
+      # service. Anyone curious about the number opens the run summary.
+      # See issue #132 for the open question of how to expose this
+      # post-OSS-launch (Codecov / similar).
       - name: Coverage summary
         if: always()
         run: |
@@ -152,26 +155,3 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      # Stash the merged coverage profile + config for the
-      # publish-coverage-badge workflow to pick up via `workflow_run`
-      # artifact download. Only on main pushes — PR runs don't publish and
-      # don't need to spend the upload time.
-      - name: Upload coverage profile (main only)
-        if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-profile
-          path: |
-            tmp/coverage/total/coverage.txt
-            .testcoverage.yml
-          if-no-files-found: error
-          retention-days: 1
-
-  # Coverage badge publish lives in its own workflow file
-  # (publish-coverage-badge.yml). That workflow is triggered via
-  # `workflow_run` after this workflow completes on a push to main, so
-  # PR runs never trigger it — no "Skipped" entry in the PR's Checks
-  # panel, and the `vladopajic/go-test-coverage` Docker image is never
-  # pre-pulled on PR pods. The artifact uploaded above is what the
-  # follow-on workflow downloads.
