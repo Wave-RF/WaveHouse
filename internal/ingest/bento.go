@@ -448,12 +448,21 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	}
 
 	if c.apiCache != nil {
-		_ = c.apiCache.InvalidateByTags(ctx, []string{tableName})
+		if err := c.apiCache.InvalidateByTags(ctx, []string{tableName}); err != nil {
+			slog.WarnContext(ctx, "failed to invalidate cache after successful write",
+				"table", tableName,
+				"error", err,
+			)
+		}
 	}
 
 	return nil
 }
 
+// activeCache ensures the Bento plugin factory always dereferences the freshest
+// cache instance, preventing stale pointers during sequential integration tests.
+// NOTE: While Bento output registration (sync.Once) only fires once per process,
+// StartIngestWorker updates this pointer so subsequent test setups use the new cache.
 var activeCache atomic.Pointer[cache.TieredCache]
 
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the

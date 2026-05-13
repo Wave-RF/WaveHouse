@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -18,9 +19,12 @@ import (
 	"github.com/google/uuid"
 )
 
-var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b`)
+// tableExtractionRe extracts table names following FROM, JOIN, INTO, UPDATE, or TABLE.
+// Supports optional schema prefixes (db.table) and ClickHouse quoted identifiers (backticks or quotes).
+var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`" + `"]?`)
 
-var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE)\b`)
+// mutationRe detects queries that modify data or schema to trigger cache invalidation.
+var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
 
 func extractCacheTags(sql string) []string {
 	matches := tableExtractionRe.FindAllStringSubmatch(sql, -1)
@@ -103,7 +107,16 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if h.Cache != nil && mutationRe.MatchString(req.SQL) {
 		tags := extractCacheTags(req.SQL)
 		if len(tags) > 0 {
-			_ = h.Cache.InvalidateByTags(r.Context(), tags)
+			// Decouple from request context so client disconnects don't abort the cache purge
+			invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer invCancel()
+
+			if err := h.Cache.InvalidateByTags(invCtx, tags); err != nil {
+				slog.ErrorContext(r.Context(), "cache invalidation failed for raw SQL mutation",
+					"tags", tags,
+					"error", err,
+				)
+			}
 		}
 	}
 

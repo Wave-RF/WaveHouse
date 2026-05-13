@@ -183,7 +183,7 @@ Active Sweeper (async goroutine, every 60s):
 Client POST /v1/query (Raw SQL)
   → Optional JWT auth middleware
   → Execute query directly on ClickHouse (Cache Bypass)
-  → If SQL is a mutation (INSERT/UPDATE/DELETE):
+  → If SQL is a mutation (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/REPLACE):
     → Extract table names
     → Trigger InvalidateByTags across Cache tiers
   → Return result (X-Cache: BYPASS header)

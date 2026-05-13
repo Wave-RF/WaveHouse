@@ -36,7 +36,6 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 		NumCounters: maxCost / 100 * 10,
 		MaxCost:     maxCost,
 		BufferItems: 64,
-		// [MUST FIX]: Catch background memory evictions from Ristretto
 		OnEvict: func(item *ristretto.Item[*cacheValue]) {
 			// Extract the original string key from the wrapped value payload
 			if item.Value != nil {
@@ -82,7 +81,6 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 			remaining = time.Until(exp)
 			if remaining <= 0 {
 				l.tagsMu.Lock()
-				// [MUST FIX]: Re-verify expiration inside the lock (TOCTOU)
 				expVal2, ok2 := l.ttls.Load(key)
 				if !ok2 || time.Until(expVal2.(time.Time)) <= 0 {
 					l.cache.Del(key)
