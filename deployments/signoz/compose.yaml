@@ -71,6 +71,7 @@ services:
         echo "Fetching histogram-quantile binary for $${node_os}/$${node_arch}"
         cd /tmp
         wget -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        echo "<expected-sha256>  histogram-quantile.tar.gz" | sha256sum -c -
         tar -xvzf histogram-quantile.tar.gz
         mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
     volumes:
