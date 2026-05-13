@@ -125,6 +125,47 @@ func TestOTLPSamplerFn_PassesThroughRateForBelowWarn(t *testing.T) {
 	}
 }
 
+// Regression: NewLogger ends with `.With("component", ...)`, which calls
+// Handler.WithAttrs. If TraceHandler doesn't implement WithAttrs/WithGroup,
+// promotion to the embedded interface returns the unwrapped inner handler and
+// stdout trace-ID injection silently breaks.
+func TestTraceHandler_WithAttrsPreservesWrapping(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	h := &TraceHandler{Handler: base}
+
+	ctx, span := newTestTracer(t).Start(context.Background(), "op")
+	defer span.End()
+
+	log := slog.New(h).With("component", "test")
+	log.InfoContext(ctx, "hello")
+
+	out := buf.String()
+	assert.Contains(t, out, "trace_id=")
+	assert.Contains(t, out, "span_id=")
+	assert.Contains(t, out, "component=test")
+}
+
+func TestTraceHandler_WithGroupPreservesWrapping(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	h := &TraceHandler{Handler: base}
+
+	ctx, span := newTestTracer(t).Start(context.Background(), "op")
+	defer span.End()
+
+	log := slog.New(h).WithGroup("g")
+	log.InfoContext(ctx, "hello")
+
+	out := buf.String()
+	assert.Contains(t, out, "trace_id=")
+	assert.Contains(t, out, "span_id=")
+}
+
 func TestTraceHandler_InvalidSpan(t *testing.T) {
 	t.Parallel()
 

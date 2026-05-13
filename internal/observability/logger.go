@@ -29,6 +29,18 @@ func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
+// WithAttrs and WithGroup must re-wrap so chained Logger.With / WithGroup calls
+// keep going through TraceHandler.Handle. Without these, Go promotes the calls
+// to the embedded slog.Handler and the returned handler is the unwrapped inner
+// handler — silently dropping stdout trace-ID injection.
+func (h *TraceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &TraceHandler{Handler: h.Handler.WithAttrs(attrs)}
+}
+
+func (h *TraceHandler) WithGroup(name string) slog.Handler {
+	return &TraceHandler{Handler: h.Handler.WithGroup(name)}
+}
+
 // otlpSamplerFn returns the per-record sample rate for the OTLP log exporter.
 // WARN+ records always return 1.0 (non-configurable safety floor — silently
 // dropping errors during incidents would be a worse failure mode than the
