@@ -51,7 +51,6 @@
   - changed-files:
     - any-glob-to-any-file:
       - "docs/**"
-      - "site/**"
       - "README.md"
       - "CONTRIBUTING.md"
       - "CHANGELOG.md"
@@ -106,7 +105,6 @@ documentation:
   - changed-files:
     - any-glob-to-any-file:
       - "docs/**"
-      - "site/**"
       - "README.md"
       - "CONTRIBUTING.md"
       - "SECURITY.md"

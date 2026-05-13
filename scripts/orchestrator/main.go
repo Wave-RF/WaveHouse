@@ -156,6 +156,11 @@ func run() error {
 		"WH_SCHEMA_REFRESH_INTERVAL=5",
 		"WH_DLQ_ENABLED=true",
 		"WH_SERVER_CORS_ALLOWED_ORIGINS=*",
+		// Exercise the OTel branch in coverage. gRPC exporters are lazy
+		// (no collector needs to be reachable for init to succeed), so
+		// this is safe in the e2e harness even without a SigNoz instance.
+		"WH_OTEL_ENABLED=true",
+		"WH_OTEL_ADDR=127.0.0.1:4317",
 	)
 	if verbose {
 		whCmd.Stdout = io.MultiWriter(whLog, os.Stdout)

@@ -33,9 +33,8 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:
-          # Pin the CLI to the v2 major line — gets patch bumps via
-          # goreleaser-action's resolver, breaks loudly on a v3 bump
-          # instead of silently changing release behavior on every run.
+          # Pin to the v2 line so a v3 release breaks loudly instead
+          # of silently changing release behavior.
           version: "~> v2"
           args: release --clean
         env:
