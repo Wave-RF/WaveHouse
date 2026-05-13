@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -31,7 +32,7 @@ var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|A
 var (
 	blockCommentRe  = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	lineCommentRe   = regexp.MustCompile(`--.*`)
-	stringLiteralRe = regexp.MustCompile(`'[^']*'`)
+	stringLiteralRe = regexp.MustCompile(`'(?:''|\\'|[^'])*'`)
 )
 
 func extractCacheTags(cleanedSQL string) []string {
@@ -112,11 +113,13 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	cleanSQL := cleanSQLForTags(req.SQL)
 
-	isMutation := mutationRe.MatchString(cleanSQL)
+	isMutation := false
+	if fields := strings.Fields(cleanSQL); len(fields) > 0 {
+		isMutation = mutationRe.MatchString(fields[0])
+	}
 
 	var execCtx context.Context
 	if isMutation {
-		// For mutations, ignore client disconnects so the write and cache invalidation always finish
 		execCtx = context.WithoutCancel(r.Context())
 	} else {
 		execCtx = r.Context()

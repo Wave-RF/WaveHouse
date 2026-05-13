@@ -104,21 +104,23 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 }
 
 func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
-	// Wrap the data and the key before giving it to Ristretto
-	l.cache.SetWithTTL(key, &cacheValue{key: key, data: value}, int64(len(value)), ttl)
+	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value}, int64(len(value)), ttl)
+
 	var exp time.Time
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
 	}
-	l.ttls.Store(key, exp)
 
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
 
-	// Clean up old tags if we are overwriting an existing key
+	if ttl > 0 {
+		l.ttls.Store(key, exp)
+	}
+
 	l.removeKeyFromTagsLocked(key)
 
-	if len(tags) > 0 {
+	if admitted && len(tags) > 0 {
 		l.keyTags[key] = tags
 		for _, tag := range tags {
 			if l.tagsMap[tag] == nil {
@@ -127,6 +129,7 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 			l.tagsMap[tag][key] = struct{}{}
 		}
 	}
+
 	return nil
 }
 

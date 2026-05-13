@@ -299,7 +299,6 @@ type clickhouseOutput struct {
 	user       string
 	password   string
 	db         string
-	apiCache   cache.Cache
 }
 
 func (c *clickhouseOutput) Connect(ctx context.Context) error { return nil }
@@ -446,8 +445,16 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return err
 	}
 
-	if c.apiCache != nil {
-		if err := c.apiCache.InvalidateByTags(ctx, []string{tableName}); err != nil {
+	var liveCache cache.Cache
+	if ptr := activeCache.Load(); ptr != nil {
+		liveCache = *ptr
+	}
+
+	if liveCache != nil {
+		invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer invCancel()
+
+		if err := liveCache.InvalidateByTags(invCtx, []string{tableName}); err != nil {
 			slog.WarnContext(ctx, "failed to invalidate cache after successful write",
 				"table", tableName,
 				"error", err,
@@ -528,16 +535,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 				if scheme == "" {
 					scheme = "http" // Default fallback
 				}
-				var c cache.Cache
-				if ptr := activeCache.Load(); ptr != nil {
-					c = *ptr
-				}
-				// WARNING: Because this factory is registered via sync.Once, the ClickHouse
-				// connection parameters (scheme, host, port, user, password, db) are captured
-				// by-value from the very first StartIngestWorker call and CANNOT be updated.
-				// Only the apiCache is dynamically refreshed via activeCache.Load().
-				// Note for E2E: If tests use dynamic ClickHouse ports, they must reuse the
-				// same container/port across all test runs in the process.
+
 				return &clickhouseOutput{
 					httpClient: &http.Client{Timeout: 30 * time.Second},
 					scheme:     scheme,
@@ -546,7 +544,6 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 					user:       chUser,
 					password:   chPassword,
 					db:         chDB,
-					apiCache:   c,
 				}, service.BatchPolicy{}, 1, nil
 			},
 		); err != nil {
