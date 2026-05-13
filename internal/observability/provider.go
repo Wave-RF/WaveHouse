@@ -24,20 +24,25 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
-// ProviderConfig wires the OTel pipeline. Each signal is independently
-// gated; SampleRate values must be in [0.0, 1.0] and only apply to head-based
-// trace sampling. Log sampling is enforced inside NewLogger (per-level).
+// ProviderConfig wires the metrics/traces/logs pipeline. Each output is
+// independently gated; SampleRate values must be in [0.0, 1.0] and only apply
+// to head-based trace sampling. Log sampling is enforced inside NewLogger
+// (per-level).
 //
-// MetricsPrometheusEnabled adds a Prometheus-format Reader to the
-// MeterProvider alongside the OTLP push exporter. When true, InitProvider
-// returns a non-nil promHandler that the caller mounts on an HTTP server.
+// MetricsEnabled drives the OTLP-push metric exporter; PrometheusEnabled
+// drives the Prometheus exposition reader. Either, both, or neither may be
+// set — the underlying OTel MeterProvider is the shared substrate. When
+// PrometheusEnabled is true InitProvider returns a non-nil promHandler.
+//
+// Endpoint is the OTLP gRPC target. It is dialed only by the OTLP exporters
+// (traces / metrics-OTLP / logs); Prometheus-only operation leaves it unused.
 type ProviderConfig struct {
-	Endpoint                 string
-	TracesEnabled            bool
-	TracesSampleRate         float64
-	MetricsEnabled           bool
-	MetricsPrometheusEnabled bool
-	LogsEnabled              bool
+	Endpoint          string
+	TracesEnabled     bool
+	TracesSampleRate  float64
+	MetricsEnabled    bool
+	PrometheusEnabled bool
+	LogsEnabled       bool
 }
 
 // InitProvider sets up the OpenTelemetry pipeline, registering only the
@@ -46,8 +51,8 @@ type ProviderConfig struct {
 // extraction still works against a no-op tracer provider).
 //
 // Returns a shutdown function (always non-nil) and a Prometheus HTTP handler
-// (non-nil iff MetricsEnabled && MetricsPrometheusEnabled). The handler reads
-// from a private prometheus.Registry — global registry pollution is avoided.
+// (non-nil iff PrometheusEnabled). The handler reads from a private
+// prometheus.Registry — global registry pollution is avoided.
 func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (func(context.Context) error, http.Handler, error) {
 	var shutdownFuncs []func(context.Context) error
 
@@ -99,20 +104,22 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	}
 
 	var promHandler http.Handler
-	if cfg.MetricsEnabled {
+	if cfg.MetricsEnabled || cfg.PrometheusEnabled {
 		readers := []metric.Reader{}
 
-		metricExporter, err := otlpmetricgrpc.New(ctx,
-			otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
-			otlpmetricgrpc.WithInsecure(),
-		)
-		if err != nil {
-			handleErr(err)
-			return shutdown, nil, err
+		if cfg.MetricsEnabled {
+			metricExporter, err := otlpmetricgrpc.New(ctx,
+				otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
+				otlpmetricgrpc.WithInsecure(),
+			)
+			if err != nil {
+				handleErr(err)
+				return shutdown, nil, err
+			}
+			readers = append(readers, metric.NewPeriodicReader(metricExporter, metric.WithInterval(15*time.Second)))
 		}
-		readers = append(readers, metric.NewPeriodicReader(metricExporter, metric.WithInterval(15*time.Second)))
 
-		if cfg.MetricsPrometheusEnabled {
+		if cfg.PrometheusEnabled {
 			// Private Registry — keeps WaveHouse metrics out of the global
 			// prometheus.DefaultRegisterer (which the prometheus client
 			// library's process/Go collectors auto-register into). Tests

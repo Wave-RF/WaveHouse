@@ -27,6 +27,7 @@ type Config struct {
 	Policy     Policy     `yaml:"policy"`
 	Pipes      Pipes      `yaml:"pipes"`
 	OTel       OTel       `yaml:"otel"`
+	Prometheus Prometheus `yaml:"prometheus"`
 }
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
@@ -45,22 +46,28 @@ type OTelTraces struct {
 }
 
 type OTelMetrics struct {
-	Enabled    bool                  `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
-	Prometheus OTelMetricsPrometheus `yaml:"prometheus"`
+	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
 }
 
-// OTelMetricsPrometheus controls a Prometheus exposition endpoint served
-// alongside (or independently of) the OTLP push exporter. The same OTel
-// meter API records both; the Prometheus exporter is an additional Reader
-// on the MeterProvider. Disabled by default.
+// Prometheus controls a Prometheus exposition endpoint served alongside (or
+// independently of) the OTLP push exporter. It is its own top-level block so
+// operators using Prometheus scraping (Grafana Alloy / Mimir / etc.) don't
+// have to hunt through `[otel]` for an output they don't otherwise care about.
+// Internally the same OTel MeterProvider drives both — the Prometheus exporter
+// is an additional Reader — but the user-facing config keeps the two outputs
+// distinct.
+//
+// Works in any of three combinations: OTel only, Prometheus only, or both. If
+// only Prometheus is enabled, the MeterProvider is still created so runtime +
+// custom metrics flow to `/metrics`; no OTLP push is attempted.
 //
 // Port `0` mounts the endpoint on the existing API server router. A non-zero
 // port spins up a dedicated HTTP listener — useful for firewalling metrics
 // off the public API surface in production.
-type OTelMetricsPrometheus struct {
-	Enabled bool   `yaml:"enabled" env:"WH_OTEL_METRICS_PROMETHEUS_ENABLED" env-default:"false"`
-	Path    string `yaml:"path" env:"WH_OTEL_METRICS_PROMETHEUS_PATH" env-default:"/metrics"`
-	Port    int    `yaml:"port" env:"WH_OTEL_METRICS_PROMETHEUS_PORT" env-default:"0"`
+type Prometheus struct {
+	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED" env-default:"false"`
+	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH" env-default:"/metrics"`
+	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT" env-default:"0"`
 }
 
 // OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
@@ -185,17 +192,20 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
 			}
 		}
-		if c.OTel.Metrics.Enabled && c.OTel.Metrics.Prometheus.Enabled {
-			p := c.OTel.Metrics.Prometheus
-			if p.Port < 0 || p.Port > 65535 {
-				return fmt.Errorf("otel.metrics.prometheus.port %d out of range [0, 65535]", p.Port)
-			}
-			if p.Port != 0 && p.Port == c.Server.Port {
-				return fmt.Errorf("otel.metrics.prometheus.port collides with server.port (%d); use 0 to mount on the API server or pick a different port", p.Port)
-			}
-			if !strings.HasPrefix(p.Path, "/") {
-				return fmt.Errorf("otel.metrics.prometheus.path %q must start with '/'", p.Path)
-			}
+	}
+
+	// Prometheus exposition is independent of OTel — operators can run it
+	// standalone (Alloy scrape, no OTLP push) or alongside OTLP push.
+	if c.Prometheus.Enabled {
+		p := c.Prometheus
+		if p.Port < 0 || p.Port > 65535 {
+			return fmt.Errorf("prometheus.port %d out of range [0, 65535]", p.Port)
+		}
+		if p.Port != 0 && p.Port == c.Server.Port {
+			return fmt.Errorf("prometheus.port collides with server.port (%d); use 0 to mount on the API server or pick a different port", p.Port)
+		}
+		if !strings.HasPrefix(p.Path, "/") {
+			return fmt.Errorf("prometheus.path %q must start with '/'", p.Path)
 		}
 	}
 

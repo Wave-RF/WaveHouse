@@ -98,14 +98,17 @@ func run() int {
 	slog.SetDefault(logger)
 
 	var promHandler http.Handler
-	if cfg.OTel.Enabled {
+	// Provider init runs whenever either OTLP push or Prometheus exposition is
+	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
+	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
+	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
-			Endpoint:                 cfg.OTel.Addr,
-			TracesEnabled:            cfg.OTel.Traces.Enabled,
-			TracesSampleRate:         cfg.OTel.Traces.SampleRate,
-			MetricsEnabled:           cfg.OTel.Metrics.Enabled,
-			MetricsPrometheusEnabled: cfg.OTel.Metrics.Prometheus.Enabled,
-			LogsEnabled:              cfg.OTel.Logs.Enabled,
+			Endpoint:          cfg.OTel.Addr,
+			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
+			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
+			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
+			PrometheusEnabled: cfg.Prometheus.Enabled,
+			LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
 		})
 		if err != nil {
 			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
@@ -120,14 +123,25 @@ func run() int {
 				_ = otelShutdown(ctx)
 			}()
 
-			otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.OTel.Logs.SampleRate)
-			logger = otelLogger.With(
-				"version", Version,
-				"build_time", BuildTime,
-				"git_commit", GitCommit,
-			)
-			slog.SetDefault(logger)
-			logger.Info("observability pipeline established", "endpoint", cfg.OTel.Addr)
+			// Only swap to the OTLP-aware logger when OTLP logs are wired up;
+			// Prometheus-only mode keeps the stdout-only handler set earlier.
+			if cfg.OTel.Enabled && cfg.OTel.Logs.Enabled {
+				otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.OTel.Logs.SampleRate)
+				logger = otelLogger.With(
+					"version", Version,
+					"build_time", BuildTime,
+					"git_commit", GitCommit,
+				)
+				slog.SetDefault(logger)
+			}
+			switch {
+			case cfg.OTel.Enabled && cfg.Prometheus.Enabled:
+				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr, "prometheus", true)
+			case cfg.OTel.Enabled:
+				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr)
+			case cfg.Prometheus.Enabled:
+				logger.Info("observability pipeline established", "prometheus", true)
+			}
 		}
 	}
 
@@ -323,8 +337,8 @@ func run() int {
 
 	// Prometheus /metrics routing: same-port → mount on API router,
 	// dedicated port → spin a sidecar HTTP server below.
-	promPath := cfg.OTel.Metrics.Prometheus.Path
-	promPort := cfg.OTel.Metrics.Prometheus.Port
+	promPath := cfg.Prometheus.Path
+	promPort := cfg.Prometheus.Port
 	var promSrv *http.Server
 	if promHandler != nil {
 		if promPort == 0 {

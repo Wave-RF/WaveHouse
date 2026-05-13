@@ -335,9 +335,9 @@ func TestLoad_Defaults_PrometheusDisabled(t *testing.T) {
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
 
-	assert.False(t, cfg.OTel.Metrics.Prometheus.Enabled)
-	assert.Equal(t, "/metrics", cfg.OTel.Metrics.Prometheus.Path)
-	assert.Equal(t, 0, cfg.OTel.Metrics.Prometheus.Port)
+	assert.False(t, cfg.Prometheus.Enabled)
+	assert.Equal(t, "/metrics", cfg.Prometheus.Path)
+	assert.Equal(t, 0, cfg.Prometheus.Port)
 }
 
 func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
@@ -346,19 +346,10 @@ func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		OTel: OTel{
+		Prometheus: Prometheus{
 			Enabled: true,
-			Addr:    "127.0.0.1:4317",
-			Traces:  OTelTraces{SampleRate: 0.10},
-			Logs:    OTelLogs{SampleRate: 0.10},
-			Metrics: OTelMetrics{
-				Enabled: true,
-				Prometheus: OTelMetricsPrometheus{
-					Enabled: true,
-					Path:    "/metrics",
-					Port:    8080, // collides
-				},
-			},
+			Path:    "/metrics",
+			Port:    8080, // collides
 		},
 	}
 	err := cfg.Validate()
@@ -383,19 +374,10 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 				Server:     Server{Port: 8080},
 				ClickHouse: ClickHouse{HTTPScheme: "http"},
 				Schema:     Schema{RefreshInterval: 60},
-				OTel: OTel{
+				Prometheus: Prometheus{
 					Enabled: true,
-					Addr:    "127.0.0.1:4317",
-					Traces:  OTelTraces{SampleRate: 0.10},
-					Logs:    OTelLogs{SampleRate: 0.10},
-					Metrics: OTelMetrics{
-						Enabled: true,
-						Prometheus: OTelMetricsPrometheus{
-							Enabled: true,
-							Path:    "/metrics",
-							Port:    tc.port,
-						},
-					},
+					Path:    "/metrics",
+					Port:    tc.port,
 				},
 			}
 			err := cfg.Validate()
@@ -411,24 +393,28 @@ func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		OTel: OTel{
+		Prometheus: Prometheus{
 			Enabled: true,
-			Addr:    "127.0.0.1:4317",
-			Traces:  OTelTraces{SampleRate: 0.10},
-			Logs:    OTelLogs{SampleRate: 0.10},
-			Metrics: OTelMetrics{
-				Enabled: true,
-				Prometheus: OTelMetricsPrometheus{
-					Enabled: true,
-					Path:    "metrics", // missing leading slash
-					Port:    0,
-				},
-			},
+			Path:    "metrics", // missing leading slash
+			Port:    0,
 		},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must start with '/'")
+}
+
+func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
+	t.Parallel()
+	// Operators using Prometheus scrape (Alloy / Mimir) without OTel push:
+	// otel.enabled stays false, prometheus.enabled is true. Must validate.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{Enabled: true, Path: "/metrics", Port: 0},
+	}
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
@@ -440,19 +426,10 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 		Server:     Server{Port: 8080},
 		ClickHouse: ClickHouse{HTTPScheme: "http"},
 		Schema:     Schema{RefreshInterval: 60},
-		OTel: OTel{
-			Enabled: true,
-			Addr:    "127.0.0.1:4317",
-			Traces:  OTelTraces{SampleRate: 0.10},
-			Logs:    OTelLogs{SampleRate: 0.10},
-			Metrics: OTelMetrics{
-				Enabled: true,
-				Prometheus: OTelMetricsPrometheus{
-					Enabled: false,
-					Path:    "garbage",
-					Port:    8080,
-				},
-			},
+		Prometheus: Prometheus{
+			Enabled: false,
+			Path:    "garbage",
+			Port:    8080,
 		},
 	}
 	assert.NoError(t, cfg.Validate())

@@ -109,7 +109,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 ### OTel
 
-The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/logs) is then individually gated by its own `enabled` flag — you can run traces-only, logs-only, etc. Stdout is always active for logs (the logger fans out to both stdout and the OTLP exporter), so logs never disappear regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup; transient export errors are surfaced via the OTel SDK's error handler. The `if err != nil` fallback in `main.go` only fires for genuine init errors (malformed options, resource construction failure).
+The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/logs) is then individually gated by its own `enabled` flag — you can run traces-only, logs-only, etc. Prometheus exposition is configured in its own top-level [`prometheus`](#prometheus) block; it operates independently and works in any combination with OTel (OTLP push only, Prometheus only, both, or neither). Stdout is always active for logs (the logger fans out to both stdout and the OTLP exporter), so logs never disappear regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup; transient export errors are surfaced via the OTel SDK's error handler. The `if err != nil` fallback in `main.go` only fires for genuine init errors (malformed options, resource construction failure).
 
 **Sampling rates apply only to the OTLP push path.** Stdout always emits 100% of records — operators using a scraping-style pipeline (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit, etc.) set the collection rate at the scraper, not the application. WaveHouse pushes telemetry to an OTel collector; the scraper world owns its own ingest policy. If you want to throttle OTLP volume for cost, lower the rates below. If you want to throttle Loki/Datadog Logs/etc., do it at that pipeline.
 
@@ -122,11 +122,18 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
-| `otel.metrics.prometheus.enabled` | `WH_OTEL_METRICS_PROMETHEUS_ENABLED` | `false` | Also expose a `/metrics` endpoint in Prometheus exposition format. The same OTel `Meter()` API records both this and the OTLP push — they're two readers on one MeterProvider. Disabled by default; enabling adds an unauthenticated endpoint, so it's an explicit opt-in. Typical use case: Prometheus / Grafana Alloy scrapes WaveHouse directly instead of (or in addition to) the OTLP push to a collector. |
-| `otel.metrics.prometheus.path` | `WH_OTEL_METRICS_PROMETHEUS_PATH` | `/metrics` | URL path for the Prometheus endpoint. Must start with `/`. |
-| `otel.metrics.prometheus.port` | `WH_OTEL_METRICS_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
 | `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling this leaves stdout logging untouched — the OTel logger provider is simply not registered. |
 | `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for `DEBUG`/`INFO` records, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
+
+### Prometheus
+
+Prometheus exposition is its own top-level config block, independent of `otel.*`. Operators using a scrape-based pipeline (Grafana Alloy, Mimir, the standalone Prometheus server) can leave the entire `[otel]` block at its `enabled: false` default and turn on only `prometheus.enabled` — no OTLP collector required. Conversely, OTLP push and Prometheus can both be on at once (the underlying OTel MeterProvider drives both readers, same `Meter()` API). Disabled by default since enabling adds an unauthenticated endpoint, so opt-in is explicit.
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `prometheus.enabled` | `WH_PROMETHEUS_ENABLED` | `false` | Expose a Prometheus-format `/metrics` endpoint. Works standalone (no OTel push) or alongside `otel.metrics.enabled`. |
+| `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`. |
+| `prometheus.port` | `WH_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
 
 ### Logging
 
@@ -189,12 +196,13 @@ otel:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
   metrics:
-    enabled: true        # OTLP push
-    prometheus:
-      enabled: false     # also expose /metrics for Prometheus scrape
-      path: /metrics
-      port: 0            # 0 = mount on server.port; non-zero = sidecar listener
+    enabled: true        # OTLP push for metrics
   logs:
     enabled: true
     sample_rate: 1.0     # DEBUG/INFO OTLP rate; WARN+ always 100%, stdout always 100%
+
+prometheus:
+  enabled: false         # independent of otel — works standalone for scrape
+  path: /metrics
+  port: 0                # 0 = mount on server.port; non-zero = sidecar listener
 ```

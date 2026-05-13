@@ -51,7 +51,7 @@ func guardOTelGlobals(t *testing.T) {
 
 // initAndShutdown installs the OTel pipeline with the given config and
 // returns the shutdown func plus the Prometheus handler (non-nil only when
-// cfg.MetricsPrometheusEnabled is true). Caller is responsible for calling
+// cfg.PrometheusEnabled is true). Caller is responsible for calling
 // shutdown to drain pending exports before asserting on the receiver.
 func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) (func(context.Context) error, http.Handler) {
 	t.Helper()
@@ -209,16 +209,16 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	r := testutil.NewFakeOTLP(t)
 
 	shutdown, promHandler := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:                 r.Addr(),
-		MetricsEnabled:           true,
-		MetricsPrometheusEnabled: true,
+		Endpoint:          r.Addr(),
+		MetricsEnabled:    true,
+		PrometheusEnabled: true,
 	})
 	t.Cleanup(func() {
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer drainCancel()
 		_ = shutdown(drainCtx)
 	})
-	require.NotNil(t, promHandler, "prometheus handler should be non-nil when MetricsPrometheusEnabled=true")
+	require.NotNil(t, promHandler, "prometheus handler should be non-nil when PrometheusEnabled=true")
 
 	// Record a known custom metric so we can assert it appears at /metrics.
 	// OTel→Prometheus name translation: dots/dashes become underscores,
