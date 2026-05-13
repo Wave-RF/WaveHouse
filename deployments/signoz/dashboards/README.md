@@ -11,13 +11,13 @@ Format: SigNoz query-builder **v5** schema (the `version` field). Each file is e
 
 ## Loading them
 
-SigNoz OSS doesn't provision dashboards from disk, so after the stack is up and you've created your account in the UI:
+SigNoz OSS doesn't provision dashboards from disk, so after the stack is up and you've created your account in the UI, grab the `AUTH_TOKEN` from DevTools → Application → Local Storage → `http://localhost:3301`, then:
 
 ```bash
-SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='…' ../load-dashboards.sh
+SIGNOZ_TOKEN='eyJ…' ../load-dashboards.sh
 ```
 
-`../load-dashboards.sh` upserts by title (existing dashboards are updated in place), so re-run it whenever these files change. See its header for auth options (`SIGNOZ_TOKEN`, `SIGNOZ_URL`).
+`../load-dashboards.sh` upserts by title (existing dashboards are updated in place), so re-run it whenever these files change. See its header for the full token-grab walkthrough and `SIGNOZ_URL` overrides.
 
 ## Editing a dashboard
 

@@ -9,18 +9,20 @@
 # self-registration, so this can't be folded into `docker compose up` — run it
 # once after you've created your SigNoz account in the UI.
 #
-# Auth — provide ONE of:
-#   SIGNOZ_TOKEN=<jwt>                                    bearer token; in the SigNoz UI it's
-#                                                         localStorage['AUTH_TOKEN']
-#   SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='...'    logs in for you via /api/v1/login
+# Auth: SIGNOZ_TOKEN (the JWT used by the SPA itself).
+#   1. Sign in at ${SIGNOZ_URL} (default http://localhost:3301).
+#   2. DevTools → Application → Local Storage → http://localhost:3301 → copy
+#      the value of `AUTH_TOKEN`.
+#   3. Export it: `export SIGNOZ_TOKEN='eyJ...'`.
+#
+# (SigNoz v0.122.0 moved username/password login to `/api/v2/sessions/email_password`
+# and requires an org UUID that isn't externally discoverable, so we no longer
+# offer email/password login here — the token is one click away.)
+#
 # Optional:
 #   SIGNOZ_URL=http://localhost:3301                      (default)
 #
 # Requires: curl, jq.
-#
-# Examples:
-#   SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='hunter2' deployments/signoz/load-dashboards.sh
-#   SIGNOZ_TOKEN="$(pbpaste)" deployments/signoz/load-dashboards.sh
 set -euo pipefail
 
 SIGNOZ_URL="${SIGNOZ_URL:-http://localhost:3301}"
@@ -29,26 +31,16 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dashboards"
 command -v jq   >/dev/null 2>&1 || { echo "error: jq is required (brew install jq | apt-get install jq)" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
 
-# --- obtain a bearer token --------------------------------------------------
 TOKEN="${SIGNOZ_TOKEN:-}"
 if [ -z "$TOKEN" ]; then
-  if [ -z "${SIGNOZ_EMAIL:-}" ] || [ -z "${SIGNOZ_PASSWORD:-}" ]; then
-    cat >&2 <<EOF
-error: no SigNoz credentials.
+  cat >&2 <<EOF
+error: SIGNOZ_TOKEN is required.
 
-  1. Open ${SIGNOZ_URL} and sign in (create the account on first visit).
-  2. Re-run with either:
-       SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='...' $0
-     or paste the JWT from the browser (localStorage AUTH_TOKEN):
-       SIGNOZ_TOKEN='eyJ...' $0
+  1. Sign in at ${SIGNOZ_URL} (create your account on first visit).
+  2. DevTools → Application → Local Storage → ${SIGNOZ_URL} → copy AUTH_TOKEN.
+  3. Re-run: SIGNOZ_TOKEN='eyJ...' $0
 EOF
-    exit 1
-  fi
-  TOKEN="$(curl -fsS -X POST "${SIGNOZ_URL}/api/v1/login" \
-            -H 'Content-Type: application/json' \
-            -d "$(jq -nc --arg e "$SIGNOZ_EMAIL" --arg p "$SIGNOZ_PASSWORD" '{email:$e,password:$p}')" \
-          | jq -r '.accessJwt // .data.accessJwt // empty')"
-  [ -n "$TOKEN" ] || { echo "error: login failed — check SIGNOZ_EMAIL / SIGNOZ_PASSWORD (or pass SIGNOZ_TOKEN instead)" >&2; exit 1; }
+  exit 1
 fi
 AUTH=(-H "Authorization: Bearer ${TOKEN}")
 

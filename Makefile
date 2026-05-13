@@ -261,16 +261,17 @@ signoz-wipe: ## Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin accou
 	@echo "$(RED)==> Wiping SigNoz (containers + volumes)...$(RESET)"
 	@$(SIGNOZ_COMPOSE) down -v --remove-orphans
 
-# Dashboard loader auths to the SigNoz API via either a JWT (SIGNOZ_TOKEN,
-# pulled from the UI's localStorage AUTH_TOKEN) or email+password. Both are
-# user-specific, so neither is committed — the guard fails fast with a
-# pointer to the first-run flow rather than letting the loader emit a less
-# obvious 401.
+# Dashboard loader auths to the SigNoz API with a JWT (SIGNOZ_TOKEN, pulled
+# from the UI's localStorage AUTH_TOKEN). v0.122.0 moved password login to an
+# endpoint that needs an org UUID we can't externally discover, so the token
+# is the only supported path. The guard fails fast with a pointer to the
+# first-run flow rather than letting the loader emit a less obvious 401.
 .PHONY: signoz-dashboards
-signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNOZ_TOKEN or SIGNOZ_EMAIL+SIGNOZ_PASSWORD)
-	@if [ -z "$$SIGNOZ_TOKEN" ] && { [ -z "$$SIGNOZ_EMAIL" ] || [ -z "$$SIGNOZ_PASSWORD" ]; }; then \
-		echo "$(RED)==> Set SIGNOZ_TOKEN, or SIGNOZ_EMAIL + SIGNOZ_PASSWORD.$(RESET)"; \
-		echo "    First-run: open http://localhost:3301 and create your admin account, then re-run."; \
+signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNOZ_TOKEN)
+	@if [ -z "$$SIGNOZ_TOKEN" ]; then \
+		echo "$(RED)==> Set SIGNOZ_TOKEN.$(RESET)"; \
+		echo "    First-run: open http://localhost:3301, create your admin account,"; \
+		echo "    then copy AUTH_TOKEN from DevTools → Application → Local Storage."; \
 		exit 1; \
 	fi
 	@deployments/signoz/load-dashboards.sh
@@ -284,8 +285,8 @@ dev-obs: deps-up signoz-up $(AIR) ## Hot-reload dev server with SigNoz observabi
 	@echo "$(CYAN)==> Starting WaveHouse with SigNoz observability$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)"
 	@echo "    SigNoz UI:  $(GREEN)http://localhost:3301$(RESET)  (first-run: create local admin account)"
-	@if [ -n "$$SIGNOZ_TOKEN" ] || { [ -n "$$SIGNOZ_EMAIL" ] && [ -n "$$SIGNOZ_PASSWORD" ]; }; then \
-		echo "$(CYAN)==> Loading dashboards (creds detected)...$(RESET)"; \
+	@if [ -n "$$SIGNOZ_TOKEN" ]; then \
+		echo "$(CYAN)==> Loading dashboards (SIGNOZ_TOKEN detected)...$(RESET)"; \
 		deployments/signoz/load-dashboards.sh || echo "$(YELLOW)==> Dashboard load failed; continuing$(RESET)"; \
 	else \
 		echo "    Dashboards: run $(CYAN)make signoz-dashboards$(RESET) after creating your SigNoz account"; \
