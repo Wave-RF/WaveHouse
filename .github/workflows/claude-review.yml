@@ -70,16 +70,29 @@ on:
         type: string
 
 # Dedup per PR. PR number reachable from each event payload before
-# any step runs. Fast-follow human action (new push, /review comment)
-# cancels an in-flight review against the now-stale HEAD. Bot-triggered
-# events do NOT cancel — otherwise Claude's own sticky comment fires
-# an `issue_comment created` webhook that would cancel the in-flight
-# review-run as it's still finishing posting. The new bot-triggered
-# run is filtered out at the job-level `if:` anyway, so making it
-# non-cancelling here just lets the original run complete.
+# any step runs. Only `pull_request` events (a new push to the PR's
+# head ref, opened, reopened, ready_for_review) cancel the in-flight
+# run — those produce a new HEAD SHA which immediately invalidates
+# any review-in-progress. Every other trigger QUEUES behind the
+# running review instead of cancelling it:
+#
+#   - `issue_comment` (@claude / /review) shouldn't kill an in-flight
+#     review; queueing means the new comment context is visible to
+#     the follow-up run when it picks up.
+#   - `workflow_dispatch` is an operator escape hatch for retrying
+#     after a transient Anthropic API hiccup; killing the running
+#     attempt on a manual re-trigger would punish the operator for
+#     trying to help.
+#   - Claude's own sticky-comment edits fire `issue_comment` webhooks
+#     against this workflow. Restricting cancel-in-progress to
+#     `pull_request` events makes bot-authored comments incapable of
+#     cancelling, regardless of which user the GitHub App is acting
+#     on behalf of (the previous sender-type gate from #111 missed
+#     PAT-acting-as-bot edges; this scope is strictly narrower and
+#     semantic).
 concurrency:
   group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
-  cancel-in-progress: ${{ github.event.sender.type != 'Bot' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   review:
