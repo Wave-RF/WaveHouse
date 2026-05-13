@@ -233,14 +233,31 @@ func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Hand
 }
 
 // corsMiddleware handles CORS preflight and response headers.
-// When allowedOrigins contains "*", any origin is accepted.
-// Otherwise only listed origins receive CORS headers.
+//
+// Origin policy:
+//   - allowedOrigins == nil/empty OR contains "*": any origin is accepted.
+//     The response echoes "*" (no Vary), which is correct for our Bearer-auth
+//     API because no credentials are required to read the response.
+//   - Otherwise: only origins in the allowlist receive Access-Control-Allow-Origin
+//     (echoed back, with Vary: Origin so caches key on it).
+//
+// Credentials: we deliberately do NOT emit Access-Control-Allow-Credentials.
+// WaveHouse is a Bearer-token API (see internal/api/middleware.go) — clients
+// send Authorization: Bearer <jwt> as an explicit request header, not via
+// browser-managed cookies, so credentials mode is unnecessary. Sending
+// Allow-Credentials: true together with Allow-Origin: "*" is also a CORS
+// spec violation that browsers reject. Keeping credentials off both fixes
+// the spec violation and shrinks the CSRF surface (see issue #30).
+//
+// Non-CORS requests (no Origin header) are passed through unchanged — we
+// don't decorate same-origin responses with CORS noise.
 func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 	allowAll := len(allowedOrigins) == 0
 	allowedSet := make(map[string]struct{}, len(allowedOrigins))
 	for _, o := range allowedOrigins {
 		if o == "*" {
 			allowAll = true
+			continue
 		}
 		allowedSet[o] = struct{}{}
 	}
@@ -249,20 +266,42 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			if allowAll {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-			} else if _, ok := allowedSet[origin]; ok && origin != "" {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
+			// Same-origin / non-browser request: skip CORS decoration entirely.
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
 			}
 
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
-			w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Max-Age", "3600")
+			allowed := false
+			switch {
+			case allowAll:
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				allowed = true
+			default:
+				// In allowlist mode the response is per-origin, so always set
+				// Vary: Origin — even when the origin is rejected. Without
+				// this, a shared cache could memoize the headerless reject
+				// response under the URL alone and replay it to a later
+				// allowed-origin request, stripping the CORS headers and
+				// breaking the legitimate client.
+				w.Header().Set("Vary", "Origin")
+				if _, ok := allowedSet[origin]; ok {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					allowed = true
+				}
+			}
+
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
+				w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
+				w.Header().Set("Access-Control-Max-Age", "3600")
+			}
 
 			if r.Method == http.MethodOptions {
+				// Always short-circuit OPTIONS — disallowed origins simply get a
+				// 204 with no CORS headers, which the browser will treat as a
+				// preflight failure.
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

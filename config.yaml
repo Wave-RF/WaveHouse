@@ -6,6 +6,14 @@ data_dir: ./data
 server:
   port: 8080
   shutdown_timeout: 10
+  # CORS allowlist. "*" allows any browser origin; this is fine in dev because
+  # WaveHouse is a Bearer-token API (no cookies, no credentials mode — see
+  # internal/api/router.go corsMiddleware), so cross-origin XHR can't smuggle
+  # auth. In production with a known frontend domain, replace "*" with the
+  # explicit list, e.g.:
+  #   cors_allowed_origins:
+  #     - "https://dashboard.wavehouse.example"
+  #     - "http://localhost:3000"   # local frontend dev server
   cors_allowed_origins:
     - "*"
 
