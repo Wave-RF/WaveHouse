@@ -9,6 +9,25 @@ server:
   cors_allowed_origins:
     - "*"
 
+otel:
+  enabled: false         # master switch — set true to export via OTLP gRPC
+  addr: "127.0.0.1:4317"
+  traces:
+    enabled: true
+    sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
+  metrics:
+    enabled: true        # OTLP push for metrics
+  logs:
+    enabled: true
+    sample_rate: 1.0     # DEBUG/INFO OTLP rate; WARN+ always 100%, stdout always 100%
+
+# Prometheus exposition is independent of OTel — works on its own (Alloy /
+# Mimir scrape, no collector) or alongside OTLP push.
+prometheus:
+  enabled: false
+  path: /metrics
+  port: 0                # 0 = mount on server.port; non-zero = sidecar listener
+
 clickhouse:
   addr: localhost:9000
   http_port: 8123
