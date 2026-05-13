@@ -390,11 +390,11 @@ Two dashboards live in `deployments/signoz/dashboards/` as version-controlled JS
 2. Open `http://localhost:3301` and **create your account** (first visit only).
 3. Load the dashboards (via Make wrapper or directly):
 
-   ```bash
-   SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='…' make signoz-dashboards
-   # or call the loader directly:
-   SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='…' deployments/signoz/load-dashboards.sh
-   ```
+# First, get the token from the SigNoz UI's localStorage
+export SIGNOZ_TOKEN='eyJ...'
+make signoz-dashboards
+# or call the loader directly:
+deployments/signoz/load-dashboards.sh
 
 The loader upserts by title (matching dashboards are updated in place, new ones created), so re-run it whenever the JSON changes. It can also take a `SIGNOZ_TOKEN` (the `AUTH_TOKEN` from the SigNoz UI's `localStorage`) instead of email/password, and `SIGNOZ_URL` (default `http://localhost:3301`). Needs `curl` and `jq`. To edit a dashboard, change it in the UI, then re-export it: `GET /api/v1/dashboards/<id>` and save the response's `.data.data` over the JSON file.
 
