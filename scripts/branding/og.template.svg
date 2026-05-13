@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d2429"/>
+      <stop offset="1" stop-color="#152e35"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- subtle horizontal waves at the bottom -->
+  <g fill="none" stroke="#5bbfcf" stroke-width="3" stroke-linecap="round" opacity="0.10">
+    <path d="M-20 560 C 120 500, 220 620, 360 560 S 600 500, 740 560 S 980 620, 1220 560"/>
+    <path d="M-20 595 C 120 535, 220 655, 360 595 S 600 535, 740 595 S 980 655, 1220 595"/>
+  </g>
+
+  <!-- Mark — the contents of scripts/branding/mark.svg are spliced in here
+       by scripts/branding/generate.sh, with currentColor substituted for the
+       OG-card mark color. Scaled 2.5x so the (64-unit) mark renders 160 px,
+       sized to read alongside the 140 px wordmark rather than overpower it. -->
+  <g transform="translate(220 190) scale(2.5)">
+    __MARK_GROUP__
+  </g>
+
+  <text x="400" y="320" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="140" font-weight="700" fill="#f8f9fa" letter-spacing="-3">WaveHouse</text>
+
+  <text x="600" y="450" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="36" font-weight="400" fill="#c2c9d1" text-anchor="middle">
+    The open-source real-time API gateway for ClickHouse
+  </text>
+
+  <text x="600" y="520" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="24" font-weight="500" fill="#5bbfcf" text-anchor="middle" letter-spacing="2">
+    SCHEMA-AWARE INGEST  ·  ASYNC BATCHING  ·  REAL-TIME STREAMING  ·  TIERED CACHING
+  </text>
+</svg>

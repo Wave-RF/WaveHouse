@@ -1,4 +1,10 @@
-# 🏖️ WaveHouse
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/branding/wavehouse-mark-dark.svg">
+    <img src="docs/src/assets/branding/wavehouse-mark-light.svg" alt="" height="36" width="36">
+  </picture>
+  WaveHouse
+</h1>
 
 [![CI](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml)
 [![Coverage](https://github.com/Wave-RF/WaveHouse/blob/badges/.badges/main/coverage.svg?raw=true)](https://github.com/Wave-RF/WaveHouse/actions)
@@ -11,6 +17,8 @@ WaveHouse is a high-performance, Go-based gateway designed to sit entirely in fr
 
 If you are building user-facing analytics, **WaveHouse acts like Supabase for ClickHouse**—or an **open-source Tinybird** that pushes data to your frontend in real time over SSE and WebSockets, not just via pull-based REST queries.
 
+📖 **Full documentation:** [wavehouse.dev](https://wavehouse.dev)
+
 ## ✨ Why WaveHouse?
 
 ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend applications comes with sharp edges. You typically have to build custom APIs, manage Kafka queues to prevent "too many parts" errors during insertion, and write complex replacing logic for deduplication. WaveHouse abstracts all of this away into a single, deployable binary so you stop interacting with ClickHouse directly.
@@ -18,7 +26,7 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **📋 Schema-Aware Validation:** WaveHouse discovers your ClickHouse table schemas automatically via `system.columns` and validates every ingest payload against the real schema — unknown fields are rejected, types are checked, and nullable constraints are enforced. Bring Your Own Schema: you define tables in ClickHouse, WaveHouse enforces them.
 * **📥 Asynchronous Buffered Ingestion:** Never drop a packet. WaveHouse writes incoming data to a highly durable Write-Ahead Log (WAL) and returns `200 OK` instantly, batching inserts to ClickHouse in the background.
 * **👯 Optional Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations. Enable it when you need it, skip it when you don't.
-* **⚡ Two-Tier Query Caching:** An ultra-fast local memory cache (L1) and a shared distributed cache (L2) coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
+* **⚡ In-process Query Caching:** An in-process Ristretto cache plus Go `singleflight` coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
 * **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
 * **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
 * **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
@@ -133,12 +141,15 @@ We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md]
 
 ## 📖 Documentation
 
-* [Architecture](docs/architecture.md) — System design, data flows, and package overview
-* [API Reference](docs/api.md) — All endpoints, authentication, request/response formats
-* [Configuration](docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/deployment.md) — Standalone, (future) clustered, Docker, and release guide
-* [Development](docs/development.md) — Building, testing, linting, and project structure
-* [SDK Reference](docs/sdk.md) — TypeScript client SDK usage and codegen
+The full documentation site lives at **[wavehouse.dev](https://wavehouse.dev)**. Source markdown is in [`docs/src/content/docs/`](docs/src/content/docs/):
+
+* [Getting Started](docs/src/content/docs/getting-started.md) — Five-minute quickstart
+* [Architecture](docs/src/content/docs/architecture.md) — System design, data flows, and package overview
+* [API Reference](docs/src/content/docs/api.md) — All endpoints, authentication, request/response formats
+* [Configuration](docs/src/content/docs/configuration.md) — Full config reference (YAML + environment variables)
+* [Deployment](docs/src/content/docs/deployment.md) — Single-binary deployment, Docker images, releases, and health checks
+* [Development](docs/src/content/docs/development.md) — Building, testing, linting, and project structure
+* [SDK Reference](docs/src/content/docs/sdk.md) — TypeScript client SDK usage and codegen
 
 ## 📜 License
 
