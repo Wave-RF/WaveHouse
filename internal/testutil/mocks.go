@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
@@ -110,9 +111,10 @@ type mockEntry struct {
 
 // MockCache implements cache.Cache for testing.
 type MockCache struct {
-	mu    sync.Mutex
-	store map[string]mockEntry
-	Err   error
+	mu              sync.Mutex
+	store           map[string]mockEntry
+	InvalidatedTags []string
+	Err             error
 }
 
 func NewMockCache() *MockCache {
@@ -149,6 +151,8 @@ func (m *MockCache) InvalidateByTags(_ context.Context, tags []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.InvalidatedTags = append(m.InvalidatedTags, tags...)
+
 	for key, entry := range m.store {
 		for _, targetTag := range tags {
 			for _, entryTag := range entry.tags {
@@ -163,4 +167,44 @@ func (m *MockCache) InvalidateByTags(_ context.Context, tags []string) error {
 	return nil
 }
 
+func (m *MockCache) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.InvalidatedTags = nil
+	m.store = make(map[string]mockEntry)
+}
+
 func (m *MockCache) Close() error { return nil }
+
+// MockConn satisfies the driver.Conn interface.
+// We embed driver.Conn so we don't have to implement all 30+ methods.
+type MockConn struct {
+	driver.Conn
+	// QueryFn allows us to define custom behavior per-test
+	QueryFn func(ctx context.Context, query string, args ...any) (driver.Rows, error)
+	// ExecFn allows us to define custom behavior for Exec calls
+	ExecFn func(ctx context.Context, query string, args ...any) error
+}
+
+func (m *MockConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if m.QueryFn != nil {
+		return m.QueryFn(ctx, query, args...)
+	}
+	return &MockRows{}, nil
+}
+
+func (m *MockConn) Exec(ctx context.Context, query string, args ...any) error {
+	if m.ExecFn != nil {
+		return m.ExecFn(ctx, query, args...)
+	}
+	return nil
+}
+
+// MockRows satisfies the driver.Rows interface for mocked results.
+type MockRows struct {
+	driver.Rows
+}
+
+func (m *MockRows) Close() error                     { return nil }
+func (m *MockRows) Next() bool                       { return false } // Returns no rows by default
+func (m *MockRows) ColumnTypes() []driver.ColumnType { return nil }

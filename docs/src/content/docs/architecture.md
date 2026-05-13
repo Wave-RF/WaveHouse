@@ -153,7 +153,7 @@ Client POST /v1/ingest/{table}
 
 Bento ingest pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
-  → Validate table name against safeIdentifierRe
+  → Validate table name against query.SafeIdentifierRe (internal/query/sqlutil.go)
   → Batch events per table, bulk INSERT to ClickHouse
   → Delete actions handled inline (chConn.Exec)
   → On success:

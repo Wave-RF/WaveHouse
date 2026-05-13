@@ -462,7 +462,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // cache instance, preventing stale pointers during sequential integration tests.
 // NOTE: While Bento output registration (sync.Once) only fires once per process,
 // StartIngestWorker updates this pointer so subsequent test setups use the new cache.
-var activeCache atomic.Value
+var activeCache atomic.Pointer[cache.Cache]
 
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
@@ -478,7 +478,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 
 	// Store the newest cache pointer every time this is called
 	if apiCache != nil {
-		activeCache.Store(apiCache)
+		activeCache.Store(&apiCache)
 	}
 
 	js, err := jetstream.New(nc)
@@ -529,8 +529,8 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 					scheme = "http" // Default fallback
 				}
 				var c cache.Cache
-				if val := activeCache.Load(); val != nil {
-					c = val.(cache.Cache)
+				if ptr := activeCache.Load(); ptr != nil {
+					c = *ptr
 				}
 				// WARNING: Because this factory is registered via sync.Once, the ClickHouse
 				// connection parameters (scheme, host, port, user, password, db) are captured

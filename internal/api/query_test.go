@@ -7,10 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sync/singleflight"
 )
 
 // safeHandle calls a handler and recovers from panics.
@@ -229,4 +233,34 @@ func TestExtractCacheTags(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQueryHandler_MutationInvalidation(t *testing.T) {
+	mockCache := testutil.NewMockCache()
+
+	// Stub connection
+	mockConn := &testutil.MockConn{
+		QueryFn: func(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+			return &testutil.MockRows{}, nil
+		},
+	}
+
+	handler := NewQueryHandler(mockConn, mockCache, time.Minute)
+	handler.sf = singleflight.Group{}
+
+	t.Run("successful mutation triggers invalidation", func(t *testing.T) {
+		mockCache.Reset() // Clear previous state
+
+		sql := "INSERT INTO orders (id) VALUES (1)"
+		reqBody, _ := json.Marshal(queryRequest{SQL: sql})
+
+		req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/query", bytes.NewReader(reqBody))
+		w := httptest.NewRecorder()
+
+		handler.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		// Verify the tag was recorded in our new InvalidatedTags slice
+		assert.Contains(t, mockCache.InvalidatedTags, "orders")
+	})
 }

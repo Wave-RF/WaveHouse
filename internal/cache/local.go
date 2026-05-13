@@ -118,12 +118,14 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	// Clean up old tags if we are overwriting an existing key
 	l.removeKeyFromTagsLocked(key)
 
-	l.keyTags[key] = tags
-	for _, tag := range tags {
-		if l.tagsMap[tag] == nil {
-			l.tagsMap[tag] = make(map[string]struct{})
+	if len(tags) > 0 {
+		l.keyTags[key] = tags
+		for _, tag := range tags {
+			if l.tagsMap[tag] == nil {
+				l.tagsMap[tag] = make(map[string]struct{})
+			}
+			l.tagsMap[tag][key] = struct{}{}
 		}
-		l.tagsMap[tag][key] = struct{}{}
 	}
 	return nil
 }

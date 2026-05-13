@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 ### Added
 - **Per-table cache invalidation via Bento** (`internal/cache/`, `internal/ingest/bento.go`): the ingest worker now triggers a targeted cache purge after successful ClickHouse batch flushes. This ensures "Read-Your-Writes" consistency within the standalone deployment without requiring a complex WAL-merging query engine.
-- **Cache Tagging system** (`internal/cache/local.go`, `internal/cache/tiered.go`): the `Cache` interface now supports `Set(..., tags []string)` and `InvalidateByTags(ctx, tags)`. `LocalCache` uses a double-indexed map (`tagsMap` and `keyTags`) to track which cache keys are associated with which tables, with automatic cleanup of the tag index on TTL expiry to prevent memory leaks.
+- **Cache Tagging system** (`internal/cache/local.go`, `internal/cache/tiered.go`): the `Cache` interface now supports `Set(..., tags []string)` and `InvalidateByTags(ctx, tags)`. `LocalCache` uses a double-indexed map (`tagsMap` and `keyTags`) to track which cache keys are associated with which tables, with automatic cleanup of the tag index on eviction to prevent memory leaks.
 - **Safe SQL Tag Extraction** (`internal/api/query.go`, `internal/api/pipes.go`): introduced `extractCacheTags()` helper that parses SQL for `FROM`, `JOIN`, and `INTO` clauses to automatically tag cache entries. Includes regex-based validation of identifiers to prevent cache-poisoning via malformed SQL.
 
 ### Fixed
