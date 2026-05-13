@@ -65,16 +65,34 @@ jobs:
         # → cov sequentially. Mirrors local `make ci` exactly.
         run: make ci
 
-      # Cache save: only on push to main, and only when the exact key
-      # didn't already exist upstream (skip the re-upload no-op). PR
-      # pushes are restore-only — see setup-env/action.yml. Net effect:
-      # PR runs save ~3 minutes per push by skipping the ~1.7 GB
-      # post-step that the unified `actions/cache@v4` was running.
+      # Cache save: every branch (PR + main), but only when the exact
+      # key wasn't already in the cache server. The cache-hit gate is
+      # what controls the no-op skip — it short-circuits before the
+      # action ever runs, so a same-key re-push is essentially free
+      # (the post-step doesn't get a chance to fire).
+      #
+      # Why the previous main-only gate is gone: cache traffic now
+      # lands on caches.dmz.local:3000 at LAN speeds (~5 ms RTT), so
+      # the ~30-60s tar+upload cost of a first PR-push save is paid
+      # back almost immediately by every subsequent push to that
+      # branch (and every other PR with the same go.sum / lockfiles)
+      # hitting warm restores instead of cold-building `make ci` for
+      # ~270 s. The first-save-per-hash-tuple is the only push that
+      # pays the cost; everything after is hit-skipped here.
+      #
+      # Cache scope semantics: actions/cache saves under the workflow's
+      # ref scope. Each PR's ref (refs/pull/N/merge) inherits the base
+      # ref's (main's) cache, so a main-push save populates every PR's
+      # restore. PR-push saves populate same-branch re-runs AND any
+      # later main-push restore on the same key. Cross-PR sharing is
+      # opportunistic: PRs against the same base see each other's
+      # saves when their key tuples match — that's the design intent
+      # (one PR's `go mod download` warms the next PR's).
       #
       # Three save steps mirror the three restore caches in setup-env —
       # paths and keys must stay in sync.
       - name: Save Go module + build cache
-        if: github.ref == 'refs/heads/main' && steps.setup.outputs.gobuild-cache-hit != 'true'
+        if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -83,7 +101,7 @@ jobs:
           key: gobuild-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
       - name: Save golangci-lint cache
-        if: github.ref == 'refs/heads/main' && steps.setup.outputs.golangci-cache-hit != 'true'
+        if: steps.setup.outputs.golangci-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -92,7 +110,7 @@ jobs:
           key: golangci-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yml') }}
 
       - name: Save pnpm store cache
-        if: github.ref == 'refs/heads/main' && steps.setup.outputs.pnpm-cache-hit != 'true'
+        if: steps.setup.outputs.pnpm-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.local/share/pnpm/store

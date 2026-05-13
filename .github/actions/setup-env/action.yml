@@ -3,11 +3,12 @@
 # explicit actions/checkout step (composite actions cannot self-checkout —
 # the workflow has to land the repo first so this action's path resolves).
 #
-# Restore-only: this action only restores caches. Saving is gated on
-# `github.ref == 'refs/heads/main'` and lives in the consuming workflow
-# (ci.yml) so PR pushes never re-upload the 1.7 GB go-build bundle. The
-# `*-cache-hit` outputs let the workflow short-circuit save when the
-# exact key already exists upstream.
+# Restore-only: this action only restores caches. Saving lives in the
+# consuming workflow (ci.yml), gated on the `*-cache-hit` outputs below
+# so a same-key re-push doesn't re-upload an identical 1.7 GB blob.
+# Saves fire on every branch (PR + main) since cache traffic is LAN-
+# routed — the first PR push per (go.sum + lockfile) tuple pays a
+# ~30-60s tar+upload cost; everything after is hit-skipped.
 #
 # What's cached, and why each cache is keyed the way it is:
 #
