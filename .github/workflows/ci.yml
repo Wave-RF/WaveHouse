@@ -29,31 +29,19 @@ concurrency:
 
 jobs:
   ci:
-    # Single-pod pipeline. Was previously six fan-out jobs (lint / test /
-    # build / integration / sdk-test / e2e) — collapsed because:
-    #
-    #   1. Pod budget. The ARC pool maxes at 8 pods, shared with
-    #      orchestration workflows (claude-review, admin-approval,
-    #      project-orchestrator, etc.). Six CI jobs ate most of the pool
-    #      and queued concurrent PRs. One job leaves seven pods free.
-    #   2. Cache locality. The Go module cache, build cache, .bin/, pnpm
-    #      store, and bin/wavehouse-cov all stay hot across phases — no
-    #      artifact upload/download choreography between jobs.
-    #   3. Make is the source of truth. CI is now literally `make ci`, so
-    #      a different CI tool's pipeline file is one line.
-    #
-    # The Makefile's `ci` target handles parallelization internally
+    # Single-job pipeline. `make ci` runs every gate in one process so
+    # the Go build cache, pnpm store, golangci cache, and coverage-
+    # instrumented binary all stay hot across phases without
+    # artifact upload/download between jobs. Parallelism lives inside
+    # the Makefile.
     name: CI
     runs-on: [wave-rf-runners]
-    # Sum of the previous per-job timeouts was ~105 min; in practice on a
-    # warm cache the whole pipeline finishes in ~15 min. 45 min gives
-    # plenty of headroom for cold caches + slow E2E without leaving a
-    # genuinely-hung pod sitting around forever.
+    # Warm cache: ~2 min. Cold key change: ~5-8 min. 45 leaves headroom
+    # for cold caches + slow E2E without letting a hung runner sit.
     timeout-minutes: 45
     steps:
-      # Composite actions cannot perform their own checkout — the workflow
-      # must land the repo first so the `./.github/actions/setup-env` path
-      # resolves on the runner.
+      # Composite actions can't self-checkout — repo must land first
+      # so the `./.github/actions/setup-env` path resolves.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - id: setup
@@ -65,32 +53,15 @@ jobs:
         # → cov sequentially. Mirrors local `make ci` exactly.
         run: make ci
 
-      # Cache save: every branch (PR + main), but only when the exact
-      # key wasn't already in the cache server. The cache-hit gate is
-      # what controls the no-op skip — it short-circuits before the
-      # action ever runs, so a same-key re-push is essentially free
-      # (the post-step doesn't get a chance to fire).
+      # Saves run on every branch, gated on `*-cache-hit != 'true'` so
+      # a same-key re-push is a no-op. Cross-PR sharing happens
+      # naturally: actions/cache saves under the workflow's ref scope,
+      # and each PR's `refs/pull/N/merge` inherits the base ref's
+      # cache, so a main-push save warms every PR's restore and PRs
+      # sharing key tuples warm each other.
       #
-      # Why the previous main-only gate is gone: cache traffic now
-      # lands on caches.dmz.local:3000 at LAN speeds (~5 ms RTT), so
-      # the ~30-60s tar+upload cost of a first PR-push save is paid
-      # back almost immediately by every subsequent push to that
-      # branch (and every other PR with the same go.sum / lockfiles)
-      # hitting warm restores instead of cold-building `make ci` for
-      # ~270 s. The first-save-per-hash-tuple is the only push that
-      # pays the cost; everything after is hit-skipped here.
-      #
-      # Cache scope semantics: actions/cache saves under the workflow's
-      # ref scope. Each PR's ref (refs/pull/N/merge) inherits the base
-      # ref's (main's) cache, so a main-push save populates every PR's
-      # restore. PR-push saves populate same-branch re-runs AND any
-      # later main-push restore on the same key. Cross-PR sharing is
-      # opportunistic: PRs against the same base see each other's
-      # saves when their key tuples match — that's the design intent
-      # (one PR's `go mod download` warms the next PR's).
-      #
-      # Three save steps mirror the three restore caches in setup-env —
-      # paths and keys must stay in sync.
+      # Three saves mirror the three restores in setup-env — keep
+      # paths and keys in sync.
       - name: Save Go module + build cache
         if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -109,14 +80,10 @@ jobs:
             ~/.cache/golangci-lint
           key: golangci-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yml') }}
 
-      # Drop pnpm store content that no project's node_modules references
-      # before save. Without this the store grows monotonically as
-      # transitive deps churn — a six-month-old branch would haul around
-      # every package version any sibling PR ever pulled in. `pnpm store
-      # prune` walks every project's node_modules in the workspace and
-      # deletes any store entry not currently linked from one of them.
-      # Same restore-keys fallback we use elsewhere stays intact: the
-      # pruned store still satisfies the active lockfile.
+      # Keep the store from growing monotonically as transitive deps
+      # churn — `pnpm store prune` drops entries not linked from any
+      # workspace project's node_modules. Restore-keys fall-through
+      # still works on the pruned store.
       - name: Prune pnpm store before save
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
         shell: bash
@@ -132,11 +99,8 @@ jobs:
           key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
 
       # Coverage summary in the run's job summary panel. The merged
-      # coverage profile that produces this view is the only published
-      # surface for coverage data today — no README badge, no external
-      # service. Anyone curious about the number opens the run summary.
-      # See issue #132 for the open question of how to expose this
-      # post-OSS-launch (Codecov / similar).
+      # profile is the only published surface for coverage data today —
+      # see issue #133 for the post-OSS-launch decision (Codecov etc).
       - name: Coverage summary
         if: always()
         run: |

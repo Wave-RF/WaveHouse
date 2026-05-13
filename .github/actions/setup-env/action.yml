@@ -1,60 +1,39 @@
-# Composite action — restores the caches and tool toolchains that `make ci`
-# expects on a fresh ARC pod. Used by .github/workflows/ci.yml after an
-# explicit actions/checkout step (composite actions cannot self-checkout —
-# the workflow has to land the repo first so this action's path resolves).
+# Composite — restores caches + sets up Go/pnpm/Node for `make ci`.
+# Used by ci.yml after an explicit actions/checkout (composite actions
+# can't self-checkout).
 #
-# Restore-only: this action only restores caches. Saving lives in the
-# consuming workflow (ci.yml), gated on the `*-cache-hit` outputs below
-# so a same-key re-push doesn't re-upload an identical 1.7 GB blob.
-# Saves fire on every branch (PR + main) since cache traffic is LAN-
-# routed — the first PR push per (go.sum + lockfile) tuple pays a
-# ~30-60s tar+upload cost; everything after is hit-skipped.
+# Restore-only. Saves live in ci.yml gated on the `*-cache-hit` outputs
+# below so same-key re-pushes are no-ops.
 #
-# What's cached, and why each cache is keyed the way it is:
+# What's cached:
 #
-#   1. Go module + build cache (~/go/pkg/mod, ~/.cache/go-build) keyed on
-#      every go.sum in the repo. `restore-keys` lets a changed go.sum still
-#      restore the most recent gobuild-* cache, so `go mod download` only
-#      fetches deltas and the build cache stays warm for unchanged packages.
-#      Avoids setup-go's exact-key-only built-in cache; see
-#      https://github.com/actions/setup-go/issues/357.
+#   1. Go module + build cache (~/go/pkg/mod, ~/.cache/go-build) keyed
+#      on every go.sum. `restore-keys` keeps the build cache warm across
+#      go.sum changes — `go mod download` only fetches deltas, unchanged
+#      packages stay compiled. Avoids setup-go's exact-key-only built-in
+#      cache: https://github.com/actions/setup-go/issues/357.
 #
 #   2. golangci-lint binary + analysis cache (.bin, ~/.cache/golangci-lint)
-#      keyed on the Makefile (which pins GOLANGCI_LINT_VERSION) plus the
-#      golangci config. The analysis cache is the actual perf win — a warm
-#      lint runs in ~10s vs ~90s cold. The binary itself is cheap but
-#      caching it skips the install-from-curl path on every run.
+#      keyed on Makefile + .golangci.yml. The analysis cache is the win
+#      (~10s warm vs ~90s cold).
 #
-#   3. pnpm store (path resolved at runtime via `pnpm store path`) keyed
-#      on all three lockfiles. The repo has three pnpm projects
-#      (clients/ts/, tests/e2e/sdk/, and docs/) and a single store covers
-#      all of them — pnpm hardlinks from the store into each project's
-#      node_modules.
+#   3. pnpm store (path resolved at runtime) keyed on all three lockfiles.
+#      Three pnpm projects (clients/ts, tests/e2e/sdk, docs) share one
+#      store via hardlinks.
 #
-#      Why dynamic path resolution: pnpm's "documented" default
-#      ~/.local/share/pnpm/store applies only when $HOME and the project
-#      tree live on the same mount. On ARC pods $HOME and
-#      $GITHUB_WORKSPACE are on different mounts, so pnpm falls back to
-#      /home/runner/_work/.pnpm-store/v<N>/. Hard-coding the documented
-#      path caused every run to log `Path Validation Error: Path(s) ...
-#      do(es) not exist` at save time and silently skip the upload —
-#      pnpm reinstalled cold every run. `pnpm store path --silent` reports
-#      whichever path pnpm actually uses, so this composite is robust
-#      across mount layouts and pnpm major bumps (the trailing v<N> moves
-#      automatically).
-#
-# All three caches transparently route to the on-prem
-# falcondev-oss/github-actions-cache-server (no GitHub size limit, sub-VM
-# latency) via CUSTOM_ACTIONS_RESULTS_URL pre-set on the ARC pod. The
-# runner image must be the falcondev fork (which binary-patches the
-# runner agent to honor that env); unpatched upstream silently routes
-# to GitHub's hosted cache over WAN. No workflow-side config needed.
+#      Why dynamic path resolution: pnpm's documented default
+#      ~/.local/share/pnpm/store applies only when $HOME and the
+#      project tree live on the same mount. When they don't (some
+#      container-based runners), pnpm falls back to a workspace-
+#      relative path. Hard-coding the documented value produces silent
+#      "Path Validation Error" warnings at save time and no cache.
+#      `pnpm store path --silent` reports whichever path pnpm
+#      actually uses.
 name: Setup CI environment
 description: Restores caches and sets up Go + pnpm + Node for WaveHouse CI
 
-# Cache-hit flags surfaced to the consuming workflow. ci.yml uses these to
-# skip the `actions/cache/save` step when the exact key was already in
-# the cache server (no point re-uploading an identical 1.7 GB blob).
+# Cache-hit flags surfaced to ci.yml so save steps can short-circuit
+# when the exact key already exists upstream.
 outputs:
   gobuild-cache-hit:
     description: "true if the exact-key Go module + build cache was restored"
@@ -104,10 +83,9 @@ runs:
         go-version-file: go.mod
         cache: false
 
-    # pnpm install MUST come before the pnpm cache restore — we need the
-    # pnpm binary on PATH so the next step can ask pnpm where its store
-    # actually lives. See the header comment for the mount-layout reason
-    # this matters.
+    # pnpm install MUST come before the pnpm cache restore — we need
+    # pnpm on PATH so the next step can ask it where its store actually
+    # lives. See the header comment for the mount-layout reason.
     - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       with:
         version: "10.33.0"
