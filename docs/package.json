@@ -1,0 +1,44 @@
+{
+  "name": "wavehouse-docs",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "wrangler dev",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@astrojs/starlight": "^0.38.3",
+    "astro": "^6.1.5",
+    "cloudflare-md-router": "github:Wave-RF/cloudflare-md-router",
+    "katex": "^0.16.11",
+    "rehype-katex": "^7.0.1",
+    "rehype-mermaid": "^3.0.0",
+    "remark-math": "^6.0.0",
+    "sharp": "^0.34.2",
+    "starlight-image-zoom": "^0.14.1",
+    "starlight-llm-tools": "github:Wave-RF/starlight-llm-tools",
+    "typescript": "^5.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240208.0",
+    "playwright": "^1.59.1",
+    "unist-util-visit": "^5.0.0",
+    "wrangler": "^4.81.0"
+  },
+  "engines": {
+    "node": ">=20.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "workerd"
+    ]
+  }
+}

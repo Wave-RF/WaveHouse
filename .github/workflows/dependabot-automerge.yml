@@ -1,33 +1,23 @@
 name: Dependabot auto-merge
 
-# Auto-approves and enables auto-merge for Dependabot PRs on patch-
-# and minor-version bumps. Major bumps stay held for human review,
-# both admins get assigned as reviewers, and a sticky-comment
-# explains the hold.
+# Auto-approves and enables auto-merge for Dependabot PRs on patch
+# and minor bumps. Major bumps stay held for human review, both
+# admins get assigned, and a sticky comment explains the hold.
 #
-# Board placement is no longer done here — the project's native
-# "Auto-add to project" workflow (configured in the project UI under
-# project #7's Workflows tab) handles adding the PR to the board, and
-# the "Item added to project" workflow sets its initial Status. The
-# orchestrator-side board-upsert step was removed in the same change
-# that deleted project-orchestrator.yml; native workflows are the
-# replacement.
-#
-# Admin-approval bypass: Dependabot PRs skip the `Admin approval`
-# required status check entirely (see `admin-approval.yml`). For
-# patch / minor, the trust model is: this workflow's bot-approval +
-# classification (via fetch-metadata) gates *enabling* auto-merge;
-# the actual merge is gated by required-checks on the ruleset (CI
-# passing). So CI failures still block merges. For major bumps: a
-# human admin approves in GitHub as usual.
+# Dependabot PRs bypass the `Admin approval` required status check
+# (see admin-approval.yml). For patch / minor, this workflow's bot
+# approval + fetch-metadata classification gates *enabling* auto-
+# merge; the actual merge is still gated by required-checks (CI
+# passing), so CI failures continue to block. Major bumps go through
+# a human admin review as usual.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
-  # contents: write is needed for `gh pr merge` to perform an immediate
-  # squash when checks are already green at enablement time.
+  # contents: write lets `gh pr merge` squash immediately when checks
+  # are already green at enablement time.
   contents: write
   pull-requests: write
 
@@ -38,12 +28,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout main (trusted composite-action source)
-        # Security: pin to the default branch, not the PR head.
-        # Dependabot PRs can modify .github/actions/** and since this
-        # workflow runs with write-scoped tokens (contents:write +
-        # pull-requests:write) a compromised upstream action could
-        # inject code via a bump PR. Defensive regardless of the
-        # actor being dependabot[bot].
+        # Security: check out the default branch, not the PR head.
+        # Dependabot PRs can touch .github/actions/**, and this
+        # workflow has write-scoped tokens — a compromised action
+        # could inject code via a bump PR.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -51,10 +39,8 @@ jobs:
           persist-credentials: false
 
       - name: Load board config
-        # Loads ADMINS (comma-separated) from board-config.env, used by
-        # the major-bump reviewer-assign step below. board-config.env is
-        # the single source of truth for the admin set (with
-        # admin-approval.yml's documented inline-copy exception).
+        # Loads ADMINS (comma-separated) used by the major-bump
+        # reviewer-assign step below.
         run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
       - name: Fetch Dependabot metadata
@@ -73,28 +59,19 @@ jobs:
             --body "Auto-approved by dependabot-automerge workflow (${{ steps.meta.outputs.update-type }})."
           gh pr merge --auto --squash "$PR_URL"
 
-      # ───────────────────────────────────────────────────────────────
-      # Major-bump path: hold for human review.
-      # ───────────────────────────────────────────────────────────────
+      # --- Major-bump path: hold for human review ---------------------
 
       - name: Convert ADMINS to space-separated (composite expects spaces)
-        # ADMINS is comma-separated in board-config.env; the
-        # assign-and-request-review composite splits on whitespace,
-        # so we need to convert. Done in a bash step rather than a
-        # `${{ }}` expression because GitHub Actions doesn't have a
-        # `replace()` function in its expression language — only
-        # contains/startsWith/endsWith/format/join/toJSON/fromJSON/
-        # hashFiles. Using a non-existent function in `with:` causes
-        # GitHub to fail the workflow at validation time on *every*
-        # push event, which is what was producing the
-        # ghost ".github/workflows/dependabot-automerge.yml push failure"
-        # runs on every branch.
+        # The composite splits reviewers on whitespace; done in bash
+        # because GitHub Actions has no `replace()` expression
+        # function and using a non-existent one fails workflow
+        # validation on every push event.
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         run: echo "ADMINS_SPACE=${ADMINS//,/ }" >> "$GITHUB_ENV"
 
       - name: Assign + request review from both admins (major bump)
-        # Dependabot is the author — assign both admins so whoever
-        # picks it up first can action.
+        # Author is Dependabot; assign both admins so whoever picks
+        # it up first can action.
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
         uses: ./.github/actions/assign-and-request-review
         with:
@@ -110,12 +87,9 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # Marker-comment upsert (same pattern as housekeeping.yml's
-          # title-lint comment): on every synchronize the workflow
-          # re-runs and finds the existing comment by its hidden marker,
-          # then edits it in place rather than posting a new one. The
-          # previous unconditional `gh pr comment` produced a fresh
-          # comment for every Dependabot push.
+          # Marker-comment upsert: find the existing comment by its
+          # hidden marker and edit in place rather than posting a new
+          # one on every synchronize.
           MARKER='<!-- dependabot-major-bump-comment -->'
           BODY="$MARKER
           Major-version bump — holding for human review. Auto-merge is limited to patch and minor updates. Reviewers assigned. See dependency changelog / release notes before merging."

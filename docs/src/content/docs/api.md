@@ -1,4 +1,11 @@
-# API Reference
+---
+title: "API Reference"
+description: "All endpoints, authentication, request/response formats for the WaveHouse API."
+sidebar:
+  order: 5
+---
+
+Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. Authentication is optional and controlled by `auth.enabled`; see [Configuration](configuration.md#authentication) for the full auth config surface.
 
 ## Authentication
 
@@ -171,7 +178,7 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ### `POST /v1/query` — Query ClickHouse
 
-Executes a SQL query directly against ClickHouse. Results are cached using a two-tier cache (L1 in-memory + L2 cache in (future) clustered mode). UUID and DateTime columns are converted to string representations in the response.
+Executes a SQL query directly against ClickHouse. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in the response.
 
 **Request:**
 

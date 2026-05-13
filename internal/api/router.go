@@ -32,6 +32,11 @@ type Dependencies struct {
 	JS              jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel        *slog.LevelVar
+	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
+	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
+	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
+	MetricsHandler http.Handler
+	MetricsPath    string
 }
 
 // NewRouter creates the chi router with all routes.
@@ -54,10 +59,22 @@ func NewRouter(deps Dependencies) http.Handler {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	})
 
+	metricsPath := deps.MetricsPath
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// BYPASS: Do not use standard HTTP tracing for long-lived streams
-			if strings.HasPrefix(r.URL.Path, "/v1/stream/") {
+			// Skip span creation on infra/probe paths:
+			//   /v1/stream/*  — long-lived streams (SSE/WS); the standard
+			//                   HTTP tracer would emit one span per stream
+			//                   that lives until the client disconnects.
+			//   prometheus    — scrape every ~15s would produce ~4 spans/min
+			//                   of pure infra cardinality, and creates a
+			//                   self-loop when the same backend stores both
+			//                   traces and scraped metrics.
+			//   /health, /ready — liveness/readiness probes inflate span
+			//                   counts and skew latency percentiles.
+			p := r.URL.Path
+			if strings.HasPrefix(p, "/v1/stream/") || p == "/health" || p == "/ready" ||
+				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -69,6 +86,13 @@ func NewRouter(deps Dependencies) http.Handler {
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)
+
+	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
+	// AND prometheus.port is 0 (mount on this router). When prometheus.port
+	// is non-zero, main.go runs a dedicated listener instead and this is nil.
+	if deps.MetricsHandler != nil && deps.MetricsPath != "" {
+		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
+	}
 
 	// API v1 endpoints (auth middleware may be no-op if disabled).
 	r.Route("/v1", func(r chi.Router) {
@@ -209,14 +233,31 @@ func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Hand
 }
 
 // corsMiddleware handles CORS preflight and response headers.
-// When allowedOrigins contains "*", any origin is accepted.
-// Otherwise only listed origins receive CORS headers.
+//
+// Origin policy:
+//   - allowedOrigins == nil/empty OR contains "*": any origin is accepted.
+//     The response echoes "*" (no Vary), which is correct for our Bearer-auth
+//     API because no credentials are required to read the response.
+//   - Otherwise: only origins in the allowlist receive Access-Control-Allow-Origin
+//     (echoed back, with Vary: Origin so caches key on it).
+//
+// Credentials: we deliberately do NOT emit Access-Control-Allow-Credentials.
+// WaveHouse is a Bearer-token API (see internal/api/middleware.go) — clients
+// send Authorization: Bearer <jwt> as an explicit request header, not via
+// browser-managed cookies, so credentials mode is unnecessary. Sending
+// Allow-Credentials: true together with Allow-Origin: "*" is also a CORS
+// spec violation that browsers reject. Keeping credentials off both fixes
+// the spec violation and shrinks the CSRF surface (see issue #30).
+//
+// Non-CORS requests (no Origin header) are passed through unchanged — we
+// don't decorate same-origin responses with CORS noise.
 func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 	allowAll := len(allowedOrigins) == 0
 	allowedSet := make(map[string]struct{}, len(allowedOrigins))
 	for _, o := range allowedOrigins {
 		if o == "*" {
 			allowAll = true
+			continue
 		}
 		allowedSet[o] = struct{}{}
 	}
@@ -225,20 +266,42 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			if allowAll {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-			} else if _, ok := allowedSet[origin]; ok && origin != "" {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
+			// Same-origin / non-browser request: skip CORS decoration entirely.
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
 			}
 
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
-			w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Max-Age", "3600")
+			allowed := false
+			switch {
+			case allowAll:
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				allowed = true
+			default:
+				// In allowlist mode the response is per-origin, so always set
+				// Vary: Origin — even when the origin is rejected. Without
+				// this, a shared cache could memoize the headerless reject
+				// response under the URL alone and replay it to a later
+				// allowed-origin request, stripping the CORS headers and
+				// breaking the legitimate client.
+				w.Header().Set("Vary", "Origin")
+				if _, ok := allowedSet[origin]; ok {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					allowed = true
+				}
+			}
+
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
+				w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
+				w.Header().Set("Access-Control-Max-Age", "3600")
+			}
 
 			if r.Method == http.MethodOptions {
+				// Always short-circuit OPTIONS — disallowed origins simply get a
+				// 204 with no CORS headers, which the browser will treat as a
+				// preflight failure.
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

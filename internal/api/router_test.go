@@ -124,6 +124,91 @@ func TestCORSMiddleware_BlockedOrigin(t *testing.T) {
 
 	assert.True(t, called, "handler still invoked for non-allowed origin")
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"),
+		"non-allowed origins must not receive any CORS headers")
+	// Vary: Origin is still set even though we reject the origin, so that a
+	// shared cache can't memoize this headerless reject response and replay
+	// it to a later allowed-origin request.
+	assert.Equal(t, "Origin", w.Header().Get("Vary"),
+		"allowlist mode must always emit Vary: Origin to keep caches per-origin")
+}
+
+// TestCORSMiddleware_NoCredentialsHeader pins the deliberate omission of
+// Access-Control-Allow-Credentials. WaveHouse is a Bearer-token API; cookies
+// are never used (see issue #30). Emitting credentials=true with a wildcard
+// origin also breaks browsers per the CORS spec.
+func TestCORSMiddleware_NoCredentialsHeader(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		allowed []string
+		origin  string
+	}{
+		{"wildcard", []string{"*"}, "https://anything.example.com"},
+		{"empty-allowlist-is-wildcard", nil, "https://anything.example.com"},
+		{"allowlist-hit", []string{"https://app.example.com"}, "https://app.example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handler := corsMiddleware(tc.allowed)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+			req.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"),
+				"Bearer-token API must not emit Access-Control-Allow-Credentials")
+		})
+	}
+}
+
+// TestCORSMiddleware_NoOriginIsPassthrough ensures same-origin / non-browser
+// callers don't get CORS response headers stamped onto every response.
+func TestCORSMiddleware_NoOriginIsPassthrough(t *testing.T) {
+	t.Parallel()
+	handler := corsMiddleware([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
+}
+
+// TestCORSMiddleware_BlockedOriginPreflight pins that a preflight from a
+// disallowed origin returns 204 with no CORS headers — the browser treats
+// that as a preflight failure, so the actual request never fires.
+func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
+	t.Parallel()
+	handler := corsMiddleware([]string{"https://allowed.com"})(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("should not reach handler on OPTIONS")
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/", nil)
+	req.Header.Set("Origin", "https://evil.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	// Pin the full "no CORS headers" contract — Allow-Origin alone isn't
+	// enough; a regression that leaked Allow-Methods/Allow-Headers/etc. to a
+	// disallowed origin would still slip through that single assertion.
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
+	assert.Empty(t, w.Header().Get("Access-Control-Expose-Headers"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"))
+	assert.Empty(t, w.Header().Get("Access-Control-Max-Age"))
+	// Vary: Origin is still set in allowlist mode even on a reject, so a
+	// shared cache can't memoize this headerless 204 under the URL alone
+	// and replay it to a later allowed-origin preflight.
+	assert.Equal(t, "Origin", w.Header().Get("Vary"))
 }
 
 func TestNewRouter_RoutesRegistered(t *testing.T) {

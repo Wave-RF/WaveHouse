@@ -1,25 +1,14 @@
 name: GoReleaser snapshot validation
 
-# Catches goreleaser config + Go-compile breakage at PR time, instead of
-# at tag time when it would block a release. Snapshot mode implies
-# --skip=publish, so this never pushes anything; the run is purely a
-# dry-run of the release pipeline.
+# Catches goreleaser config + Go-compile breakage at PR time, before
+# it could block a real tag-time release. Snapshot mode implies
+# --skip=publish, so nothing is pushed.
 #
-# Path-filtered: only runs when files that could plausibly break
-# goreleaser change. Notably absent: go.mod / go.sum. Most dep bumps
-# don't break cross-compile, and `publish-dev.yml` runs the full
-# multi-target goreleaser pipeline on every push to main, which catches
-# any cross-compile regressions post-merge. Keeping the snapshot run
-# scoped to actual goreleaser config / dockerfile changes drops a
-# heavy job from the typical PR.
-#
-# Uses `goreleaser build --snapshot --single-target` to compile the
-# Go binary for the host platform (linux/amd64 on our runners) — that
-# exercises goreleaser config parseability + Go compile in ~30s. The
-# full multi-target cross-compile + Docker build + archive pipeline
-# runs post-merge via publish-dev.yml on every main push, so anything
-# this snapshot misses is caught there. (`goreleaser release` does
-# not accept `--single-target` — that flag is only on `build`.)
+# Path-filtered to goreleaser config / dockerfile changes only;
+# go.mod / go.sum bumps are validated post-merge by publish-dev.yml
+# running the full multi-target pipeline. `goreleaser build
+# --single-target` exercises config parseability + Go compile for
+# the host platform (release does not accept --single-target).
 on:
   pull_request:
     paths:
@@ -45,32 +34,25 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # goreleaser uses `git describe` to derive the snapshot version;
-          # fetch-depth: 0 gives it tag access for that.
+          # goreleaser uses `git describe` to derive the snapshot
+          # version; needs full tag history.
           fetch-depth: 0
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: "go.mod"
-          # Disable setup-go's bundled cache. At --single-target we
-          # only build one binary, so the ~2-minute post-step cache
-          # save outweighs the ~30-second cold `go mod download` for
-          # this job.
+          # Single-target build is fast enough that the bundled
+          # cache's post-step save costs more than a cold
+          # `go mod download`.
           cache: false
 
       - name: Run GoReleaser snapshot build
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:
-          # Pin to the v2 major line — same line as release.yml so the
-          # snapshot validates against the same goreleaser version a
-          # real release will use.
+          # Same v2 line as release.yml so the snapshot validates
+          # against the same goreleaser version a real release uses.
           version: "~> v2"
-          # `build` (not `release`) so we can pass --single-target.
-          # release-only steps (archive / docker / checksums) run
-          # post-merge via publish-dev.yml.
-          # --snapshot: bypass tag validation; build with a dev version
-          #   string. Implies --skip=publish, so nothing is pushed.
-          # --clean: remove dist/ before building (idempotent across runs).
-          # --single-target: build for host platform only (linux/amd64
-          #   on ARC runners) instead of cross-compiling every target.
+          # `build` (not `release`) so --single-target is accepted;
+          # release-only steps (archive / docker / checksums) are
+          # validated post-merge by publish-dev.yml.
           args: build --snapshot --clean --single-target

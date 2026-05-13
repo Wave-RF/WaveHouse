@@ -1,4 +1,9 @@
-# Architecture
+---
+title: "Architecture"
+description: "System design, data flows, internal packages, and technology stack."
+sidebar:
+  order: 4
+---
 
 This document describes the internal architecture of WaveHouse, a schema-aware ClickHouse proxy.
 
@@ -6,74 +11,54 @@ This document describes the internal architecture of WaveHouse, a schema-aware C
 
 WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the entry and exit point for data. It discovers your real ClickHouse table schemas, validates data at ingest time, batches inserts asynchronously, and provides real-time streaming and query caching.
 
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│                         Clients                                 │
-│              (REST API, SSE, WebSocket)                         │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    WaveHouse API Layer                          │
-│  ┌──────────┐   ┌──────────┐ ┌──────────┐  ┌──────────────┐     │
-│  │  Ingest  │   │  Query   │ │   SSE    │  │  WebSocket   │     │
-│  │  Handler │   │  Handler │ │  Handler │  │   Handler    │     │
-│  └────┬─────┘   └────┬─────┘ └────┬─────┘  └──────┬───────┘     │
-│       │              │            │               │             │
-│  ┌────▼────┐    ┌────▼────┐   ┌───▼───┐           │             │
-│  │ Schema  │    │ Cache   │   │  Hub  │  (broadcast fan-out)    │
-│  │Registry │    │ (Tiered)│   └───┬───┘                         │
-│  └────┬────┘    └────┬────┘       │                             │
-│       │              │            │                             │
-│  ┌────▼─────┐        │                                          │
-│  │ Dedupe   │        │       (NATS JetStream retains messages   │
-│  │(optional)│        │        for SSE/WS gap-fill via           │
-│  └────┬─────┘        │        DeliverByStartTime)               │
-│       │              │                                          │
-│       ▼              │                                          │
-│  ┌─────────┐         │                                          │
-│  │   MQ    │         │                                          │
-│  │ (NATS)  │         │                                          │
-│  └────┬────┘         │                                          │
-│       │              │                                          │
-│  ┌────▼──────────┐   │                                          │
-│  │ Buffer        │   │       ┌───────────┐                      │
-│  │ Consumer      │   │       │  Active   │                      │
-│  │ (batch flush) │   │       │  Sweeper  │ (purges old msgs)    │
-│  └────┬──────────┘   │       └───────────┘                      │
-│       │              │                                          │
-│  ┌────▼──────┐       │                                          │
-│  │   DLQ     │       │       (failed inserts → WAVEHOUSE_DLQ)   │
-│  └───────────┘       │                                          │
-│                      │                                          │
-└───────┼──────────────┼──────────────────────────────────────────┘
-        │              │
-        ▼              ▼
-┌─────────────────────────────┐
-│        ClickHouse           │
-│   (analytics storage)       │
-└─────────────────────────────┘
+```mermaid
+flowchart TD
+    Clients["Clients<br/>(REST API, SSE, WebSocket)"]
+
+    Clients --> IH
+    Clients --> QH
+    Clients --> SSH
+    Clients --> WSH
+
+    subgraph api["WaveHouse API Layer"]
+        IH["Ingest Handler"] --> SR["Schema Registry"]
+        SR --> DD["Dedupe (optional)"]
+        DD --> MQ["MQ (NATS)"]
+        MQ --> BC["Buffer Consumer<br/>(batch flush)"]
+        BC -.->|failed inserts| DLQ["DLQ"]
+
+        QH["Query Handler"] --> Cache["Cache<br/>(Ristretto + singleflight)"]
+
+        SSH["SSE Handler"] --> Hub["Hub<br/>(broadcast fan-out)"]
+        WSH["WebSocket Handler"] --> Hub
+
+        SW["Active Sweeper"] -.->|purges old msgs| MQ
+
+        NATS["NATS JetStream retains messages<br/>for SSE/WS gap-fill<br/>via DeliverByStartTime"]
+    end
+
+    BC --> CH[("ClickHouse<br/>(analytics storage)")]
+    Cache --> CH
+
+    style NATS fill:none,stroke-dasharray:5 5,stroke:#888,color:#888
 ```
 
 ## Binaries
 
-WaveHouse ships one binary for deployment:
-
-| Binary | Mode | Purpose |
-| ------ | ---- | ------- |
-| `wavehouse` | Standalone | All-in-one: API + worker + embedded NATS + optional embedded Pebble dedup. Zero external deps beyond ClickHouse. |
+WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup. The only external dependency is ClickHouse.
 
 ## Internal Packages
 
 ```text
 internal/
 ├── api/         HTTP layer (Chi router, handlers, middleware, Hub)
-├── cache/       Two-tier caching (L1 Ristretto)
+├── cache/       In-process Ristretto cache with singleflight coalescing
 ├── config/      YAML + env var configuration loading
 ├── dedupe/      Optional deduplication (Pebble)
 ├── discovery/   ClickHouse schema introspection and validation
 ├── ingest/      Batch buffering, DLQ, and Active Sweeper
 ├── mq/          Message queue abstraction (embedded NATS)
+├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
 ├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
 ├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
 └── query/       Structured query AST, SQL builder, and timestamp bucketing
@@ -97,11 +82,11 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
 - **health.go** — Liveness (`/health`) and readiness (`/ready`) probes. Both consult an optional `BootState` so they can return 503 with a diagnostic while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/health` returns 200 and stays there.
 
-### `cache/` — Two-Tier Caching
+### `cache/` — Query Cache
 
 - **cache.go** — `Cache` interface: `Get`, `Set`, `Close`.
-- **local.go** — L1 in-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
-- **tiered.go** — Combines L1 + L2 with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses.
+- **local.go** — In-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
+- **tiered.go** — Wraps the local cache with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses. The tiered interface accepts an optional second cache slot for future shared-cache backends, but ships with the slot empty.
 
 ### `config/` — Configuration
 
@@ -128,6 +113,15 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 - **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `DoubleAck(ctx)`, `Ack()`, and `Nak()`.
 - **embedded.go** — In-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
+
+### `observability/` — OpenTelemetry Pipeline
+
+- **provider.go** — `InitProvider(ctx, serviceName, ProviderConfig)` wires the OTel pipeline. Each output is independently gated; the W3C TraceContext + Baggage propagator is always installed (cheap, harmless when traces are off). Returns `(shutdown, promHandler http.Handler, err)` — `promHandler` is non-nil only when `PrometheusEnabled` is true and reads from a *private* `prometheus.Registry` to avoid leaking the process/Go collectors that `prometheus.DefaultRegisterer` auto-registers. OTLP-metrics push (`MetricsEnabled`) and Prometheus exposition (`PrometheusEnabled`) are independent: either, both, or neither may be set, and any combination produces a single MeterProvider feeding the active readers. The Endpoint field is only dialed by the OTLP exporters (traces / metrics-OTLP / logs); Prometheus-only operation leaves it untouched. Provider init in `main.go` runs whenever `otel.enabled` OR `prometheus.enabled` is true, so Prometheus-only operation (Alloy/scrape, no collector) is a first-class mode.
+- **logger.go** — `NewLogger(component, level, isJSON, otlpSampleRate)` produces a slog logger that fans out to stdout (always 100%) and the OTLP log exporter (DEBUG/INFO sampled at `otlpSampleRate`, WARN/ERROR always 100% as a non-configurable safety floor). `TraceHandler` injects `trace_id`/`span_id` from the active span when one exists. `otlpSamplerFn` is exposed (lowercase) for unit testing the per-level rate logic without driving through the slogmulti middleware.
+- **metrics.go** — `RegisterSystemMetrics(natsServer, dedup)` registers observable gauges for embedded NATS connections, in-msgs, and Pebble dedupe storage stats. Wired in `cmd/wavehouse/main.go` after the providers are up.
+- **tracer.go** — W3C TraceContext propagation over NATS message headers (`InjectNATS` / `ExtractNATS`) — bridges the API request span into the Bento ingest worker so end-to-end traces survive the queue handoff.
+
+The package's design invariants — stdout always 100%, WARN+ERROR always export at 100%, gRPC exporters dial lazily so unreachable collectors never block startup, private Prometheus registry — are documented in AGENTS.md "Key Design Decisions" #15 and must be preserved by anything touching this package.
 
 ### `policy/` — Access Control
 
@@ -198,19 +192,6 @@ Client GET /v1/stream/sse or /v1/stream/ws
   → Stream live events as they arrive via MQ → Hub → client
 ```
 
-## Standalone vs. (future) Clustered
-
-| Aspect | Standalone | (future) Clustered |
-| ------ | ---------- | --------- |
-| Binaries | Single `wavehouse` binary | `wavehouse-api` + `wavehouse-worker` |
-| Message Queue | Embedded NATS (in-process) | External NATS cluster |
-| Deduplication | Optional — Pebble (embedded KV) | Optional — TBD (distributed) |
-| Cache | L1 only (Ristretto) | L1 (Ristretto) + L2 |
-| Schema Discovery | On boot + periodic refresh | On boot + periodic refresh |
-| DLQ | NATS stream `WAVEHOUSE_DLQ` | NATS stream `WAVEHOUSE_DLQ` |
-| Scaling | Vertical only | Horizontal (add API/worker nodes) |
-| External Dependencies | ClickHouse only | ClickHouse, NATS, L1 Cache, (TBD dedup DB if enabled) |
-
 ## Technology Stack
 
 | Component | Technology | Purpose |
@@ -221,7 +202,7 @@ Client GET /v1/stream/sse or /v1/stream/ws
 | Analytics DB | ClickHouse | Primary data store + schema source of truth |
 | Message Queue | NATS + JetStream | Durable event streaming |
 | L1 Cache | Ristretto v2 | In-process memory cache |
-| Embedded KV | Pebble | Optional standalone deduplication |
+| Embedded KV | Pebble | Optional deduplication |
 | WebSocket | coder/websocket | WebSocket protocol support |
 | Config | cleanenv | YAML + env var config loading |
 | Release | GoReleaser | Cross-platform binary builds |

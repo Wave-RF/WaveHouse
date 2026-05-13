@@ -1,19 +1,22 @@
-# Configuration for the vladopajic/go-test-coverage CI action.
-# Docs: https://github.com/vladopajic/go-test-coverage
+# Coverage threshold spec. Consumed by `scripts/cov` (the Go helper
+# behind `make cov` / `make test-<suite>`) which renders profiles and
+# gates each suite against the numbers below. Schema is compatible with
+# `vladopajic/go-test-coverage`'s config format, but we don't run that
+# action anymore — see issue #133 for the future-state coverage
+# reporting decision (post-OSS-launch, likely Codecov or similar).
 
-# The merged-suites profile produced by `scripts/cov merge` at the end of
-# `make ci`. Contains unit + integration + e2e coverage stitched together,
-# so `threshold.total` below applies to the *project-wide* number the
-# badge advertises rather than unit coverage alone — unit covers only the
-# packages under `./internal/...` exercised by `*_test.go` files, which
-# falls below the total threshold; merged coverage adds the
-# integration- and e2e-only paths and clears it.
+# Merged-suites profile produced by `scripts/cov merge` at the end of
+# `make ci`. Contains unit + integration + e2e coverage stitched
+# together, so `threshold.total` below applies to the *project-wide*
+# coverage number — unit alone covers only `./internal/...` packages
+# exercised by `*_test.go` files (below total threshold); merged
+# coverage adds integration- and e2e-only paths and clears it.
 profile: tmp/coverage/total/coverage.txt
 local-prefix: github.com/Wave-RF/WaveHouse
 
-# Default threshold for go-test-coverage's own gate (used by the badge-publish
-# step in CI, which invokes the action directly without `--threshold-total`).
-# Per-suite gating in `make test-<suite>` uses the `suites` block below.
+# Project-wide minimum, enforced by `make cov` against the merged
+# profile. Per-suite minima live in the `suites` block below and are
+# enforced by `make test-<suite>` against their per-suite profiles.
 threshold:
   total: 80
 

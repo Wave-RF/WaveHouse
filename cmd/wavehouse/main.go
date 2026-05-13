@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -77,27 +78,72 @@ func run() int {
 
 	ctx := context.Background()
 	serviceName := "wavehouse"
-	otelAddr := os.Getenv("WH_OTEL_ADDR")
-	if otelAddr == "" {
-		otelAddr = "127.0.0.1:4317"
+
+	var level slog.Level
+	switch strings.ToUpper(strings.TrimSpace(os.Getenv("WH_LOG_LEVEL"))) {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
 	}
-
-	logger.Info("initializing observability", "endpoint", otelAddr, "service", serviceName)
-
-	otelShutdown, err := observability.InitProvider(ctx, serviceName, otelAddr)
-	if err != nil {
-		fmt.Printf("FATAL: failed to initialize observability: %v\n", err)
-		return 1
-	}
-
-	defer func() {
-		_ = otelShutdown(context.Background()) // From InitProvider to flush traces before process dies
-	}()
 
 	logLevel := &slog.LevelVar{}
-	logLevel.Set(slog.LevelInfo)
-	logger = observability.NewLogger(serviceName, logLevel, true)
+	logLevel.Set(level)
+
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
+
+	var promHandler http.Handler
+	// Provider init runs whenever either OTLP push or Prometheus exposition is
+	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
+	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
+	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
+		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
+			Endpoint:          cfg.OTel.Addr,
+			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
+			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
+			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
+			PrometheusEnabled: cfg.Prometheus.Enabled,
+			LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
+		})
+		if err != nil {
+			logger.Error("failed to initialize observability, falling back to stdout", "error", err)
+		} else {
+			promHandler = ph
+			defer func() {
+				// Bound shutdown so an unreachable collector doesn't hang
+				// process exit. The OTel SDK's batch processors don't fully
+				// honor the context deadline during gRPC retry/backoff.
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = otelShutdown(ctx)
+			}()
+
+			// Only swap to the OTLP-aware logger when OTLP logs are wired up;
+			// Prometheus-only mode keeps the stdout-only handler set earlier.
+			if cfg.OTel.Enabled && cfg.OTel.Logs.Enabled {
+				otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.OTel.Logs.SampleRate)
+				logger = otelLogger.With(
+					"version", Version,
+					"build_time", BuildTime,
+					"git_commit", GitCommit,
+				)
+				slog.SetDefault(logger)
+			}
+			switch {
+			case cfg.OTel.Enabled && cfg.Prometheus.Enabled:
+				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr, "prometheus", true)
+			case cfg.OTel.Enabled:
+				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr)
+			case cfg.Prometheus.Enabled:
+				logger.Info("observability pipeline established", "prometheus", true)
+			}
+		}
+	}
 
 	// ClickHouse connection.
 	chConn, err := clickhouse.Open(&clickhouse.Options{
@@ -173,8 +219,14 @@ func run() int {
 	}
 	defer func() { _ = embeddedMQ.Close() }()
 
-	if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
-		logger.Error("failed to register system metrics", "error", err)
+	// Only register system metric gauges when a real MeterProvider is in
+	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
+	// provider and RegisterCallback silently no-ops, making this look
+	// authoritative when it's actually doing nothing.
+	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
+		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
+			logger.Error("failed to register system metrics", "error", err)
+		}
 	}
 
 	// DLQ stream.
@@ -313,6 +365,33 @@ func run() int {
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,
 	}
+
+	// Prometheus /metrics routing: same-port → mount on API router,
+	// dedicated port → spin a sidecar HTTP server below.
+	promPath := cfg.Prometheus.Path
+	promPort := cfg.Prometheus.Port
+	var promSrv *http.Server
+	if promHandler != nil {
+		if promPort == 0 {
+			deps.MetricsHandler = promHandler
+			deps.MetricsPath = promPath
+		} else {
+			mux := http.NewServeMux()
+			mux.Handle(promPath, promHandler)
+			promSrv = &http.Server{
+				Addr:              fmt.Sprintf(":%d", promPort),
+				Handler:           mux,
+				ReadHeaderTimeout: 10 * time.Second,
+				// Full Read/Write timeouts are safe here — unlike the main API
+				// server (SSE/WebSocket), the Prometheus sidecar serves only
+				// single-shot scrape requests, so an unbounded slow client has
+				// no legitimate reason to hold a connection.
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 30 * time.Second,
+			}
+		}
+	}
+
 	router := api.NewRouter(deps)
 
 	srv := &http.Server{
@@ -334,7 +413,21 @@ func run() int {
 		if err := srv.Shutdown(shutCtx); err != nil {
 			logger.Error("server shutdown error", "error", err)
 		}
+		if promSrv != nil {
+			if err := promSrv.Shutdown(shutCtx); err != nil {
+				logger.Error("prometheus server shutdown error", "error", err)
+			}
+		}
 	}()
+
+	if promSrv != nil {
+		go func() {
+			logger.Info("starting prometheus metrics server", "addr", promSrv.Addr, "path", promPath)
+			if err := promSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("prometheus server error", "error", err)
+			}
+		}()
+	}
 
 	logger.Info("starting server", "port", cfg.Server.Port)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
