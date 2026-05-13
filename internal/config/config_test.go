@@ -328,6 +328,7 @@ func TestValidate_RejectsMalformedHeaders(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
 				ClickHouse: ClickHouse{HTTPScheme: "http"},
