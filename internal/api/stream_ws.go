@@ -78,8 +78,12 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Merged channel receives messages from all subscribed topics.
-	merged := make(chan []byte, 64)
+	// Merged channel receives messages from all subscribed tables. Each message
+	// carries the subscribing table name so the dispatcher doesn't need to
+	// re-unmarshal the payload to label the outbound envelope — and so the
+	// envelope's "table" field is correct even when the payload isn't an
+	// ingest.EventMessage (e.g. raw JSON pass-through).
+	merged := make(chan wsOutbound, 64)
 
 	// Track active subscriptions by table name, with their per-table channels.
 	var mu sync.Mutex
@@ -95,11 +99,12 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		subs[table] = ch
 		h.Hub.Subscribe("ingest."+table, ch)
 
-		// Pump per-table channel into merged channel
+		// Pump per-table channel into merged channel, tagging each message with
+		// the subscribing table so the writer keeps the subscription context.
 		go func() {
 			for msg := range ch {
 				select {
-				case merged <- msg:
+				case merged <- wsOutbound{table: table, data: msg}:
 				default:
 				}
 			}
@@ -135,9 +140,11 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if table := r.URL.Query().Get("table"); table != "" {
 		subscribeTable(table)
 
-		// Gap fill from NATS.
+		// Gap fill from NATS. RFC3339Nano subsumes RFC3339 (the fractional
+		// component is optional), matching the SSE handler's acceptance of
+		// high-precision client timestamps.
 		if since := r.URL.Query().Get("since"); since != "" {
-			if ts, parseErr := time.Parse(time.RFC3339, since); parseErr == nil && h.JS != nil {
+			if ts, parseErr := time.Parse(time.RFC3339Nano, since); parseErr == nil && h.JS != nil {
 				h.replayFromNATS(ctx, ts, "ingest."+table, func(data []byte) bool {
 					out := h.applyStreamPolicy(data, role, map[string]any(claims), table)
 					if out == nil {
@@ -182,22 +189,13 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		// Determine the event's table_name to label the envelope.
-		case data := <-merged:
+		case m := <-merged:
 			var envelope struct {
 				TraceHeaders map[string]string `json:"trace_headers"`
 				Payload      []byte            `json:"payload"`
 			}
-			if err := json.Unmarshal(data, &envelope); err != nil {
+			if err := json.Unmarshal(m.data, &envelope); err != nil {
 				continue
-			}
-
-			var rawEvt struct {
-				TableName string `json:"table_name"`
-			}
-			evtTable := ""
-			if json.Unmarshal(envelope.Payload, &rawEvt) == nil {
-				evtTable = rawEvt.TableName
 			}
 
 			parentCtx := otel.GetTextMapPropagator().Extract(
@@ -207,7 +205,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 			_, pushSpan := tracer.Start(parentCtx, "WS.PushEvent")
 
-			out := h.applyStreamPolicy(envelope.Payload, role, map[string]any(claims), evtTable)
+			out := h.applyStreamPolicy(envelope.Payload, role, map[string]any(claims), m.table)
 			if out == nil {
 				pushSpan.End()
 				continue
@@ -220,6 +218,13 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			pushSpan.End()
 		}
 	}
+}
+
+// wsOutbound pairs a message with the subscribing table name so the WS write
+// loop can label the outbound envelope without re-unmarshalling the payload.
+type wsOutbound struct {
+	table string
+	data  []byte
 }
 
 // applyStreamPolicy transforms raw event data for the client, filtering columns
