@@ -397,7 +397,7 @@ func (*emptyRows) ColumnTypes() []driver.ColumnType {
 func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	t.Helper()
 	conn := &fakeConn{errsThenSuccess: errs}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return NewSchemaRegistry(conn, "test", time.Hour, logger), conn
 }
 
@@ -407,9 +407,17 @@ func TestRetryRefresh_SucceedsOnFirstAttempt(t *testing.T) {
 	t.Parallel()
 	sr, conn := newFakeRegistry(t, nil)
 
+	// 2s timeout context bounds a hypothetical regression where RetryRefresh
+	// starts sleeping before checking success — initialBackoff=time.Hour means
+	// such a regression would otherwise hang the test until the Go test
+	// framework's default timeout (10m). With WithTimeout, the test fails fast
+	// with a context error instead.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	var attempts int32
 	start := time.Now()
-	err := sr.RetryRefresh(context.Background(), time.Hour, time.Hour, func(error) {
+	err := sr.RetryRefresh(ctx, time.Hour, time.Hour, func(error) {
 		atomic.AddInt32(&attempts, 1)
 	})
 	require.NoError(t, err)
