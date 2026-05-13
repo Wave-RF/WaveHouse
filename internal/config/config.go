@@ -215,6 +215,13 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("prometheus.path %q conflicts with reserved endpoint", p.Path)
 			}
 		}
+		// Same-port mode mounts the (unauthenticated) metrics handler on the
+		// main router. A path inside the /v1 namespace would shadow the
+		// authenticated API subtree with a public handler — worse than the
+		// /health shadow case because it leaks at an authenticated-looking URL.
+		if p.Port == 0 && (p.Path == "/v1" || strings.HasPrefix(p.Path, "/v1/")) {
+			return fmt.Errorf("prometheus.path %q conflicts with authenticated /v1 API namespace when prometheus.port is 0", p.Path)
+		}
 	}
 
 	return nil

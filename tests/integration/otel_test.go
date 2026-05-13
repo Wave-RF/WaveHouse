@@ -63,82 +63,60 @@ func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) (func(conte
 	return shutdown, promHandler
 }
 
-func TestOTel_TraceSampling_FullRate(t *testing.T) {
-	guardOTelGlobals(t)
-	r := testutil.NewFakeOTLP(t)
-
-	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         r.Addr(),
-		TracesEnabled:    true,
-		TracesSampleRate: 1.0,
-	})
-
-	const n = 200
-	tracer := otel.Tracer("test")
-	for i := 0; i < n; i++ {
-		_, span := tracer.Start(context.Background(), "op")
-		span.End()
+func TestOTel_TraceSampling(t *testing.T) {
+	// TraceIDRatioBased over random trace IDs is binomial(n, rate). For
+	// rate=0.5 / n=2000 the stddev is ~22; ±200 is ~9σ — flake-proof but tight
+	// enough to catch a sampler accidentally pinned at 25% / 75% (would land
+	// at 500 / 1500 and slip past a wider window). Bypass (count→n) and
+	// broken (count→0) failure modes still fail loud regardless of tolerance.
+	cases := []struct {
+		name   string
+		rate   float64
+		n      int
+		assert func(t *testing.T, got int)
+	}{
+		{
+			name: "full rate", rate: 1.0, n: 200,
+			assert: func(t *testing.T, got int) { assert.Equal(t, 200, got) },
+		},
+		{
+			name: "half rate", rate: 0.5, n: 2000,
+			assert: func(t *testing.T, got int) {
+				assert.InDelta(t, 1000, got, 200, "got %d spans, expected ~1000 within ±200", got)
+			},
+		},
+		{
+			name: "zero rate", rate: 0.0, n: 100,
+			assert: func(t *testing.T, got int) {
+				assert.Zero(t, got, "0.0 sample rate should drop every span")
+			},
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// No t.Parallel: each case mutates OTel globals via initAndShutdown.
+			guardOTelGlobals(t)
+			r := testutil.NewFakeOTLP(t)
 
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer drainCancel()
-	require.NoError(t, shutdown(drainCtx))
+			shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
+				Endpoint:         r.Addr(),
+				TracesEnabled:    true,
+				TracesSampleRate: tc.rate,
+			})
 
-	assert.Equal(t, n, r.SpanCount())
-}
+			tracer := otel.Tracer("test")
+			for i := 0; i < tc.n; i++ {
+				_, span := tracer.Start(context.Background(), "op")
+				span.End()
+			}
 
-func TestOTel_TraceSampling_HalfRate(t *testing.T) {
-	guardOTelGlobals(t)
-	r := testutil.NewFakeOTLP(t)
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer drainCancel()
+			require.NoError(t, shutdown(drainCtx))
 
-	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         r.Addr(),
-		TracesEnabled:    true,
-		TracesSampleRate: 0.5,
-	})
-
-	const n = 2000
-	tracer := otel.Tracer("test")
-	for i := 0; i < n; i++ {
-		_, span := tracer.Start(context.Background(), "op")
-		span.End()
+			tc.assert(t, r.SpanCount())
+		})
 	}
-
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer drainCancel()
-	require.NoError(t, shutdown(drainCtx))
-
-	// TraceIDRatioBased over random trace IDs is binomial(2000, 0.5):
-	// mean 1000, stddev ~22. ±200 is ~9σ — still essentially flake-proof
-	// but tight enough to catch a sampler accidentally pinned to 25% or
-	// 75% (which would land at 500 / 1500 and slip past a wider window).
-	// Bypass (count→2000) and broken (count→0) cases still fail loud.
-	got := r.SpanCount()
-	assert.InDelta(t, 1000, got, 200, "got %d spans, expected ~1000 within ±200", got)
-}
-
-func TestOTel_TraceSampling_ZeroRate(t *testing.T) {
-	guardOTelGlobals(t)
-	r := testutil.NewFakeOTLP(t)
-
-	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         r.Addr(),
-		TracesEnabled:    true,
-		TracesSampleRate: 0.0,
-	})
-
-	const n = 100
-	tracer := otel.Tracer("test")
-	for i := 0; i < n; i++ {
-		_, span := tracer.Start(context.Background(), "op")
-		span.End()
-	}
-
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer drainCancel()
-	require.NoError(t, shutdown(drainCtx))
-
-	assert.Zero(t, r.SpanCount(), "0.0 sample rate should drop every span")
 }
 
 func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {

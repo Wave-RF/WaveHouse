@@ -55,6 +55,15 @@ type ProviderConfig struct {
 // (non-nil iff PrometheusEnabled). The handler reads from a private
 // prometheus.Registry — global registry pollution is avoided.
 func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (func(context.Context) error, http.Handler, error) {
+	// Snapshot the OTel globals on entry. On a partial init failure we want to
+	// roll them back to whatever was installed before — otherwise the caller
+	// (which continues on init error per main.go) keeps using shut-down
+	// providers as the global state, strictly worse than the no-op defaults.
+	prevProp := otel.GetTextMapPropagator()
+	prevTP := otel.GetTracerProvider()
+	prevMP := otel.GetMeterProvider()
+	prevLP := global.GetLoggerProvider()
+
 	var shutdownFuncs []func(context.Context) error
 
 	shutdown := func(ctx context.Context) error {
@@ -67,11 +76,16 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	}
 
 	// On any setup error we run partial shutdown to release whatever was
-	// already registered. The setup error itself flows back to the caller via
-	// the return value; the shutdown error is diagnostic-only — surface it on
-	// stdout so partial-init failures are debuggable in production rather than
-	// silently swallowed.
+	// already registered AND restore the prior globals so the caller falls back
+	// to clean state. The setup error itself flows back via the return value;
+	// the shutdown error is diagnostic-only — surface it on stdout so
+	// partial-init failures are debuggable in production rather than silently
+	// swallowed.
 	handleErr := func(inErr error) {
+		otel.SetTextMapPropagator(prevProp)
+		otel.SetTracerProvider(prevTP)
+		otel.SetMeterProvider(prevMP)
+		global.SetLoggerProvider(prevLP)
 		if shutErr := shutdown(ctx); shutErr != nil {
 			slog.Warn("observability shutdown error during init cleanup",
 				"shutdown_err", shutErr, "cause", inErr)

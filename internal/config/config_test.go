@@ -404,6 +404,49 @@ func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 	assert.Contains(t, err.Error(), "must start with '/'")
 }
 
+func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		path    string
+		port    int
+		wantSub string
+	}{
+		{"health probe", "/health", 0, "reserved endpoint"},
+		{"ready probe", "/ready", 0, "reserved endpoint"},
+		{"v1 root same-port", "/v1", 0, "authenticated /v1"},
+		{"v1 subpath same-port", "/v1/admin/metrics", 0, "authenticated /v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				Prometheus: Prometheus{Enabled: true, Path: tc.path, Port: tc.port},
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantSub)
+		})
+	}
+}
+
+func TestValidate_PrometheusV1PathAllowedOnSidecarPort(t *testing.T) {
+	t.Parallel()
+	// /v1* shadowing is only a concern on the same-port mount. A sidecar
+	// listener on its own port is a separate route table entirely, so the
+	// path doesn't collide with the API. Validation should let this through.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{Enabled: true, Path: "/v1/metrics", Port: 9091},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
 func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
 	t.Parallel()
 	// Operators using Prometheus scrape (Alloy / Mimir) without OTel push:
