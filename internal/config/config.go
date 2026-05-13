@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -25,6 +26,58 @@ type Config struct {
 	DLQ        DLQ        `yaml:"dlq"`
 	Policy     Policy     `yaml:"policy"`
 	Pipes      Pipes      `yaml:"pipes"`
+	OTel       OTel       `yaml:"otel"`
+	Prometheus Prometheus `yaml:"prometheus"`
+}
+
+// OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
+// when false, no signals are initialized regardless of the per-signal toggles.
+type OTel struct {
+	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
+	Addr    string      `yaml:"addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
+	Traces  OTelTraces  `yaml:"traces"`
+	Metrics OTelMetrics `yaml:"metrics"`
+	Logs    OTelLogs    `yaml:"logs"`
+}
+
+type OTelTraces struct {
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
+}
+
+type OTelMetrics struct {
+	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+}
+
+// Prometheus controls a Prometheus exposition endpoint served alongside (or
+// independently of) the OTLP push exporter. It is its own top-level block so
+// operators using Prometheus scraping (Grafana Alloy / Mimir / etc.) don't
+// have to hunt through `[otel]` for an output they don't otherwise care about.
+// Internally the same OTel MeterProvider drives both — the Prometheus exporter
+// is an additional Reader — but the user-facing config keeps the two outputs
+// distinct.
+//
+// Works in any of three combinations: OTel only, Prometheus only, or both. If
+// only Prometheus is enabled, the MeterProvider is still created so runtime +
+// custom metrics flow to `/metrics`; no OTLP push is attempted.
+//
+// Port `0` mounts the endpoint on the existing API server router. A non-zero
+// port spins up a dedicated HTTP listener — useful for firewalling metrics
+// off the public API surface in production.
+type Prometheus struct {
+	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED" env-default:"false"`
+	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH" env-default:"/metrics"`
+	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT" env-default:"0"`
+}
+
+// OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
+// WARN and ERROR always export at 100% — dropping them silently during
+// incidents is too dangerous to expose as a knob. Stdout receives 100% of
+// records regardless of this rate (sampling for scraped-log pipelines like
+// Loki/Promtail belongs at the scraper, not the application).
+type OTelLogs struct {
+	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
+	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
 }
 
 type Server struct {
@@ -121,6 +174,54 @@ func (c *Config) Validate() error {
 
 	if c.MQ.GapWindowMinutes < 0 {
 		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
+	}
+
+	if c.OTel.Enabled {
+		if c.OTel.Addr == "" {
+			return fmt.Errorf("otel.addr must be non-empty when otel.enabled is true")
+		}
+		// Only validate sample rates for signals that are actually enabled —
+		// an unused field shouldn't block startup.
+		if c.OTel.Traces.Enabled {
+			if r := c.OTel.Traces.SampleRate; r < 0 || r > 1 {
+				return fmt.Errorf("otel.traces.sample_rate %g out of range [0.0, 1.0]", r)
+			}
+		}
+		if c.OTel.Logs.Enabled {
+			if r := c.OTel.Logs.SampleRate; r < 0 || r > 1 {
+				return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
+			}
+		}
+	}
+
+	// Prometheus exposition is independent of OTel — operators can run it
+	// standalone (Alloy scrape, no OTLP push) or alongside OTLP push.
+	if c.Prometheus.Enabled {
+		p := c.Prometheus
+		if p.Port < 0 || p.Port > 65535 {
+			return fmt.Errorf("prometheus.port %d out of range [0, 65535]", p.Port)
+		}
+		if p.Port != 0 && p.Port == c.Server.Port {
+			return fmt.Errorf("prometheus.port collides with server.port (%d); use 0 to mount on the API server or pick a different port", p.Port)
+		}
+		if !strings.HasPrefix(p.Path, "/") {
+			return fmt.Errorf("prometheus.path %q must start with '/'", p.Path)
+		}
+		// Chi registers /metrics before the health routes — a collision here
+		// would silently shadow the probe (first-registered-wins) rather than
+		// erroring at boot. Fail loud so the misconfig is debuggable.
+		for _, reserved := range []string{"/health", "/ready"} {
+			if p.Path == reserved {
+				return fmt.Errorf("prometheus.path %q conflicts with reserved endpoint", p.Path)
+			}
+		}
+		// Same-port mode mounts the (unauthenticated) metrics handler on the
+		// main router. A path inside the /v1 namespace would shadow the
+		// authenticated API subtree with a public handler — worse than the
+		// /health shadow case because it leaks at an authenticated-looking URL.
+		if p.Port == 0 && (p.Path == "/v1" || strings.HasPrefix(p.Path, "/v1/")) {
+			return fmt.Errorf("prometheus.path %q conflicts with authenticated /v1 API namespace when prometheus.port is 0", p.Path)
+		}
 	}
 
 	return nil

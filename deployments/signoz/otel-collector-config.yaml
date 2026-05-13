@@ -68,24 +68,24 @@ extensions:
     endpoint: 0.0.0.0:1777
 exporters:
   clickhousetraces:
-    datasource: tcp://clickhouse:9000/signoz_traces
+    datasource: tcp://${env:SIGNOZ_CH_USER}:${env:SIGNOZ_CH_PASSWORD}@clickhouse:9000/signoz_traces
     low_cardinal_exception_grouping: ${env:LOW_CARDINAL_EXCEPTION_GROUPING}
     use_new_schema: true
   signozclickhousemetrics:
-    dsn: tcp://clickhouse:9000/signoz_metrics
+    dsn: tcp://${env:SIGNOZ_CH_USER}:${env:SIGNOZ_CH_PASSWORD}@clickhouse:9000/signoz_metrics
   clickhouselogsexporter:
-    dsn: tcp://clickhouse:9000/signoz_logs
+    dsn: tcp://${env:SIGNOZ_CH_USER}:${env:SIGNOZ_CH_PASSWORD}@clickhouse:9000/signoz_logs
     timeout: 10s
     use_new_schema: true
   signozclickhousemeter:
-    dsn: tcp://clickhouse:9000/signoz_meter
+    dsn: tcp://${env:SIGNOZ_CH_USER}:${env:SIGNOZ_CH_PASSWORD}@clickhouse:9000/signoz_meter
     timeout: 45s
     sending_queue:
       enabled: false
   metadataexporter:
     cache:
       provider: in_memory
-    dsn: tcp://clickhouse:9000/signoz_metadata
+    dsn: tcp://${env:SIGNOZ_CH_USER}:${env:SIGNOZ_CH_PASSWORD}@clickhouse:9000/signoz_metadata
     enabled: true
     timeout: 45s
 service:

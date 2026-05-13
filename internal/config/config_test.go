@@ -32,6 +32,13 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.Equal(t, 300, cfg.Cache.DefaultTTL)
+	assert.False(t, cfg.OTel.Enabled)
+	assert.Equal(t, "127.0.0.1:4317", cfg.OTel.Addr)
+	assert.True(t, cfg.OTel.Traces.Enabled)
+	assert.InEpsilon(t, 1.0, cfg.OTel.Traces.SampleRate, 0.0001)
+	assert.True(t, cfg.OTel.Metrics.Enabled)
+	assert.True(t, cfg.OTel.Logs.Enabled)
+	assert.InEpsilon(t, 1.0, cfg.OTel.Logs.SampleRate, 0.0001)
 }
 
 func TestLoad_FromYAML(t *testing.T) {
@@ -215,6 +222,260 @@ auth:
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validate config")
+}
+
+func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		rate float64
+	}{
+		{"negative", -0.01},
+		{"just above one", 1.01},
+		{"well above one", 2.0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				OTel: OTel{
+					Enabled: true,
+					Addr:    "127.0.0.1:4317",
+					Traces:  OTelTraces{Enabled: true, SampleRate: tc.rate},
+					Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
+				},
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "traces.sample_rate")
+		})
+	}
+}
+
+func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: true,
+			Addr:    "127.0.0.1:4317",
+			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
+			Logs:    OTelLogs{Enabled: true, SampleRate: 1.5},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "logs.sample_rate")
+}
+
+func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
+	t.Parallel()
+	// Out-of-range rates should not fail validation when the master switch is off —
+	// the rates are unused so policing them would surprise operators iterating on
+	// config that they haven't enabled yet.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: false,
+			Traces:  OTelTraces{SampleRate: 99},
+			Logs:    OTelLogs{SampleRate: -1},
+		},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_RejectsEmptyOTelAddrWhenEnabled(t *testing.T) {
+	t.Parallel()
+	// Empty addr → OTLP gRPC exporters dial lazily against "" and surface
+	// failures only later as opaque SDK error-handler noise. Catch at config
+	// load instead with an explicit message.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: true,
+			Addr:    "",
+			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
+			Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "otel.addr")
+}
+
+func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
+	t.Parallel()
+	// Same idea one level down — when the master switch is on but the individual
+	// signal is off, its sample_rate is unused and should not gate startup.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: true,
+			Addr:    "127.0.0.1:4317",
+			Traces:  OTelTraces{Enabled: false, SampleRate: 99},
+			Logs:    OTelLogs{Enabled: false, SampleRate: -1},
+		},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestLoad_Defaults_PrometheusDisabled(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Prometheus.Enabled)
+	assert.Equal(t, "/metrics", cfg.Prometheus.Path)
+	assert.Equal(t, 0, cfg.Prometheus.Port)
+}
+
+func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{
+			Enabled: true,
+			Path:    "/metrics",
+			Port:    8080, // collides
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collides with server.port")
+}
+
+func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		port int
+	}{
+		{"negative", -1},
+		{"just above uint16", 65536},
+		{"well above uint16", 99999},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				Prometheus: Prometheus{
+					Enabled: true,
+					Path:    "/metrics",
+					Port:    tc.port,
+				},
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "prometheus.port")
+		})
+	}
+}
+
+func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{
+			Enabled: true,
+			Path:    "metrics", // missing leading slash
+			Port:    0,
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must start with '/'")
+}
+
+func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		path    string
+		port    int
+		wantSub string
+	}{
+		{"health probe", "/health", 0, "reserved endpoint"},
+		{"ready probe", "/ready", 0, "reserved endpoint"},
+		{"v1 root same-port", "/v1", 0, "authenticated /v1"},
+		{"v1 subpath same-port", "/v1/admin/metrics", 0, "authenticated /v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				Prometheus: Prometheus{Enabled: true, Path: tc.path, Port: tc.port},
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantSub)
+		})
+	}
+}
+
+func TestValidate_PrometheusV1PathAllowedOnSidecarPort(t *testing.T) {
+	t.Parallel()
+	// /v1* shadowing is only a concern on the same-port mount. A sidecar
+	// listener on its own port is a separate route table entirely, so the
+	// path doesn't collide with the API. Validation should let this through.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{Enabled: true, Path: "/v1/metrics", Port: 9091},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
+	t.Parallel()
+	// Operators using Prometheus scrape (Alloy / Mimir) without OTel push:
+	// otel.enabled stays false, prometheus.enabled is true. Must validate.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{Enabled: true, Path: "/metrics", Port: 0},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
+	t.Parallel()
+	// All sorts of invalid prometheus settings should be ignored when
+	// prometheus.enabled is false — operators iterating on yaml shouldn't
+	// get yelled at about unused fields.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Prometheus: Prometheus{
+			Enabled: false,
+			Path:    "garbage",
+			Port:    8080,
+		},
+	}
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_InvalidHTTPScheme(t *testing.T) {

@@ -116,7 +116,10 @@ WH_CH_HTTP_SCHEME=http              # Scheme for Bento HTTP inserts (http/https)
 # Schema discovery
 WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 
-# CORS
+# CORS — comma-separated allowlist (or "*" for any origin).
+# WaveHouse is a Bearer-token API; no cookies are used and the middleware
+# deliberately omits Access-Control-Allow-Credentials, so this allowlist only
+# controls *which origins can read responses*, not cookie scope.
 WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 
 # Optional auth
@@ -304,6 +307,42 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 ## Dead Letter Queue (DLQ)
 
 When `dlq.enabled` is `true` (default), failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
+
+## Observability (SigNoz)
+
+Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. Each signal can be toggled independently — see `docs/configuration.md` for the full table of knobs.
+
+WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
+
+### Pattern: SigNoz / Honeycomb / OTel-native backends
+
+Point `otel.addr` at the OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
+
+### Pattern: Grafana Cloud / Mimir / Loki / Tempo via Grafana Alloy
+
+The Grafana stack typically wants Prometheus-style scraping for metrics, stdout scraping for logs, and OTLP push for traces. Wire it like this:
+
+- **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API. No WaveHouse config needed — stdout always emits 100%.
+- **Traces**: Set `otel.addr` to Alloy's `otelcol.receiver.otlp` listener (`alloy:4317`). Alloy forwards to Tempo.
+- **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics` (or whatever port you configured). The `prometheus` block is independent of `otel.*` — you can leave `otel.enabled: false` if Alloy is only scraping (no OTLP push at all), or combine the two if traces still go via OTLP.
+
+For the metrics path specifically: WaveHouse uses the OTel SDK's Prometheus exporter under the hood, which translates OTel metric names to Prometheus conventions automatically (dots and dashes become underscores; counters get a `_total` suffix). Existing OTel instruments don't need renaming.
+
+### Separating the `/metrics` listener
+
+By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API server port (typically `8080`). This is the friendliest setup for compose / quick-start use.
+
+For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
+
+`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally (ClickHouse + query service + OTel collector at `:4317`). Bring it up:
+
+```bash
+docker compose -f deployments/signoz/docker-compose.yaml up -d
+```
+
+ClickHouse credentials inside the SigNoz stack default to `default` / `password`. To override, copy `deployments/signoz/.env.example` to `deployments/signoz/.env` and set `SIGNOZ_CH_USER` / `SIGNOZ_CH_PASSWORD`. The `.env` file is gitignored.
+
+The SigNoz UI is exposed on `http://localhost:3301`. Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` (the default).
 
 ## Resetting Data in Development
 
