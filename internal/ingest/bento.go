@@ -177,9 +177,12 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				// to break the infinite-Nak retry loop that a bad query (syntax
 				// error, missing table, etc.) would otherwise produce. Route the
 				// original NATS envelope to dlq.<table> and DoubleAck so the
-				// message is removed from the main queue. Phase 2 will classify
-				// transient (network/timeout) vs permanent errors and Nak the
-				// transient ones.
+				// message is removed from the main queue.
+				//
+				// TODO(#91, Phase 2): classify transient (network/timeout) vs
+				// permanent errors and Nak the transient ones so they get retried.
+				// Until that lands, a ClickHouse blip during a delete drops the
+				// message to DLQ instead of retrying — accepted trade-off, see #91.
 				slog.ErrorContext(spanCtx, "clickhouse delete failed — routing to DLQ",
 					"table", raw.TableName,
 					"id", raw.ID,
