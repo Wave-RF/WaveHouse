@@ -151,68 +151,43 @@ Tooling notes:
 
 ## Local-First Validation
 
-**Validate locally before pushing. Don't use CI as your first feedback
-loop.** Every push consumes shared CI capacity and AI-reviewer credits,
-and produces visible churn for the rest of the team.
+**Validate locally before pushing. Don't use CI as your first feedback loop.** Every push consumes shared CI capacity and AI-reviewer credits, and produces visible churn for the rest of the team.
 
 ### Before every push
 
 ```bash
-make ci   # Full parity with CI: parallel verify + builds + unit/SDK
-          # tests, then integration + E2E + cov
+make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then integration + E2E + cov
 ```
 
-If `make ci` passes locally, your commit has crossed the same gates CI
-will run. For workflow-only changes, read the YAML diff carefully and
-run `actionlint` if you have it installed.
+If `make ci` passes locally, your commit has crossed the same gates CI will run. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
 
 ### If local passes but CI fails
 
-Treat as environment mismatch first, test bug second. Reproduce the
-failure locally (`go test -race -run TestFoo ./...`); if it passes,
-try concurrent copies to simulate runner contention; only then look
-at the runner itself. Masking environment issues with longer timeouts
-compounds — today's 5s bump becomes tomorrow's 30s bump.
+Treat as environment mismatch first, test bug second. Reproduce the failure locally (`go test -race -run TestFoo ./...`); if it passes, try concurrent copies to simulate runner contention; only then look at the runner itself. Masking environment issues with longer timeouts compounds — today's 5s bump becomes tomorrow's 30s bump.
 
-When delegating to a subagent: tell them explicitly *"run locally
-first."* Agents default to "commit and let CI run" because it looks
-like progress.
+When delegating to a subagent: tell them explicitly *"run locally first."* Agents default to "commit and let CI run" because it looks like progress.
 
 ## Review Response
 
-Every review comment gets a substantive reply, and every thread gets
-resolved before merge. The `main branch protection` ruleset enforces
-`required_review_thread_resolution: true`, so unresolved threads
-block merge. Applies to human reviewers and AI reviewers alike
-(Copilot, Gemini Code Assist, claude-review).
+Every review comment gets a substantive reply, and every thread gets resolved before merge. The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads block merge. Applies to human reviewers and AI reviewers alike (Copilot, Gemini Code Assist, claude-review).
 
 ### What to do
 
 1. **Decide**: accept, push back, or defer (right but out-of-scope).
-2. **Reply substantively** with the fix's commit SHA or your
-   reasoning. No bare "fixed" / "LGTM" / "good catch".
-3. **@mention the bot you're replying to** (except Copilot), on its
-   own line below your signature trailer:
+2. **Reply substantively** with the fix's commit SHA or your reasoning. No bare "fixed" / "LGTM" / "good catch".
+3. **@mention the bot you're replying to** (except Copilot), on its own line below your signature trailer:
    - Claude: `@claude` or `/review` re-invokes the workflow
    - Gemini: `@gemini-code-assist` or `/gemini <question>`
    - Copilot: no mention works — note the re-request-review button
-   
-   Without the mention, the bot never sees the reply and the dialog
-   silently terminates.
-4. **Fix in this PR** if the suggestion is right and in scope.
-   Out-of-scope but valid: link a tracking issue before resolving.
-5. **Resolve the thread** once the reply addresses the concern and
-   no counter-reply is pending. Bot threads are safe to resolve
-   after a substantive reply (bots only re-engage on mention);
-   human threads — wait for them.
-6. **Re-request review** from humans after substantive changes. Bot
-   reviewers re-run on `synchronize` (Claude, Gemini) or via a
-   re-request button (Copilot).
+
+   Without the mention, the bot never sees the reply and the dialog silently terminates.
+4. **Fix in this PR** if the suggestion is right and in scope. Out-of-scope but valid: link a tracking issue before resolving.
+5. **Resolve the thread** once the reply addresses the concern and no counter-reply is pending. Bot threads are safe to resolve after a substantive reply (bots only re-engage on mention); human threads — wait for them.
+6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via a re-request button (Copilot).
 
 ### What not to do
 
-- Don't argue in circles. If the reviewer repeats the same point,
-  escalate to a maintainer rather than looping.
+- Don't argue in circles. If the reviewer repeats the same point, escalate to a maintainer rather than looping.
 - Don't resolve a thread that has an open child comment.
 
 ### Review tooling reference
@@ -228,8 +203,7 @@ block merge. Applies to human reviewers and AI reviewers alike
 
 ## Documentation Sync
 
-Every code change should update the corresponding docs in the same
-PR. A code change without its doc update is incomplete.
+Every code change should update the corresponding docs in the same PR. A code change without its doc update is incomplete.
 
 | Change | Files to update |
 | ------ | --------------- |
@@ -243,15 +217,12 @@ PR. A code change without its doc update is incomplete.
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔
-  `docs/configuration.md`, `config.yaml`, compose env blocks
-- `EventMessage` JSON tags ↔ `docs/api.md` event format,
-  SSE/WS examples, ClickHouse INSERT columns
+- Config struct tags in `internal/config/config.go` ↔ `docs/configuration.md`, `config.yaml`, compose env blocks
+- `EventMessage` JSON tags ↔ `docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
 - Route registrations in `router.go` ↔ `docs/api.md` endpoint list
 - Handler error responses ↔ `docs/api.md` error tables
 
-Before finishing a task, grep for the identifiers you touched (field
-names, env var names, endpoint paths) across docs to catch staleness.
+Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
 
 ## Common Tasks
 
@@ -328,38 +299,16 @@ docs/                   → Project documentation
 
 ## Repository Automation
 
-- **Issue triage** (`triage.yml`): GitHub Models classifies new/edited
-  issues and applies `area/*` + `security` + `breaking-change` labels.
-- **Code review** (advisory; the `Admin approval` required status
-  check + the ruleset are the actual merge gate):
+- **Issue triage** (`triage.yml`): GitHub Models classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels.
+- **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate):
   - **Gemini Code Assist App** configured via `.gemini/styleguide.md`.
-  - **Claude PR review** (`claude-review.yml`) runs on every PR open
-    or push, gated on the HEAD commit's author or committer having
-    ≥read permission. Dependabot is filtered at workflow level.
-    Findings post as inline review comments (blocked by
-    `required_review_thread_resolution`) plus a sticky verdict
-    summary. Manual re-trigger via `@claude` / `/review` from a
-    trusted commenter or via `workflow_dispatch`. Review-only —
-    Claude can comment but not push. Requires the
-    `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
-- **Dependabot auto-merge** (`dependabot-automerge.yml`):
-  patch/minor bumps auto-approve + auto-merge; major bumps hold for
-  human review. CI still gates the actual merge. Dependabot bypasses
-  `Admin approval` since the workflow + CI passing is the trust
-  model for patch/minor.
+  - **Claude PR review** (`claude-review.yml`) runs on every PR open or push, gated on the HEAD commit's author or committer having ≥read permission. Dependabot is filtered at workflow level. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Manual re-trigger via `@claude` / `/review` from a trusted commenter or via `workflow_dispatch`. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
+- **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Dependabot bypasses `Admin approval` since the workflow + CI passing is the trust model for patch/minor.
 
 ## Governance Files
 
-- **No `CODEOWNERS`**: replaced by workflow-driven reviewer
-  assignment + approval enforcement.
-  - `admin-approval.yml` — required status check that fails unless an
-    admin has an `APPROVED` review (Dependabot bypasses).
-  - `housekeeping.yml` — requests review from a non-author admin on
-    PR open / ready-for-review via the `assign-and-request-review`
-    composite. Task Board placement is handled by native Projects v2
-    workflows configured in the project UI.
-- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: thin pointer files
-  to AGENTS.md. Keep those pointers short; never duplicate content.
-- **`CONTRIBUTING.md`**: the Conventional Commits type list must stay
-  in sync with the regex in `housekeeping.yml`. The title linter
-  validates squash-merge commit messages.
+- **No `CODEOWNERS`**: replaced by workflow-driven reviewer assignment + approval enforcement.
+  - `admin-approval.yml` — required status check that fails unless an admin has an `APPROVED` review (Dependabot bypasses).
+  - `housekeeping.yml` — requests review from a non-author admin on PR open / ready-for-review via the `assign-and-request-review` composite. Task Board placement is handled by native Projects v2 workflows configured in the project UI.
+- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: thin pointer files to AGENTS.md. Keep those pointers short; never duplicate content.
+- **`CONTRIBUTING.md`**: the Conventional Commits type list must stay in sync with the regex in `housekeeping.yml`. The title linter validates squash-merge commit messages.
