@@ -32,6 +32,11 @@ type Dependencies struct {
 	JS              jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel        *slog.LevelVar
+	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
+	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
+	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
+	MetricsHandler http.Handler
+	MetricsPath    string
 }
 
 // NewRouter creates the chi router with all routes.
@@ -54,10 +59,22 @@ func NewRouter(deps Dependencies) http.Handler {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	})
 
+	metricsPath := deps.MetricsPath
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// BYPASS: Do not use standard HTTP tracing for long-lived streams
-			if strings.HasPrefix(r.URL.Path, "/v1/stream/") {
+			// Skip span creation on infra/probe paths:
+			//   /v1/stream/*  — long-lived streams (SSE/WS); the standard
+			//                   HTTP tracer would emit one span per stream
+			//                   that lives until the client disconnects.
+			//   prometheus    — scrape every ~15s would produce ~4 spans/min
+			//                   of pure infra cardinality, and creates a
+			//                   self-loop when the same backend stores both
+			//                   traces and scraped metrics.
+			//   /health, /ready — liveness/readiness probes inflate span
+			//                   counts and skew latency percentiles.
+			p := r.URL.Path
+			if strings.HasPrefix(p, "/v1/stream/") || p == "/health" || p == "/ready" ||
+				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -69,6 +86,13 @@ func NewRouter(deps Dependencies) http.Handler {
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)
+
+	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
+	// AND prometheus.port is 0 (mount on this router). When prometheus.port
+	// is non-zero, main.go runs a dedicated listener instead and this is nil.
+	if deps.MetricsHandler != nil && deps.MetricsPath != "" {
+		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
+	}
 
 	// API v1 endpoints (auth middleware may be no-op if disabled).
 	r.Route("/v1", func(r chi.Router) {
