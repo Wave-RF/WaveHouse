@@ -381,6 +381,22 @@ docker compose -f deployments/signoz/docker-compose.yaml up -d
 
 The SigNoz UI is on `http://localhost:3301` (host `3301` → container `8080`; `8080` is left for WaveHouse). Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` for a host-side WaveHouse (the default), or `WH_OTEL_ADDR=host.docker.internal:4317` from a WaveHouse container — the collector publishes `4317` on the host. See `deployments/compose/standalone.signoz.yaml` for a compose override that wires the containerized `standalone.yaml` WaveHouse into this stack.
 
+### Dashboards
+
+Two dashboards live in `deployments/signoz/dashboards/` as version-controlled JSON — `wavehouse-overview.json` (HTTP traffic, latency, OTLP intake) and `wavehouse-runtime-internals.json` (Go runtime, embedded NATS, ingest pipeline, payload sizes). SigNoz OSS has no on-disk dashboard provisioning (unlike Grafana) and disables self-registration, so loading them is a one-time-per-person manual step rather than part of `compose up`:
+
+1. `docker compose -f deployments/signoz/docker-compose.yaml up -d`
+2. Open `http://localhost:3301` and **create your account** (first visit only).
+3. Load the dashboards:
+
+   ```bash
+   SIGNOZ_EMAIL=you@example.com SIGNOZ_PASSWORD='…' deployments/signoz/load-dashboards.sh
+   ```
+
+The loader upserts by title (matching dashboards are updated in place, new ones created), so re-run it whenever the JSON changes. It can also take a `SIGNOZ_TOKEN` (the `AUTH_TOKEN` from the SigNoz UI's `localStorage`) instead of email/password, and `SIGNOZ_URL` (default `http://localhost:3301`). Needs `curl` and `jq`. To edit a dashboard, change it in the UI, then re-export it: `GET /api/v1/dashboards/<id>` and save the response's `.data.data` over the JSON file.
+
+The two **Ingest** panels (`wavehouse_bento_*`) are empty until events actually flow through the ingest pipeline — those counters aren't emitted until the first event is written.
+
 ## Resetting Data in Development
 
 ### Option 1: Drop and Recreate Tables

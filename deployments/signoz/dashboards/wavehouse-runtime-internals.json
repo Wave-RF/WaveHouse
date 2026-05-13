@@ -1,0 +1,576 @@
+{
+  "title": "WaveHouse · Runtime & Internals",
+  "description": "Go runtime, embedded NATS, ingest pipeline, and HTTP payload sizes for the local WaveHouse service.",
+  "tags": [
+    "wavehouse"
+  ],
+  "variables": {},
+  "version": "v5",
+  "layout": [
+    {
+      "i": "cd634115-f28a-5eac-9139-47f084d17325",
+      "x": 0,
+      "y": 0,
+      "w": 4,
+      "h": 3
+    },
+    {
+      "i": "e9fa7d35-09e8-54bc-a95f-6f6d43bf0e34",
+      "x": 4,
+      "y": 0,
+      "w": 4,
+      "h": 3
+    },
+    {
+      "i": "596b38da-a5d3-5aae-96de-054fd50cfbf9",
+      "x": 8,
+      "y": 0,
+      "w": 4,
+      "h": 3
+    },
+    {
+      "i": "05167217-93f9-5475-acdc-3317beb3c1c7",
+      "x": 0,
+      "y": 3,
+      "w": 4,
+      "h": 3
+    },
+    {
+      "i": "5d29c83c-0940-5d76-a498-f5af98e7af07",
+      "x": 4,
+      "y": 3,
+      "w": 4,
+      "h": 3
+    },
+    {
+      "i": "f7c79930-5bdd-5fb1-a914-6433a2cf0743",
+      "x": 8,
+      "y": 3,
+      "w": 4,
+      "h": 3
+    },
+    {
+      "i": "4c82c49e-c310-5bec-8065-49689e17e8c9",
+      "x": 0,
+      "y": 6,
+      "w": 6,
+      "h": 3
+    },
+    {
+      "i": "8828b51f-f0fc-56b2-a674-21d95d230501",
+      "x": 6,
+      "y": 6,
+      "w": 6,
+      "h": 3
+    }
+  ],
+  "widgets": [
+    {
+      "id": "cd634115-f28a-5eac-9139-47f084d17325",
+      "title": "Go — goroutines",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "go.goroutine.count",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "latest"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [],
+              "having": {
+                "expression": ""
+              },
+              "legend": "goroutines",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "a85cb74f-054f-54c2-abeb-dfc9c6818279"
+      },
+      "yAxisUnit": "short"
+    },
+    {
+      "id": "e9fa7d35-09e8-54bc-a95f-6f6d43bf0e34",
+      "title": "Go — memory used (bytes)",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "go.memory.used",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "latest"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [
+                {
+                  "key": "go.memory.type",
+                  "dataType": "string",
+                  "type": "tag",
+                  "isColumn": false
+                }
+              ],
+              "having": {
+                "expression": ""
+              },
+              "legend": "{{go.memory.type}}",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "2678fb88-02cb-50b5-9456-a15e6229f024"
+      },
+      "yAxisUnit": "bytes"
+    },
+    {
+      "id": "596b38da-a5d3-5aae-96de-054fd50cfbf9",
+      "title": "Go — allocation rate (bytes/s)",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "go.memory.allocations",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "rate"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [],
+              "having": {
+                "expression": ""
+              },
+              "legend": "bytes/s",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "c39d7174-e9d2-5b0b-b43e-cfb2b575d403"
+      },
+      "yAxisUnit": "Bps"
+    },
+    {
+      "id": "05167217-93f9-5475-acdc-3317beb3c1c7",
+      "title": "NATS — client connections",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "wavehouse_nats_connections",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "latest"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [],
+              "having": {
+                "expression": ""
+              },
+              "legend": "connections",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "7d74c1ba-a8a9-5dad-bcbb-0b7c76d5fcdd"
+      },
+      "yAxisUnit": "short"
+    },
+    {
+      "id": "5d29c83c-0940-5d76-a498-f5af98e7af07",
+      "title": "NATS — messages in (msg/s)",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "wavehouse_nats_in_msgs_total",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "rate"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [],
+              "having": {
+                "expression": ""
+              },
+              "legend": "msg/s",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "42fd6f7b-2f45-5b2a-bd27-29e1fa6818a4"
+      }
+    },
+    {
+      "id": "f7c79930-5bdd-5fb1-a914-6433a2cf0743",
+      "title": "Ingest — events written to ClickHouse (events/s)",
+      "description": "Populates once ingest traffic flows (WaveHouse uses bring-your-own-schema).",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "wavehouse_bento_events_processed",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "rate"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [
+                {
+                  "key": "table",
+                  "dataType": "string",
+                  "type": "tag",
+                  "isColumn": false
+                }
+              ],
+              "having": {
+                "expression": ""
+              },
+              "legend": "{{table}}",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "b6d9577d-10ac-55be-97ba-7e6d4afc5ffa"
+      }
+    },
+    {
+      "id": "4c82c49e-c310-5bec-8065-49689e17e8c9",
+      "title": "Ingest — DLQ messages permanently dropped (per sec)",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "wavehouse_bento_dlq_dropped",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "sum",
+                  "temporality": null,
+                  "timeAggregation": "rate"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [
+                {
+                  "key": "table",
+                  "dataType": "string",
+                  "type": "tag",
+                  "isColumn": false
+                }
+              ],
+              "having": {
+                "expression": ""
+              },
+              "legend": "{{table}}",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "05b8bba7-a4d0-57b6-9cd7-d19eedc69171"
+      }
+    },
+    {
+      "id": "8828b51f-f0fc-56b2-a674-21d95d230501",
+      "title": "HTTP — request / response body size p99 (bytes)",
+      "description": "",
+      "panelTypes": "graph",
+      "timePreferance": "GLOBAL_TIME",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "aggregations": [
+                {
+                  "metricName": "http.server.request.body.size.bucket",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "p99",
+                  "temporality": null,
+                  "timeAggregation": "rate"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "A",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [],
+              "having": {
+                "expression": ""
+              },
+              "legend": "request p99",
+              "orderBy": [],
+              "queryName": "A",
+              "stepInterval": 60
+            },
+            {
+              "aggregations": [
+                {
+                  "metricName": "http.server.response.body.size.bucket",
+                  "reduceTo": "avg",
+                  "spaceAggregation": "p99",
+                  "temporality": null,
+                  "timeAggregation": "rate"
+                }
+              ],
+              "dataSource": "metrics",
+              "disabled": false,
+              "expression": "B",
+              "filter": {
+                "expression": ""
+              },
+              "groupBy": [],
+              "having": {
+                "expression": ""
+              },
+              "legend": "response p99",
+              "orderBy": [],
+              "queryName": "B",
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "promql": [
+          {
+            "name": "A",
+            "query": "",
+            "legend": "",
+            "disabled": false
+          }
+        ],
+        "id": "ed4527e0-8071-5d8f-9d80-a3d2139b6dfa"
+      },
+      "yAxisUnit": "bytes"
+    }
+  ]
+}
