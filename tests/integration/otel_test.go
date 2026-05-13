@@ -193,12 +193,15 @@ func TestOTel_PerSignal_TracesOnly(t *testing.T) {
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
-	// 100ms grace so any stray metric/log RPCs from a misconfig surface.
-	time.Sleep(100 * time.Millisecond)
-
+	// Span emitted before shutdown — count should be set on return.
 	assert.Equal(t, 1, r.SpanCount())
-	assert.Zero(t, r.MetricCount(), "metrics disabled — no metric records should appear")
-	assert.Zero(t, r.LogCount(), "logs disabled — no log records should appear")
+	// Negative assertions: poll for 100ms in case a misconfigured exporter
+	// would emit a stray RPC. require.Never is the testify-native primitive
+	// for "this must stay false for window X" — clearer than a bare sleep.
+	require.Never(t, func() bool { return r.MetricCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond,
+		"metrics disabled — no metric records should appear")
+	require.Never(t, func() bool { return r.LogCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond,
+		"logs disabled — no log records should appear")
 }
 
 func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
@@ -266,11 +269,12 @@ func TestOTel_PerSignal_LogsOnly(t *testing.T) {
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
-	time.Sleep(100 * time.Millisecond)
-
+	// Log emitted before shutdown — count should be set on return.
 	assert.GreaterOrEqual(t, r.LogCount(), 1, "logs should be exported")
-	assert.Zero(t, r.SpanCount())
-	assert.Zero(t, r.MetricCount())
+	require.Never(t, func() bool { return r.SpanCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond,
+		"traces disabled — no span records should appear")
+	require.Never(t, func() bool { return r.MetricCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond,
+		"metrics disabled — no metric records should appear")
 }
 
 func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {

@@ -243,6 +243,7 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 				Schema:     Schema{RefreshInterval: 60},
 				OTel: OTel{
 					Enabled: true,
+					Addr:    "127.0.0.1:4317",
 					Traces:  OTelTraces{Enabled: true, SampleRate: tc.rate},
 					Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
 				},
@@ -262,6 +263,7 @@ func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
+			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
 			Logs:    OTelLogs{Enabled: true, SampleRate: 1.5},
 		},
@@ -289,6 +291,27 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 	assert.NoError(t, cfg.Validate())
 }
 
+func TestValidate_RejectsEmptyOTelAddrWhenEnabled(t *testing.T) {
+	t.Parallel()
+	// Empty addr → OTLP gRPC exporters dial lazily against "" and surface
+	// failures only later as opaque SDK error-handler noise. Catch at config
+	// load instead with an explicit message.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: true,
+			Addr:    "",
+			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
+			Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "otel.addr")
+}
+
 func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 	t.Parallel()
 	// Same idea one level down — when the master switch is on but the individual
@@ -299,6 +322,7 @@ func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
+			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{Enabled: false, SampleRate: 99},
 			Logs:    OTelLogs{Enabled: false, SampleRate: -1},
 		},
@@ -324,6 +348,7 @@ func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
+			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{SampleRate: 0.10},
 			Logs:    OTelLogs{SampleRate: 0.10},
 			Metrics: OTelMetrics{
@@ -360,6 +385,7 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 				Schema:     Schema{RefreshInterval: 60},
 				OTel: OTel{
 					Enabled: true,
+					Addr:    "127.0.0.1:4317",
 					Traces:  OTelTraces{SampleRate: 0.10},
 					Logs:    OTelLogs{SampleRate: 0.10},
 					Metrics: OTelMetrics{
@@ -387,6 +413,7 @@ func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
+			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{SampleRate: 0.10},
 			Logs:    OTelLogs{SampleRate: 0.10},
 			Metrics: OTelMetrics{
@@ -415,6 +442,7 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
+			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{SampleRate: 0.10},
 			Logs:    OTelLogs{SampleRate: 0.10},
 			Metrics: OTelMetrics{

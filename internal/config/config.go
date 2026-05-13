@@ -170,6 +170,9 @@ func (c *Config) Validate() error {
 	}
 
 	if c.OTel.Enabled {
+		if c.OTel.Addr == "" {
+			return fmt.Errorf("otel.addr must be non-empty when otel.enabled is true")
+		}
 		// Only validate sample rates for signals that are actually enabled —
 		// an unused field shouldn't block startup.
 		if c.OTel.Traces.Enabled {
