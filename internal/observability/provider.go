@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -65,8 +66,16 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		return err
 	}
 
-	handleErr := func(_ error) {
-		_ = shutdown(ctx)
+	// On any setup error we run partial shutdown to release whatever was
+	// already registered. The setup error itself flows back to the caller via
+	// the return value; the shutdown error is diagnostic-only — surface it on
+	// stdout so partial-init failures are debuggable in production rather than
+	// silently swallowed.
+	handleErr := func(inErr error) {
+		if shutErr := shutdown(ctx); shutErr != nil {
+			slog.Warn("observability shutdown error during init cleanup",
+				"shutdown_err", shutErr, "cause", inErr)
+		}
 	}
 
 	res, err := resource.New(ctx,

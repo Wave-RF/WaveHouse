@@ -59,10 +59,22 @@ func NewRouter(deps Dependencies) http.Handler {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	})
 
+	metricsPath := deps.MetricsPath
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// BYPASS: Do not use standard HTTP tracing for long-lived streams
-			if strings.HasPrefix(r.URL.Path, "/v1/stream/") {
+			// Skip span creation on infra/probe paths:
+			//   /v1/stream/*  — long-lived streams (SSE/WS); the standard
+			//                   HTTP tracer would emit one span per stream
+			//                   that lives until the client disconnects.
+			//   prometheus    — scrape every ~15s would produce ~4 spans/min
+			//                   of pure infra cardinality, and creates a
+			//                   self-loop when the same backend stores both
+			//                   traces and scraped metrics.
+			//   /health, /ready — liveness/readiness probes inflate span
+			//                   counts and skew latency percentiles.
+			p := r.URL.Path
+			if strings.HasPrefix(p, "/v1/stream/") || p == "/health" || p == "/ready" ||
+				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return
 			}

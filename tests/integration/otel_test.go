@@ -109,11 +109,12 @@ func TestOTel_TraceSampling_HalfRate(t *testing.T) {
 	require.NoError(t, shutdown(drainCtx))
 
 	// TraceIDRatioBased over random trace IDs is binomial(2000, 0.5):
-	// mean 1000, stddev ~22. ±25% tolerance covers >>6σ and any rounding
-	// in the sampler's bit-mask comparison. The test fails the right way
-	// if sampling is silently bypassed (count→2000) or broken (count→0).
+	// mean 1000, stddev ~22. ±200 is ~9σ — still essentially flake-proof
+	// but tight enough to catch a sampler accidentally pinned to 25% or
+	// 75% (which would land at 500 / 1500 and slip past a wider window).
+	// Bypass (count→2000) and broken (count→0) cases still fail loud.
 	got := r.SpanCount()
-	assert.InDelta(t, 1000, got, 500, "got %d spans, expected ~1000 within ±500", got)
+	assert.InDelta(t, 1000, got, 200, "got %d spans, expected ~1000 within ±200", got)
 }
 
 func TestOTel_TraceSampling_ZeroRate(t *testing.T) {
@@ -168,10 +169,12 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 	require.NoError(t, shutdown(drainCtx))
 
 	// OTel severity numbers: DEBUG=5, INFO=9, WARN=13, ERROR=17.
-	infoCount := r.LogCount() - r.LogCountAtLevel(13)
-	warnCount := r.LogCountAtLevel(13)
-	assert.Zero(t, infoCount, "INFO records should have been dropped at sample_rate=0.0")
-	assert.Equal(t, 2*n, warnCount, "WARN+ERROR floor should export at 100% regardless of rate")
+	// `LogCountAtLevel(13)` is "WARN and above" (testutil semantics), so the
+	// complement is DEBUG+INFO — the records the rate=0.0 sampler should drop.
+	lowSevCount := r.LogCount() - r.LogCountAtLevel(13)
+	warnAndAboveCount := r.LogCountAtLevel(13)
+	assert.Zero(t, lowSevCount, "DEBUG+INFO records should have been dropped at sample_rate=0.0")
+	assert.Equal(t, 2*n, warnAndAboveCount, "WARN+ERROR floor should export at 100% regardless of rate")
 }
 
 func TestOTel_PerSignal_TracesOnly(t *testing.T) {

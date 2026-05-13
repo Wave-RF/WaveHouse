@@ -194,8 +194,14 @@ func run() int {
 	}
 	defer func() { _ = embeddedMQ.Close() }()
 
-	if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
-		logger.Error("failed to register system metrics", "error", err)
+	// Only register system metric gauges when a real MeterProvider is in
+	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
+	// provider and RegisterCallback silently no-ops, making this look
+	// authoritative when it's actually doing nothing.
+	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
+		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
+			logger.Error("failed to register system metrics", "error", err)
+		}
 	}
 
 	// DLQ stream.
@@ -351,6 +357,12 @@ func run() int {
 				Addr:              fmt.Sprintf(":%d", promPort),
 				Handler:           mux,
 				ReadHeaderTimeout: 10 * time.Second,
+				// Full Read/Write timeouts are safe here — unlike the main API
+				// server (SSE/WebSocket), the Prometheus sidecar serves only
+				// single-shot scrape requests, so an unbounded slow client has
+				// no legitimate reason to hold a connection.
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 30 * time.Second,
 			}
 		}
 	}

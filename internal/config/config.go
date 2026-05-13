@@ -207,6 +207,14 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(p.Path, "/") {
 			return fmt.Errorf("prometheus.path %q must start with '/'", p.Path)
 		}
+		// Chi registers /metrics before the health routes — a collision here
+		// would silently shadow the probe (first-registered-wins) rather than
+		// erroring at boot. Fail loud so the misconfig is debuggable.
+		for _, reserved := range []string{"/health", "/ready"} {
+			if p.Path == reserved {
+				return fmt.Errorf("prometheus.path %q conflicts with reserved endpoint", p.Path)
+			}
+		}
 	}
 
 	return nil
