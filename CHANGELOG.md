@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
 ### Fixed
 - **Ingest worker no longer infinite-retries permanent delete errors** (`internal/ingest/bento.go`, `internal/ingest/bento_test.go`, `docs/architecture.md`, `AGENTS.md`): `jsInput.Read`'s `action: "delete"` block called `m.Nak()` on every `chConn.Exec` failure, which JetStream interprets as "redeliver immediately." A delete whose error was *deterministic* (syntax error, unknown table, malformed identifier) would loop forever — clogging the buffer consumer, burning CPU, and spamming logs with the same message. Phase 1 of issue #91: every delete-Exec error is now treated as permanent. The original NATS envelope is published to `dlq.<table>` (reusing the existing `bentoDLQDropped` counter when the DLQ publish itself fails) and the message is `DoubleAck`'d so it leaves the main queue. Issue #91 stays open after this lands as the Phase 2 tracker for transient-vs-permanent error classification (timeouts and network errors should still `Nak()` for retry); Phase 1 alone is the stopgap, Phase 2 makes the trade-off acceptable in production.
 

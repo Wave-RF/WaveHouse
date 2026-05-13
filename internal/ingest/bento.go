@@ -186,6 +186,12 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"error", err,
 				)
 
+				// DLQ shape note: insert failures route through dlqOutput.WriteBatch
+				// and publish `raw.Payload` (the inner data field only). This path
+				// publishes the full NATS envelope (`{"action":"delete","table_name":...,"id":...}`)
+				// so a DLQ consumer can re-issue the delete with full context. A consumer
+				// of `dlq.<table>` must branch on the `"action"` field to distinguish the
+				// two shapes; Phase 2 (issue #91) may normalize this.
 				dlqSubject := "dlq." + raw.TableName
 				if _, pubErr := j.js.Publish(spanCtx, dlqSubject, m.Data()); pubErr != nil {
 					slog.ErrorContext(spanCtx, "DLQ publish failed for permanent delete error — message dropped",
