@@ -19,7 +19,7 @@ type cacheValue struct {
 // LocalCache is an L1 in-process cache backed by Ristretto.
 type LocalCache struct {
 	cache   *ristretto.Cache[string, *cacheValue]
-	ttls    sync.Map 
+	ttls    sync.Map
 	tagsMu  sync.RWMutex
 	tagsMap map[string]map[string]struct{}
 	keyTags map[string][]string
