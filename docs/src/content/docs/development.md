@@ -166,10 +166,8 @@ The stack is its own compose project under `deployments/signoz/compose.yaml` —
 **First run**: SigNoz prompts you to create a local admin account before any API request will authenticate — that's normal, not a misconfigured deployment. Once you've signed up, export credentials so subsequent runs auto-load the WaveHouse dashboards:
 
 ```bash
-export SIGNOZ_EMAIL=you@example.com
-export SIGNOZ_PASSWORD='...'
-# or grab AUTH_TOKEN from localStorage in the SigNoz UI:
-# export SIGNOZ_TOKEN='...'
+# Grab AUTH_TOKEN from localStorage in the SigNoz UI:
+export SIGNOZ_TOKEN='...'
 make dev-obs
 ```
 
