@@ -1,84 +1,182 @@
+# Self-contained SigNoz stack for running an OTel-native observability backend
+# locally. Modelled on the upstream SigNoz `deploy/docker/docker-compose.yaml`
+# (SigNoz v0.122.0 / signoz-otel-collector v0.144.3), trimmed to a single node
+# and adapted to this repo's layout.
+#
+# Bring it up:
+#   docker compose -f deployments/signoz/docker-compose.yaml up -d
+#
+# UI:        http://localhost:3301   (host 3301 → container 8080; WaveHouse owns 8080)
+# OTLP gRPC: localhost:4317          (point WaveHouse at it: WH_OTEL_ADDR=127.0.0.1:4317,
+#                                     or host.docker.internal:4317 from another container)
+# OTLP HTTP: localhost:4318
+#
+# Long-running services: clickhouse, zookeeper-1, signoz, otel-collector.
+# One-shot init containers (normal to see them as `Exited (0)`):
+#   - init-clickhouse: fetches the histogramQuantile UDF binary ClickHouse loads
+#   - signoz-telemetrystore-migrator: creates the signoz_* ClickHouse schema, then exits
+
+x-common: &common
+  networks:
+    - signoz-net
+  restart: unless-stopped
+  logging:
+    options:
+      max-size: 50m
+      max-file: "3"
+
+x-clickhouse-defaults: &clickhouse-defaults
+  <<: *common
+  image: clickhouse/clickhouse-server:25.5.6
+  tty: true
+  depends_on:
+    init-clickhouse:
+      condition: service_completed_successfully
+    zookeeper-1:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "-q", "0.0.0.0:8123/ping"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+  ulimits:
+    nproc: 65535
+    nofile:
+      soft: 262144
+      hard: 262144
+  environment:
+    - CLICKHOUSE_SKIP_USER_SETUP=1
+
+x-db-depend: &db-depend
+  <<: *common
+  depends_on:
+    clickhouse:
+      condition: service_healthy
+
 services:
-  volume-fixer:
-    image: alpine
-    container_name: signoz-volume-fixer
-    user: root
+  init-clickhouse:
+    <<: *common
+    image: clickhouse/clickhouse-server:25.5.6
+    container_name: signoz-init-clickhouse
+    restart: on-failure
+    command:
+      - bash
+      - -c
+      - |
+        version="v0.0.1"
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        echo "Fetching histogram-quantile binary for $${node_os}/$${node_arch}"
+        cd /tmp
+        wget -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        tar -xvzf histogram-quantile.tar.gz
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
     volumes:
-      - clickhouse_data:/mnt/ch_data
-      - signoz_db:/mnt/sz_db
-    command: >
-      sh -c "chown -R 101:101 /mnt/ch_data && 
-             chown -R 1000:1000 /mnt/sz_db && 
-             echo 'Permissions fixed'"
+      - clickhouse-scripts:/var/lib/clickhouse/user_scripts/
+
+  zookeeper-1:
+    <<: *common
+    image: signoz/zookeeper:3.7.1
+    container_name: signoz-zookeeper-1
+    user: root
+    environment:
+      - ZOO_SERVER_ID=1
+      - ALLOW_ANONYMOUS_LOGIN=yes
+      - ZOO_AUTOPURGE_INTERVAL=1
+      - ZOO_ENABLE_PROMETHEUS_METRICS=yes
+      - ZOO_PROMETHEUS_METRICS_PORT_NUMBER=9141
+    volumes:
+      - zookeeper-1:/bitnami/zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -m 2 http://localhost:8080/commands/ruok | grep error | grep null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.1.2-alpine
+    <<: *clickhouse-defaults
     container_name: signoz-clickhouse
-    depends_on:
-      volume-fixer:
-        condition: service_completed_successfully
-    environment:
-      - CLICKHOUSE_USER=${SIGNOZ_CH_USER:-default}
-      - CLICKHOUSE_PASSWORD=${SIGNOZ_CH_PASSWORD:-password}
+    # Ports are intentionally not published — this ClickHouse is internal to
+    # SigNoz. (WaveHouse has its own ClickHouse in deployments/compose/.)
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.xml
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.xml
+      - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
+      - clickhouse-scripts:/var/lib/clickhouse/user_scripts/
+      - clickhouse:/var/lib/clickhouse/
 
-  migrator:
-    image: signoz/signoz-otel-collector:latest
-    container_name: signoz-migrator
-    depends_on:
-      clickhouse:
-        condition: service_healthy
+  signoz:
+    <<: *db-depend
+    image: signoz/signoz:v0.122.0
+    container_name: signoz
+    ports:
+      - "3301:8080" # UI + API (8080 in the container; published on 3301 — WaveHouse owns host 8080)
+    volumes:
+      - sqlite:/var/lib/signoz/
     environment:
-      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://${SIGNOZ_CH_USER:-default}:${SIGNOZ_CH_PASSWORD:-password}@clickhouse:9000
+      - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
+      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
+      - SIGNOZ_TOKENIZER_JWT_SECRET=secret
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  otel-collector:
+    <<: *db-depend
+    image: signoz/signoz-otel-collector:v0.144.3
+    container_name: signoz-otel-collector
     entrypoint: ["/bin/sh"]
     command:
       - -c
       - |
-        /signoz-otel-collector migrate bootstrap --clickhouse-cluster="" --clickhouse-replication=false &&
-        /signoz-otel-collector migrate sync up --clickhouse-cluster="" --clickhouse-replication=false &&
-        /signoz-otel-collector migrate async up --clickhouse-cluster="" --clickhouse-replication=false
-
-  signoz:
-    image: signoz/query-service:latest
-    container_name: signoz
-    depends_on:
-      migrator:
-        condition: service_completed_successfully
-    ports:
-      - "3301:8080"
-    environment:
-      - SIGNOZ_PORT=8080
-      - FRONTEND_API_ENDPOINT=http://localhost:3301
-      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://${SIGNOZ_CH_USER:-default}:${SIGNOZ_CH_PASSWORD:-password}@clickhouse:9000
-    volumes:
-      - signoz_db:/var/lib/signoz
-
-  otel-collector:
-    image: signoz/signoz-otel-collector:latest
-    container_name: signoz-otel-collector
-    depends_on:
-      migrator:
-        condition: service_completed_successfully
-    environment:
-      - SIGNOZ_CH_USER=${SIGNOZ_CH_USER:-default}
-      - SIGNOZ_CH_PASSWORD=${SIGNOZ_CH_PASSWORD:-password}
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml --manager-config=/etc/manager-config.yaml --copy-path=/var/tmp/collector-config.yaml
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+      - ./otel-collector-opamp-config.yaml:/etc/manager-config.yaml
+    environment:
+      - OTEL_RESOURCE_ATTRIBUTES=host.name=signoz-host,os.type=linux
+      - LOW_CARDINAL_EXCEPTION_GROUPING=false
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
     ports:
-      - "4317:4317"
-    command: ["--config=/etc/otel-collector-config.yaml"]
+      - "4317:4317" # OTLP gRPC receiver — WaveHouse pushes here
+      - "4318:4318" # OTLP HTTP receiver
 
-volumes:
-  clickhouse_data:
-  signoz_db:
+  signoz-telemetrystore-migrator:
+    <<: *db-depend
+    image: signoz/signoz-otel-collector:v0.144.3
+    container_name: signoz-telemetrystore-migrator
+    restart: on-failure
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
 
 networks:
-  default:
-    name: wavehouse-obs-net
+  signoz-net:
+    name: signoz-net
+
+volumes:
+  clickhouse:
+    name: signoz-clickhouse
+  clickhouse-scripts:
+    name: signoz-clickhouse-user-scripts
+  sqlite:
+    name: signoz-sqlite
+  zookeeper-1:
+    name: signoz-zookeeper-1

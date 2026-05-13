@@ -373,15 +373,13 @@ By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API se
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
 
-`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally (ClickHouse + query service + OTel collector at `:4317`). Bring it up:
+`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally. It is modelled on the upstream SigNoz `deploy/docker/docker-compose.yaml` (SigNoz `v0.122.0` / `signoz-otel-collector v0.144.3`), trimmed to a single node: ClickHouse + ZooKeeper + the SigNoz query/UI service + the OTel collector (OTLP gRPC on `:4317`, HTTP on `:4318`), plus two one-shot init containers (`signoz-init-clickhouse` fetches the `histogramQuantile` UDF binary; `signoz-telemetrystore-migrator` creates the `signoz_*` ClickHouse schema). Both init containers exit `0` after running — that's expected. Bring it up:
 
 ```bash
 docker compose -f deployments/signoz/docker-compose.yaml up -d
 ```
 
-ClickHouse credentials inside the SigNoz stack default to `default` / `password`. To override, copy `deployments/signoz/.env.example` to `deployments/signoz/.env` and set `SIGNOZ_CH_USER` / `SIGNOZ_CH_PASSWORD`. The `.env` file is gitignored.
-
-The SigNoz UI is exposed on `http://localhost:3301`. Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` (the default).
+The SigNoz UI is on `http://localhost:3301` (host `3301` → container `8080`; `8080` is left for WaveHouse). Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` for a host-side WaveHouse (the default), or `WH_OTEL_ADDR=host.docker.internal:4317` from a WaveHouse container — the collector publishes `4317` on the host. See `deployments/compose/standalone.signoz.yaml` for a compose override that wires the containerized `standalone.yaml` WaveHouse into this stack.
 
 ## Resetting Data in Development
 
