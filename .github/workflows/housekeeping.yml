@@ -61,8 +61,12 @@ jobs:
         id: check
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           # Matches the conventional 72-char git subject cap; PR titles
-          # become the squash-merge subject on main.
+          # become the squash-merge subject on main. Dependabot's
+          # grouped-update titles routinely exceed 72 chars and the
+          # format isn't configurable, so Dependabot PRs are exempt
+          # from the length check (the format regex still applies).
           MAX_LEN: "72"
         run: |
           # Type list — keep in sync with CONTRIBUTING.md.
@@ -71,12 +75,21 @@ jobs:
           # subject capitalization.
           pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
-          if [[ ${#PR_TITLE} -gt $MAX_LEN ]]; then
+          is_dependabot=false
+          if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
+            is_dependabot=true
+          fi
+
+          if [[ "$is_dependabot" != "true" && ${#PR_TITLE} -gt $MAX_LEN ]]; then
             echo "passed=false" >> "$GITHUB_OUTPUT"
             echo "::error::PR title is ${#PR_TITLE} chars (max $MAX_LEN): $PR_TITLE"
           elif [[ "$PR_TITLE" =~ $pattern ]]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
-            echo "PR title OK: $PR_TITLE"
+            if [[ "$is_dependabot" == "true" && ${#PR_TITLE} -gt $MAX_LEN ]]; then
+              echo "::notice::Dependabot PR title is ${#PR_TITLE} chars (exempt from $MAX_LEN cap): $PR_TITLE"
+            else
+              echo "PR title OK: $PR_TITLE"
+            fi
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
             echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"

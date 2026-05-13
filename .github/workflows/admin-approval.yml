@@ -16,9 +16,12 @@ name: Admin approval
 # The workflow itself always exits 0; the commit status is the
 # source of truth.
 #
-# Dependabot PRs bypass entirely (status posted as success);
-# dependabot-automerge.yml handles patch/minor merges and major
-# bumps still need a human admin review.
+# Dependabot patch/minor bumps bypass (status posted as success);
+# dependabot-automerge.yml handles those. Major bumps fall through
+# to admin review like any human PR — closed a hole where a bot's
+# APPROVED review (e.g. CodeRabbit) could merge a major bump (see
+# #130, PR #127). The ruleset's `required_approving_review_count`
+# is 0; this status check is the single admin-review gate.
 
 on:
   pull_request:
@@ -61,6 +64,19 @@ jobs:
     runs-on: [wave-rf-runners]
     timeout-minutes: 5
     steps:
+      # Fetch Dependabot's update-type so the bypass below can scope
+      # itself to patch/minor only. Gated on Dependabot author —
+      # fetch-metadata errors on non-Dependabot PRs. continue-on-error
+      # is fail-safe: if metadata can't be read, UPDATE_TYPE will be
+      # empty and the bypass below won't fire, so the PR falls through
+      # to admin review. A blocked PR is recoverable; an
+      # erroneously-merged major bump is not.
+      - name: Fetch Dependabot metadata
+        id: meta
+        if: github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'app/dependabot'
+        continue-on-error: true
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
       - name: Evaluate admin approval and post commit status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,6 +88,10 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
           REVIEW_AUTHOR: ${{ github.event.review.user.login }}
+          # Empty when fetch-metadata was skipped (non-Dependabot
+          # PR) or errored; bypass below treats empty as "not
+          # patch/minor" and falls through to admin review.
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type || '' }}
           # target_url for the commit status — "Details" links here.
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -90,13 +110,23 @@ jobs:
             echo "Posted commit status: state=$state context='Admin approval' description='$description'"
           }
 
-          # Dependabot bypass — dependabot-automerge.yml handles these.
-          # Match both login shapes: "dependabot[bot]" (user context)
-          # and "app/dependabot" (some app contexts).
+          # Dependabot bypass — patch/minor only.
+          # dependabot-automerge.yml handles those hands-off.
+          # Major bumps, unknown update-types, and empty UPDATE_TYPE
+          # (metadata-fetch failure) fall through to admin review —
+          # closed a hole where CodeRabbit's APPROVED review could
+          # merge a major bump (see #130).
+          #
+          # Match both login shapes: "dependabot[bot]" (user
+          # context) and "app/dependabot" (some app contexts).
           if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
-            echo "::notice::Dependabot PR — bypassing admin approval (handled by dependabot-automerge workflow)."
-            post_status success "Dependabot PR — bypassed"
-            exit 0
+            if [[ "$UPDATE_TYPE" == "version-update:semver-patch" || "$UPDATE_TYPE" == "version-update:semver-minor" ]]; then
+              short_type="${UPDATE_TYPE#version-update:semver-}"
+              echo "::notice::Dependabot $short_type bump — bypassing admin approval (handled by dependabot-automerge workflow)."
+              post_status success "Dependabot $short_type — bypassed"
+              exit 0
+            fi
+            echo "::notice::Dependabot PR with update-type='$UPDATE_TYPE' — not auto-bypassed; falling through to admin review."
           fi
 
           IFS=',' read -ra admins <<< "$ADMINS"
