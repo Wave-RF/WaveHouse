@@ -32,7 +32,6 @@ export class SharedWSManager {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _closed = false;
   private _connected = false;
-  private _pendingCommands: string[] = [];
 
   constructor(baseURL: string, auth?: () => Promise<string> | string) {
     this._baseURL = baseURL;
@@ -69,22 +68,41 @@ export class SharedWSManager {
       onStatus?.(this._connected ? 'live' : 'connecting');
     }
 
-    // Send subscribe command for new tables.
-    if (isNewTable) {
-      this._send(JSON.stringify({ action: 'subscribe', table }));
+    // Send subscribe frame only if the socket is open. If we're still
+    // connecting (or reconnecting), onopen will reconcile by re-subscribing
+    // every table in this._subs — queuing the frame here would just produce
+    // a duplicate subscribe once the socket opens.
+    if (isNewTable && this._wsOpen()) {
+      this._ws!.send(JSON.stringify({ action: 'subscribe', table }));
     }
 
     return () => {
-      tableSubs!.delete(sub);
-      if (tableSubs!.size === 0) {
+      // Idempotent — look up the *current* set each call rather than the one
+      // captured at subscribe-time. If this closure runs twice (or after a
+      // subsequent subscribe replaced this table's set), the captured
+      // reference would otherwise let the second call delete the wrong entry
+      // from this._subs.
+      const current = this._subs.get(table);
+      if (!current || !current.has(sub)) return;
+      current.delete(sub);
+      if (current.size === 0) {
         this._subs.delete(table);
-        this._send(JSON.stringify({ action: 'unsubscribe', table }));
+        if (this._wsOpen()) {
+          this._ws!.send(JSON.stringify({ action: 'unsubscribe', table }));
+        }
+        // If not open, onopen only re-subscribes what's still in this._subs —
+        // the just-deleted table is excluded, so no explicit unsubscribe
+        // needs to reach the server.
       }
       // Close connection if no subscriptions remain.
       if (this._subs.size === 0) {
         this.close();
       }
     };
+  }
+
+  private _wsOpen(): boolean {
+    return this._ws !== null && this._ws.readyState === WebSocket.OPEN;
   }
 
   /** Close the WebSocket and release all resources. */
@@ -131,13 +149,10 @@ export class SharedWSManager {
       this._connected = true;
       this._notifyAllStatus('live');
 
-      // Flush pending commands.
-      for (const cmd of this._pendingCommands) {
-        this._ws?.send(cmd);
-      }
-      this._pendingCommands = [];
-
-      // Re-subscribe all active tables.
+      // Reconcile server state from this._subs — sends one subscribe per
+      // currently-active table. Sub/unsub frames while the socket was opening
+      // (or reconnecting) intentionally aren't queued; this loop is the
+      // single source of truth for what the server should be streaming.
       for (const table of this._subs.keys()) {
         this._ws?.send(JSON.stringify({ action: 'subscribe', table }));
       }
@@ -193,14 +208,6 @@ export class SharedWSManager {
         this._scheduleReconnect();
       }
     };
-  }
-
-  private _send(data: string): void {
-    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-      this._ws.send(data);
-    } else {
-      this._pendingCommands.push(data);
-    }
   }
 
   private _scheduleReconnect(): void {
