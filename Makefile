@@ -191,6 +191,17 @@ dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on 
 	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
 	@$(AIR) -c .air.toml
 
+# Docs site dev/preview servers — long-running, blocking. Astro dev defaults
+# to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
+# `make dev` on :8080.
+.PHONY: dev-docs
+dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
+	@cd $(DOCS_DIR) && $(PNPM) dev
+
+.PHONY: preview-docs
+preview-docs: build-docs ## Preview the production docs build locally
+	@cd $(DOCS_DIR) && $(PNPM) preview
+
 # `up -d --wait` blocks until the compose healthcheck transitions to
 # healthy, so callers can chain on success without a polling loop. The
 # ClickHouse healthcheck (in $(DEV_COMPOSE_FILE)) probes /ping on :8123.
@@ -321,20 +332,37 @@ $(COVER_BINARIES): %-cov: go-mod-download
 .PHONY: build-cover
 build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation → bin/<name>-cov
 
+# build-all: umbrella for "compile every artifact this repo produces" without
+# running tests. Recursive `$(MAKE) -j 4` mirrors how `ci` forces parallelism
+# on `ci-parallel` — typing `make build-all` gets parallel builds without
+# requiring the user to remember `-j`.
+.PHONY: build-all
+build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
+	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
+	@$(MAKE) -j 4 build build-sdk build-docs
+	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
+
 # --- TypeScript SDK build / install ------------------------------------------
 # pnpm is the canonical package manager (migrated from npm). Locally available
-# via PATH; CI installs/caches it via actions/cache + setup-node. Both the SDK
-# (clients/ts/) and the E2E test harness (tests/e2e/sdk/) use pnpm.
+# via PATH; CI installs/caches it via actions/cache + setup-node. Three pnpm
+# projects share a single store: the SDK (clients/ts/), the E2E test harness
+# (tests/e2e/sdk/), and the docs site (docs/).
 PNPM        ?= pnpm
 SDK_DIR     := clients/ts
 E2E_SDK_DIR := tests/e2e/sdk
+DOCS_DIR    := docs
 
-# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
-# comment so they don't show in `make help`. The user-facing targets below
-# (build-sdk, test-sdk, test-e2e) depend on them.
+# install-sdk + install-e2e-sdk + install-docs are intermediate prereqs — they
+# have no doc comment so they don't show in `make help`. User-facing targets
+# below (build-sdk, test-sdk, test-e2e, build-docs, dev-docs, preview-docs)
+# depend on them.
 .PHONY: install-sdk
 install-sdk:
 	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
+
+.PHONY: install-docs
+install-docs:
+	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
 
 .PHONY: install-e2e-sdk
 install-e2e-sdk:
@@ -344,6 +372,23 @@ install-e2e-sdk:
 build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
 	@echo "$(CYAN)==> Building SDK...$(RESET)"
 	@cd $(SDK_DIR) && $(PNPM) build
+
+# Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
+# Starlight content collection itself — no separate convert step.
+.PHONY: build-docs
+build-docs: install-docs ## Build docs site for production → docs/dist/
+	@echo "$(CYAN)==> Building docs site...$(RESET)"
+	@cd $(DOCS_DIR) && $(PNPM) build
+
+# Single-source-of-truth logo pipeline. Edit scripts/branding/mark.svg (the
+# path) and run `make branding` to regenerate favicon.{svg,ico},
+# apple-touch-icon.png, og.png, and the Starlight nav light/dark SVGs.
+# Requires librsvg (rsvg-convert) + ImageMagick 7 (magick) — `brew install
+# librsvg imagemagick`. Not part of `build-docs`: derived assets are
+# committed so contributors don't need the raster toolchain to build docs.
+.PHONY: branding
+branding: ## Regenerate all logo/favicon/OG assets from scripts/branding/mark.svg
+	@scripts/branding/generate.sh
 
 ##@ Test
 
@@ -429,7 +474,7 @@ cov: ## Merge all available covdata + gate against total threshold
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify build build-cover build-sdk test test-sdk
+ci-parallel: verify build build-cover build-sdk build-docs test test-sdk
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -507,9 +552,9 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 #   clean-all    everything above + data/ + docker volumes (full reset)
 
 .PHONY: clean
-clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/)
+clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ dist/ clients/ts/dist/
+	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/
 
 .PHONY: clean-test
 clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
@@ -519,7 +564,7 @@ clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 .PHONY: clean-tools
 clean-tools: ## Remove installed tools and pnpm deps (.bin/, node_modules/)
 	@echo "$(YELLOW)==> Cleaning installed tools and pnpm deps...$(RESET)"
-	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/
+	@rm -rf .bin/ clients/ts/node_modules/ tests/e2e/sdk/node_modules/ docs/node_modules/
 
 .PHONY: clean-all
 clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + clean-tools + dev data + docker volumes
@@ -541,7 +586,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk ## Install pinned tools, Go modules, and pnpm deps
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, and pnpm deps
 	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
@@ -568,3 +613,4 @@ $(AIR):
 	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
+

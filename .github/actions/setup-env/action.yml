@@ -24,10 +24,10 @@
 #      lint runs in ~10s vs ~90s cold. The binary itself is cheap but
 #      caching it skips the install-from-curl path on every run.
 #
-#   3. pnpm store (~/.local/share/pnpm/store) keyed on both lockfiles. We
-#      have two pnpm projects (clients/ts/ and tests/e2e/sdk/) and a
-#      single store covers both — pnpm hardlinks from the store into each
-#      project's node_modules.
+#   3. pnpm store (~/.local/share/pnpm/store) keyed on all three lockfiles.
+#      The repo has three pnpm projects (clients/ts/, tests/e2e/sdk/, and
+#      docs/) and a single store covers all of them — pnpm hardlinks from
+#      the store into each project's node_modules.
 #
 # All three caches transparently route to the on-prem
 # falcondev-oss/github-actions-cache-server (no GitHub size limit, sub-VM
@@ -79,12 +79,12 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
-    # pnpm store, shared across clients/ts and tests/e2e/sdk lockfiles.
+    # pnpm store, shared across clients/ts, tests/e2e/sdk, and docs lockfiles.
     - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
       id: pnpm-cache
       with:
         path: ~/.local/share/pnpm/store
-        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml') }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
         restore-keys: |
           pnpm-${{ runner.os }}-
 
