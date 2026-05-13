@@ -10,10 +10,10 @@ importers:
     dependencies:
       '@astrojs/check':
         specifier: ^0.9.9
-        version: 0.9.9(prettier@3.8.3)(typescript@6.0.3)
+        version: 0.9.9(prettier@3.8.3)(typescript@5.9.3)
       '@astrojs/starlight':
         specifier: ^0.39.2
-        version: 0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3)
+        version: 0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3)
       astro:
         specifier: ^6.3.1
         version: 6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0)
@@ -37,13 +37,13 @@ importers:
         version: 0.34.5
       starlight-image-zoom:
         specifier: ^0.14.1
-        version: 0.14.1(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3))
+        version: 0.14.1(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3))
       starlight-llm-tools:
         specifier: github:Wave-RF/starlight-llm-tools
-        version: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3))(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))
+        version: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3))(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))
       typescript:
-        specifier: ^6.0.3
-        version: 6.0.3
+        specifier: ^5.0.0
+        version: 5.9.3
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20240208.0
@@ -2519,8 +2519,8 @@ packages:
   typescript-auto-import-cache@0.3.6:
     resolution: {integrity: sha512-RpuHXrknHdVdK7wv/8ug3Fr0WNsNi5l5aB8MYYuXhq2UH5lnEB1htJ1smhtD5VeCsGr2p8mUDtd83LCQDFVgjQ==}
 
-  typescript@6.0.3:
-    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -2891,12 +2891,12 @@ snapshots:
       package-manager-detector: 1.6.0
       tinyexec: 1.1.2
 
-  '@astrojs/check@0.9.9(prettier@3.8.3)(typescript@6.0.3)':
+  '@astrojs/check@0.9.9(prettier@3.8.3)(typescript@5.9.3)':
     dependencies:
-      '@astrojs/language-server': 2.16.8(prettier@3.8.3)(typescript@6.0.3)
+      '@astrojs/language-server': 2.16.8(prettier@3.8.3)(typescript@5.9.3)
       chokidar: 4.0.3
       kleur: 4.1.5
-      typescript: 6.0.3
+      typescript: 5.9.3
       yargs: 17.7.2
     transitivePeerDependencies:
       - prettier
@@ -2910,12 +2910,12 @@ snapshots:
     dependencies:
       picomatch: 4.0.4
 
-  '@astrojs/language-server@2.16.8(prettier@3.8.3)(typescript@6.0.3)':
+  '@astrojs/language-server@2.16.8(prettier@3.8.3)(typescript@5.9.3)':
     dependencies:
       '@astrojs/compiler': 2.13.1
       '@astrojs/yaml2ts': 0.2.3
       '@jridgewell/sourcemap-codec': 1.5.5
-      '@volar/kit': 2.4.28(typescript@6.0.3)
+      '@volar/kit': 2.4.28(typescript@5.9.3)
       '@volar/language-core': 2.4.28
       '@volar/language-server': 2.4.28
       '@volar/language-service': 2.4.28
@@ -2990,7 +2990,7 @@ snapshots:
       stream-replace-string: 2.0.0
       zod: 4.4.3
 
-  '@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3)':
+  '@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3)':
     dependencies:
       '@astrojs/markdown-remark': 7.1.1
       '@astrojs/mdx': 5.0.4(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))
@@ -3006,7 +3006,7 @@ snapshots:
       hast-util-select: 6.0.4
       hast-util-to-string: 3.0.1
       hastscript: 9.0.1
-      i18next: 26.1.0(typescript@6.0.3)
+      i18next: 26.1.0(typescript@5.9.3)
       js-yaml: 4.1.1
       klona: 2.0.6
       magic-string: 0.30.21
@@ -3798,12 +3798,12 @@ snapshots:
       d3-selection: 3.0.0
       d3-transition: 3.0.1(d3-selection@3.0.0)
 
-  '@volar/kit@2.4.28(typescript@6.0.3)':
+  '@volar/kit@2.4.28(typescript@5.9.3)':
     dependencies:
       '@volar/language-service': 2.4.28
       '@volar/typescript': 2.4.28
       typesafe-path: 0.2.2
-      typescript: 6.0.3
+      typescript: 5.9.3
       vscode-languageserver-textdocument: 1.0.12
       vscode-uri: 3.1.0
 
@@ -4739,9 +4739,9 @@ snapshots:
 
   http-cache-semantics@4.2.0: {}
 
-  i18next@26.1.0(typescript@6.0.3):
+  i18next@26.1.0(typescript@5.9.3):
     optionalDependencies:
-      typescript: 6.0.3
+      typescript: 5.9.3
 
   iconv-lite@0.6.3:
     dependencies:
@@ -5821,9 +5821,9 @@ snapshots:
 
   space-separated-tokens@2.0.2: {}
 
-  starlight-image-zoom@0.14.1(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3)):
+  starlight-image-zoom@0.14.1(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3)):
     dependencies:
-      '@astrojs/starlight': 0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3)
+      '@astrojs/starlight': 0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3)
       mdast-util-mdx-jsx: 3.2.0
       rehype-raw: 7.0.0
       unist-util-visit: 5.1.0
@@ -5831,9 +5831,9 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3))(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0)):
+  starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e(@astrojs/starlight@0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3))(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0)):
     dependencies:
-      '@astrojs/starlight': 0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@6.0.3)
+      '@astrojs/starlight': 0.39.2(astro@6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0))(typescript@5.9.3)
       astro: 6.3.1(@types/node@24.12.4)(rollup@4.60.3)(yaml@2.9.0)
 
   stream-replace-string@2.0.0: {}
@@ -5901,7 +5901,7 @@ snapshots:
     dependencies:
       semver: 7.8.0
 
-  typescript@6.0.3: {}
+  typescript@5.9.3: {}
 
   ufo@1.6.4: {}
 

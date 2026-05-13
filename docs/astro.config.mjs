@@ -75,6 +75,7 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
       sidebar,
       plugins: [
         starlightImageZoom(),
+        // @ts-expect-error - Type mismatch between starlight-llm-tools and @astrojs/starlight plugin types in TS 5.x
         starlightLlmTools(),
       ],
     }),
