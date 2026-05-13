@@ -12,7 +12,7 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Ten internal packages under `internal/`:
+Twelve internal packages under `internal/`:
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/WS/schema/DLQ/policy/pipes handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
@@ -21,6 +21,7 @@ Ten internal packages under `internal/`:
 - **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
 - **`ingest/`** — Bento-based ingest pipeline (`bento.go`: JetStream input → per-table batch INSERT with DLQ output, plus inline delete handling — failed deletes route to `dlq.<table>` and `DoubleAck` rather than `Nak`, to break the infinite-redelivery loop that a deterministic delete error would otherwise produce) + `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
+- **`observability/`** — OpenTelemetry pipeline: `InitProvider` wires trace/metric/log providers via OTLP gRPC (each signal independently gated). A top-level `Prometheus` config block drives an optional `/metrics` scrape endpoint that runs independently of OTLP push — standalone (Alloy/Mimir scrape, no collector), alongside OTLP, or off. `NewLogger` produces a slog handler that fans out to stdout AND OTLP (stdout always 100%, OTLP sample-rate-aware). `TraceHandler` injects trace_id/span_id from active spans. `tracer.go` provides W3C trace context propagation over NATS headers.
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
 - **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
 - **`query/`** — Structured query AST types + SQL builder with schema validation, permission injection, timestamp bucketing
@@ -41,6 +42,8 @@ Ten internal packages under `internal/`:
 12. **Structured queries**: Type-safe query AST endpoint (`POST /v1/tables/{table}/query`) validated against schema, with permission enforcement, timestamp bucketing for cache optimization, and `DefaultMaxRows` (10,000) limit cap.
 13. **Named query pipes**: Pre-defined SQL templates (inspired by Tinybird) with parameter binding, role restrictions, and caching. Stored in NATS KV with `.sql` file directory bootstrap.
 14. **TypeScript SDK**: `@wavehouse/sdk` — zero-dependency client with typed query builder, real-time SSE, live queries with smart aggregation classification (incrementable/decomposable/poll), and codegen CLI.
+15. **Observability invariants**: Stdout is *always* 100% — the slog logger fans out to stdout AND OTLP, and stdout sampling would silently hide records that scraping pipelines (Promtail/Alloy/Vector → Loki) are paying to store. Sampling knobs apply only to OTLP push. WARN+ERROR records always export at 100% regardless of `logs.sample_rate` — silently dropping errors during incidents would be a worse failure mode than the cost of forwarding them all (this is a *non-configurable* floor; do not expose it). gRPC OTel exporters dial lazily, so an unreachable collector never blocks startup; transient failures surface via the OTel SDK's error handler. The OTel Prometheus exporter (when enabled) uses a *private* `prometheus.Registry` to avoid leaking process/Go collectors that `prometheus.DefaultRegisterer` auto-registers into our `/metrics` output. When changing the logger, the sampler, or the provider wiring, preserve these invariants.
+16. **Bearer-token-only CORS posture**: WaveHouse is a Bearer-token API — `Authorization: Bearer <jwt>` on every authenticated request, no cookies, no session middleware. The CORS middleware (`internal/api/router.go` `corsMiddleware`) deliberately **never** emits `Access-Control-Allow-Credentials`, because (a) we don't need it (Bearer tokens are explicit request headers, not browser-managed credentials) and (b) the historical pairing of `Allow-Credentials: true` with `Allow-Origin: *` is a CORS spec violation that browsers reject. The `cors_allowed_origins` allowlist controls *which origins can read responses*, not cookie scope. CSRF protection is structural: cross-site requests can't smuggle a Bearer token because the browser won't auto-attach `Authorization` headers cross-origin. Do not reintroduce cookie-based auth or `Access-Control-Allow-Credentials` without a separate design discussion — the current posture is the answer to GitHub issues #29 and #30.
 
 ## Code Conventions
 
@@ -146,115 +149,80 @@ Tooling notes:
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
 - **E2E tests via SDK**: The TypeScript SDK is the primary E2E test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) and simultaneously validate backend behavior and SDK correctness. Use `make test-e2e` to run. Add new E2E scenarios as `tests/e2e/sdk/*.test.ts` files using helpers from `tests/e2e/sdk/helpers.ts`.
 
-## Local-First Validation (MANDATORY)
+## Local-First Validation
 
-**Validate locally before pushing. Do not use CI as your first feedback loop.** The repo runs on a shared 4-runner self-hosted VM with finite throughput and bills AI-reviewer (Claude, Gemini, Copilot) credits on every push. A speculative "let's see what CI says" commit costs real minutes and real dollars and is visible to the entire team as churn. Every push should represent a change you have locally verified to pass the same gates CI will run.
+**Validate locally before pushing. Don't use CI as your first feedback loop.** Every push consumes shared CI capacity and AI-reviewer credits, and produces visible churn for the rest of the team.
 
 ### Before every push
-
-Run the CI-equivalent locally:
 
 ```bash
 make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then integration + E2E + cov
 ```
 
-`make ci` runs every gate that CI runs (verify = tidy + fmt + lint + vulncheck; build + build-cover + build-sdk; test-unit + test-sdk; test-integration + test-e2e; final merged coverage gate). If it passes, your commit has crossed the same gates CI will run. If it fails, fix it before pushing — don't rely on CI to surface issues that took seconds to catch locally.
-
-For workflow-only changes where `make ci` isn't relevant, manually read through your YAML diff line-by-line before pushing. If you already have `actionlint` installed locally, also run `actionlint .github/workflows/*.yml`; CI's own billing makes "push and see" for workflow-file iteration especially wasteful.
+If `make ci` passes locally, your commit has crossed the same gates CI will run. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
 
 ### If local passes but CI fails
 
-**Treat this as an environment mismatch, not a test bug, until proven otherwise.** Tests that pass on a dev machine in milliseconds but time out on the self-hosted VM point to runner-side problems (I/O pressure, zombie processes, disk contention, shared-VM fsync storms) — not to flaky test code. Investigate the runner before changing tests or production code. Masking environment issues with longer timeouts or retries tends to compound: today's 5s bump becomes tomorrow's 30s bump becomes next week's unbounded wait, and the underlying runner problem keeps slowly degrading.
+Treat as environment mismatch first, test bug second. Reproduce the failure locally (`go test -race -run TestFoo ./...`); if it passes, try concurrent copies to simulate runner contention; only then look at the runner itself. Masking environment issues with longer timeouts compounds — today's 5s bump becomes tomorrow's 30s bump.
 
-Order of operations before patching tests for "CI flakiness":
+When delegating to a subagent: tell them explicitly *"run locally first."* Agents default to "commit and let CI run" because it looks like progress.
 
-1. **Reproduce the reported failure locally first.** `go test -race -run TestFoo ./...` on your machine. If it fails locally, you have a real test bug; fix it with deterministic primitives (use `c.Wait()` not `time.Sleep`, use `require.Eventually` not `time.Sleep` then assert, use channel sync not goroutine scheduling assumptions).
-2. **If it passes locally, try to reproduce under load.** Run 4 concurrent copies of `make test-unit` to simulate the VM's shared-runner contention. If that still passes, the problem is the VM — not the test.
-3. **Only then touch the runner.** SSH in, check `iostat -x 2`, `pgrep -af nats-server`, `df -h`, `du -sh /opt/github/action-runner-*/_work`. Environment fixes (cleanup crons, tmpfs for test temp dirs, slower runner count, faster disk) stay scoped to the runner and don't pollute the codebase.
+## Review Response
 
-### When delegating to another agent
+Every review comment gets a substantive reply, and every thread gets resolved before merge. The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads block merge. Applies to human reviewers and AI reviewers alike (Copilot, Gemini Code Assist, claude-review).
 
-If you hand work to a subagent or another Claude session, tell them explicitly: *"Run locally first. Do not push to CI until `make ci` passes on your checkout."* Agents default to "commit and let CI run" because it looks like progress; in this repo that default is expensive. Override it at delegation time.
+### What to do
 
-## Review Response (MANDATORY)
+1. **Decide**: accept, push back, or defer (right but out-of-scope).
+2. **Reply substantively** with the fix's commit SHA or your reasoning. No bare "fixed" / "LGTM" / "good catch".
+3. **@mention the bot you're replying to** (except Copilot), on its own line below your signature trailer:
+   - Claude: `@claude` or `/review` re-invokes the workflow
+   - Gemini: `@gemini-code-assist` or `/gemini <question>`
+   - Copilot: no mention works — note the re-request-review button
 
-**Every review comment on a PR gets a substantive reply, and every conversation gets resolved before merge. This applies equally to human reviewers and AI reviewers (Copilot, Gemini Code Assist, claude-review, future bots). The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads literally block merge.**
-
-### What to do on every review comment
-
-1. **Read it, decide**: accept (it's right), push back (it's wrong or out-of-scope), or defer (it's right but deserves its own PR).
-2. **Reply substantively** — not "fixed" alone. Say *what* was changed and in which commit SHA, or *why* you're pushing back. For cross-reviewer disagreements (one bot contradicts another, or a bot contradicts a human), argue with code references or spec citations — don't just assert.
-3. **Always @mention the bot you're replying to** (except Copilot). Without the mention the bot never sees your reply and the dialog silently terminates. Put the mention *below* the signature trailer, on its own line:
-   - **Claude**: end with `@claude` (or `/review`) to re-invoke `claude-review.yml` for a fresh review on the current head SHA (gated to OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR)
-   - **Gemini**: end with `@gemini-code-assist` to re-invoke Gemini, or open with `/gemini review` / `/gemini <question>`
-   - **Copilot**: no mention works — add a parenthetical noting the re-request-review button instead
-   
-   Mention on **every** bot reply, not just pushback cases. If you accept and fix, the bot may still want to verify; if you push back, the bot may have a counter-argument. Silent termination defeats the dialog design.
-4. **Fix in the PR when the suggestion is clearly right and in scope.** If it's right but out-of-scope, reply with a tracking link (issue or planned follow-up PR) before resolving.
-5. **Resolve the thread** once the reply fully addresses the concern AND no counter-reply is pending. Don't resolve threads a human reviewer is still engaging with; wait. Bot threads can be resolved after a substantive reply since bots only re-engage when mentioned — if the reply doesn't mention the bot, it's accepted as terminal.
-6. **Re-request review** from humans after substantive code changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via an explicit re-request button (Copilot).
+   Without the mention, the bot never sees the reply and the dialog silently terminates.
+4. **Fix in this PR** if the suggestion is right and in scope. Out-of-scope but valid: link a tracking issue before resolving.
+5. **Resolve the thread** once the reply addresses the concern and no counter-reply is pending. Bot threads are safe to resolve after a substantive reply (bots only re-engage on mention); human threads — wait for them.
+6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via a re-request button (Copilot).
 
 ### What not to do
 
-- No empty acknowledgements (`LGTM`, `fixed`, `good catch`). Always include detail so the reply makes sense standalone.
-- Don't argue in circles. If a reviewer comes back with the same point after your reply, escalate to a human maintainer rather than looping.
-- Don't resolve a thread that has an open child comment from the reviewer you haven't addressed.
+- Don't argue in circles. If the reviewer repeats the same point, escalate to a maintainer rather than looping.
+- Don't resolve a thread that has an open child comment.
 
 ### Review tooling reference
 
 | Reviewer | How it runs | Re-runs on new commits | Blocks merge |
 | -------- | ----------- | ---------------------- | ------------ |
-| Claude (`.github/workflows/claude-review.yml`) | Our workflow, `pull_request: [opened, synchronize, reopened, ready_for_review]` trigger — fires on every PR push directly (not chained off CI). Manual re-trigger via `@claude` or `/review` in a PR comment, or `gh workflow run "Claude PR review" -f pr_number=<N>` | Yes, auto — **posts inline review comments** at specific lines (resolution required by the ruleset) plus a sticky verdict-summary top-level comment that edits in place across pushes | Yes for inline comments — the ruleset's `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
-| Gemini Code Assist | Marketplace App at repo level | Yes on synchronize, **but silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — so Gemini reviews rarely see infra PRs | No (advisory) |
-| Copilot | GitHub-native when reviewer has Copilot Pro enabled | Yes if enabled in Copilot settings | No (advisory) |
-| Human admins (Eric / Taite) | Review requested from the non-author admin by `.github/workflows/housekeeping.yml` on `pull_request_target: opened` and `ready_for_review` (not on every synchronize — `dismiss_stale_reviews_on_push` would otherwise re-spam the reviewer after each push). Reviewer selection rule: PR author == Eric → Taite; author == Taite → Eric; any other author → admin chosen by `PR_NUM % len(ADMINS)` for deterministic load spreading. The composite action also sets the GitHub `assignees` field to the same user (the assignee + review-request pair encode "this is your PR" + "GitHub should notify you"). Board placement on project #7 is handled by GitHub's native Projects v2 workflows (`Auto-add to project`, `Item added`, `Pull request merged`) configured in the project UI. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request after a CHANGES_REQUESTED. | Yes — `.github/workflows/admin-approval.yml` is a required status check that fails unless Eric or Taite has an `APPROVED` review (Dependabot PRs bypass). |
+| Claude (`.github/workflows/claude-review.yml`) | Our workflow, fires on every PR push (open/sync/reopen/ready). Manual re-trigger via `@claude` / `/review` in a PR comment, or `gh workflow run "Claude PR review" -f pr_number=<N>` | Yes — posts inline review comments plus a sticky verdict-summary comment that edits in place | Yes for inline comments — `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
+| Gemini Code Assist | Marketplace App at repo level | Yes on synchronize. **Silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — Gemini rarely sees infra PRs | No (advisory) |
+| Copilot | GitHub-native, requires a reviewer with Copilot Pro | Yes if enabled | No (advisory) |
+| Human admins | Review requested from a non-author admin by `housekeeping.yml` on PR open / ready-for-review (not on every push). Selection picks the other admin if the author is one, otherwise round-robins. The composite also sets `assignees`. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request. | Yes — `admin-approval.yml` is a required status check that fails unless an admin has approved. Dependabot patch/minor bypasses (auto-merge handles those); major bumps fall through to admin review. |
 
 > **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
-## Documentation & Consistency Sync (MANDATORY)
+## Documentation Sync
 
-**This is a hard requirement. Every code change MUST include corresponding updates to all affected files below. Do NOT wait for the user to ask — verify and update these automatically as part of every task. A code change without its documentation counterpart is incomplete.**
-
-### What to check on EVERY change
-
-1. **API docs** (`docs/api.md`) — If you add, modify, or remove an endpoint, request/response field, error code, or query parameter, update the API reference. Ensure JSON field names, HTTP status codes, and curl examples match the actual handler code.
-2. **Configuration docs** (`docs/configuration.md`) — If you add or change a field in `internal/config/config.go`, update the config reference table, the example YAML block, and the mode-specific settings section.
-3. **Architecture docs** (`docs/architecture.md`) — If you add/rename a package, change a data flow, or modify component wiring, update the architecture overview, package descriptions, and data flow diagrams.
-4. **Deployment docs** (`docs/deployment.md`) — If you change Docker Compose files, environment variables, the ClickHouse schema, or startup behavior, update the deployment guide and quick-start blocks.
-5. **Development docs** (`docs/development.md`) — If you change build commands, test procedures, prerequisites, or the project structure, update the development guide.
-6. **README.md** — If any user-facing behavior, quick-start steps, or feature descriptions change, update the README.
-7. **CHANGELOG.md** — Every notable change gets an entry under `[Unreleased]`. Use Added/Changed/Fixed/Removed subsections.
-8. **AGENTS.md** — If you change the architecture, add packages, modify design decisions, or alter conventions described here, update this file so future agents have accurate context.
-9. **Docker Compose files** (`deployments/compose/`) — If you add a new env var or dependency, ensure all relevant compose files set it.
-10. **Default config** (`config.yaml`) — If you add a config field with a default, ensure `config.yaml` includes it.
-
-### Cross-referencing rules
-
-These representations of the same data MUST always agree:
-
-| Source of truth | Must match in |
-| --------------- | ------------- |
-| Go struct tags in `config.go` (field name, env var, default) | `docs/configuration.md` tables, `config.yaml`, compose env blocks |
-| `EventMessage` struct JSON tags in `buffer.go` | `docs/api.md` event format, SSE/WS examples, ClickHouse `INSERT` columns |
-| Route registrations in `router.go` | `docs/api.md` endpoint list |
-| Handler error responses in `ingest.go`, `query.go`, etc. | `docs/api.md` error tables |
-| Compose env vars in `deployments/compose/*.yaml` | `docs/configuration.md`, `docs/deployment.md` |
-
-### How to verify
-
-Before finishing any task, do a quick search across docs for the identifiers you touched (field names, env var names, endpoint paths, struct names). If anything is stale, fix it in the same change.
-
-### Quick reference table
+Every code change should update the corresponding docs in the same PR. A code change without its doc update is incomplete.
 
 | Change | Files to update |
 | ------ | --------------- |
 | Add/modify API endpoint | `docs/api.md`, `README.md` (if user-facing) |
-| Add/modify config option | `docs/configuration.md`, `config.yaml`, compose files, `docs/deployment.md` |
-| Change architecture/packages | `docs/architecture.md`, `AGENTS.md` |
-| Change ingest/event format | `docs/api.md`, `docs/deployment.md` (CH schema) |
-| Change deployment/Docker | `docs/deployment.md`, compose files |
-| Change build/test process | `docs/development.md`, `Makefile` |
-| Any notable change | `CHANGELOG.md` (under `[Unreleased]`) |
+| Add/modify config option | `docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/deployment.md` |
+| Change architecture / add a package | `docs/architecture.md`, `AGENTS.md` |
+| Change ingest / event format | `docs/api.md`, `docs/deployment.md` (CH schema) |
+| Change deployment / Docker | `docs/deployment.md`, compose files |
+| Change build / test process | `docs/development.md`, `Makefile` |
+| Any notable change | `CHANGELOG.md` under `[Unreleased]` |
+
+Source-of-truth pairs that must agree:
+
+- Config struct tags in `internal/config/config.go` ↔ `docs/configuration.md`, `config.yaml`, compose env blocks
+- `EventMessage` JSON tags ↔ `docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
+- Route registrations in `router.go` ↔ `docs/api.md` endpoint list
+- Handler error responses ↔ `docs/api.md` error tables
+
+Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
 
 ## Common Tasks
 
@@ -303,6 +271,7 @@ internal/dedupe/        → Optional deduplication (interface + embedded/distrib
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
+internal/observability/ → OpenTelemetry pipeline (traces/metrics/logs providers, Prometheus exporter, slog fan-out, NATS trace propagation)
 internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstrap)
 internal/policy/        → Access control policies (types, evaluation, NATS KV store)
 internal/query/         → Structured query AST + SQL builder
@@ -328,47 +297,18 @@ docs/                   → Project documentation
 - **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.
 - **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. `pr-title.yml` is an inline check rather than a third-party action).
 
-## Repository Automation (two tiers)
+## Repository Automation
 
-1. **Tier 1 — Issue triage** (`.github/workflows/triage.yml`): GitHub Models (`gpt-4o-mini` via `actions/ai-inference`) classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels. Optionally writes the `Priority` custom field on the Task Board (Project #7) when a `PROJECT_BOARD_TOKEN` secret with project scope is configured.
-2. **Tier 2 — Code review** (two reviewers, both advisory; the `Admin approval` required status check + the ruleset are the actual merge-gate):
-   - **Gemini Code Assist App** configured via `.gemini/styleguide.md` — Marketplace App attached at the repo/org level, no workflow file.
-   - **Claude PR review** (`.github/workflows/claude-review.yml`) — `anthropics/claude-code-action` runs on every PR open / push, gated on the HEAD commit's author or committer having at least read permission on the repo (catches "admin pushed a fixup onto an external author's PR"). Dependabot is filtered at the workflow level. Claude posts findings as **inline review comments** (tagged `[MUST]` / `[SHOULD]` / `[MAY]` per the prompt template) plus a short sticky verdict summary; inline threads count against the ruleset's `required_review_thread_resolution`, so they block merge until resolved — same mechanism Gemini uses. Manual re-trigger via `@claude` or `/review` in a PR comment from a trusted actor, or via `gh workflow run "Claude PR review" -f pr_number=<N>`. The workflow is review-only — Claude can comment but cannot push commits. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (generated via `claude setup-token`).
-
-### Dependabot automation
-
-`.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs for patch and minor version bumps. Major bumps get a comment flagging them for human review and stay open until a maintainer acts. CI still has to pass for auto-merge to actually squash the PR. Dependabot PRs **bypass the `Admin approval` required status check** (see `admin-approval.yml`) — the auto-approval from the workflow + CI passing is the trust model for patch/minor bumps.
+- **Issue triage** (`triage.yml`): GitHub Models classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels.
+- **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate):
+  - **Gemini Code Assist App** configured via `.gemini/styleguide.md`.
+  - **Claude PR review** (`claude-review.yml`) runs on every PR open or push, gated on the HEAD commit's author or committer having ≥read permission. Dependabot is filtered at workflow level. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Manual re-trigger via `@claude` / `/review` from a trusted commenter or via `workflow_dispatch`. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
+- **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Patch/minor bypass `Admin approval` (the workflow + CI passing is the trust model); major bumps fall through to admin review like any human PR — this closed a hole where a bot's APPROVED review (e.g. CodeRabbit) could merge a major bump without admin involvement (see #130).
 
 ## Governance Files
 
-- **No `CODEOWNERS` file**: Removed 2026-04-21 in favor of workflow-driven reviewer assignment and approval enforcement. `CODEOWNERS`'s one-ping-on-open behavior conflicted with the "don't notify reviewers until bots are clean" design goal. Admin approval is now enforced by `.github/workflows/admin-approval.yml` (required status check that fails unless Eric or Taite has an `APPROVED` review, Dependabot PRs bypass). Reviewer assignment is handled by `.github/workflows/housekeeping.yml` — fires on `pull_request_target: opened` / `ready_for_review` and requests review from the non-author admin via the `assign-and-request-review` composite. Task Board placement and Status moves are handled by the project's *native* Projects v2 workflows (`Auto-add to project`, `Item added`, `Pull request merged`) configured in the project UI.
-
-### Task Board state machine
-
-The Task Board (project #7) is a queue of "what needs attention next." Each PR / Issue card has two axes:
-
-- **Assignee** — _set once, per card_. The PR card is assigned to the **reviewer** (the non-author admin, picked by `housekeeping.yml` per the parity rule below). Issue cards are assigned to the **implementer**. Assignees don't rotate across state transitions — they represent "this card is your card." Use card assignment to find what's in your queue; use the card Status to know what state the work is in.
-- **Status** — moved by GitHub's native Projects v2 workflows (configured in the project UI):
-  - `Auto-add to project` adds new PRs/issues to the board automatically.
-  - `Item added to project` sets the initial Status when something lands on the board.
-  - `Pull request merged` flips the PR card to `Done` on merge (and via `Auto-close issue` the linked-Closes issue closes + flips to `Done` as well).
-
-**Reviewer-assignment rule** (the only PR-side automation we keep in a workflow file, in `housekeeping.yml`): when the PR is opened or flipped from draft → ready,
-- if the PR author is Eric → reviewer is Taite;
-- if the PR author is Taite → reviewer is Eric;
-- if the PR author is anyone else → reviewer is `ADMINS[PR_NUM % len(ADMINS)]` (deterministic load-spread).
-
-The composite sets both `assignees` and a GitHub review-request on the same user. Drafts and Dependabot PRs are skipped (Dependabot's major-bump PRs assign both admins via `dependabot-automerge.yml` instead).
-
-**Things we used to automate but don't anymore** (handled manually now, the simplification PR that landed on 2026-05-12 had the explicit trade-off discussion):
-
-- Auto-flip draft → ready on bot-clean: dropped. Drafts are informative signal; the author marks the PR ready when they want review.
-- Auto-move PR card to `In review` on a `CHANGES_REQUESTED` review: dropped. One-click manual move on the board.
-- Auto-mirror Issue card Status when the linked PR moves (PR `Ready` ↔ Issue `In review`): dropped. The PR list shows what needs review; the linked-issue mirror was a clever feature with low practical value for a 4-person team.
-- Re-firing review-request on author "re-request review" when `dismiss_stale_reviews_on_push` has cleared it: dropped. Author uses the GitHub UI's Re-request Review button.
-
-**Dependabot PR handling** via `dependabot-automerge.yml`:
-- Patch/minor bumps: auto-approved + auto-merged hands-off. Native "Auto-add to project" still adds them to the board.
-- Major-version bumps: held for human review, both admins assigned, review requested from both (Dependabot is the author, so the parity rule doesn't apply — either admin can pick it up). The sticky comment explains the hold and edits in place across re-syncs via the marker-comment upsert pattern.
-- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: Thin pointer files. `AGENTS.md` (this file) is the single source of truth. Keep those pointers short; never duplicate content.
-- **`CONTRIBUTING.md`**: Conventional Commits type list must stay in sync with the regex in `.github/workflows/housekeeping.yml` (formerly `pr-title.yml`). The title linter validates squash-merge commit messages.
+- **No `CODEOWNERS`**: replaced by workflow-driven reviewer assignment + approval enforcement.
+  - `admin-approval.yml` — required status check that fails unless an admin has an `APPROVED` review. Dependabot patch/minor bypasses; major bumps go through admin review.
+  - `housekeeping.yml` — requests review from a non-author admin on PR open / ready-for-review via the `assign-and-request-review` composite. Task Board placement is handled by native Projects v2 workflows configured in the project UI.
+- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: thin pointer files to AGENTS.md. Keep those pointers short; never duplicate content.
+- **`CONTRIBUTING.md`**: the Conventional Commits type list must stay in sync with the regex in `housekeeping.yml`. The title linter validates squash-merge commit messages.

@@ -51,6 +51,9 @@ node_modules/
 *.swo
 *~
 
+# Local git worktrees
+.worktrees/
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -63,3 +66,12 @@ Thumbs.db
 
 # Debug
 __debug_bin*
+
+# Docs site build outputs
+docs/.astro/
+docs/.env.production
+docs/.wrangler/
+docs/dist/
+
+# pnpm
+pnpm-debug.log*

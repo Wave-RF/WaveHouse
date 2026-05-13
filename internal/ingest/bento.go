@@ -248,7 +248,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if meta, err := m.Metadata(); err == nil {
 			publishedTime = meta.Timestamp
 		}
-
 		msg.MetaSet("bento_start_time", fmt.Sprintf("%d", publishedTime.UnixMilli()))
 
 		j.inFlight.Add(1)

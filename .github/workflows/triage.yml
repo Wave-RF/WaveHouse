@@ -1,14 +1,15 @@
 name: Triage issues
 
-# Auto-classifies new and edited issues using GitHub Models (gpt-4o-mini)
-# and applies area/* labels + security / breaking-change flags. Optionally
-# writes the Priority field on the Task Board (project #7) when a
-# PROJECT_BOARD_TOKEN secret with `project` scope is configured; otherwise
-# the board-write step soft-fails and only labels are applied.
+# Auto-classifies new and edited issues using GitHub Models and
+# applies area/* labels + security / breaking-change flags.
+# Optionally writes the Priority field on the project board when
+# PROJECT_BOARD_TOKEN (with `project` scope) is configured;
+# otherwise the board-write step soft-fails.
 #
-# Issue bodies are user-controlled and untrusted — the classifier's output
-# only affects labels and a board field, never code execution. A
-# prompt-injection attempt can at worst produce a wrong label.
+# Security: issue bodies are untrusted user input. The classifier's
+# output only affects labels and a board field, never code
+# execution — a prompt-injection attempt can at worst produce a
+# wrong label.
 
 on:
   issues:
@@ -46,12 +47,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-        # Discovers the set of `area/*` labels currently defined on the
-        # repo and formats them for the classifier's system prompt. This
-        # keeps the triager's legal-area list in sync with the actual
-        # labels — adding a new `area/foo` label is enough; no workflow
-        # edit needed. Label descriptions are used as the classifier's
-        # per-area hint, so make them meaningful when creating labels.
+        # Discovers `area/*` labels at runtime so adding a new label
+        # doesn't require a workflow edit. Label descriptions feed
+        # the classifier as per-area hints — keep them meaningful.
         run: |
           gh label list -R "$REPO" --json name,description --jq '
             [.[]
@@ -67,11 +65,11 @@ jobs:
 
       - name: Classify with GitHub Models
         id: classify
-        uses: actions/ai-inference@af6ad2c4ac4edf01884054fc3a6caa6d2567c13a # v2.0.8
+        uses: actions/ai-inference@17ff458cb182449bbb2e43701fcd98f6af8f6570 # v2.1.0
         with:
           model: openai/gpt-4o-mini
-          # 400 leaves headroom for multi-area classifications + flags
-          # without truncating mid-JSON. Cost difference is rounding error.
+          # Leaves headroom for multi-area classifications + flags
+          # without truncating mid-JSON.
           max-tokens: 400
           system-prompt: |
             You are an issue-triage assistant for the WaveHouse project — a
@@ -127,11 +125,9 @@ jobs:
           ' 2>/dev/null || echo "")
 
           if [[ -z "$labels" ]]; then
-            # Distinguish "no labels suggested" (valid empty result, fine)
-            # from "JSON parse failure" (likely max-tokens truncation or
-            # the model going off-script — needs visibility). Echo the
-            # raw response at warning level so the action log surfaces
-            # what we actually got back.
+            # Distinguish "no labels suggested" (valid empty result)
+            # from "JSON parse failure" (max-tokens truncation or
+            # off-script output — surface the raw response).
             if ! echo "$json" | jq -e . >/dev/null 2>&1; then
               echo "::warning::Classifier output is not valid JSON. Raw response below:"
               printf '%s\n' "$RESPONSE" | sed 's/^/  /'
@@ -145,10 +141,9 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --add-label "$labels" -R "$REPO"
 
       - name: Set Priority on Task Board
-        # Soft-fail: the default GITHUB_TOKEN lacks `project` scope, so this
-        # only succeeds when PROJECT_BOARD_TOKEN is configured as a classic
-        # PAT (or fine-grained token) with project write access. Without it,
-        # label triage still works.
+        # Soft-fail: GITHUB_TOKEN lacks `project` scope, so the
+        # board write needs PROJECT_BOARD_TOKEN (a PAT with project
+        # write access). Label triage still works without it.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.PROJECT_BOARD_TOKEN || secrets.GITHUB_TOKEN }}
@@ -164,8 +159,7 @@ jobs:
             exit 0
           fi
 
-          # Project IDs come from .github/board-config.env (loaded into
-          # $GITHUB_ENV at the start of this job).
+          # Project IDs come from .github/board-config.env.
           case "$priority" in
             P0) OPTION_ID="$PRIORITY_P0" ;;
             P1) OPTION_ID="$PRIORITY_P1" ;;
