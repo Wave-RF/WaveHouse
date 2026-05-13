@@ -150,8 +150,9 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if h.Cache != nil {
-			// Use the shared helper to extract tags and assign to the cache entry
-			tags := extractCacheTags(sql)
+			cleanedSQL := cleanSQLForTags(sql)
+			tags := extractCacheTags(cleanedSQL)
+
 			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL, tags)
 		}
 		return data, nil

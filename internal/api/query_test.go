@@ -215,15 +215,21 @@ func TestExtractCacheTags(t *testing.T) {
 			sql:      "SELECT * FROM users -- tail",
 			expected: []string{"users"},
 		},
+		{
+			name:     "quoted identifiers supported",
+			sql:      "SELECT * FROM `my_db`.`my_table` JOIN \"other_table\"",
+			expected: []string{"my_table", "other_table"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := extractCacheTags(tc.sql)
+			cleaned := cleanSQLForTags(tc.sql)
+			actual := extractCacheTags(cleaned)
+
 			if len(tc.expected) == 0 {
 				assert.Empty(t, actual)
 			} else {
-				// Use ElementsMatch so order doesn't fail the test
 				assert.ElementsMatch(t, tc.expected, actual)
 			}
 		})

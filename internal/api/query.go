@@ -31,7 +31,7 @@ var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|A
 var (
 	blockCommentRe  = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	lineCommentRe   = regexp.MustCompile(`--.*`)
-	stringLiteralRe = regexp.MustCompile(`'[^']*'|"[^"]*"`)
+	stringLiteralRe = regexp.MustCompile(`'[^']*'`)
 )
 
 func extractCacheTags(cleanedSQL string) []string {
@@ -48,6 +48,14 @@ func extractCacheTags(cleanedSQL string) []string {
 		}
 	}
 	return tags
+}
+
+// cleanSQLForTags removes comments and string literals so regex matchers
+// don't trigger false positives on keywords embedded inside text.
+func cleanSQLForTags(rawSQL string) string {
+	clean := blockCommentRe.ReplaceAllString(rawSQL, " ")
+	clean = lineCommentRe.ReplaceAllString(clean, " ")
+	return stringLiteralRe.ReplaceAllString(clean, " '' ")
 }
 
 // QueryHandler handles POST /v1/query.
@@ -102,12 +110,9 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Strip comments and strings to prevent false-positive mutation detection
-	cleanSQL := blockCommentRe.ReplaceAllString(req.SQL, " ")
-	cleanSQL = lineCommentRe.ReplaceAllString(cleanSQL, " ")
-	cleanSQL = stringLiteralRe.ReplaceAllString(cleanSQL, "")
+	cleanSQL := cleanSQLForTags(req.SQL)
 
-	isMutation := h.Cache != nil && mutationRe.MatchString(cleanSQL)
+	isMutation := mutationRe.MatchString(cleanSQL)
 
 	var execCtx context.Context
 	if isMutation {
