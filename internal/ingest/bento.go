@@ -529,6 +529,12 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 				if scheme == "" {
 					scheme = "http" // Default fallback
 				}
+				// WARNING: Because this factory is registered via sync.Once, the ClickHouse
+				// connection parameters (scheme, host, port, user, password, db) are captured
+				// by-value from the very first StartIngestWorker call and CANNOT be updated.
+				// Only the apiCache is dynamically refreshed via activeCache.Load().
+				// Note for E2E: If tests use dynamic ClickHouse ports, they must reuse the
+				// same container/port across all test runs in the process.
 				return &clickhouseOutput{
 					httpClient: &http.Client{Timeout: 30 * time.Second},
 					scheme:     scheme,

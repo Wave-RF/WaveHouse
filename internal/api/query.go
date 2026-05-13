@@ -17,6 +17,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/google/uuid"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // tableExtractionRe extracts table names following FROM, JOIN, INTO, UPDATE, or TABLE.
@@ -48,6 +50,7 @@ type QueryHandler struct {
 	Cache       *cache.TieredCache
 	DefaultTTL  time.Duration
 	PolicyStore *policy.Store
+	sf          singleflight.Group
 }
 
 func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
@@ -96,12 +99,19 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// Execute immediately (Bypassing the Cache)
-	result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+	// Coalesce concurrent identical queries to protect ClickHouse from stampedes.
+	// We still bypass the application cache, but we prevent N simultaneous identical
+	// requests from hammering the database.
+	key := queryCacheKey(req.SQL, req.Params)
+	val, err, _ := h.sf.Do(key, func() (any, error) {
+		return h.executeQuery(queryCtx, req.SQL, req.Params)
+	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	result := val.([]map[string]any)
 
 	// If this raw SQL was a mutation, extract the table names and invalidate them.
 	if h.Cache != nil && mutationRe.MatchString(req.SQL) {
