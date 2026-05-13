@@ -12,7 +12,7 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/check": "^0.9.4",
+    "@astrojs/check": "^0.9.9",
     "@astrojs/starlight": "^0.39.2",
     "astro": "^6.3.1",
     "cloudflare-md-router": "github:Wave-RF/cloudflare-md-router",
