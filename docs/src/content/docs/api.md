@@ -311,8 +311,8 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `table` | string | (required) | Table name to subscribe to. Returns 400 if missing. |
-| `since` | string | — | RFC 3339 timestamp. If provided, replays historical events from NATS before switching to live streaming. |
+| `table` | string | (required) | Table name to subscribe to. Must match `^[a-zA-Z_][a-zA-Z0-9_]*$` (rejects NATS wildcards `*` / `>`). Returns 400 if missing or invalid. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp. If provided, replays historical events from NATS before switching to live streaming. |
 | `token` | string | — | JWT token (alternative to `Authorization` header, useful for `EventSource`). Stripped from URL after extraction. |
 
 **Headers:**
@@ -355,8 +355,8 @@ Opens a WebSocket connection for real-time event streaming. Supports in-band mul
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `table` | string | — | Optional initial table to subscribe to. If omitted, the client must send subscribe commands. |
-| `since` | string | — | RFC 3339 timestamp for gap-fill on the initial `?table=` subscription. |
+| `table` | string | — | Optional initial table to subscribe to. If omitted, the client must send subscribe commands. When present, must match `^[a-zA-Z_][a-zA-Z0-9_]*$` — invalid values return 400 before the WebSocket upgrade. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp for gap-fill on the initial `?table=` subscription. |
 | `token` | string | — | JWT token (alternative to `Authorization` header). Stripped from URL after extraction. |
 
 **In-band commands (client → server):**

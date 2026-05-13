@@ -70,15 +70,23 @@ export class WSTransport<T = Record<string, unknown>> implements StreamTransport
 
     this._ws.onmessage = (e) => {
       try {
-        const msg = JSON.parse(e.data as string) as {
-          table_name: string;
-          received_timestamp: string;
-          data: T;
+        // Server WS envelope: {table, data: {table_name, received_timestamp, data}}.
+        // For non-EventMessage (raw-JSON pass-through) payloads, table_name on
+        // the inner object may be absent — fall back to the envelope's table so
+        // the StreamEvent always carries the subscribing table name.
+        const envelope = JSON.parse(e.data as string) as {
+          table: string;
+          data: {
+            table_name?: string;
+            received_timestamp?: string;
+            data: T;
+          };
         };
+        if (!envelope.table || !envelope.data) return;
         const event: StreamEvent<T> = {
-          table: msg.table_name,
-          timestamp: msg.received_timestamp,
-          data: msg.data,
+          table: envelope.data.table_name ?? envelope.table,
+          timestamp: envelope.data.received_timestamp ?? '',
+          data: envelope.data.data,
         };
         this.onEvent?.(event);
       } catch {

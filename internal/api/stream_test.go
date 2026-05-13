@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -186,18 +187,19 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	h := &SSEHandler{Hub: NewHub()}
 
 	cases := []struct {
-		name  string
-		table string
+		name    string
+		table   string
+		errBody string
 	}{
-		{"missing", ""},
-		{"nats greater wildcard", ">"},
-		{"nats star wildcard", "*"},
-		{"dot separator", "ingest.clicks"},
-		{"nested wildcard", "ingest.>"},
-		{"trailing wildcard", "clicks.>"},
-		{"space", "click s"},
-		{"leading digit", "1clicks"},
-		{"empty after url decode", ""},
+		{"missing", "", "missing required query parameter: table"},
+		{"nats greater wildcard", ">", "invalid table name"},
+		{"nats star wildcard", "*", "invalid table name"},
+		{"dot separator", "ingest.clicks", "invalid table name"},
+		{"nested wildcard", "ingest.>", "invalid table name"},
+		{"trailing wildcard", "clicks.>", "invalid table name"},
+		{"space", "click s", "invalid table name"},
+		{"leading digit", "1clicks", "invalid table name"},
+		{"empty after url decode", "", "missing required query parameter: table"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,8 +211,7 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 			w := httptest.NewRecorder()
 			h.Handle(w, req)
-			assert.Equal(t, http.StatusBadRequest, w.Code)
-			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": tc.errBody})
 		})
 	}
 }
@@ -246,8 +247,7 @@ func TestWS_RejectsInvalidTableOnQuery(t *testing.T) {
 			h.Handle(w, req)
 			// Validation runs before websocket.Accept, so we get a plain 400
 			// rather than an upgrade-attempt error.
-			assert.Equal(t, http.StatusBadRequest, w.Code)
-			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid table name"})
 		})
 	}
 }

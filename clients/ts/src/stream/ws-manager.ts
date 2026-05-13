@@ -145,19 +145,24 @@ export class SharedWSManager {
 
     this._ws.onmessage = (e) => {
       try {
+        // Server envelope: {table, data: {table_name, received_timestamp, data}}.
+        // For non-EventMessage (raw-JSON pass-through) payloads, the inner
+        // table_name may be absent — fall back to the envelope's table so the
+        // StreamEvent always carries the subscribing table. envelope.table is
+        // also what we key dispatch by, so the two are guaranteed to agree.
         const envelope = JSON.parse(e.data as string) as {
           table: string;
           data: {
-            table_name: string;
-            received_timestamp: string;
+            table_name?: string;
+            received_timestamp?: string;
             data: unknown;
           };
         };
         if (!envelope.table || !envelope.data) return;
 
         const event: StreamEvent = {
-          table: envelope.data.table_name,
-          timestamp: envelope.data.received_timestamp,
+          table: envelope.data.table_name ?? envelope.table,
+          timestamp: envelope.data.received_timestamp ?? '',
           data: envelope.data.data as Record<string, unknown>,
         };
 
