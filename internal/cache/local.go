@@ -37,12 +37,14 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 		MaxCost:     maxCost,
 		BufferItems: 64,
 		OnEvict: func(item *ristretto.Item[*cacheValue]) {
-			// Removed l.removeKeyFromTagsLocked from here to prevent
+			// We removed l.removeKeyFromTagsLocked from here to prevent
 			// an async race condition where a delayed eviction callback
 			// could wipe the tags of a freshly updated key.
-
-			// We still delete from ttls because it's a simple key-value map
-			// without the complex cross-referencing of the tag system.
+			//
+			// KNOWN TRADEOFF: This introduces a bounded memory leak where tagsMap
+			// and keyTags accumulate stale entries for keys naturally evicted by
+			// Ristretto's internal policies. These ghost entries are cleaned up lazily
+			// upon a subsequent Set or InvalidateByTags.
 			if item.Value != nil {
 				l.ttls.Delete(item.Value.key)
 			}

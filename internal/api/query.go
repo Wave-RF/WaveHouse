@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -113,10 +112,9 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	cleanSQL := cleanSQLForTags(req.SQL)
 
-	isMutation := false
-	if fields := strings.Fields(cleanSQL); len(fields) > 0 {
-		isMutation = mutationRe.MatchString(fields[0])
-	}
+	// Run against full string to catch CTE-wrapped mutations (e.g., WITH...INSERT).
+	// The \b anchors in mutationRe prevent false positives on column names.
+	isMutation := mutationRe.MatchString(cleanSQL)
 
 	var execCtx context.Context
 	if isMutation {
