@@ -102,12 +102,19 @@ func run() int {
 	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
 	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
+		// Headers already passed config validation; the parser cannot fail
+		// here for input that satisfied Validate().
+		headers, _ := observability.ParseOTelHeaders(cfg.OTel.Headers)
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
 			Endpoint:          cfg.OTel.Addr,
+			Headers:           headers,
+			TracesEndpoint:    cfg.OTel.Traces.Addr,
 			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
 			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
+			MetricsEndpoint:   cfg.OTel.Metrics.Addr,
 			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
 			PrometheusEnabled: cfg.Prometheus.Enabled,
+			LogsEndpoint:      cfg.OTel.Logs.Addr,
 			LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
 		})
 		if err != nil {

@@ -314,9 +314,48 @@ Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at th
 
 WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
-### Pattern: SigNoz / Honeycomb / OTel-native backends
+### Pattern: SigNoz / OTel-native backends (local collector)
 
-Point `otel.addr` at the OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
+Point `otel.addr` at a plaintext OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
+
+```yaml
+otel:
+  enabled: true
+  addr: 127.0.0.1:4317   # bare host:port — plaintext gRPC
+```
+
+### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud, Datadog OTLP, etc.)
+
+`otel.addr` is scheme-aware: `https://` selects TLS, `http://` or no scheme stays plaintext. Combine with `otel.headers` for the per-RPC auth that every cloud OTLP gateway expects. No sidecar required — a sidecar is still useful for egress queuing, batching, and tail-based sampling, but is no longer the only way to get TLS + auth.
+
+**Honeycomb (single endpoint, per-RPC auth):**
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=https://api.honeycomb.io:443
+export WH_OTEL_HEADERS=x-honeycomb-team=YOUR_API_KEY
+```
+
+**Grafana Cloud OTLP gateway (Basic auth):**
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
+# instanceID:token, base64-encoded; backslash-escape the space if your shell needs it
+export WH_OTEL_HEADERS=authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64)
+```
+
+**Datadog OTLP intake:**
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=https://otlp.datadoghq.com:4317
+export WH_OTEL_HEADERS=dd-api-key=YOUR_API_KEY
+```
+
+If different signals need different gateway hosts (Grafana Cloud's traces/metrics/logs endpoints differ in some regions), set `WH_OTEL_TRACES_ADDR` / `WH_OTEL_METRICS_ADDR` / `WH_OTEL_LOGS_ADDR` to override the default per signal. Empty means inherit from `otel.addr`. Headers always apply to every exporter — there is intentionally no per-signal header override.
+
+mTLS / client-certificate auth is not yet supported; open an issue if you need it.
 
 ### Pattern: Grafana Cloud / Mimir / Loki / Tempo via Grafana Alloy
 

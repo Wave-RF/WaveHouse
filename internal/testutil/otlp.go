@@ -15,15 +15,28 @@
 //
 // Always call shutdown before asserting counts — the OTel SDK batches
 // exports and only drains on shutdown (or after the batch timeout).
+//
+// For TLS verification, use NewFakeOTLPTLS which mints an ephemeral self-signed
+// cert and exposes TLSConfig() for a matching client-side config.
 package testutil
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -37,18 +50,50 @@ import (
 // log Export RPCs and captures every received payload. Cleanup is registered
 // on the *testing.T automatically.
 type FakeOTLP struct {
-	addr   string
-	server *grpc.Server
+	addr      string
+	server    *grpc.Server
+	tlsConfig *tls.Config // non-nil only when constructed via NewFakeOTLPTLS
 
 	mu      sync.Mutex
 	traces  []*tracepb.ResourceSpans
 	metrics []*metricspb.ResourceMetrics
 	logs    []*logspb.ResourceLogs
+
+	// Captured gRPC request metadata, indexed by signal. Each Export call
+	// appends an entry. Tests assert on auth/header propagation through these.
+	traceHeaders  []metadata.MD
+	metricHeaders []metadata.MD
+	logHeaders    []metadata.MD
 }
 
 // NewFakeOTLP binds the receiver to 127.0.0.1 on a random port and starts
-// serving. The server is stopped automatically when the test ends.
+// serving plaintext gRPC. The server is stopped automatically when the test
+// ends.
 func NewFakeOTLP(t *testing.T) *FakeOTLP {
+	t.Helper()
+	return newFakeOTLP(t, nil)
+}
+
+// NewFakeOTLPTLS is the TLS variant: an ephemeral self-signed cert (SAN
+// 127.0.0.1) is generated, and the server listens with that cert. The matching
+// client config is available via TLSConfig() — wire it into ProviderConfig so
+// the OTel exporters trust the cert. Production code never sets ProviderConfig.TLSConfig;
+// only this test path does.
+func NewFakeOTLPTLS(t *testing.T) *FakeOTLP {
+	t.Helper()
+
+	cert, clientCfg := ephemeralTLSPair(t)
+	serverCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	return newFakeOTLP(t, &fakeOTLPTLS{server: serverCfg, client: clientCfg})
+}
+
+type fakeOTLPTLS struct {
+	server *tls.Config
+	client *tls.Config
+}
+
+func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
 	t.Helper()
 
 	var lc net.ListenConfig
@@ -57,10 +102,14 @@ func NewFakeOTLP(t *testing.T) *FakeOTLP {
 		t.Fatalf("FakeOTLP listen: %v", err)
 	}
 
-	r := &FakeOTLP{
-		addr:   lis.Addr().String(),
-		server: grpc.NewServer(),
+	var serverOpts []grpc.ServerOption
+	r := &FakeOTLP{addr: lis.Addr().String()}
+	if tlsCfg != nil {
+		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsCfg.server)))
+		r.tlsConfig = tlsCfg.client
 	}
+	r.server = grpc.NewServer(serverOpts...)
+
 	coltracepb.RegisterTraceServiceServer(r.server, &fakeTraceServer{parent: r})
 	colmetricspb.RegisterMetricsServiceServer(r.server, &fakeMetricsServer{parent: r})
 	collogspb.RegisterLogsServiceServer(r.server, &fakeLogsServer{parent: r})
@@ -76,9 +125,54 @@ func NewFakeOTLP(t *testing.T) *FakeOTLP {
 	return r
 }
 
+// ephemeralTLSPair mints a one-shot ECDSA self-signed cert valid for 127.0.0.1
+// and returns it along with a client tls.Config that trusts only this cert.
+func ephemeralTLSPair(t *testing.T) (tls.Certificate, *tls.Config) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("FakeOTLPTLS: generate key: %v", err)
+	}
+	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+	if err != nil {
+		t.Fatalf("FakeOTLPTLS: serial: %v", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "FakeOTLP"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("FakeOTLPTLS: create cert: %v", err)
+	}
+	cert := tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+	}
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("FakeOTLPTLS: parse cert: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(parsed)
+	return cert, &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"}
+}
+
 // Addr returns the listener address (e.g. "127.0.0.1:42891") suitable for
 // passing to observability.ProviderConfig.Endpoint.
 func (r *FakeOTLP) Addr() string { return r.addr }
+
+// TLSConfig returns the client-side tls.Config that trusts this server's
+// ephemeral cert. Returns nil when the server was constructed via the plaintext
+// NewFakeOTLP.
+func (r *FakeOTLP) TLSConfig() *tls.Config { return r.tlsConfig }
 
 // SpanCount returns the total number of spans received across all RPCs.
 // Spans are flattened across resource and scope groupings.
@@ -139,6 +233,27 @@ func (r *FakeOTLP) LogCountAtLevel(minSeverity int32) int {
 	return n
 }
 
+// LastTraceHeaders returns the gRPC metadata captured from the most recent
+// trace Export RPC, or nil if none.
+func (r *FakeOTLP) LastTraceHeaders() metadata.MD { return lastMD(&r.mu, r.traceHeaders) }
+
+// LastMetricHeaders returns the gRPC metadata captured from the most recent
+// metric Export RPC, or nil if none.
+func (r *FakeOTLP) LastMetricHeaders() metadata.MD { return lastMD(&r.mu, r.metricHeaders) }
+
+// LastLogHeaders returns the gRPC metadata captured from the most recent log
+// Export RPC, or nil if none.
+func (r *FakeOTLP) LastLogHeaders() metadata.MD { return lastMD(&r.mu, r.logHeaders) }
+
+func lastMD(mu *sync.Mutex, slice []metadata.MD) metadata.MD {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(slice) == 0 {
+		return nil
+	}
+	return slice[len(slice)-1]
+}
+
 // Reset clears all captured payloads. Useful between test phases.
 func (r *FakeOTLP) Reset() {
 	r.mu.Lock()
@@ -146,6 +261,9 @@ func (r *FakeOTLP) Reset() {
 	r.traces = nil
 	r.metrics = nil
 	r.logs = nil
+	r.traceHeaders = nil
+	r.metricHeaders = nil
+	r.logHeaders = nil
 }
 
 type fakeTraceServer struct {
@@ -153,9 +271,11 @@ type fakeTraceServer struct {
 	parent *FakeOTLP
 }
 
-func (s *fakeTraceServer) Export(_ context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
+func (s *fakeTraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
 	s.parent.mu.Lock()
 	s.parent.traces = append(s.parent.traces, req.GetResourceSpans()...)
+	s.parent.traceHeaders = append(s.parent.traceHeaders, md.Copy())
 	s.parent.mu.Unlock()
 	return &coltracepb.ExportTraceServiceResponse{}, nil
 }
@@ -165,9 +285,11 @@ type fakeMetricsServer struct {
 	parent *FakeOTLP
 }
 
-func (s *fakeMetricsServer) Export(_ context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
+func (s *fakeMetricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
 	s.parent.mu.Lock()
 	s.parent.metrics = append(s.parent.metrics, req.GetResourceMetrics()...)
+	s.parent.metricHeaders = append(s.parent.metricHeaders, md.Copy())
 	s.parent.mu.Unlock()
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
 }
@@ -177,9 +299,11 @@ type fakeLogsServer struct {
 	parent *FakeOTLP
 }
 
-func (s *fakeLogsServer) Export(_ context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
+func (s *fakeLogsServer) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
 	s.parent.mu.Lock()
 	s.parent.logs = append(s.parent.logs, req.GetResourceLogs()...)
+	s.parent.logHeaders = append(s.parent.logHeaders, md.Copy())
 	s.parent.mu.Unlock()
 	return &collogspb.ExportLogsServiceResponse{}, nil
 }
