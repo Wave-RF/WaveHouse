@@ -343,7 +343,7 @@ export WH_OTEL_ENABLED=true
 export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
 # instanceID:token, base64-encoded; backslash-escape the space if your shell needs it
 export WH_OTEL_HEADERS=authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64)
-```
+export WH_OTEL_HEADERS=authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')
 
 **Datadog OTLP intake:**
 
