@@ -18,7 +18,7 @@ import (
 )
 
 // Regex to detect mutating queries
-var mutationRe = regexp.MustCompile(`(?i)^\s*(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)`)
+var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b`)
 
 // Unified table extraction regex
 var (
