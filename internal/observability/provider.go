@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,6 +25,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
+
+// runtimeStartOnce gates the `runtime.Start` call in InitProvider so that
+// re-init (in tests, or any future hot-reload path) doesn't accumulate
+// goroutines the upstream package exposes no way to stop. See the comment at
+// the Do() call site for the trade-off.
+var runtimeStartOnce sync.Once
 
 // ProviderConfig wires the metrics/traces/logs pipeline. Each output is
 // independently gated; SampleRate values must be in [0.0, 1.0] and only apply
@@ -166,10 +173,25 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 		otel.SetMeterProvider(meterProvider)
 
-		if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {
-			handleErr(err)
-			return shutdown, nil, err
-		}
+		// `runtime.Start` spawns goroutines that the upstream package exposes
+		// no way to stop. In production InitProvider is called exactly once,
+		// but tests re-init the provider repeatedly — sync.Once caps the leak
+		// at one goroutine for the whole process. Trade-off: the runtime
+		// callbacks stay bound to the FIRST MeterProvider, so subsequent
+		// re-inits get no runtime metrics on their new MeterProvider. No test
+		// asserts on runtime metric presence and production never re-inits,
+		// so this is acceptable until upstream adds a Stop().
+		//
+		// Errors here are intentionally non-fatal: a runtime-instrumentation
+		// failure shouldn't tear down a fully-initialized OTel pipeline. Log
+		// and continue with degraded host metrics rather than routing through
+		// handleErr (which would roll back the globals).
+		runtimeStartOnce.Do(func() {
+			if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {
+				slog.Warn("OTel runtime instrumentation failed to start; continuing with degraded host metrics",
+					"err", err)
+			}
+		})
 	}
 
 	if cfg.LogsEnabled {

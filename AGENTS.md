@@ -12,7 +12,7 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Eleven internal packages under `internal/`:
+Twelve internal packages under `internal/`:
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/WS/schema/DLQ/policy/pipes handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
@@ -305,6 +305,7 @@ internal/dedupe/        → Optional deduplication (interface + embedded/distrib
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
+internal/observability/ → OpenTelemetry pipeline (traces/metrics/logs providers, Prometheus exporter, slog fan-out, NATS trace propagation)
 internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstrap)
 internal/policy/        → Access control policies (types, evaluation, NATS KV store)
 internal/query/         → Structured query AST + SQL builder
