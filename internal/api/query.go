@@ -34,9 +34,8 @@ var (
 	stringLiteralRe = regexp.MustCompile(`'(?:''|\\'|[^'])*'`)
 )
 
-func extractCacheTags(rawSQL string) []string {
-	cleanedSQL := cleanSQLForTags(rawSQL)
-
+// extractCacheTagsFromCleaned expects SQL with comments and string literals already removed.
+func extractCacheTagsFromCleaned(cleanedSQL string) []string {
 	matches := tableExtractionRe.FindAllStringSubmatch(cleanedSQL, -1)
 	var tags []string
 	seen := make(map[string]bool)
@@ -152,7 +151,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Cache Invalidation
 	if isMutation && h.Cache != nil {
-		tags := extractCacheTags(cleanSQL)
+		tags := extractCacheTagsFromCleaned(cleanSQL)
 		if len(tags) > 0 {
 			invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer invCancel()

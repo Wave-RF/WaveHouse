@@ -224,7 +224,7 @@ func TestExtractCacheTags(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cleaned := cleanSQLForTags(tc.sql)
-			actual := extractCacheTags(cleaned)
+			actual := extractCacheTagsFromCleaned(cleaned)
 
 			if len(tc.expected) == 0 {
 				assert.Empty(t, actual)

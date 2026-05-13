@@ -64,7 +64,7 @@ func TestTieredCache_L1Hit(t *testing.T) {
 	t.Parallel()
 	l1 := newMemCache()
 	l2 := newMemCache()
-	tc := NewTiered(l1, l2)
+	tc := &TieredCache{l1: l1, l2: l2}
 	ctx := context.Background()
 	require.NoError(t, l1.Set(ctx, "key", []byte("l1-value"), 5*time.Minute, nil))
 	val, ttl, err := tc.Get(ctx, "key")
@@ -77,7 +77,7 @@ func TestTieredCache_L1Miss_L2Hit(t *testing.T) {
 	t.Parallel()
 	l1 := newMemCache()
 	l2 := newMemCache()
-	tc := NewTiered(l1, l2)
+	tc := &TieredCache{l1: l1, l2: l2}
 	ctx := context.Background()
 	require.NoError(t, l2.Set(ctx, "key", []byte("l2-value"), 3*time.Minute, nil))
 	val, ttl, err := tc.Get(ctx, "key")
@@ -91,7 +91,7 @@ func TestTieredCache_L1Miss_L2Hit(t *testing.T) {
 
 func TestTieredCache_BothMiss(t *testing.T) {
 	t.Parallel()
-	tc := NewTiered(newMemCache(), newMemCache())
+	tc := &TieredCache{l1: newMemCache(), l2: newMemCache()}
 	val, ttl, err := tc.Get(context.Background(), "miss")
 	require.NoError(t, err)
 	assert.Nil(t, val)
@@ -102,7 +102,7 @@ func TestTieredCache_Set_WritesToBoth(t *testing.T) {
 	t.Parallel()
 	l1 := newMemCache()
 	l2 := newMemCache()
-	tc := NewTiered(l1, l2)
+	tc := &TieredCache{l1: l1, l2: l2}
 	ctx := context.Background()
 	require.NoError(t, tc.Set(ctx, "key", []byte("both"), 5*time.Minute, nil))
 	l1val, _, _ := l1.Get(ctx, "key")
@@ -123,7 +123,7 @@ func TestTieredCache_Set_NilL2(t *testing.T) {
 
 func TestTieredCache_Close(t *testing.T) {
 	t.Parallel()
-	assert.NoError(t, NewTiered(newMemCache(), newMemCache()).Close())
+	assert.NoError(t, (&TieredCache{l1: newMemCache(), l2: newMemCache()}).Close())
 }
 
 func TestTieredCache_Close_NilL2(t *testing.T) {
@@ -135,7 +135,7 @@ func TestTieredCache_SingleflightDedup(t *testing.T) {
 	t.Parallel()
 	l1 := newMemCache()
 	l2 := &slowCache{inner: newMemCache(), delay: 50 * time.Millisecond}
-	tc := NewTiered(l1, l2)
+	tc := &TieredCache{l1: l1, l2: l2}
 	ctx := context.Background()
 	require.NoError(t, l2.Set(ctx, "key", []byte("slow-val"), 5*time.Minute, nil))
 
@@ -163,7 +163,7 @@ func TestTieredCache_InvalidateByTags(t *testing.T) {
 	t.Parallel()
 	l1 := newMemCache()
 	l2 := newMemCache()
-	tc := NewTiered(l1, l2)
+	tc := &TieredCache{l1: l1, l2: l2}
 	ctx := context.Background()
 
 	require.NoError(t, tc.Set(ctx, "q1", []byte("val"), time.Minute, []string{"clicks"}))

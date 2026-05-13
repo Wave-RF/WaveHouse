@@ -37,17 +37,14 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 		MaxCost:     maxCost,
 		BufferItems: 64,
 		OnEvict: func(item *ristretto.Item[*cacheValue]) {
-			// We removed l.removeKeyFromTagsLocked from here to prevent
-			// an async race condition where a delayed eviction callback
-			// could wipe the tags of a freshly updated key.
-			//
-			// KNOWN TRADEOFF: This introduces a bounded memory leak where tagsMap
-			// and keyTags accumulate stale entries for keys naturally evicted by
-			// Ristretto's internal policies. These ghost entries are cleaned up lazily
-			// upon a subsequent Set or InvalidateByTags.
-			if item.Value != nil {
-				l.ttls.Delete(item.Value.key)
+			if item.Value == nil {
+				return
 			}
+			key := item.Value.key
+			l.tagsMu.Lock()
+			l.removeKeyFromTagsLocked(key)
+			l.ttls.Delete(key)
+			l.tagsMu.Unlock()
 		},
 	})
 	if err != nil {
@@ -83,23 +80,15 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 		exp := expVal.(time.Time)
 		if !exp.IsZero() {
 			remaining = time.Until(exp)
+			// FIX: Simplified eviction path. If it's expired, lock and delete.
+			// The race condition with a concurrent Set resolves naturally as a cache miss.
 			if remaining <= 0 {
 				l.tagsMu.Lock()
-				expVal2, ok2 := l.ttls.Load(key)
-				if !ok2 || time.Until(expVal2.(time.Time)) <= 0 {
-					l.cache.Del(key)
-					l.ttls.Delete(key)
-					l.removeKeyFromTagsLocked(key)
-					l.tagsMu.Unlock()
-					return nil, 0, nil
-				}
-				// If we get here, a concurrent Set updated the key while we waited for the lock
+				l.cache.Del(key)
+				l.ttls.Delete(key)
+				l.removeKeyFromTagsLocked(key)
 				l.tagsMu.Unlock()
-				val, _ = l.cache.Get(key) // Fetch the fresh value
-				if val == nil {
-					return nil, 0, nil
-				}
-				remaining = time.Until(expVal2.(time.Time))
+				return nil, 0, nil
 			}
 		}
 	}

@@ -16,6 +16,9 @@ type TieredCache struct {
 
 // NewTiered creates a tiered cache. L2 can be nil for standalone mode.
 func NewTiered(l1, l2 Cache) *TieredCache {
+	if l2 != nil {
+		panic("L2 cache wired without tag-propagation support; see TODO in tiered.go")
+	}
 	return &TieredCache{l1: l1, l2: l2}
 }
 

@@ -151,7 +151,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 		if h.Cache != nil {
 			cleanedSQL := cleanSQLForTags(sql)
-			tags := extractCacheTags(cleanedSQL)
+			tags := extractCacheTagsFromCleaned(cleanedSQL)
 
 			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL, tags)
 		}
