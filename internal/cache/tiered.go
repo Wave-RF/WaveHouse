@@ -31,8 +31,9 @@ func (t *TieredCache) Get(ctx context.Context, key string) ([]byte, time.Duratio
 		if t.l2 != nil {
 			val, ttl, err := t.l2.Get(ctx, key)
 			if err == nil && val != nil {
-				// Backfill L1 with remaining TTL from L2.
-				// Note: We don't have the original tags here, but L2 is out-of-scope for v1 Standalone.
+				// TODO(L2): tags must be stored in L2 alongside the value and propagated
+				// here on backfill, otherwise InvalidateByTags misses L1 entries that
+				// were promoted from L2. Blocked until SharedCache is implemented.
 				_ = t.l1.Set(ctx, key, val, ttl, nil)
 				return &cacheResult{data: val, ttl: ttl}, nil
 			}

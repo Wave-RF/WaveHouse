@@ -31,8 +31,7 @@ func TestLocalCache_SetAndGet(t *testing.T) {
 	err = c.Set(ctx, "key1", []byte("hello"), 10*time.Second, nil)
 	assert.NoError(t, err)
 
-	// Ristretto uses async admission — wait briefly for it to be admitted.
-	time.Sleep(10 * time.Millisecond)
+	c.cache.Wait()
 
 	val, ttl, err := c.Get(ctx, "key1")
 	assert.NoError(t, err)

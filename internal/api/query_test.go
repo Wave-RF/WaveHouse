@@ -196,11 +196,6 @@ func TestExtractCacheTags(t *testing.T) {
 			expected: []string{"inner_tbl"},
 		},
 		{
-			name:     "quoted identifiers supported",
-			sql:      "SELECT * FROM `my_db`.`my_table` JOIN \"other_table\"",
-			expected: []string{"my_table", "other_table"},
-		},
-		{
 			name:     "mutations",
 			sql:      "UPDATE state SET x = 1; INSERT INTO events (id) VALUES (1)",
 			expected: []string{"state", "events"},

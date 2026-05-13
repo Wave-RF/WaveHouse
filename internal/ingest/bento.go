@@ -299,7 +299,7 @@ type clickhouseOutput struct {
 	user       string
 	password   string
 	db         string
-	apiCache   *cache.TieredCache
+	apiCache   cache.Cache
 }
 
 func (c *clickhouseOutput) Connect(ctx context.Context) error { return nil }
@@ -462,13 +462,13 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // cache instance, preventing stale pointers during sequential integration tests.
 // NOTE: While Bento output registration (sync.Once) only fires once per process,
 // StartIngestWorker updates this pointer so subsequent test setups use the new cache.
-var activeCache atomic.Pointer[cache.TieredCache]
+var activeCache atomic.Value
 
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, apiCache *cache.TieredCache, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, apiCache cache.Cache, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -528,6 +528,10 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 				if scheme == "" {
 					scheme = "http" // Default fallback
 				}
+				var c cache.Cache
+				if val := activeCache.Load(); val != nil {
+					c = val.(cache.Cache)
+				}
 				// WARNING: Because this factory is registered via sync.Once, the ClickHouse
 				// connection parameters (scheme, host, port, user, password, db) are captured
 				// by-value from the very first StartIngestWorker call and CANNOT be updated.
@@ -542,7 +546,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 					user:       chUser,
 					password:   chPassword,
 					db:         chDB,
-					apiCache:   activeCache.Load(),
+					apiCache:   c,
 				}, service.BatchPolicy{}, 1, nil
 			},
 		); err != nil {

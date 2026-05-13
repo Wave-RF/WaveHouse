@@ -61,13 +61,13 @@ func cleanSQLForTags(rawSQL string) string {
 // QueryHandler handles POST /v1/query.
 type QueryHandler struct {
 	CHConn      driver.Conn
-	Cache       *cache.TieredCache
+	Cache       cache.Cache
 	DefaultTTL  time.Duration
 	PolicyStore *policy.Store
 	sf          singleflight.Group
 }
 
-func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
+func NewQueryHandler(conn driver.Conn, c cache.Cache, defaultTTL time.Duration) *QueryHandler {
 	return &QueryHandler{CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
 }
 
@@ -148,8 +148,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cache Invalidation
-	if isMutation {
-		// Pass the cleanSQL to avoid double-stripping in the helper
+	if isMutation && h.Cache != nil {
 		tags := extractCacheTags(cleanSQL)
 		if len(tags) > 0 {
 			invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
