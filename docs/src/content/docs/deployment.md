@@ -116,7 +116,10 @@ WH_CH_HTTP_SCHEME=http              # Scheme for Bento HTTP inserts (http/https)
 # Schema discovery
 WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 
-# CORS
+# CORS — comma-separated allowlist (or "*" for any origin).
+# WaveHouse is a Bearer-token API; no cookies are used and the middleware
+# deliberately omits Access-Control-Allow-Credentials, so this allowlist only
+# controls *which origins can read responses*, not cookie scope.
 WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 
 # Optional auth
