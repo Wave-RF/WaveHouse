@@ -1,0 +1,114 @@
+name: Publish coverage badge
+
+# Fires after a successful CI run on main, downloads the coverage-profile
+# artifact, and pushes the rendered SVG badge to the `badges` branch.
+#
+# Why a separate workflow (vs a `publish-badge` job inside ci.yml):
+#
+#   1. PR Checks panel stays clean. A `needs: ci` job gated to
+#      `github.ref == 'refs/heads/main'` would appear as a "Skipped"
+#      entry in every PR's Checks list. Pulling the job out into its own
+#      workflow with `workflow_run` means PRs never instantiate it, so it
+#      doesn't show up at all.
+#
+#   2. No Docker image pre-pull on PR pods. GitHub Actions pre-pulls a
+#      Docker-typed action's image at job-start, regardless of any
+#      step-level `if:` gating. The badge publisher
+#      (`vladopajic/go-test-coverage`) is a Docker action — ~14-20s of
+#      pre-pull cost on every PR run when it lived in ci.yml as a
+#      sibling job. Moving it to a workflow that doesn't trigger on PRs
+#      eliminates that cost.
+#
+# Tradeoff: workflow_run adds ~5-15s of dispatch latency between ci.yml
+# finishing and this workflow starting. We chose PR-side speed (every PR
+# run, fast feedback) over main-side latency (one badge update per merge,
+# few-second slip is fine).
+#
+# `workflow_run` always uses the workflow file from the DEFAULT branch
+# (main). Changes to this file in a PR don't affect what runs until the
+# PR is merged.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Manual escape hatch: pass an explicit ci.yml run-id to re-publish the
+  # badge from an earlier successful run (e.g., recover from a `badges`
+  # branch force-push or a transient git push failure).
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: ID of the CI run to publish the badge from
+        required: true
+        type: string
+
+permissions:
+  # contents: write — needed to push the rendered badge to the `badges`
+  # branch via go-test-coverage's `git-token` flow.
+  contents: write
+  # actions: read — workflow_run-triggered jobs default to the
+  # repository's permission model, but cross-workflow artifact downloads
+  # need `actions: read` to enumerate the source run's artifacts.
+  actions: read
+
+# One badge publish at a time. Sequential `workflow_run` events on
+# successive main pushes queue here — we want the latest commit's
+# badge to win, but cancelling an in-flight push to the `badges` branch
+# can leave it in a half-pushed state. Queue serially instead.
+concurrency:
+  group: publish-coverage-badge
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Only publish for successful CI runs. workflow_run fires on every
+    # completion regardless of conclusion, so we have to gate.
+    # On workflow_dispatch, conclusion is empty — fall through to the
+    # publish step which will fail-loud if the requested run-id has no
+    # artifact.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    name: Publish coverage badge
+    runs-on: [wave-rf-runners]
+    timeout-minutes: 5
+    steps:
+      # Need the working copy because go-test-coverage walks file paths
+      # from the coverage profile against the source tree to render the
+      # badge.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Restore coverage profile from CI run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-profile
+          # Cross-workflow artifact: download-artifact needs to know which
+          # run produced the artifact. For workflow_run triggers that's
+          # the triggering run's id; for manual re-runs the operator
+          # passes it explicitly.
+          run-id: ${{ github.event.workflow_run.id || inputs.ci_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # download-artifact extracts the artifact's relative paths back
+          # to the job workspace root — coverage.txt lands at
+          # tmp/coverage/total/coverage.txt, config at .testcoverage.yml.
+
+      # v2.18.8 fixes a regression in v2.18.5–v2.18.7 where
+      # findFilePathMatchingSearch returned -1 on an exact filename
+      # match (PR #312 / issue from #308). v2.18.7 surfaced as
+      # "could not find file [github.com/.../internal/api/dlq.go]"
+      # on the first profile entry whose stripped name matched a
+      # walked file at pos 0.
+      #
+      # `make ci` already enforced the threshold via `make cov` →
+      # scripts/coverage.sh → `go tool go-test-coverage`. This step is
+      # purely the badge publish; the action's own threshold check is
+      # redundant but harmless (config + profile already satisfy it).
+      - name: Publish coverage badge
+        uses: vladopajic/go-test-coverage@a93b868a4cbcbf18dc3781650fad241f0020e609 # v2.18.8
+        with:
+          config: ./.testcoverage.yml
+          git-token: ${{ secrets.GITHUB_TOKEN }}
+          git-branch: badges

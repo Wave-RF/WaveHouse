@@ -25,10 +25,23 @@
 #      lint runs in ~10s vs ~90s cold. The binary itself is cheap but
 #      caching it skips the install-from-curl path on every run.
 #
-#   3. pnpm store (~/.local/share/pnpm/store) keyed on all three lockfiles.
-#      The repo has three pnpm projects (clients/ts/, tests/e2e/sdk/, and
-#      docs/) and a single store covers all of them — pnpm hardlinks from
-#      the store into each project's node_modules.
+#   3. pnpm store (path resolved at runtime via `pnpm store path`) keyed
+#      on all three lockfiles. The repo has three pnpm projects
+#      (clients/ts/, tests/e2e/sdk/, and docs/) and a single store covers
+#      all of them — pnpm hardlinks from the store into each project's
+#      node_modules.
+#
+#      Why dynamic path resolution: pnpm's "documented" default
+#      ~/.local/share/pnpm/store applies only when $HOME and the project
+#      tree live on the same mount. On ARC pods $HOME and
+#      $GITHUB_WORKSPACE are on different mounts, so pnpm falls back to
+#      /home/runner/_work/.pnpm-store/v<N>/. Hard-coding the documented
+#      path caused every run to log `Path Validation Error: Path(s) ...
+#      do(es) not exist` at save time and silently skip the upload —
+#      pnpm reinstalled cold every run. `pnpm store path --silent` reports
+#      whichever path pnpm actually uses, so this composite is robust
+#      across mount layouts and pnpm major bumps (the trailing v<N> moves
+#      automatically).
 #
 # All three caches transparently route to the on-prem
 # falcondev-oss/github-actions-cache-server (no GitHub size limit, sub-VM
@@ -52,6 +65,9 @@ outputs:
   pnpm-cache-hit:
     description: "true if the exact-key pnpm store cache was restored"
     value: ${{ steps.pnpm-cache.outputs.cache-hit }}
+  pnpm-store-path:
+    description: "Absolute path to the pnpm content-addressable store on this runner — pass to actions/cache/save in the consuming workflow."
+    value: ${{ steps.pnpm-store.outputs.path }}
 
 runs:
   using: composite
@@ -82,25 +98,34 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
-    # pnpm store, shared across clients/ts, tests/e2e/sdk, and docs lockfiles.
-    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-      id: pnpm-cache
-      with:
-        path: ~/.local/share/pnpm/store
-        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
-        restore-keys: |
-          pnpm-${{ runner.os }}-
-
     # `cache: false` because we manage the Go cache explicitly above.
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
         go-version-file: go.mod
         cache: false
 
+    # pnpm install MUST come before the pnpm cache restore — we need the
+    # pnpm binary on PATH so the next step can ask pnpm where its store
+    # actually lives. See the header comment for the mount-layout reason
+    # this matters.
     - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       with:
         version: "10.33.0"
         run_install: false
+
+    - name: Resolve pnpm store directory
+      id: pnpm-store
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    # pnpm store, shared across clients/ts, tests/e2e/sdk, and docs lockfiles.
+    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      id: pnpm-cache
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-${{ runner.os }}-
 
     - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:

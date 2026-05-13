@@ -109,11 +109,26 @@ jobs:
             ~/.cache/golangci-lint
           key: golangci-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yml') }}
 
+      # Drop pnpm store content that no project's node_modules references
+      # before save. Without this the store grows monotonically as
+      # transitive deps churn — a six-month-old branch would haul around
+      # every package version any sibling PR ever pulled in. `pnpm store
+      # prune` walks every project's node_modules in the workspace and
+      # deletes any store entry not currently linked from one of them.
+      # Same restore-keys fallback we use elsewhere stays intact: the
+      # pruned store still satisfies the active lockfile.
+      - name: Prune pnpm store before save
+        if: steps.setup.outputs.pnpm-cache-hit != 'true'
+        shell: bash
+        run: pnpm store prune
+
+      # Path comes from setup-env's `pnpm store path` resolution — see the
+      # composite for why we can't hard-code ~/.local/share/pnpm/store.
       - name: Save pnpm store cache
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: ~/.local/share/pnpm/store
+          path: ${{ steps.setup.outputs.pnpm-store-path }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
 
       # Coverage summary in the run's job summary panel. Was previously in
@@ -138,12 +153,13 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Stash the merged coverage profile + config for the publish-badge
-      # job to pick up. Only on main pushes — PR runs don't publish and
+      # Stash the merged coverage profile + config for the
+      # publish-coverage-badge workflow to pick up via `workflow_run`
+      # artifact download. Only on main pushes — PR runs don't publish and
       # don't need to spend the upload time.
       - name: Upload coverage profile (main only)
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-profile
           path: |
@@ -152,54 +168,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Coverage badge publish — separate job so the `vladopajic/go-test-coverage`
-  # Docker action's image (~14-20s pre-pull every time it appears in the
-  # job graph) doesn't tax PR runs. GitHub pre-pulls Docker-typed actions
-  # regardless of step-level `if:` gating, so the only way to skip the
-  # pull on PR runs is to put the action in a job that doesn't materialize
-  # on PRs at all.
-  #
-  # Required-check note: the ruleset's required-check `CI` corresponds to
-  # the workflow's name (this whole file). When `publish-badge` is skipped
-  # entirely (its `if:` evaluates false on PRs), the workflow conclusion is
-  # still success as long as `ci` succeeded — that's what the ruleset checks.
-  publish-badge:
-    name: Publish coverage badge
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: ci
-    runs-on: [wave-rf-runners]
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      # Need the working copy because go-test-coverage walks file paths from
-      # the coverage profile against the source tree to render the badge.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-
-      - name: Restore coverage profile from ci job
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-        with:
-          name: coverage-profile
-          # download-artifact extracts the artifact's relative paths back
-          # to the job workspace root — coverage.txt lands at
-          # tmp/coverage/total/coverage.txt, config at .testcoverage.yml.
-
-      # v2.18.8 fixes a regression in v2.18.5–v2.18.7 where
-      # findFilePathMatchingSearch returned -1 on an exact filename
-      # match (PR #312 / issue from #308). v2.18.7 surfaced as
-      # "could not find file [github.com/.../internal/api/dlq.go]"
-      # on the first profile entry whose stripped name matched a
-      # walked file at pos 0.
-      #
-      # `make ci` already enforced the threshold via `make cov` →
-      # scripts/coverage.sh → `go tool go-test-coverage`. This step is
-      # purely the badge publish; the action's own threshold check is
-      # redundant but harmless (config + profile already satisfy it).
-      - name: Publish coverage badge
-        uses: vladopajic/go-test-coverage@a93b868a4cbcbf18dc3781650fad241f0020e609 # v2.18.8
-        with:
-          config: ./.testcoverage.yml
-          git-token: ${{ secrets.GITHUB_TOKEN }}
-          git-branch: badges
+  # Coverage badge publish lives in its own workflow file
+  # (publish-coverage-badge.yml). That workflow is triggered via
+  # `workflow_run` after this workflow completes on a push to main, so
+  # PR runs never trigger it — no "Skipped" entry in the PR's Checks
+  # panel, and the `vladopajic/go-test-coverage` Docker image is never
+  # pre-pulled on PR pods. The artifact uploaded above is what the
+  # follow-on workflow downloads.
