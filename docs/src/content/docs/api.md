@@ -199,7 +199,7 @@ Executes a SQL query directly against ClickHouse. Results are cached in-process 
 
 The response includes a cache header:
 
-- `X-Cache: BYPASS` — the query bypassed the cache to ensure consistency (Standard for raw SQL)
+- `X-Cache: BYPASS` — the query bypassed the cache to ensure consistency (standard for raw SQL). Additionally, mutation statements (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`) trigger [`InvalidateByTags`](../architecture.md) for the affected tables, clearing any cached results from `/v1/tables/{table}/query` and `/v1/pipes/{name}` for those tables.
 - `X-Cache: HIT` — served from cache (Standard for Pipes and Structured Queries)
 - `X-Cache: MISS` — fetched from ClickHouse and subsequently cached
 

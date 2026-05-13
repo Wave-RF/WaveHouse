@@ -104,8 +104,6 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 }
 
 func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
-	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value}, int64(len(value)), ttl)
-
 	var exp time.Time
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
@@ -113,6 +111,8 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
+
+	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value}, int64(len(value)), ttl)
 
 	if admitted {
 		if ttl > 0 {

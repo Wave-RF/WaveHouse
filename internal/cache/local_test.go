@@ -110,12 +110,21 @@ func TestLocalCache_InvalidateByTags(t *testing.T) {
 
 	// This key belongs to 'users', so it won't be wiped when we invalidate 'clicks'
 	require.NoError(t, c.Set(ctx, "query:users:789", []byte("val3"), 10*time.Second, []string{"users"}))
+	require.NoError(t, c.Set(ctx, "query:join:999", []byte("joined"), 10*time.Second, []string{"clicks", "users"}))
 
 	c.Wait()
 
 	// Wipe out the clicks table cache
 	err = c.InvalidateByTags(ctx, []string{"clicks"})
 	assert.NoError(t, err)
+
+	// Assert: Multi-tag key should be gone — it referenced "clicks"
+	joined, _, _ := c.Get(ctx, "query:join:999")
+	assert.Nil(t, joined, "multi-tag key must be evicted when any of its tags is invalidated")
+
+	// Assert: And tagsMap["users"] must no longer hold a ghost ref to this key.
+	// Verified indirectly: a second InvalidateByTags(["users"]) should succeed without panicking.
+	require.NoError(t, c.InvalidateByTags(ctx, []string{"users"}))
 
 	// Verify the target keys are gone
 	val1, _, _ := c.Get(ctx, "query:clicks:123")
