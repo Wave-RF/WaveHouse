@@ -226,20 +226,31 @@ auth:
 
 func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 	t.Parallel()
-	for _, rate := range []float64{-0.01, 1.01, 2.0} {
-		cfg := Config{
-			Server:     Server{Port: 8080},
-			ClickHouse: ClickHouse{HTTPScheme: "http"},
-			Schema:     Schema{RefreshInterval: 60},
-			OTel: OTel{
-				Enabled: true,
-				Traces:  OTelTraces{Enabled: true, SampleRate: rate},
-				Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
-			},
-		}
-		err := cfg.Validate()
-		require.Error(t, err, "rate %v should be rejected", rate)
-		assert.Contains(t, err.Error(), "traces.sample_rate")
+	cases := []struct {
+		name string
+		rate float64
+	}{
+		{"negative", -0.01},
+		{"just above one", 1.01},
+		{"well above one", 2.0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				OTel: OTel{
+					Enabled: true,
+					Traces:  OTelTraces{Enabled: true, SampleRate: tc.rate},
+					Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
+				},
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "traces.sample_rate")
+		})
 	}
 }
 
@@ -273,6 +284,23 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 			Enabled: false,
 			Traces:  OTelTraces{SampleRate: 99},
 			Logs:    OTelLogs{SampleRate: -1},
+		},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
+	t.Parallel()
+	// Same idea one level down — when the master switch is on but the individual
+	// signal is off, its sample_rate is unused and should not gate startup.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: true,
+			Traces:  OTelTraces{Enabled: false, SampleRate: 99},
+			Logs:    OTelLogs{Enabled: false, SampleRate: -1},
 		},
 	}
 	assert.NoError(t, cfg.Validate())
@@ -315,28 +343,39 @@ func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 
 func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 	t.Parallel()
-	for _, port := range []int{-1, 65536, 99999} {
-		cfg := Config{
-			Server:     Server{Port: 8080},
-			ClickHouse: ClickHouse{HTTPScheme: "http"},
-			Schema:     Schema{RefreshInterval: 60},
-			OTel: OTel{
-				Enabled: true,
-				Traces:  OTelTraces{SampleRate: 0.10},
-				Logs:    OTelLogs{SampleRate: 0.10},
-				Metrics: OTelMetrics{
+	cases := []struct {
+		name string
+		port int
+	}{
+		{"negative", -1},
+		{"just above uint16", 65536},
+		{"well above uint16", 99999},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				OTel: OTel{
 					Enabled: true,
-					Prometheus: OTelMetricsPrometheus{
+					Traces:  OTelTraces{SampleRate: 0.10},
+					Logs:    OTelLogs{SampleRate: 0.10},
+					Metrics: OTelMetrics{
 						Enabled: true,
-						Path:    "/metrics",
-						Port:    port,
+						Prometheus: OTelMetricsPrometheus{
+							Enabled: true,
+							Path:    "/metrics",
+							Port:    tc.port,
+						},
 					},
 				},
-			},
-		}
-		err := cfg.Validate()
-		require.Error(t, err, "port %d should be rejected", port)
-		assert.Contains(t, err.Error(), "prometheus.port")
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "prometheus.port")
+		})
 	}
 }
 

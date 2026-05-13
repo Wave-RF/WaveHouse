@@ -115,13 +115,28 @@ func TestOTLPSamplerFn_WarnFloor(t *testing.T) {
 func TestOTLPSamplerFn_PassesThroughRateForBelowWarn(t *testing.T) {
 	t.Parallel()
 
-	for _, rate := range []float64{0.0, 0.1, 0.5, 1.0} {
-		s := otlpSamplerFn(rate)
-		for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo} {
-			r := slog.NewRecord(time.Time{}, level, "msg", 0)
+	cases := []struct {
+		name  string
+		rate  float64
+		level slog.Level
+	}{
+		{"debug rate=0.0", 0.0, slog.LevelDebug},
+		{"info rate=0.0", 0.0, slog.LevelInfo},
+		{"debug rate=0.1", 0.1, slog.LevelDebug},
+		{"info rate=0.1", 0.1, slog.LevelInfo},
+		{"debug rate=0.5", 0.5, slog.LevelDebug},
+		{"info rate=0.5", 0.5, slog.LevelInfo},
+		{"debug rate=1.0", 1.0, slog.LevelDebug},
+		{"info rate=1.0", 1.0, slog.LevelInfo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := otlpSamplerFn(tc.rate)
+			r := slog.NewRecord(time.Time{}, tc.level, "msg", 0)
 			got := s(context.Background(), r)
-			assert.InDelta(t, rate, got, 1e-9, "rate=%v level=%v", rate, level)
-		}
+			assert.InDelta(t, tc.rate, got, 1e-9)
+		})
 	}
 }
 

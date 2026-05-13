@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,7 +80,7 @@ func run() int {
 	serviceName := "wavehouse"
 
 	var level slog.Level
-	switch os.Getenv("WH_LOG_LEVEL") {
+	switch strings.ToUpper(strings.TrimSpace(os.Getenv("WH_LOG_LEVEL"))) {
 	case "DEBUG":
 		level = slog.LevelDebug
 	case "WARN":

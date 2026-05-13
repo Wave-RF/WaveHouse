@@ -170,11 +170,17 @@ func (c *Config) Validate() error {
 	}
 
 	if c.OTel.Enabled {
-		if r := c.OTel.Traces.SampleRate; r < 0 || r > 1 {
-			return fmt.Errorf("otel.traces.sample_rate %g out of range [0.0, 1.0]", r)
+		// Only validate sample rates for signals that are actually enabled —
+		// an unused field shouldn't block startup.
+		if c.OTel.Traces.Enabled {
+			if r := c.OTel.Traces.SampleRate; r < 0 || r > 1 {
+				return fmt.Errorf("otel.traces.sample_rate %g out of range [0.0, 1.0]", r)
+			}
 		}
-		if r := c.OTel.Logs.SampleRate; r < 0 || r > 1 {
-			return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
+		if c.OTel.Logs.Enabled {
+			if r := c.OTel.Logs.SampleRate; r < 0 || r > 1 {
+				return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
+			}
 		}
 		if c.OTel.Metrics.Enabled && c.OTel.Metrics.Prometheus.Enabled {
 			p := c.OTel.Metrics.Prometheus

@@ -132,7 +132,7 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 
 | Env Var | Default | Description |
 | ------- | ------- | ----------- |
-| `WH_LOG_LEVEL` | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARN`, `ERROR`. Applies to both stdout and (when OTel is enabled) the OTLP log exporter. See `otel.logs.sample_rate` above for the OTLP export rate. |
+| `WH_LOG_LEVEL` | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARN`, `ERROR` (case-insensitive). Applies to both stdout and (when OTel is enabled) the OTLP log exporter. See `otel.logs.sample_rate` above for the OTLP export rate. |
 
 ## Example Config File
 
