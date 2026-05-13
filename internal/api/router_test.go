@@ -196,7 +196,19 @@ func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNoContent, w.Code)
+	// Pin the full "no CORS headers" contract — Allow-Origin alone isn't
+	// enough; a regression that leaked Allow-Methods/Allow-Headers/etc. to a
+	// disallowed origin would still slip through that single assertion.
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
+	assert.Empty(t, w.Header().Get("Access-Control-Expose-Headers"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"))
+	assert.Empty(t, w.Header().Get("Access-Control-Max-Age"))
+	// Vary: Origin is still set in allowlist mode even on a reject, so a
+	// shared cache can't memoize this headerless 204 under the URL alone
+	// and replay it to a later allowed-origin preflight.
+	assert.Equal(t, "Origin", w.Header().Get("Vary"))
 }
 
 func TestNewRouter_RoutesRegistered(t *testing.T) {
