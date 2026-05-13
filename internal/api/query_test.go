@@ -264,3 +264,18 @@ func TestQueryHandler_MutationInvalidation(t *testing.T) {
 		assert.Contains(t, mockCache.InvalidatedTags, "orders")
 	})
 }
+
+func TestQueryHandler_StringLiteralMutationBypass(t *testing.T) {
+	t.Parallel()
+
+	// The word "INSERT" is safely inside a string literal.
+	// isMutation should be false, so it hits the cache coalescing path.
+	sql := `SELECT * FROM events WHERE message = 'INSERT INTO secret_table VALUES (1)'`
+
+	// Prove our cleaner strips the literal so the regex doesn't false-trigger
+	cleaned := cleanSQLForTags(sql)
+	assert.NotContains(t, cleaned, "INSERT")
+
+	isMutation := mutationRe.MatchString(cleaned)
+	assert.False(t, isMutation, "mutation keywords inside strings must not trigger mutation paths")
+}

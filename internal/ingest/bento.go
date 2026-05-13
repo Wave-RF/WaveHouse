@@ -463,20 +463,6 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	return nil
 }
 
-// ingestConfig holds all dependencies that might change between test runs.
-type ingestConfig struct {
-	cache    cache.Cache
-	scheme   string
-	host     string
-	port     string
-	user     string
-	password string
-	db       string
-}
-
-// activeConfig ensures Bento always uses the freshest dependencies.
-var activeConfig atomic.Pointer[ingestConfig]
-
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls

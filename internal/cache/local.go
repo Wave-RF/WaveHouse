@@ -3,33 +3,36 @@ package cache
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
 )
 
-// cacheValue wraps the cached payload with its original string key so that
-// Ristretto's OnEvict callback (which only has access to a hashed uint64 key)
-// can still scrub the tag index.
+// cacheValue wraps the cached payload with its original string key and a version nonce.
 type cacheValue struct {
-	key  string
-	data []byte
+	key     string
+	data    []byte
+	version uint64
 }
 
 // LocalCache is an L1 in-process cache backed by Ristretto.
 type LocalCache struct {
-	cache   *ristretto.Cache[string, *cacheValue]
-	ttls    sync.Map
-	tagsMu  sync.RWMutex
-	tagsMap map[string]map[string]struct{}
-	keyTags map[string][]string
+	cache       *ristretto.Cache[string, *cacheValue]
+	ttls        sync.Map
+	tagsMu      sync.RWMutex
+	tagsMap     map[string]map[string]struct{}
+	keyTags     map[string][]string
+	nextVersion atomic.Uint64
+	keyVersion  map[string]uint64
 }
 
 // NewLocal creates a new Ristretto-backed local cache.
 func NewLocal(maxCost int64) (*LocalCache, error) {
 	l := &LocalCache{
-		tagsMap: make(map[string]map[string]struct{}),
-		keyTags: make(map[string][]string),
+		tagsMap:    make(map[string]map[string]struct{}),
+		keyTags:    make(map[string][]string),
+		keyVersion: make(map[string]uint64),
 	}
 
 	c, err := ristretto.NewCache(&ristretto.Config[string, *cacheValue]{
@@ -41,10 +44,19 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 				return
 			}
 			key := item.Value.key
+			version := item.Value.version
+
 			l.tagsMu.Lock()
+			defer l.tagsMu.Unlock()
+
+			// If the key has been overwritten by a newer Set, ignore this old callback.
+			if currentVer, exists := l.keyVersion[key]; exists && currentVer != version {
+				return
+			}
+
 			l.removeKeyFromTagsLocked(key)
 			l.ttls.Delete(key)
-			l.tagsMu.Unlock()
+			delete(l.keyVersion, key)
 		},
 	})
 	if err != nil {
@@ -80,12 +92,11 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 		exp := expVal.(time.Time)
 		if !exp.IsZero() {
 			remaining = time.Until(exp)
-			// FIX: Simplified eviction path. If it's expired, lock and delete.
-			// The race condition with a concurrent Set resolves naturally as a cache miss.
 			if remaining <= 0 {
 				l.tagsMu.Lock()
 				l.cache.Del(key)
 				l.ttls.Delete(key)
+				delete(l.keyVersion, key) // Clean up version tracker
 				l.removeKeyFromTagsLocked(key)
 				l.tagsMu.Unlock()
 				return nil, 0, nil
@@ -105,9 +116,13 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
 
+	version := l.nextVersion.Add(1)
+	l.keyVersion[key] = version
+
 	l.removeKeyFromTagsLocked(key)
 
-	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value}, int64(len(value)), ttl)
+	// Inject the version into the Ristretto payload
+	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value, version: version}, int64(len(value)), ttl)
 
 	if admitted {
 		if ttl > 0 {
@@ -144,6 +159,7 @@ func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
 			for _, k := range toDelete {
 				l.cache.Del(k)
 				l.ttls.Delete(k)
+				delete(l.keyVersion, k)
 				l.removeKeyFromTagsLocked(k)
 			}
 		}
