@@ -1,44 +1,26 @@
-# Composite action — restores the caches and tool toolchains that `make ci`
-# expects on a fresh ARC pod. Used by .github/workflows/ci.yml after an
-# explicit actions/checkout step (composite actions cannot self-checkout —
-# the workflow has to land the repo first so this action's path resolves).
+# Restores caches + sets up Go/pnpm/Node for `make ci`. Composite
+# actions can't self-checkout, so ci.yml must checkout first. Saves
+# live in ci.yml gated on the `*-cache-hit` outputs below.
 #
-# Restore-only: this action only restores caches. Saving is gated on
-# `github.ref == 'refs/heads/main'` and lives in the consuming workflow
-# (ci.yml) so PR pushes never re-upload the 1.7 GB go-build bundle. The
-# `*-cache-hit` outputs let the workflow short-circuit save when the
-# exact key already exists upstream.
+#   1. Go module + build cache keyed on every go.sum. `restore-keys`
+#      keeps the build cache warm across go.sum bumps — avoids
+#      setup-go's exact-key-only cache, see actions/setup-go#357.
 #
-# What's cached, and why each cache is keyed the way it is:
+#   2. golangci-lint binary + analysis cache keyed on Makefile +
+#      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
 #
-#   1. Go module + build cache (~/go/pkg/mod, ~/.cache/go-build) keyed on
-#      every go.sum in the repo. `restore-keys` lets a changed go.sum still
-#      restore the most recent gobuild-* cache, so `go mod download` only
-#      fetches deltas and the build cache stays warm for unchanged packages.
-#      Avoids setup-go's exact-key-only built-in cache; see
-#      https://github.com/actions/setup-go/issues/357.
-#
-#   2. golangci-lint binary + analysis cache (.bin, ~/.cache/golangci-lint)
-#      keyed on the Makefile (which pins GOLANGCI_LINT_VERSION) plus the
-#      golangci config. The analysis cache is the actual perf win — a warm
-#      lint runs in ~10s vs ~90s cold. The binary itself is cheap but
-#      caching it skips the install-from-curl path on every run.
-#
-#   3. pnpm store (~/.local/share/pnpm/store) keyed on all three lockfiles.
-#      The repo has three pnpm projects (clients/ts/, tests/e2e/sdk/, and
-#      docs/) and a single store covers all of them — pnpm hardlinks from
-#      the store into each project's node_modules.
-#
-# All three caches transparently route to the on-prem
-# falcondev-oss/github-actions-cache-server (no GitHub size limit, sub-VM
-# latency) via ACTIONS_RESULTS_URL pre-set on the ARC pod. No workflow-side
-# config is needed for that — it Just Works.
+#   3. pnpm store (path resolved at runtime) keyed on all three
+#      lockfiles. The three pnpm projects (clients/ts, tests/e2e/sdk,
+#      docs) share one store via hardlinks. Path is dynamic because
+#      pnpm's documented default ~/.local/share/pnpm/store only
+#      applies when $HOME and the project tree share a mount; on some
+#      runners it falls back to a workspace-relative path. Hard-coding
+#      the default silently fails the save with a Path Validation
+#      Error.
 name: Setup CI environment
 description: Restores caches and sets up Go + pnpm + Node for WaveHouse CI
 
-# Cache-hit flags surfaced to the consuming workflow. ci.yml uses these to
-# skip the `actions/cache/save` step when the exact key was already in
-# the cache server (no point re-uploading an identical 1.7 GB blob).
+# Cache-hit flags + resolved pnpm store path surfaced to ci.yml.
 outputs:
   gobuild-cache-hit:
     description: "true if the exact-key Go module + build cache was restored"
@@ -49,14 +31,14 @@ outputs:
   pnpm-cache-hit:
     description: "true if the exact-key pnpm store cache was restored"
     value: ${{ steps.pnpm-cache.outputs.cache-hit }}
+  pnpm-store-path:
+    description: "Absolute path to the pnpm content-addressable store on this runner — pass to actions/cache/save in the consuming workflow."
+    value: ${{ steps.pnpm-store.outputs.path }}
 
 runs:
   using: composite
   steps:
-    # Go module + build cache. setup-go's bundled cache is exact-key-only
-    # (every go.sum change is a hard miss); explicit cache + restore-keys
-    # keeps the build cache warm across dep bumps.
-    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       id: gobuild-cache
       with:
         path: |
@@ -66,10 +48,7 @@ runs:
         restore-keys: |
           gobuild-${{ runner.os }}-go-
 
-    # golangci-lint binary (.bin/) + analysis cache (~/.cache/golangci-lint).
-    # Key on Makefile so a GOLANGCI_LINT_VERSION bump invalidates and the
-    # binary file-target rule reinstalls the new version.
-    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       id: golangci-cache
       with:
         path: |
@@ -79,25 +58,31 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
-    # pnpm store, shared across clients/ts, tests/e2e/sdk, and docs lockfiles.
-    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-      id: pnpm-cache
-      with:
-        path: ~/.local/share/pnpm/store
-        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
-        restore-keys: |
-          pnpm-${{ runner.os }}-
-
-    # `cache: false` because we manage the Go cache explicitly above.
+    # `cache: false` — Go cache is managed explicitly above.
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
         go-version-file: go.mod
         cache: false
 
-    - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+    # pnpm must install before its cache restore so the next step can
+    # ask pnpm for the actual store path.
+    - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       with:
         version: "10.33.0"
         run_install: false
+
+    - name: Resolve pnpm store directory
+      id: pnpm-store
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      id: pnpm-cache
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-${{ runner.os }}-
 
     - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:

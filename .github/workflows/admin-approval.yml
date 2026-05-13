@@ -1,92 +1,65 @@
 name: Admin approval
 
-# Required status check that enforces at-least-one approval from an
-# admin (Eric or Taite) before any PR can merge. Replaces the
-# CODEOWNERS-based `require_code_owner_review` rule so that reviewer
-# assignment can be workflow-controlled (see `housekeeping.yml`, which
-# requests review from the non-author admin on first open) and Task
-# Board state is handled by GitHub's native Projects v2 workflows
-# configured in the project UI.
+# Required status check enforcing at least one admin approval before
+# any PR can merge.
 #
-# Status reporting model: this workflow does NOT use its own check-run
-# conclusion to drive the gate. Instead it manually POSTs a commit
-# status with context "Admin approval" via the GitHub statuses API.
-# Two reasons:
+# This workflow posts a commit status ("Admin approval") via the
+# statuses API rather than relying on its own check-run conclusion.
+# Reasons:
+#   1. PRs are unapproved most of their lifetime — a check-run
+#      FAILURE on every push would spam the author with workflow-
+#      failure emails.
+#   2. Commit-status `pending` blocks merge without firing failure
+#      notifications, and the required-status-check ruleset accepts
+#      either check runs or commit statuses by name.
 #
-#   1. PRs sit unapproved by definition for most of their lifetime.
-#      With check-run conclusions, every push reported FAILURE until
-#      an admin reviewed, which spammed the author with workflow-
-#      failure emails on every iteration.
-#   2. Commit-status state `pending` (⏳) is a non-failure way to
-#      block merge. The required-status-check ruleset accepts either
-#      check runs or commit statuses by name, so swapping to commit
-#      statuses preserves the merge gate while killing the email
-#      noise.
+# The workflow itself always exits 0; the commit status is the
+# source of truth.
 #
-# The workflow itself always exits 0; the commit status is the source
-# of truth. Required by ruleset 15353356 by name "Admin approval".
-#
-# Dependabot patch/minor bumps bypass this check (status posted as
-# success without a review check) — dependabot-automerge.yml's
-# bot-approval + classification gates the auto-merge. Major bumps
-# are NOT bypassed: they fall through to the same admin-review
-# evaluation as human PRs. This closed a hole where any APPROVED
-# review (e.g. from CodeRabbit) could merge a major Dependabot bump
-# without admin involvement — see issue #130 and PR #127 for the
-# trigger. The ruleset's `required_approving_review_count` is set
-# to 0; this status check is the single admin-review gate, so any
-# bot's APPROVED review is no longer load-bearing.
+# Dependabot patch/minor bumps bypass (status posted as success);
+# dependabot-automerge.yml handles those. Major bumps fall through
+# to admin review like any human PR — closed a hole where a bot's
+# APPROVED review (e.g. CodeRabbit) could merge a major bump (see
+# #130, PR #127). The ruleset's `required_approving_review_count`
+# is 0; this status check is the single admin-review gate.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
-    # `edited` drops intentionally — editing a review's body doesn't
-    # change its state, so re-running the approval check on edits
-    # just burns workflow minutes (Claude flagged this).
+    # `edited` is dropped intentionally: editing a review body doesn't
+    # change its state, so re-running on edits just burns minutes.
     types: [submitted, dismissed]
 
 permissions:
   pull-requests: read
-  # statuses: write is the new permission needed for the
-  # `POST /repos/.../statuses/{sha}` API call. This is what lets us
-  # bypass the check-run-conclusion → workflow-fail-email path.
+  # statuses: write is required for `POST /repos/.../statuses/{sha}`,
+  # which is how this workflow drives the merge gate without firing
+  # check-run-failure emails.
   statuses: write
 
-# Inline ADMINS instead of loading from .github/board-config.env. The
-# old workflow checked out main and grepped board-config.env, which
-# meant a board-config rename or a missing file (the file was added
-# in PR #89 itself, so main didn't have it during that PR's run)
-# would crash the workflow before it could post any status — i.e.,
-# back to "workflow failed" emails. Other workflows that need the
-# project IDs still load board-config.env; this one only needs the
-# admin list, so a 1-line env: declaration is simpler and removes
-# the cross-file dependency. If the admin set changes, update both
-# places (this file and .github/board-config.env).
+# ADMINS is inlined here (rather than loaded from board-config.env)
+# so a missing/renamed config file can't crash the workflow before
+# it posts a status. If the admin set changes, also update
+# .github/board-config.env.
 env:
   ADMINS: "EricAndrechek,taitelee"
 
 concurrency:
-  # cancel-in-progress: false is deliberate. The earlier `true` setting
-  # caused Eric-observed "approval doesn't clear the red X" behavior:
-  # when a second event (e.g. a bot comment) fired while the approval-
-  # triggered run was executing, the approval run got cancelled mid-
-  # flight. A cancelled check run shows as CANCELLED in the ruleset's
-  # required-check view, which is neither SUCCESS nor FAILURE and was
-  # being read as "not passing." Let runs complete sequentially — a
-  # few seconds of queueing is cheaper than a stuck gate.
+  # cancel-in-progress: false is deliberate. If a second event
+  # cancels an in-flight approval run, the cancelled status reads as
+  # neither SUCCESS nor FAILURE in the ruleset's required-check view
+  # and the gate stays stuck. Sequential runs trade a few seconds of
+  # queueing for a reliable gate.
   group: admin-approval-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   admin-approval:
-    # The job's display name is the check-run name GitHub auto-creates.
-    # We deliberately use a different name from the commit-status
-    # context ("Admin approval") so the PR checks list doesn't show
-    # two entries with the same name competing — one pass (this
-    # workflow's check run) and one pending (our posted commit
-    # status). The status is the gate; this name advertises the
-    # workflow's job.
+    # Job display name differs from the commit-status context
+    # ("Admin approval") so the PR checks list doesn't show two
+    # entries — the posted commit status is the merge gate; this
+    # job name just advertises the workflow.
     name: Evaluate admin reviews
     runs-on: [wave-rf-runners]
     timeout-minutes: 5
@@ -115,22 +88,17 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
           REVIEW_AUTHOR: ${{ github.event.review.user.login }}
-          # Empty when fetch-metadata was skipped (non-Dependabot PR)
-          # or errored (metadata-fetch failure on a Dependabot PR). The
-          # bypass below treats empty the same as "not patch/minor" —
-          # fall through to admin review.
+          # Empty when fetch-metadata was skipped (non-Dependabot
+          # PR) or errored; bypass below treats empty as "not
+          # patch/minor" and falls through to admin review.
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type || '' }}
-          # Build a link back to this run so the commit status's
-          # target_url surfaces the approval logic if anyone clicks
-          # the status's "Details" link.
+          # target_url for the commit status — "Details" links here.
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
-          # Helper: post a commit status. Always succeed at the
-          # workflow level — the commit status is the source of truth
-          # for whether merge is allowed, not this workflow's
-          # conclusion. (See header comment.)
+          # Helper: post a commit status. The workflow always exits 0;
+          # the commit status is what gates merge.
           post_status() {
             local state="$1"      # pending | success
             local description="$2"
@@ -142,20 +110,15 @@ jobs:
             echo "Posted commit status: state=$state context='Admin approval' description='$description'"
           }
 
-          # Dependabot bypass — only for patch/minor bumps, which
-          # dependabot-automerge.yml handles hands-off. Major bumps,
-          # unknown update-types, and empty UPDATE_TYPE (metadata
-          # fetch failure) fall through to admin-review evaluation,
-          # same path as a human PR. See issue #130: an APPROVED
-          # review from CodeRabbit was satisfying the count rule on
-          # major bumps, and the unconditional bypass here was
-          # satisfying this status check — together that let majors
-          # merge with no admin involvement.
+          # Dependabot bypass — patch/minor only.
+          # dependabot-automerge.yml handles those hands-off.
+          # Major bumps, unknown update-types, and empty UPDATE_TYPE
+          # (metadata-fetch failure) fall through to admin review —
+          # closed a hole where CodeRabbit's APPROVED review could
+          # merge a major bump (see #130).
           #
-          # Match both login shapes ("dependabot[bot]" is the standard
-          # user-context login; "app/dependabot" shows up in some GH
-          # API / app contexts). Keeping both keeps this check aligned
-          # with dependabot-automerge.yml's bypass.
+          # Match both login shapes: "dependabot[bot]" (user
+          # context) and "app/dependabot" (some app contexts).
           if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
             if [[ "$UPDATE_TYPE" == "version-update:semver-patch" || "$UPDATE_TYPE" == "version-update:semver-minor" ]]; then
               short_type="${UPDATE_TYPE#version-update:semver-}"
@@ -166,18 +129,13 @@ jobs:
             echo "::notice::Dependabot PR with update-type='$UPDATE_TYPE' — not auto-bypassed; falling through to admin review."
           fi
 
-          # Admin list comes from .github/board-config.env (loaded into
-          # $GITHUB_ENV at the start of this job).
           IFS=',' read -ra admins <<< "$ADMINS"
 
-          # Fast-path: if the triggering event IS an admin's APPROVED
-          # review, trust the event payload directly and don't round-
-          # trip through the reviews API (which has observable lag
-          # after submit events — can be a second or two before the
-          # new review shows up in GET /reviews responses). Eliminates
-          # the "I approved but the check is still red" confusion for
-          # the common case. The slow path below still runs for every
-          # other event type.
+          # Fast path: if the triggering event is an admin's APPROVED
+          # review, trust the payload directly. The reviews API has
+          # observable lag after submit events; skipping the round-
+          # trip avoids "I approved but the check is still red" for
+          # the common case.
           if [[ "$EVENT_NAME" == "pull_request_review" && "$EVENT_ACTION" == "submitted" && "$REVIEW_STATE" == "approved" ]]; then
             for admin in "${admins[@]}"; do
               if [[ "$REVIEW_AUTHOR" == "$admin" ]]; then
@@ -189,27 +147,18 @@ jobs:
           fi
 
           # Slow path: evaluate each user's *latest* review state via
-          # the reviews API. Required APPROVED. Without this, a
-          # historical APPROVED review that was later followed by
-          # CHANGES_REQUESTED (or dismissed) would still satisfy the
-          # gate.
+          # the reviews API; a historical APPROVED followed by
+          # CHANGES_REQUESTED must not satisfy the gate.
           #
-          # Uses explicit group_by(user) | map(max_by(submitted_at))
-          # rather than sort + unique_by — Copilot flagged that
-          # `unique_by` sorts internally and could keep an arbitrary
-          # review within each user-group depending on input order.
-          # group_by + max_by is unambiguous: pick the most recent
-          # review per user, then filter for APPROVED.
+          # group_by(user) | map(max_by(submitted_at)) is unambiguous
+          # about which review per user to inspect; `unique_by` sorts
+          # internally and could keep an arbitrary review depending
+          # on input order.
           #
-          # Retry the API call up to 3 times with 2-second backoff
-          # to absorb review-submit eventual consistency. The fast-
-          # path above covers the common submit case; this retry
-          # guards non-submit events (synchronize, opened) that fire
-          # in the same cluster as a submit.
-          # Distinguish "API succeeded, no admin in approvers yet"
-          # (retry — propagation lag) from "API failed" (post a
-          # pending status with the error in the description so it's
-          # surfaced, rather than silently treating it as no-approval).
+          # Retry up to 3 times with 2s backoff to absorb review-
+          # submit eventual consistency on non-submit triggers
+          # (synchronize, opened). API failures post pending with the
+          # error in the description so the cause is visible.
           attempts=0
           approvers=""
           admin_found=""
@@ -249,11 +198,10 @@ jobs:
             [ $attempts -lt 3 ] && sleep 2
           done
 
-          # If every attempt errored, post pending with an error
-          # description rather than silently reporting "no admin
-          # approval." The status stays blocking either way (pending
-          # blocks merge same as a failure would), but the description
-          # makes the real cause visible.
+          # If every attempt errored, post pending with the error in
+          # the description rather than silently reporting "no admin
+          # approval"; pending blocks merge either way, but this
+          # surfaces the real cause.
           if [ -z "$admin_found" ] && [ -n "$last_api_err" ]; then
             echo "::error::Unable to read PR reviews after 3 attempts. Last error: $last_api_err"
             post_status pending "Reviews API unreachable; unable to check approval"
@@ -266,15 +214,13 @@ jobs:
             exit 0
           fi
 
-          # No admin approval yet — post pending with the wait list in
-          # the description. Pending blocks merge but doesn't email.
+          # No admin approval yet — post pending with the wait list.
+          # If non-admin approvers exist, call them out so reviewers
+          # see why their approval isn't unblocking merge.
           admin_list=$(IFS=,; echo "${admins[*]}")
           if [[ -z "$approvers" ]]; then
             description="Waiting for approval from one of: $admin_list"
           else
-            # Other approvers exist (non-admin reviewers); call them
-            # out so reviewers see why their approval isn't unblocking
-            # merge.
             description="Waiting for admin approval. Current approvers: $(echo "$approvers" | tr '\n' ',' | sed 's/,$//; s/,/, /g'). Required: one of $admin_list"
           fi
           post_status pending "$description"

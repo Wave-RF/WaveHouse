@@ -1,61 +1,21 @@
 name: Claude PR review
 
-# Auto-reviews PRs whose HEAD commit was authored or pushed by someone
-# with repo permission. Accepts manual re-review via `@claude` /
-# `/review` comments and the workflow_dispatch button.
+# Auto-reviews PRs whose HEAD commit was authored or pushed by a user
+# with repo permission. Manual re-runs via `@claude` / `/review`
+# comments (trusted reviewers only) or workflow_dispatch.
 #
-# Triggers:
-#   pull_request        — fires on every PR open/sync/reopen/
-#                         ready-for-review immediately, not after CI.
-#                         The job's check appears in the PR's Checks
-#                         panel natively — no manual status posting.
-#                         `pull_request_target` doesn't work here:
-#                         the Anthropic action's OIDC token exchange
-#                         rejects pull_request_target's OIDC claims
-#                         (upstream issue #713). With `pull_request`,
-#                         secrets are *not* available for fork PRs —
-#                         that means Claude can't auto-review a PR
-#                         from a drive-by contributor, but it also
-#                         means the action can never run with PR-
-#                         supplied code holding write tokens.
-#                         Internal PRs (the dominant case) work fine
-#                         because secrets are accessible.
-#   issue_comment       — manual re-trigger when a trusted reviewer
-#                         types `@claude` or `/review` in a PR
-#                         comment.
-#   workflow_dispatch   — UI / `gh workflow run` escape hatch with
-#                         an explicit PR-number input.
+# Triggers use `pull_request` rather than `pull_request_target`: the
+# action's OIDC token exchange rejects pull_request_target claims
+# (anthropics/claude-code-action#713). The cost is that fork-PR
+# secrets are unavailable, so drive-by contributor PRs aren't
+# auto-reviewed — the benefit is that the action can never run with
+# fork-supplied code holding write tokens.
 #
-# Trust gate: the HEAD commit's GitHub author OR committer must have
-# at least *read* permission on the repo. "Author" is who wrote the
-# code; "committer" is who applied/pushed it. Accepting either covers:
-#   - normal push (author == committer == trusted user)
-#   - GitHub Web UI commits (author = user, committer = web-flow)
-#   - admin pushing a fixup onto a fork PR (author = external,
-#     committer = admin) — this is the case where the previous
-#     author-only gate skipped Claude even after a trusted user
-#     pushed code.
-# Fails on:
-#   - fork PR where neither author nor committer is a collaborator
-#     (drive-by contributor)
-#   - bot accounts other than Dependabot (filtered at workflow level)
-# When the gate decides to skip, the job still completes with
-# conclusion=success (the gate step exits 0). That keeps the
-# "Claude review" check present on the PR so reviewers can see at
-# a glance that the workflow ran.
-#
-# Prompt structure follows Anthropic's canonical pr-review-comprehensive
-# template — see `.github/prompts/pr-review.md`. The header block we
-# prepend ("REPO: ... PR NUMBER: ...") tells Claude which PR to read
-# the full context of (diff, prior comments, prior reviews, linked
-# issues). The action fetches diff/comments via GitHub API; the PR
-# HEAD checkout is what lets it run local git commands against the
-# changed files.
-#
-# Gemini Code Assist (installed as a GitHub App) also reviews PRs. The
-# two reviewers operate independently and their outputs are both
-# advisory. The ruleset (PR housekeeping + CI + Admin approval +
-# review-thread resolution) is the actual merge gate.
+# Trust gate: HEAD commit's author OR committer must have ≥read on
+# the repo. Accepting either covers the admin-fixup-onto-fork-PR case
+# (author = external, committer = admin) that author-only gates miss.
+# When the gate skips, the job exits 0 so the "Claude review" check
+# stays visible on the PR.
 
 on:
   pull_request:
@@ -69,29 +29,23 @@ on:
         required: true
         type: string
 
-# Dedup per PR. PR number reachable from each event payload before
-# any step runs. Fast-follow human action (new push, /review comment)
-# cancels an in-flight review against the now-stale HEAD. Bot-triggered
-# events do NOT cancel — otherwise Claude's own sticky comment fires
-# an `issue_comment created` webhook that would cancel the in-flight
-# review-run as it's still finishing posting. The new bot-triggered
-# run is filtered out at the job-level `if:` anyway, so making it
-# non-cancelling here just lets the original run complete.
+# Dedup per PR. Only `pull_request` events cancel the in-flight run —
+# a new HEAD SHA invalidates any review mid-flight. Other triggers
+# (issue_comment, workflow_dispatch) queue behind it instead, so:
+#   - `@claude` / `/review` comments don't kill the in-flight review
+#   - manual retries don't kill the previous attempt
+#   - Claude's own sticky-comment edits (which fire `issue_comment`)
+#     can't cancel themselves
 concurrency:
   group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
-  cancel-in-progress: ${{ github.event.sender.type != 'Bot' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   review:
-    # The check name on the PR is the *job* name. "Claude review"
-    # is what shows up in the Checks panel.
     name: Claude review
-    # Workflow-level cheap filter: skip Dependabot (handled by
-    # dependabot-automerge.yml) and clearly-untrusted issue_comment
-    # invocations. The HEAD-committer permission check is in-script
-    # so we catch "admin pushed onto an external author's PR" —
-    # webhook author_association would still report the original
-    # opener and miss this.
+    # Cheap workflow-level filter. The real trust check is in-script
+    # below — webhook `author_association` only reports the PR opener
+    # and would miss admin-pushed fixups.
     if: |
       (
         github.event_name == 'pull_request'
@@ -125,9 +79,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve PR number + HEAD SHA. pull_request gives us both
-          # in the webhook payload; the other paths need a
-          # `gh pr view` round-trip.
+          # Resolve PR number + HEAD SHA. pull_request has both in the
+          # webhook payload; other paths need a `gh pr view` round-trip.
           case "$EVENT_NAME" in
             pull_request)
               pr_num="$PR_EVENT_NUM"
@@ -143,16 +96,11 @@ jobs:
               ;;
           esac
 
-          # Self-modification gate. The Anthropic action runs a
-          # validation step that fails when its own workflow file or
-          # the prompt template is in the PR's diff (it parses them
-          # and gets confused by ones that aren't the live config).
-          # When the PR modifies either, skip the action entirely —
-          # the check still shows success because we exit 0 here, the
-          # *next* PR's run picks up the change, and we don't get a
-          # red Claude check on every PR-that-edits-Claude. Documented
-          # upstream-known limitation: anthropics/claude-code-action
-          # discussions around workflow-self-edit auto-fail.
+          # Self-modification gate. The action's validation step
+          # auto-fails when its own workflow or prompt file is in the
+          # PR diff (known limitation in anthropics/claude-code-action).
+          # Skip the action when those files are touched; the change
+          # applies to the next PR's run instead.
           self_mod_paths=$(gh pr view "$pr_num" -R "$REPO" --json files --jq '
             .files[].path
             | select(. == ".github/workflows/claude-review.yml"
@@ -164,14 +112,9 @@ jobs:
             exit 0
           fi
 
-          # Trust gate. Fetch HEAD commit; check author and committer
-          # logins against the repo's collaborator permission map.
-          # `web-flow` is the GitHub Web UI's bot identity (in-browser
-          # editor / suggestion-accept) and has no real permission —
-          # skip it as a trust signal. Permission lookup with the
-          # integration GITHUB_TOKEN works for collaborators (incl.
-          # private org members) where REST author_association would
-          # report NONE.
+          # Trust gate: check author + committer logins against the
+          # collaborator permission map. Skip `web-flow` (GitHub's
+          # Web UI bot identity) — it has no real permission.
           commit=$(gh api "repos/$REPO/commits/$head_sha")
           author_login=$(echo "$commit" | jq -r '.author.login // empty')
           committer_login=$(echo "$commit" | jq -r '.committer.login // empty')
@@ -206,20 +149,16 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.skip != 'true'
         with:
-          # pull_request defaults to checking out the PR's merge ref
-          # (a temporary merge of PR HEAD into base). Pin to the PR
-          # HEAD SHA explicitly so claude-code-action sees exactly
-          # the user's commit, not a merge artefact. The trust gate
-          # above ensures only commits from repo-permissioned users
-          # land here.
+          # Check out the PR HEAD SHA, not the default merge ref, so
+          # the action sees the user's commit not a merge artifact.
+          # The trust gate above ensures only commits from
+          # repo-permissioned users land here.
           ref: ${{ steps.gate.outputs.head_sha }}
           fetch-depth: 1
 
+      # Prepend a REPO + PR-number header to the prompt template so
+      # the action knows which PR to fetch context for.
       - name: Build review prompt from .github/prompts/pr-review.md
-        # The prompt template is checked in as markdown so it's diff-able
-        # and editor-friendly. We prepend the dynamic header (REPO + PR
-        # number) here and pass the assembled string via $GITHUB_OUTPUT.
-        # Using a heredoc-style multi-line output to preserve newlines.
         id: prompt
         if: steps.gate.outputs.skip != 'true'
         env:
@@ -240,21 +179,13 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # One summary comment per PR — sticky so iteration history
-          # stays in one place rather than accreting "Claude reviewed
-          # again" comments per push. Specific findings go in inline
-          # review comments (see `claude_args` below + the prompt
-          # template) which become real review threads that count
-          # against the ruleset's `required_review_thread_resolution`
-          # — same blocking mechanism Gemini and Copilot's review
-          # comments use.
+          # One sticky summary comment per PR — specific findings go
+          # in inline review threads (see allowedTools below) so they
+          # block merge via the ruleset's review-thread resolution.
           use_sticky_comment: true
-          # `claude_args` allows the inline-comment MCP tool plus the
-          # narrow `gh pr` reads the prompt instructs Claude to use.
           # Without an explicit allow-list, Claude Code's default
-          # tool set doesn't include the inline-comment MCP tool, so
-          # the model falls back to writing everything into the
-          # sticky comment.
+          # tools don't include the inline-comment MCP tool, so
+          # findings would collapse into the sticky comment.
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/*/pulls/*/comments:*),Bash(gh api repos/*/issues/*/comments:*),Read,Glob,Grep"
           prompt: ${{ steps.prompt.outputs.content }}
