@@ -405,17 +405,26 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		buf.WriteString("\n")
 	}
 
+	var liveCfg ingestConfig
+	if ptr := activeConfig.Load(); ptr != nil {
+		liveCfg = *ptr
+	} else {
+		err := fmt.Errorf("no active ingest configuration available")
+		chSpan.RecordError(err)
+		return err
+	}
+
 	q := url.Values{}
-	q.Set("database", c.db)
+	q.Set("database", liveCfg.db)
 
 	q.Set("query", fmt.Sprintf("INSERT INTO `%s` FORMAT JSONEachRow", tableName))
 	q.Set("input_format_skip_unknown_fields", "1")
 	q.Set("date_time_input_format", "best_effort")
 
 	u := &url.URL{
-		Scheme:   c.scheme,
-		Host:     net.JoinHostPort(c.host, c.port), // Safely joins host and port, adding IPv6 brackets if needed
-		RawQuery: q.Encode(),                       // Safely URL-encodes all parameters
+		Scheme:   liveCfg.scheme,
+		Host:     net.JoinHostPort(liveCfg.host, liveCfg.port),
+		RawQuery: q.Encode(),
 	}
 
 	req, err := http.NewRequestWithContext(reqCtx, "POST", u.String(), &buf)
@@ -425,9 +434,10 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ClickHouse-User", c.user)
-	req.Header.Set("X-ClickHouse-Key", c.password)
+	req.Header.Set("X-ClickHouse-User", liveCfg.user)
+	req.Header.Set("X-ClickHouse-Key", liveCfg.password)
 
+	// The HTTP client is stateless and safe to keep on the struct
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		chSpan.RecordError(err)
@@ -445,16 +455,11 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return err
 	}
 
-	var liveCache cache.Cache
-	if ptr := activeCache.Load(); ptr != nil {
-		liveCache = *ptr
-	}
-
-	if liveCache != nil {
+	if liveCfg.cache != nil {
 		invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer invCancel()
 
-		if err := liveCache.InvalidateByTags(invCtx, []string{tableName}); err != nil {
+		if err := liveCfg.cache.InvalidateByTags(invCtx, []string{tableName}); err != nil {
 			slog.WarnContext(ctx, "failed to invalidate cache after successful write",
 				"table", tableName,
 				"error", err,
@@ -465,11 +470,19 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	return nil
 }
 
-// activeCache ensures the Bento plugin factory always dereferences the freshest
-// cache instance, preventing stale pointers during sequential integration tests.
-// NOTE: While Bento output registration (sync.Once) only fires once per process,
-// StartIngestWorker updates this pointer so subsequent test setups use the new cache.
-var activeCache atomic.Pointer[cache.Cache]
+// ingestConfig holds all dependencies that might change between test runs.
+type ingestConfig struct {
+	cache    cache.Cache
+	scheme   string
+	host     string
+	port     string
+	user     string
+	password string
+	db       string
+}
+
+// activeConfig ensures Bento always uses the freshest dependencies.
+var activeConfig atomic.Pointer[ingestConfig]
 
 // StartIngestWorker sets up the Bento-based ingest pipeline and returns the
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
@@ -483,10 +496,20 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 
 	logger := slog.Default().With("component", "bento")
 
-	// Store the newest cache pointer every time this is called
-	if apiCache != nil {
-		activeCache.Store(&apiCache)
+	// Store the newest config every time this is called
+	cfg := ingestConfig{
+		cache:    apiCache,
+		scheme:   chHTTPScheme,
+		host:     host,
+		port:     chHTTPPort,
+		user:     chUser,
+		password: chPassword,
+		db:       chDB,
 	}
+	if cfg.scheme == "" {
+		cfg.scheme = "http"
+	}
+	activeConfig.Store(&cfg)
 
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -531,19 +554,9 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 
 		if err := service.RegisterBatchOutput("clickhouse_json_bridge", service.NewConfigSpec(),
 			func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
-				scheme := chHTTPScheme
-				if scheme == "" {
-					scheme = "http" // Default fallback
-				}
-
+				// We no longer capture connection params here!
 				return &clickhouseOutput{
 					httpClient: &http.Client{Timeout: 30 * time.Second},
-					scheme:     scheme,
-					host:       host,
-					port:       chHTTPPort,
-					user:       chUser,
-					password:   chPassword,
-					db:         chDB,
 				}, service.BatchPolicy{}, 1, nil
 			},
 		); err != nil {

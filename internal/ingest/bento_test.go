@@ -97,6 +97,18 @@ func (m *bentoMockConn) Exec(ctx context.Context, query string, args ...any) err
 	return nil
 }
 
+func setupMockConfig() {
+	activeConfig.Store(&ingestConfig{
+		scheme:   "http",
+		host:     "localhost",
+		port:     "8123",
+		user:     "test_user",
+		password: "test_pass",
+		db:       "test_db",
+		cache:    nil,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // safeIdentifierRe tests
 // ---------------------------------------------------------------------------
@@ -668,6 +680,7 @@ func TestClickhouseOutput_WriteBatch_UnsafeTableName(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 	t.Parallel()
+	setupMockConfig()
 
 	// Mock an HTTP 200 OK response from ClickHouse
 	mockTransport := &mockRoundTripper{
@@ -710,6 +723,7 @@ func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_HTTPErrorResponse(t *testing.T) {
 	t.Parallel()
+	setupMockConfig()
 
 	// Mock an HTTP 400 Bad Request response from ClickHouse
 	mockTransport := &mockRoundTripper{
@@ -736,6 +750,7 @@ func TestClickhouseOutput_WriteBatch_HTTPErrorResponse(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_NetworkError(t *testing.T) {
 	t.Parallel()
+	setupMockConfig()
 
 	// Mock a hard network failure (e.g. connection refused)
 	mockTransport := &mockRoundTripper{
@@ -759,6 +774,7 @@ func TestClickhouseOutput_WriteBatch_NetworkError(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_MalformedStartTime(t *testing.T) {
 	t.Parallel()
+	setupMockConfig()
 
 	mockTransport := &mockRoundTripper{
 		roundTripFn: func(req *http.Request) (*http.Response, error) {
@@ -785,6 +801,7 @@ func TestClickhouseOutput_WriteBatch_MalformedStartTime(t *testing.T) {
 
 func TestClickhouseOutput_WriteBatch_MultiMessage(t *testing.T) {
 	t.Parallel()
+	setupMockConfig()
 
 	mockTransport := &mockRoundTripper{
 		roundTripFn: func(req *http.Request) (*http.Response, error) {
@@ -853,6 +870,7 @@ func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			setupMockConfig()
 
 			// MOVED INSIDE THE LOOP: Each subtest now has its own isolated variables
 			var capturedBody string

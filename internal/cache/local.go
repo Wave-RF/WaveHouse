@@ -116,14 +116,14 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
 
+	l.removeKeyFromTagsLocked(key)
+
 	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value}, int64(len(value)), ttl)
 
 	if admitted {
 		if ttl > 0 {
 			l.ttls.Store(key, exp)
 		}
-
-		l.removeKeyFromTagsLocked(key)
 
 		if len(tags) > 0 {
 			l.keyTags[key] = tags

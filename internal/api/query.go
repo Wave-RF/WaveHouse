@@ -34,7 +34,9 @@ var (
 	stringLiteralRe = regexp.MustCompile(`'(?:''|\\'|[^'])*'`)
 )
 
-func extractCacheTags(cleanedSQL string) []string {
+func extractCacheTags(rawSQL string) []string {
+	cleanedSQL := cleanSQLForTags(rawSQL)
+
 	matches := tableExtractionRe.FindAllStringSubmatch(cleanedSQL, -1)
 	var tags []string
 	seen := make(map[string]bool)
