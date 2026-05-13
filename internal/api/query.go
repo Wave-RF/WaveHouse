@@ -29,16 +29,13 @@ var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE
 var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
 
 var (
-	blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	lineCommentRe  = regexp.MustCompile(`--.*`)
+	blockCommentRe  = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	lineCommentRe   = regexp.MustCompile(`--.*`)
+	stringLiteralRe = regexp.MustCompile(`'[^']*'|"[^"]*"`)
 )
 
-func extractCacheTags(sql string) []string {
-	// Strip comments so they don't break the whitespace matching
-	cleanSQL := blockCommentRe.ReplaceAllString(sql, " ")
-	cleanSQL = lineCommentRe.ReplaceAllString(cleanSQL, " ")
-
-	matches := tableExtractionRe.FindAllStringSubmatch(cleanSQL, -1)
+func extractCacheTags(cleanedSQL string) []string {
+	matches := tableExtractionRe.FindAllStringSubmatch(cleanedSQL, -1)
 	var tags []string
 	seen := make(map[string]bool)
 	for _, m := range matches {
@@ -105,10 +102,16 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isMutation := h.Cache != nil && mutationRe.MatchString(req.SQL)
+	// Strip comments and strings to prevent false-positive mutation detection
+	cleanSQL := blockCommentRe.ReplaceAllString(req.SQL, " ")
+	cleanSQL = lineCommentRe.ReplaceAllString(cleanSQL, " ")
+	cleanSQL = stringLiteralRe.ReplaceAllString(cleanSQL, "")
+
+	isMutation := h.Cache != nil && mutationRe.MatchString(cleanSQL)
 
 	var execCtx context.Context
 	if isMutation {
+		// For mutations, ignore client disconnects so the write and cache invalidation always finish
 		execCtx = context.WithoutCancel(r.Context())
 	} else {
 		execCtx = r.Context()
@@ -117,21 +120,33 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	queryCtx, cancel := context.WithTimeout(execCtx, 30*time.Second)
 	defer cancel()
 
-	key := queryCacheKey(req.SQL, req.Params)
-	val, err, _ := h.sf.Do(key, func() (any, error) {
-		return h.executeQuery(queryCtx, req.SQL, req.Params)
-	})
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	var result []map[string]any
+	var execErr error
+
+	if isMutation {
+		result, execErr = h.executeQuery(queryCtx, req.SQL, req.Params)
+	} else {
+		// Coalesce concurrent identical read queries to protect ClickHouse from stampedes.
+		key := queryCacheKey(req.SQL, req.Params)
+		var val any
+		val, execErr, _ = h.sf.Do(key, func() (any, error) {
+			return h.executeQuery(queryCtx, req.SQL, req.Params)
+		})
+		if execErr == nil {
+			result = val.([]map[string]any)
+		}
+	}
+
+	if execErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, execErr.Error())
 		return
 	}
 
-	result := val.([]map[string]any)
-
+	// Cache Invalidation
 	if isMutation {
-		tags := extractCacheTags(req.SQL)
+		// Pass the cleanSQL to avoid double-stripping in the helper
+		tags := extractCacheTags(cleanSQL)
 		if len(tags) > 0 {
-			// Decouple from request context so client disconnects don't abort the cache purge
 			invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer invCancel()
 

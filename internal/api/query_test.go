@@ -205,6 +205,16 @@ func TestExtractCacheTags(t *testing.T) {
 			sql:      "UPDATE state SET x = 1; INSERT INTO events (id) VALUES (1)",
 			expected: []string{"state", "events"},
 		},
+		{
+			name:     "mutation with block comment stripped",
+			sql:      "INSERT INTO /*x*/ events (id) VALUES (1)",
+			expected: []string{"events"},
+		},
+		{
+			name:     "select with trailing line comment stripped",
+			sql:      "SELECT * FROM users -- tail",
+			expected: []string{"users"},
+		},
 	}
 
 	for _, tc := range cases {
