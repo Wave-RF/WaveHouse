@@ -1,35 +1,27 @@
 name: PR housekeeping
 
-# Combines three responsibilities that all run once per PR open/push,
-# in a single job to keep PR-time runner-pod usage low:
+# Runs once per PR open/push to:
+#   1. Apply path-based labels via actions/labeler.
+#   2. Validate PR title against Conventional Commits.
+#   3. Request review from the non-author admin on first open or
+#      draft → ready.
 #
-#   1. Apply path-based labels via actions/labeler (was label.yml).
-#   2. Validate PR title against Conventional Commits (was pr-title.yml).
-#   3. Request review from the non-author admin on first open / on
-#      draft → ready (was project-orchestrator.yml).
+# Uses `pull_request_target` so fork PRs get labels + sticky comments
+# with base-repo permissions (a `pull_request` trigger lacks the
+# write scopes on forks).
 #
-# Triggered by `pull_request_target` so the workflow runs from the
-# default branch with base-repo permissions — fork PRs get auto-labels
-# AND the title sticky-comment. (`pull_request` from the head ref isn't
-# used: it lacks `pull-requests: write` and `issues: write` on forks,
-# so the labeler + sticky-comment steps would silently fail there.)
-#
-# Required by the `main branch protection` ruleset as the
-# `PR housekeeping` check — must report on every PR or merge gets stuck
-# at "pending." The check fails if and only if the PR title doesn't
-# match Conventional Commits; labeling and reviewer-assign failures are
-# non-fatal so a flaky API call can't block merge.
+# Required by branch protection. Fails only on a bad PR title;
+# labeling + reviewer-assign failures are non-fatal so a flaky API
+# call can't block merge.
 
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize, ready_for_review]
 
 permissions:
-  # `issues: write` is required for /repos/.../issues/{num}/comments
-  # (the sticky-comment endpoint) — PRs are issues at the REST layer
-  # for comments but `pull-requests: write` alone does NOT grant that
-  # scope. Without it, fork PR runs fail to post the comment even on
-  # `pull_request_target` with full base-repo permissions.
+  # `issues: write` is required for the sticky-comment endpoint
+  # (/repos/.../issues/{num}/comments) — `pull-requests: write` alone
+  # does not grant it, and fork PRs fail to comment without it.
   contents: read
   issues: write
   pull-requests: write
@@ -45,10 +37,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout main (board-config + composite-action source)
-        # pull_request_target defaults to base, but make the checkout
-        # explicit so `./.github/actions/assign-and-request-review`
-        # resolves and the next step can read board-config.env.
-        # persist-credentials: false — housekeeping doesn't push.
+        # Explicit ref so the local composite action and board-config.env
+        # resolve from the default branch, not the PR head.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -56,51 +46,33 @@ jobs:
           persist-credentials: false
 
       - name: Load board config
-        # ADMINS (comma-separated) for the reviewer-assign step. Project
-        # IDs in the same file are loaded but unused here — harmless.
+        # ADMINS (comma-separated) used by the reviewer-assign step.
         run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
-      # --- Path-based labeling -----------------------------------------
-      # actions/labeler reads .github/labeler.yml from the BASE branch
-      # (main) and applies labels based on the PR's changed files.
-      # `sync-labels: true` removes labels when their matching files are
-      # no longer in the diff, so labels stay in sync with the current
-      # change set rather than accumulating.
+      # `sync-labels: true` removes labels when their matching files
+      # leave the diff, so labels track the current change set.
       - name: Apply file-path labels
         uses: actions/labeler@f27b608878404679385c85cfa523b85ccb86e213 # v6.1.0
         with:
           configuration-path: .github/labeler.yml
           sync-labels: true
 
-      # --- PR title validation -----------------------------------------
       - name: Check Conventional Commits format
         id: check
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          # Max length matches the conventional 72-char git subject cap;
-          # PR titles become the squash-merge subject on main, and longer
-          # subjects mangle `git log --oneline`, GitHub's PR list, and
-          # most commit-graph viewers.
-          #
-          # Dependabot's grouped-update titles routinely exceed this cap
-          # (e.g. `deps: bump github.com/nats-io/nats.go from 1.51.0 to
-          # 1.52.0 in the go-deps group` is 80 chars). Dependabot's
-          # title format isn't configurable, so we exempt its PRs from
-          # the length check rather than renaming every bump by hand.
-          # The Conventional Commits format regex is still enforced —
-          # Dependabot already uses lowercase `deps:` / `ci:` / `docs:`
-          # prefixes, so the regex passes naturally.
+          # Matches the conventional 72-char git subject cap; PR titles
+          # become the squash-merge subject on main. Dependabot's
+          # grouped-update titles routinely exceed 72 chars and the
+          # format isn't configurable, so Dependabot PRs are exempt
+          # from the length check (the format regex still applies).
           MAX_LEN: "72"
         run: |
           # Type list — keep in sync with CONTRIBUTING.md.
-          # Optional `!` before `:` marks a breaking change per
-          # Conventional Commits 1.0.0.
-          #
           # The `[^A-Z]` after `: ` enforces a lowercase first character
-          # — this is *house style* (consistency in the squashed commit
-          # log), NOT a Conventional Commits requirement. The spec is
-          # silent on subject capitalization.
+          # as house style; the Conventional Commits spec is silent on
+          # subject capitalization.
           pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
           is_dependabot=false
@@ -124,9 +96,9 @@ jobs:
           fi
 
       - name: Post / update sticky comment on title fail
-        # continue-on-error because GITHUB_TOKEN is read-only for fork
-        # PRs, so the comment will fail there — that must not mask the
-        # final exit-1 below that drives the required-check status.
+        # continue-on-error: GITHUB_TOKEN is read-only for fork PRs so
+        # the comment fails there; that must not mask the final exit 1
+        # that drives the required-check status.
         if: steps.check.outputs.passed == 'false'
         continue-on-error: true
         env:
@@ -190,20 +162,12 @@ jobs:
             echo "Removed stale pr-title-lint comment ($EXISTING)"
           fi
 
-      # --- Request review from the non-author admin --------------------
-      # Replaces the project-orchestrator.yml reeval path's "Assign +
-      # request review" step. Fires only on first open or
-      # draft → ready, *not* on every synchronize: the
-      # assign-and-request-review composite is idempotent (skips users
-      # already requested), but firing it on every push would re-request
-      # after `dismiss_stale_reviews_on_push` clears the request on a
-      # CHANGES_REQUESTED review, re-spamming the reviewer before the
-      # author has explicitly hit "re-request review."
-      #
-      # Skipped for drafts (no point pinging a reviewer for WIP) and
-      # for Dependabot PRs (dependabot-automerge.yml assigns both admins
-      # on major bumps; patch/minor go straight to auto-merge with no
-      # human reviewer required).
+      # Fires only on first open or draft → ready, NOT on every
+      # synchronize: with `dismiss_stale_reviews_on_push` enabled,
+      # re-requesting on every push would re-spam the reviewer before
+      # the author hit "re-request review" after a CHANGES_REQUESTED.
+      # Drafts and Dependabot PRs are skipped (Dependabot is handled
+      # by dependabot-automerge.yml).
       - name: Request review from non-author admin
         if: |
           (github.event.action == 'opened' || github.event.action == 'ready_for_review')
@@ -213,11 +177,9 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         # Picks the non-author admin:
-        #   - author is an admin → reviewer is the *other* admin (first
-        #     non-self in $ADMINS order)
-        #   - author is anyone else → admin chosen deterministically by
-        #     PR_NUM % len(admins) so load spreads over time
-        # Same rule as the orchestrator used; ported here verbatim.
+        #   - author is an admin → the *other* admin
+        #   - otherwise → admin[PR_NUM % len(admins)] so review load
+        #     spreads deterministically over time
         id: pick-reviewer
         run: |
           set -euo pipefail
@@ -245,8 +207,8 @@ jobs:
           echo "Picked reviewer: $picked (author=$PR_AUTHOR, is_admin=$is_admin)"
 
       - name: Assign + request review (non-fatal)
-        # continue-on-error: a flaky review-request API call must not
-        # mask the title-lint exit code that drives the required check.
+        # A flaky review-request API call must not mask the title-lint
+        # exit code that drives the required check.
         if: |
           (github.event.action == 'opened' || github.event.action == 'ready_for_review')
           && github.event.pull_request.draft == false
@@ -261,8 +223,7 @@ jobs:
           reviewers: ${{ steps.pick-reviewer.outputs.reviewer }}
 
       - name: Fail the check if title was invalid
-        # Final step owns the exit code so the check's red-X reliably
-        # reflects the regex result, independent of comment-step or
-        # reviewer-assign I/O.
+        # Final step owns the exit code so the check status reflects
+        # the regex result, independent of comment/review-assign I/O.
         if: steps.check.outputs.passed == 'false'
         run: exit 1
