@@ -53,6 +53,10 @@ files=("${DIR}"/*.json)
 
 for f in "${files[@]}"; do
   title="$(jq -r '.title' "$f")"
+  if [ -z "$title" ] || [ "$title" = "null" ]; then
+    echo "error: dashboard file '$f' must contain a non-empty .title" >&2
+    exit 1
+  fi
   id="$(printf '%s' "$existing" | jq -r --arg t "$title" 'first(.data[] | select(.data.title == $t) | .id) // empty')"
   if [ -n "$id" ]; then
     echo "↻ updating  ${title}  (${id})"
