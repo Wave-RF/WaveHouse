@@ -196,9 +196,9 @@ func TestExtractCacheTags(t *testing.T) {
 			expected: []string{"inner_tbl"},
 		},
 		{
-			name:     "quoted identifier rejected",
-			sql:      "SELECT * FROM \"my.table\"",
-			expected: nil,
+			name:     "quoted identifiers supported",
+			sql:      "SELECT * FROM `my_db`.`my_table` JOIN \"other_table\"",
+			expected: []string{"my_table", "other_table"},
 		},
 		{
 			name:     "mutations",

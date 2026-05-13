@@ -28,8 +28,17 @@ var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE
 // mutationRe detects queries that modify data or schema to trigger cache invalidation.
 var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
 
+var (
+	blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	lineCommentRe  = regexp.MustCompile(`--.*`)
+)
+
 func extractCacheTags(sql string) []string {
-	matches := tableExtractionRe.FindAllStringSubmatch(sql, -1)
+	// Strip comments so they don't break the whitespace matching
+	cleanSQL := blockCommentRe.ReplaceAllString(sql, " ")
+	cleanSQL = lineCommentRe.ReplaceAllString(cleanSQL, " ")
+
+	matches := tableExtractionRe.FindAllStringSubmatch(cleanSQL, -1)
 	var tags []string
 	seen := make(map[string]bool)
 	for _, m := range matches {
@@ -96,12 +105,18 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	isMutation := h.Cache != nil && mutationRe.MatchString(req.SQL)
+
+	var execCtx context.Context
+	if isMutation {
+		execCtx = context.WithoutCancel(r.Context())
+	} else {
+		execCtx = r.Context()
+	}
+
+	queryCtx, cancel := context.WithTimeout(execCtx, 30*time.Second)
 	defer cancel()
 
-	// Coalesce concurrent identical queries to protect ClickHouse from stampedes.
-	// We still bypass the application cache, but we prevent N simultaneous identical
-	// requests from hammering the database.
 	key := queryCacheKey(req.SQL, req.Params)
 	val, err, _ := h.sf.Do(key, func() (any, error) {
 		return h.executeQuery(queryCtx, req.SQL, req.Params)
@@ -113,8 +128,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	result := val.([]map[string]any)
 
-	// If this raw SQL was a mutation, extract the table names and invalidate them.
-	if h.Cache != nil && mutationRe.MatchString(req.SQL) {
+	if isMutation {
 		tags := extractCacheTags(req.SQL)
 		if len(tags) > 0 {
 			// Decouple from request context so client disconnects don't abort the cache purge

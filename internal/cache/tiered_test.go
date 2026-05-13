@@ -186,12 +186,10 @@ func (s *slowCache) Get(ctx context.Context, key string) ([]byte, time.Duration,
 	return s.inner.Get(ctx, key)
 }
 
-// Fixed: Added tags []string parameter
 func (s *slowCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration, tags []string) error {
 	return s.inner.Set(ctx, key, value, ttl, tags)
 }
 
-// Fixed: Renamed from InvalidateByPrefix and changed signature
 func (s *slowCache) InvalidateByTags(ctx context.Context, tags []string) error {
 	return s.inner.InvalidateByTags(ctx, tags)
 }
