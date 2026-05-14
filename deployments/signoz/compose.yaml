@@ -65,13 +65,25 @@ services:
       - bash
       - -c
       - |
+        set -euo pipefail
+        # SHA256s from upstream's signed checksums file:
+        #   https://github.com/SigNoz/signoz/releases/download/histogram-quantile/v0.0.1/histogram-quantile_0.0.1_checksums.txt
+        # Update both `version` and the case branches together when bumping.
         version="v0.0.1"
         node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
         node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        case "$${node_os}_$${node_arch}" in
+          linux_amd64)  expected_sha=33997073eb6d82b7be4f27f9fc8ec9e28a395e0f20674d5d54bb2fa28a75488d ;;
+          linux_arm64)  expected_sha=e5605ebffa82a450ebbcdf6cf19dad546e1e40d52dbf3e03cfd2d2d5b7394211 ;;
+          darwin_amd64) expected_sha=5ec1043e57a089380d5fac5fef6e078124d6b825737831ef05f382a17687a626 ;;
+          darwin_arm64) expected_sha=4e6d87f723a141472582f6ef04a935c61870b05ed94d518dc7c29f3d5e9db038 ;;
+          *) echo "no histogram-quantile SHA256 pinned for $${node_os}/$${node_arch}" >&2; exit 1 ;;
+        esac
         echo "Fetching histogram-quantile binary for $${node_os}/$${node_arch}"
         cd /tmp
-        wget -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
-        tar -xvzf histogram-quantile.tar.gz
+        wget -q -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        echo "$${expected_sha}  histogram-quantile.tar.gz" | sha256sum -c -
+        tar -xzf histogram-quantile.tar.gz
         mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
     volumes:
       - clickhouse-scripts:/var/lib/clickhouse/user_scripts/
@@ -126,7 +138,13 @@ services:
       - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
       - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
       - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
-      - SIGNOZ_TOKENIZER_JWT_SECRET=secret
+      # JWT signing key for the SigNoz tokenizer. No default by design — a shared
+      # default in a public repo would let anyone forge tokens against any local
+      # SigNoz instance that didn't override it. `make signoz-up` generates a
+      # random per-checkout value (cached in deployments/signoz/.signoz-secret.local,
+      # gitignored; rotated by `make signoz-wipe`). If you're running compose
+      # directly: `export SIGNOZ_TOKENIZER_JWT_SECRET=$(openssl rand -hex 32)`.
+      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_TOKENIZER_JWT_SECRET:?Set SIGNOZ_TOKENIZER_JWT_SECRET — e.g. via 'make signoz-up' or 'export SIGNOZ_TOKENIZER_JWT_SECRET=$$(openssl rand -hex 32)'}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
       interval: 30s

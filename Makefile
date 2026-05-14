@@ -233,14 +233,25 @@ deps-wipe: ## Stop ClickHouse AND destroy its data volume (DESTRUCTIVE — use t
 # SigNoz stack lives in its own compose file. Same DEV_COMPOSE pattern —
 # alias once, keep recipes terse, easy to swap binaries (e.g. podman compose).
 SIGNOZ_COMPOSE_FILE := deployments/signoz/compose.yaml
-SIGNOZ_COMPOSE      := docker compose -f $(SIGNOZ_COMPOSE_FILE)
+SIGNOZ_SECRET_FILE  := deployments/signoz/.signoz-secret.local
+# SIGNOZ_TOKENIZER_JWT_SECRET is required by compose (the :? modifier fails
+# fast for raw `docker compose` users). The Makefile generates a random
+# per-checkout value once and caches it in a gitignored file, then exports
+# it for every signoz-* target. signoz-wipe rotates it. Avoids the
+# shared-default-secret risk of a publicly-checked-in compose file.
+SIGNOZ_COMPOSE       = SIGNOZ_TOKENIZER_JWT_SECRET=$$(cat $(SIGNOZ_SECRET_FILE) 2>/dev/null) docker compose -f $(SIGNOZ_COMPOSE_FILE)
+
+$(SIGNOZ_SECRET_FILE):
+	@command -v openssl >/dev/null 2>&1 || { echo "$(RED)==> 'openssl' is required to generate the SigNoz JWT secret$(RESET)"; exit 1; }
+	@openssl rand -hex 32 > $@
+	@chmod 600 $@
 
 # `--wait` blocks on the named long-running services' healthchecks:
 #   signoz          → /api/v1/health on :8080
 #   otel-collector  → health_check extension on :13133
 # clickhouse + zookeeper-1 reach healthy first via the dependency chain.
 .PHONY: signoz-up
-signoz-up: ## Start SigNoz stack (idempotent; blocks until UI + collector healthy)
+signoz-up: $(SIGNOZ_SECRET_FILE) ## Start SigNoz stack (idempotent; blocks until UI + collector healthy)
 	@echo "$(CYAN)==> Starting SigNoz stack...$(RESET)"
 	@$(SIGNOZ_COMPOSE) up -d --wait signoz otel-collector
 	@echo "    SigNoz UI:  $(GREEN)http://localhost:3301$(RESET)  (first-run: create local admin account)"
@@ -248,29 +259,31 @@ signoz-up: ## Start SigNoz stack (idempotent; blocks until UI + collector health
 	@echo "    OTLP HTTP:  $(GREEN)localhost:4318$(RESET)"
 
 .PHONY: signoz-down
-signoz-down: ## Stop SigNoz stack (preserves volumes — UI history kept)
+signoz-down: $(SIGNOZ_SECRET_FILE) ## Stop SigNoz stack (preserves volumes — UI history kept)
 	@echo "$(YELLOW)==> Stopping SigNoz...$(RESET)"
 	@$(SIGNOZ_COMPOSE) down
 
 .PHONY: signoz-logs
-signoz-logs: ## Tail SigNoz UI + collector logs (Ctrl+C to detach)
+signoz-logs: $(SIGNOZ_SECRET_FILE) ## Tail SigNoz UI + collector logs (Ctrl+C to detach)
 	@$(SIGNOZ_COMPOSE) logs -f signoz otel-collector
 
 .PHONY: signoz-wipe
-signoz-wipe: ## Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin account reset)
+signoz-wipe: $(SIGNOZ_SECRET_FILE) ## Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin account reset)
 	@echo "$(RED)==> Wiping SigNoz (containers + volumes)...$(RESET)"
 	@$(SIGNOZ_COMPOSE) down -v --remove-orphans
+	@rm -f $(SIGNOZ_SECRET_FILE)
 
-# Dashboard loader auths to the SigNoz API via either a JWT (SIGNOZ_TOKEN,
-# pulled from the UI's localStorage AUTH_TOKEN) or email+password. Both are
-# user-specific, so neither is committed — the guard fails fast with a
-# pointer to the first-run flow rather than letting the loader emit a less
-# obvious 401.
+# Dashboard loader auths to the SigNoz API with a JWT (SIGNOZ_TOKEN, pulled
+# from the UI's localStorage AUTH_TOKEN). v0.122.0 moved password login to an
+# endpoint that needs an org UUID we can't externally discover, so the token
+# is the only supported path. The guard fails fast with a pointer to the
+# first-run flow rather than letting the loader emit a less obvious 401.
 .PHONY: signoz-dashboards
-signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNOZ_TOKEN or SIGNOZ_EMAIL+SIGNOZ_PASSWORD)
-	@if [ -z "$$SIGNOZ_TOKEN" ] && { [ -z "$$SIGNOZ_EMAIL" ] || [ -z "$$SIGNOZ_PASSWORD" ]; }; then \
-		echo "$(RED)==> Set SIGNOZ_TOKEN, or SIGNOZ_EMAIL + SIGNOZ_PASSWORD.$(RESET)"; \
-		echo "    First-run: open http://localhost:3301 and create your admin account, then re-run."; \
+signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNOZ_TOKEN)
+	@if [ -z "$$SIGNOZ_TOKEN" ]; then \
+		echo "$(RED)==> Set SIGNOZ_TOKEN.$(RESET)"; \
+		echo "    First-run: open http://localhost:3301, create your admin account,"; \
+		echo "    then copy AUTH_TOKEN from DevTools → Application → Local Storage."; \
 		exit 1; \
 	fi
 	@deployments/signoz/load-dashboards.sh
@@ -284,8 +297,8 @@ dev-obs: deps-up signoz-up $(AIR) ## Hot-reload dev server with SigNoz observabi
 	@echo "$(CYAN)==> Starting WaveHouse with SigNoz observability$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)"
 	@echo "    SigNoz UI:  $(GREEN)http://localhost:3301$(RESET)  (first-run: create local admin account)"
-	@if [ -n "$$SIGNOZ_TOKEN" ] || { [ -n "$$SIGNOZ_EMAIL" ] && [ -n "$$SIGNOZ_PASSWORD" ]; }; then \
-		echo "$(CYAN)==> Loading dashboards (creds detected)...$(RESET)"; \
+	@if [ -n "$$SIGNOZ_TOKEN" ]; then \
+		echo "$(CYAN)==> Loading dashboards (SIGNOZ_TOKEN detected)...$(RESET)"; \
 		deployments/signoz/load-dashboards.sh || echo "$(YELLOW)==> Dashboard load failed; continuing$(RESET)"; \
 	else \
 		echo "    Dashboards: run $(CYAN)make signoz-dashboards$(RESET) after creating your SigNoz account"; \
