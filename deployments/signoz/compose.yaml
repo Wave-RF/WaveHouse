@@ -127,7 +127,10 @@ services:
       - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
       - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
       - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
-      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_TOKENIZER_JWT_SECRET:?set SIGNOZ_TOKENIZER_JWT_SECRET}
+      # Dev-only default — this is a local-dev compose. Override with `export
+      # SIGNOZ_TOKENIZER_JWT_SECRET=$(openssl rand -hex 32)` before `make
+      # signoz-up` if you're repurposing this stack for anything non-local.
+      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_TOKENIZER_JWT_SECRET:-wavehouse-local-dev-only}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
       interval: 30s
