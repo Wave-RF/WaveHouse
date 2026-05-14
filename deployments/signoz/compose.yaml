@@ -138,10 +138,13 @@ services:
       - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
       - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
       - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
-      # Dev-only default — this is a local-dev compose. Override with `export
-      # SIGNOZ_TOKENIZER_JWT_SECRET=$(openssl rand -hex 32)` before `make
-      # signoz-up` if you're repurposing this stack for anything non-local.
-      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_TOKENIZER_JWT_SECRET:-wavehouse-local-dev-only}
+      # JWT signing key for the SigNoz tokenizer. No default by design — a shared
+      # default in a public repo would let anyone forge tokens against any local
+      # SigNoz instance that didn't override it. `make signoz-up` generates a
+      # random per-checkout value (cached in deployments/signoz/.signoz-secret.local,
+      # gitignored; rotated by `make signoz-wipe`). If you're running compose
+      # directly: `export SIGNOZ_TOKENIZER_JWT_SECRET=$(openssl rand -hex 32)`.
+      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_TOKENIZER_JWT_SECRET:?Set SIGNOZ_TOKENIZER_JWT_SECRET — e.g. via 'make signoz-up' or 'export SIGNOZ_TOKENIZER_JWT_SECRET=$$(openssl rand -hex 32)'}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
       interval: 30s
