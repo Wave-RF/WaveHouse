@@ -44,12 +44,21 @@ EOF
 fi
 AUTH=(-H "Authorization: Bearer ${TOKEN}")
 
+# `--max-time 30` on every call: SigNoz is local so 30s is generous, and
+# `make dev-obs`'s `|| echo "failed; continuing"` only catches non-zero
+# exits — a hung curl would block the whole dev session.
 # --- existing dashboards: title -> id ---------------------------------------
 existing="$(curl -fsS --max-time 30 "${AUTH[@]}" "${SIGNOZ_URL}/api/v1/dashboards")"
 
 shopt -s nullglob
 files=("${DIR}"/*.json)
 [ "${#files[@]}" -gt 0 ] || { echo "error: no dashboard JSON files in ${DIR}" >&2; exit 1; }
+
+# Reject duplicate titles across the local JSON files. `existing` is snapshot
+# once above, so two files sharing a .title would both miss the lookup and
+# silently POST — producing duplicate dashboards instead of an upsert.
+dupe="$(jq -r '.title' "${files[@]}" | sort | uniq -d | head -1)"
+[ -z "$dupe" ] || { echo "error: duplicate dashboard .title '$dupe' across local JSON files — titles must be unique (used as the upsert key)" >&2; exit 1; }
 
 for f in "${files[@]}"; do
   title="$(jq -r '.title' "$f")"
@@ -60,11 +69,11 @@ for f in "${files[@]}"; do
   id="$(printf '%s' "$existing" | jq -r --arg t "$title" 'first(.data[] | select(.data.title == $t) | .id) // empty')"
   if [ -n "$id" ]; then
     echo "↻ updating  ${title}  (${id})"
-    curl -fsS -o /dev/null -X PUT  "${AUTH[@]}" -H 'Content-Type: application/json' \
+    curl -fsS --max-time 30 -o /dev/null -X PUT  "${AUTH[@]}" -H 'Content-Type: application/json' \
       "${SIGNOZ_URL}/api/v1/dashboards/${id}" --data-binary @"$f"
   else
     echo "＋ creating  ${title}"
-    curl -fsS -o /dev/null -X POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+    curl -fsS --max-time 30 -o /dev/null -X POST "${AUTH[@]}" -H 'Content-Type: application/json' \
       "${SIGNOZ_URL}/api/v1/dashboards" --data-binary @"$f"
   fi
 done
