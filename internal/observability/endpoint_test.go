@@ -1,8 +1,9 @@
 package observability
 
 import (
-	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseEndpoint(t *testing.T) {
@@ -23,9 +24,8 @@ func TestParseEndpoint(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gotHost, gotTLS := ParseEndpoint(tc.in)
-			if gotHost != tc.wantHost || gotTLS != tc.wantTLS {
-				t.Fatalf("ParseEndpoint(%q) = (%q, %v); want (%q, %v)", tc.in, gotHost, gotTLS, tc.wantHost, tc.wantTLS)
-			}
+			require.Equal(t, tc.wantHost, gotHost)
+			require.Equal(t, tc.wantTLS, gotTLS)
 		})
 	}
 }
@@ -51,15 +51,12 @@ func TestParseOTelHeaders(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseOTelHeaders(tc.in)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ParseOTelHeaders(%q) err = %v; wantErr = %v", tc.in, err, tc.wantErr)
-			}
 			if tc.wantErr {
+				require.Error(t, err)
 				return
 			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("ParseOTelHeaders(%q) = %v; want %v", tc.in, got, tc.want)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }
