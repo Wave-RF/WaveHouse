@@ -171,7 +171,7 @@ export SIGNOZ_TOKEN='...'
 make dev-obs
 ```
 
-When `SIGNOZ_TOKEN` or `SIGNOZ_EMAIL`+`SIGNOZ_PASSWORD` are set, `dev-obs` runs the dashboard loader best-effort (failure doesn't block the dev server). Without them, it prints a one-liner pointing at `make signoz-dashboards`.
+When `SIGNOZ_TOKEN` is set, `dev-obs` runs the dashboard loader best-effort (failure doesn't block the dev server). Without it, `dev-obs` prints a one-liner pointing at `make signoz-dashboards`.
 
 | Target | What it does |
 | ------ | ------------ |
@@ -179,8 +179,8 @@ When `SIGNOZ_TOKEN` or `SIGNOZ_EMAIL`+`SIGNOZ_PASSWORD` are set, `dev-obs` runs 
 | `make signoz-down` | Stop the stack. Volumes preserved — UI history and admin account stay. |
 | `make signoz-logs` | `docker compose logs -f signoz otel-collector`. |
 | `make signoz-wipe` | Stop **and** destroy volumes (admin account reset; UI prompts for signup again). |
-| make signoz-dashboards | Upsert the WaveHouse dashboards into local SigNoz. Idempotent (upsert-by-title); needs SIGNOZ_TOKEN. |
-| `make dev-obs` | `make dev` + `make signoz-up` + WaveHouse pointed at the collector + (if creds set) `make signoz-dashboards`. |
+| `make signoz-dashboards` | Upsert the WaveHouse dashboards into local SigNoz. Idempotent (upsert-by-title); needs `SIGNOZ_TOKEN`. |
+| `make dev-obs` | `make dev` + `make signoz-up` + WaveHouse pointed at the collector + (if `SIGNOZ_TOKEN` set) `make signoz-dashboards`. |
 
 The two version-controlled dashboards live under `deployments/signoz/dashboards/`: `wavehouse-overview` (HTTP traffic, latency, OTLP intake) and `wavehouse-runtime-internals` (Go runtime, embedded NATS, ingest pipeline). To edit one, change it in the SigNoz UI, then re-export via the API: `GET /api/v1/dashboards/<id>` and save the response's `.data.data` over the JSON file.
 

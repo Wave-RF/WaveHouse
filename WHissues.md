@@ -18,7 +18,7 @@ service_completed_successfully`). Only `signoz-clickhouse` stays up.
 
 Migrator log:
 
-```
+```text
 migrate/bootstrap.go:119  Creating databases
 Error: failed to bootstrap store for migrations: code: 62, message: Syntax error: failed at position 42 (end of query): . Expected one of: identifier, string literal
 ```
@@ -75,7 +75,7 @@ steady (data flows regardless).
 **Symptom:** `docker compose -f deployments/compose/standalone.yaml up -d --build` →
 the `wavehouse` container exits 1 on boot:
 
-```
+```text
 mq init failed  error="create stream: nats: API error: code=500 err_code=10047 description=insufficient storage resources available"  path=/app/data/nats
 ```
 
@@ -98,7 +98,7 @@ init failure as fatal.
 
 **Symptom:** on a cold `up`, the `wavehouse` container exits 1:
 
-```
+```text
 schema discovery failed on boot  error="query system.columns: dial tcp <ch-ip>:9000: connect: connection refused"
 ```
 
@@ -123,7 +123,7 @@ the `wavehouse` container after ClickHouse is up.
 **Symptom:** if you put the WaveHouse container on the SigNoz compose network so it
 can reach `signoz-otel-collector:4317` by name, schema discovery fails with:
 
-```
+```text
 query system.columns: code: 516, message: default: Authentication failed: password is incorrect, or there is no user with such name.
 ```
 
