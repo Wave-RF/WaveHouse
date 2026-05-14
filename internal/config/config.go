@@ -191,19 +191,22 @@ func validateOTelHeaders(s string) error {
 		if seg == "" {
 			continue
 		}
+		// Error messages quote only the key, never the full segment — same
+		// credential-exposure concern as observability.ParseOTelHeaders.
+		// See the doc on ParseOTelHeaders for the rationale.
 		i := strings.IndexByte(seg, '=')
 		if i < 0 {
-			return fmt.Errorf("header segment %q missing '='", seg)
+			return fmt.Errorf("header entry missing '=' separator (format is key=value)")
 		}
 		key := strings.TrimSpace(seg[:i])
 		if key == "" {
-			return fmt.Errorf("header segment %q has empty key", seg)
+			return fmt.Errorf("header entry has empty key (format is key=value)")
 		}
 		if bad, ok := firstNonHeaderTokenChar(key); !ok {
-			return fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, headerNamePunctuation)
+			return fmt.Errorf("header key %q has invalid character %q (RFC 7230 token: letters, digits, and %s)", key, bad, headerNamePunctuation)
 		}
 		if strings.TrimSpace(seg[i+1:]) == "" {
-			return fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
+			return fmt.Errorf("header key %q has empty or whitespace-only value", key)
 		}
 	}
 	return nil

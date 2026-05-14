@@ -80,20 +80,24 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 		if seg == "" {
 			continue
 		}
+		// Error messages quote only the key, never the full segment. A real
+		// misconfiguration could be `WH_OTEL_HEADERS="x:y=$REAL_API_TOKEN"`
+		// — quoting `seg` would log the token to every sink the structured
+		// "error" field reaches (Loki, Datadog, CloudWatch, etc.).
 		i := strings.IndexByte(seg, '=')
 		if i < 0 {
-			return nil, fmt.Errorf("header segment %q missing '='", seg)
+			return nil, fmt.Errorf("header entry missing '=' separator (format is key=value)")
 		}
 		key := strings.TrimSpace(seg[:i])
 		val := strings.TrimSpace(seg[i+1:])
 		if key == "" {
-			return nil, fmt.Errorf("header segment %q has empty key", seg)
+			return nil, fmt.Errorf("header entry has empty key (format is key=value)")
 		}
 		if bad, ok := firstNonTokenChar(key); !ok {
-			return nil, fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, headerNamePunctuation)
+			return nil, fmt.Errorf("header key %q has invalid character %q (RFC 7230 token: letters, digits, and %s)", key, bad, headerNamePunctuation)
 		}
 		if val == "" {
-			return nil, fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
+			return nil, fmt.Errorf("header key %q has empty or whitespace-only value", key)
 		}
 		out[key] = val
 	}
