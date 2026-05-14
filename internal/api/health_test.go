@@ -156,6 +156,8 @@ func TestHealth_Readiness_BootDegradedReports503(t *testing.T) {
 	h.Readiness(w, r)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "not ready", resp["status"])

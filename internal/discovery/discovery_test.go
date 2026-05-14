@@ -638,7 +638,12 @@ func TestStartAutoRefresh_LogsAndContinuesOnError(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond, "expected auto-refresh failure log line within 2s")
 
 	cancel()
-	<-done
+	select {
+	case <-done:
+		// expected — ticker observed ctx.Done() and exited
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartAutoRefresh did not return after ctx cancel")
+	}
 
 	// Sanity: the ticker actually fired Refresh at least once. Without
 	// this, an off-by-one that skipped the first tick would silently let
