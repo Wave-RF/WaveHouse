@@ -447,7 +447,6 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return err
 	}
 
-	// FIX: Use cache directly from the struct
 	if c.cache != nil {
 		invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer invCancel()

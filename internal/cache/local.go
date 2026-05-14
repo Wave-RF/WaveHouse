@@ -143,6 +143,11 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 }
 
 func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
+	// Flush Ristretto's async write buffer before deleting. SetWithTTL returns
+	// admitted=true before the item reaches the store; without Wait(), Del may
+	// be a no-op for recently-admitted keys, leaving stale untracked entries.
+	l.cache.Wait()
+
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
 
