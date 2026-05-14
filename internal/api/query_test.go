@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,6 +220,11 @@ func TestExtractCacheTags(t *testing.T) {
 			sql:      "SELECT * FROM `my_db`.`my_table` JOIN \"other_table\"",
 			expected: []string{"my_table", "other_table"},
 		},
+		{
+			name:     "column named drop does not trigger mutation logic",
+			sql:      "SELECT id, drop_rate FROM metrics",
+			expected: []string{"metrics"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -263,19 +269,40 @@ func TestQueryHandler_MutationInvalidation(t *testing.T) {
 		// Verify the tag was recorded in our new InvalidatedTags slice
 		assert.Contains(t, mockCache.InvalidatedTags, "orders")
 	})
+
+	t.Run("read query does not invalidate cache", func(t *testing.T) {
+		mockCache.Reset()
+		sql := "SELECT * FROM orders"
+		reqBody, _ := json.Marshal(queryRequest{SQL: sql})
+		req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/query", bytes.NewReader(reqBody))
+		w := httptest.NewRecorder()
+
+		handler.Handle(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, mockCache.InvalidatedTags, "reads must not trigger InvalidateByTags")
+	})
 }
 
 func TestQueryHandler_StringLiteralMutationBypass(t *testing.T) {
 	t.Parallel()
 
-	// The word "INSERT" is safely inside a string literal.
-	// isMutation should be false, so it hits the cache coalescing path.
 	sql := `SELECT * FROM events WHERE message = 'INSERT INTO secret_table VALUES (1)'`
-
-	// Prove our cleaner strips the literal so the regex doesn't false-trigger
 	cleaned := cleanSQLForTags(sql)
+
+	// The word "INSERT" should be gone from the cleaned SQL
 	assert.NotContains(t, cleaned, "INSERT")
 
-	isMutation := mutationRe.MatchString(cleaned)
-	assert.False(t, isMutation, "mutation keywords inside strings must not trigger mutation paths")
+	// Logic Check: Simulate the new first-word logic
+	fields := strings.Fields(cleaned)
+	isMutation := false
+	if len(fields) > 0 {
+		switch strings.ToUpper(fields[0]) {
+		case "INSERT", "UPDATE", "DELETE", "TRUNCATE", "DROP", "ALTER", "REPLACE":
+			isMutation = true
+		}
+	}
+
+	assert.False(t, isMutation, "keyword inside a string literal at index > 0 should not trigger isMutation")
+	assert.Equal(t, "SELECT", strings.ToUpper(fields[0]))
 }

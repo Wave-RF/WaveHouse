@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -24,9 +25,6 @@ import (
 // tableExtractionRe extracts table names following FROM, JOIN, INTO, UPDATE, or TABLE.
 // Supports optional schema prefixes (db.table) and ClickHouse quoted identifiers (backticks or quotes).
 var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`" + `"]?`)
-
-// mutationRe detects queries that modify data or schema to trigger cache invalidation.
-var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
 
 var (
 	blockCommentRe  = regexp.MustCompile(`(?s)/\*.*?\*/`)
@@ -113,9 +111,14 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	cleanSQL := cleanSQLForTags(req.SQL)
 
-	// Run against full string to catch CTE-wrapped mutations (e.g., WITH...INSERT).
-	// The \b anchors in mutationRe prevent false positives on column names.
-	isMutation := mutationRe.MatchString(cleanSQL)
+	isMutation := false
+	fields := strings.Fields(cleanSQL)
+	if len(fields) > 0 {
+		switch strings.ToUpper(fields[0]) {
+		case "INSERT", "UPDATE", "DELETE", "TRUNCATE", "DROP", "ALTER", "REPLACE":
+			isMutation = true
+		}
+	}
 
 	var execCtx context.Context
 	if isMutation {
