@@ -1,0 +1,47 @@
+# Override for standalone.yaml that points WaveHouse's OTLP export at the
+# SigNoz collector from deployments/signoz/compose.yaml.
+#
+# The SigNoz collector publishes 4317 on the host, so WaveHouse reaches it
+# via host.docker.internal — no shared Docker network. Joining the SigNoz
+# stack's network is tempting but breaks ClickHouse resolution: that stack
+# also defines a service named `clickhouse`, so the unqualified hostname
+# `clickhouse` becomes ambiguous and WaveHouse may dial SigNoz's ClickHouse
+# (non-empty password) instead of its own.
+#
+# Usage (bring the SigNoz stack up first):
+#   make signoz-up                # or: docker compose -f deployments/signoz/compose.yaml up -d
+#   docker compose -p wavehouse \
+#     -f deployments/compose/standalone.yaml \
+#     -f deployments/compose/standalone.signoz.yaml up -d --build
+
+services:
+  clickhouse:
+    # standalone.yaml's `depends_on: [clickhouse]` only waits for the
+    # container to start, not for ClickHouse to accept connections — and
+    # WaveHouse treats a failed schema-discovery on boot as fatal, so it
+    # races ClickHouse and exits. Add a readiness probe so the dependency
+    # below can gate on it.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  wavehouse:
+    environment:
+      WH_OTEL_ENABLED: "true"
+      WH_OTEL_ADDR: "host.docker.internal:4317"
+      # standalone.yaml leaves WH_MQ_MAX_BYTES_GB at its 50 GB default; the
+      # embedded JetStream stream then asks for more disk than the default
+      # OrbStack VM has free (~16 GB usable), so stream creation fails with
+      # "insufficient storage resources". Cap it for local use.
+      WH_MQ_MAX_BYTES_GB: "2"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
