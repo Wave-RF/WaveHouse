@@ -41,3 +41,10 @@ exclude:
     # aren't part of the shipped binary; they show up in `-coverpkg=./...`
     # but never get exercised by tests.
     - ^scripts/
+    # cmd/wavehouse/main.go is the binary entry point — 400+ lines of
+    # service wiring that's only meaningfully exercised by the e2e suite
+    # (which runs bin/wavehouse-cov against a real ClickHouse + NATS).
+    # health.go in the same package IS unit-testable (httptest server +
+    # WH_SERVER_PORT) and stays in coverage. File-level exclusion requires
+    # the path-aware match added to scripts/cov/main.go.
+    - ^cmd/wavehouse/main\.go$

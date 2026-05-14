@@ -57,9 +57,6 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		l = logger[0]
 	}
 
-	// TODO(#138): guard against too much space reserved (validate maxBytes vs statfs(storeDir))
-	// TODO(#139): allow configuring JetStream sync_interval (throughput vs durability tradeoff)
-
 	opts := &natsserver.Options{
 		DontListen: true,
 		JetStream:  true,

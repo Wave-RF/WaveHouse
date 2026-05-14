@@ -258,9 +258,16 @@ func parseCoverage(profile string, c *config) (rows []pkgRow, total, covered int
 		if c.LocalPrefix != "" && strings.HasPrefix(pkg, c.LocalPrefix+"/") {
 			pkg = pkg[len(c.LocalPrefix)+1:]
 		}
-		// Match exclusions against pkg+"/" so a pattern like
-		// ^internal/testutil/ matches a bare-directory pkg string.
-		if matchesAny(excludes, pkg+"/") {
+		shortPath := path
+		if c.LocalPrefix != "" && strings.HasPrefix(shortPath, c.LocalPrefix+"/") {
+			shortPath = shortPath[len(c.LocalPrefix)+1:]
+		}
+		// Match exclusions against either pkg+"/" (directory-level) or
+		// shortPath (file-level). Directory patterns like ^internal/testutil/
+		// match the former; single-file patterns like ^cmd/wavehouse/main\.go$
+		// match the latter, useful for excluding binary entry points that
+		// can't be unit-tested without dragging the suite gate.
+		if matchesAny(excludes, pkg+"/") || matchesAny(excludes, shortPath) {
 			continue
 		}
 		stmts, _ := strconv.Atoi(f[1])
