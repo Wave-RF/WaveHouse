@@ -399,17 +399,23 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	assert.Equal(t, []string{"abc123"}, r.LastTraceHeaders().Get("x-honeycomb-team"))
 }
 
-// TestOTel_PerSignalEndpoint_Override sends traces to one receiver and metrics
-// to another by setting TracesEndpoint on top of a default Endpoint. Grafana
-// Cloud's distinct gateway hosts per signal are the headline use case.
+// TestOTel_PerSignalEndpoint_Override verifies that TracesEndpoint and
+// MetricsEndpoint each route their own signal to a distinct receiver while
+// the default Endpoint sees neither. Grafana Cloud's per-signal gateway hosts
+// are the headline use case. Both signal-type overrides go through the same
+// pickEndpoint() helper in provider.go, so a copy-paste bug (e.g. the
+// metrics exporter being wired to TracesEndpoint) would surface here as
+// metrics landing on the wrong receiver — caught by the cross-asserts below.
 func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
 	guardOTelGlobals(t)
 	rDefault := testutil.NewFakeOTLP(t)
 	rTraces := testutil.NewFakeOTLP(t)
+	rMetrics := testutil.NewFakeOTLP(t)
 
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         rDefault.Addr(), // metrics + logs land here
-		TracesEndpoint:   rTraces.Addr(),  // traces override
+		Endpoint:         rDefault.Addr(), // both signals overridden → default sees nothing
+		TracesEndpoint:   rTraces.Addr(),
+		MetricsEndpoint:  rMetrics.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   true,
@@ -426,8 +432,10 @@ func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
-	assert.Equal(t, 1, rTraces.SpanCount(), "trace endpoint should have received the span")
+	assert.Equal(t, 1, rTraces.SpanCount(), "TracesEndpoint should receive the span")
+	assert.GreaterOrEqual(t, rMetrics.MetricCount(), 1, "MetricsEndpoint should receive the metric")
 	assert.Zero(t, rDefault.SpanCount(), "default endpoint must NOT receive traces when overridden")
-	assert.GreaterOrEqual(t, rDefault.MetricCount(), 1, "default endpoint should receive metrics (no override)")
-	assert.Zero(t, rTraces.MetricCount(), "trace endpoint should NOT receive metrics")
+	assert.Zero(t, rDefault.MetricCount(), "default endpoint must NOT receive metrics when overridden")
+	assert.Zero(t, rTraces.MetricCount(), "TracesEndpoint should NOT receive metrics (catches metrics-to-traces wiring bug)")
+	assert.Zero(t, rMetrics.SpanCount(), "MetricsEndpoint should NOT receive spans (catches traces-to-metrics wiring bug)")
 }

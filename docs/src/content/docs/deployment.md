@@ -324,7 +324,7 @@ otel:
   addr: 127.0.0.1:4317   # bare host:port — plaintext gRPC
 ```
 
-### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud, Datadog OTLP, etc.)
+### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud)
 
 `otel.addr` is scheme-aware: `https://` selects TLS, `http://` or no scheme stays plaintext. Combine with `otel.headers` for the per-RPC auth that every cloud OTLP gateway expects. No sidecar required — a sidecar is still useful for egress queuing, batching, and tail-based sampling, but is no longer the only way to get TLS + auth.
 
@@ -341,21 +341,43 @@ export WH_OTEL_HEADERS=x-honeycomb-team=YOUR_API_KEY
 ```bash
 export WH_OTEL_ENABLED=true
 export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
-# instanceID:token, base64-encoded; backslash-escape the space if your shell needs it
-export WH_OTEL_HEADERS=authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64)
-```
-
-**Datadog OTLP intake:**
-
-```bash
-export WH_OTEL_ENABLED=true
-export WH_OTEL_ADDR=https://otlp.datadoghq.com:4317
-export WH_OTEL_HEADERS=dd-api-key=YOUR_API_KEY
+# instanceID:token, base64-encoded (tr -d '\n' strips base64's 76-char line wrap)
+export WH_OTEL_HEADERS=authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')
 ```
 
 If different signals need different gateway hosts (Grafana Cloud's traces/metrics/logs endpoints differ in some regions), set `WH_OTEL_TRACES_ADDR` / `WH_OTEL_METRICS_ADDR` / `WH_OTEL_LOGS_ADDR` to override the default per signal. Empty means inherit from `otel.addr`. Headers always apply to every exporter — there is intentionally no per-signal header override.
 
 mTLS / client-certificate auth is not yet supported; open an issue if you need it.
+
+### Pattern: Datadog (via local DDOT Collector)
+
+Datadog has no public direct-to-cloud OTLP endpoint — telemetry must transit a local OTLP receiver that re-exports to Datadog over Datadog's own protocol. The recommended receiver is the [DDOT Collector](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/) (Datadog Distribution of OpenTelemetry Collector), embedded in the Datadog Agent — GA on Kubernetes, Preview on Linux. It exposes a standard OTLP receiver on `4317` (gRPC) and `4318` (HTTP) and forwards to Datadog via the bundled `datadogexporter`. Point WaveHouse at the local receiver — the API-key auth lives on the Agent, not on the OTLP hop, so `WH_OTEL_HEADERS` stays empty.
+
+**Host (DDOT Collector on the same host as WaveHouse):**
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=127.0.0.1:4317   # plaintext gRPC; no scheme
+# WH_OTEL_HEADERS intentionally unset — DD_API_KEY is on the Agent
+```
+
+**Kubernetes (DDOT Collector via the Datadog Operator or Helm chart):**
+
+WaveHouse reaches the Agent on the same node via the downward API:
+
+```yaml
+env:
+  - name: HOST_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.hostIP
+  - name: WH_OTEL_ENABLED
+    value: "true"
+  - name: WH_OTEL_ADDR
+    value: "$(HOST_IP):4317"
+```
+
+See Datadog's [DDOT install guide](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/install/kubernetes/) for enabling the OTLP receiver on the Operator/Helm side. The legacy [OTLP Ingest in the Agent](https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest_in_the_agent/) path (Agent ≥ 6.32 / 7.32) exposes the same receiver shape and works identically from WaveHouse's side — DDOT is the recommended replacement.
 
 ### Pattern: Grafana Cloud / Mimir / Loki / Tempo via Grafana Alloy
 

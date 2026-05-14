@@ -165,7 +165,14 @@ type DLQ struct {
 
 // validateOTelHeaders mirrors observability.ParseOTelHeaders for boot-time
 // validation. Kept here (rather than importing observability) so config stays
-// at the bottom of the dependency graph.
+// at the bottom of the dependency graph — importing observability would
+// transitively pull the OTel SDK into every config consumer.
+//
+// MUST stay in sync with observability.ParseOTelHeaders in
+// internal/observability/endpoint.go. cmd/wavehouse/main.go's defensive
+// error-check on the post-Validate parse exists to catch any drift loudly,
+// but the right answer is to not drift in the first place: any rule change
+// here needs the same change there, and vice versa.
 func validateOTelHeaders(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
