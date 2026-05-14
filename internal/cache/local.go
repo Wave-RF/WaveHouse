@@ -117,14 +117,13 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	defer l.tagsMu.Unlock()
 
 	version := l.nextVersion.Add(1)
-	l.keyVersion[key] = version
 
-	l.removeKeyFromTagsLocked(key)
-
-	// Inject the version into the Ristretto payload
 	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value, version: version}, int64(len(value)), ttl)
 
 	if admitted {
+		l.keyVersion[key] = version
+		l.removeKeyFromTagsLocked(key)
+
 		if ttl > 0 {
 			l.ttls.Store(key, exp)
 		}

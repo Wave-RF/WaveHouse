@@ -114,7 +114,9 @@ func TestTieredCache_Set_WritesToBoth(t *testing.T) {
 func TestTieredCache_Set_NilL2(t *testing.T) {
 	t.Parallel()
 	l1 := newMemCache()
-	tc := NewTiered(l1, nil)
+	tc, err := NewTiered(l1, nil)
+	require.NoError(t, err)
+
 	ctx := context.Background()
 	require.NoError(t, tc.Set(ctx, "key", []byte("val"), time.Minute, nil))
 	val, _, _ := l1.Get(ctx, "key")
@@ -128,7 +130,9 @@ func TestTieredCache_Close(t *testing.T) {
 
 func TestTieredCache_Close_NilL2(t *testing.T) {
 	t.Parallel()
-	assert.NoError(t, NewTiered(newMemCache(), nil).Close())
+	tc, err := NewTiered(newMemCache(), nil)
+	require.NoError(t, err)
+	assert.NoError(t, tc.Close())
 }
 
 func TestTieredCache_SingleflightDedup(t *testing.T) {

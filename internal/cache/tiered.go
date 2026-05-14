@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -15,11 +16,11 @@ type TieredCache struct {
 }
 
 // NewTiered creates a tiered cache. L2 can be nil for standalone mode.
-func NewTiered(l1, l2 Cache) *TieredCache {
+func NewTiered(l1, l2 Cache) (*TieredCache, error) {
 	if l2 != nil {
-		panic("L2 cache wired without tag-propagation support; see TODO in tiered.go")
+		return nil, errors.New("L2 cache requires tag-propagation support (not yet implemented); pass nil for standalone mode")
 	}
-	return &TieredCache{l1: l1, l2: l2}
+	return &TieredCache{l1: l1, l2: l2}, nil
 }
 
 func (t *TieredCache) Get(ctx context.Context, key string) ([]byte, time.Duration, error) {

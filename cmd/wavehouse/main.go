@@ -218,7 +218,12 @@ func run() int {
 		logger.Error("cache init", "error", err)
 		return 1
 	}
-	tiered := cache.NewTiered(l1, nil)
+	tiered, err := cache.NewTiered(l1, nil)
+	if err != nil {
+		logger.Error("tiered cache init", "error", err)
+		return 1
+	}
+
 	defer func() { _ = tiered.Close() }()
 
 	// Policy store (NATS KV + optional file bootstrap).

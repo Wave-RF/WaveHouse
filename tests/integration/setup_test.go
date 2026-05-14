@@ -167,7 +167,11 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: new local cache: %v\n", err)
 		return 1, cleanup
 	}
-	tiered := cache.NewTiered(l1, nil)
+	tiered, err := cache.NewTiered(l1, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: new tiered cache: %v\n", err)
+		return 1, cleanup
+	}
 
 	if _, err := ingest.StartIngestWorker(
 		ctx,
@@ -317,7 +321,11 @@ func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *disc
 	if err != nil {
 		return nil, fmt.Errorf("local cache: %w", err)
 	}
-	tiered := cache.NewTiered(l1, nil)
+
+	tiered, err := cache.NewTiered(l1, nil)
+	if err != nil {
+		return nil, fmt.Errorf("tiered cache: %w", err)
+	}
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ),
