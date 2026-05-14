@@ -32,6 +32,27 @@ services:
       # read-only and uncomment WH_PIPES_DIR. The directory is a seed for
       # NATS KV — runtime pipe edits go through the API, not the files.
       # WH_PIPES_DIR: /app/pipes
+      # ---- Observability (all optional, all default off) ---------------
+      # OTLP push: uncomment WH_OTEL_ENABLED=true and point WH_OTEL_ADDR
+      # at the collector. https:// → TLS via system roots; bare host:port
+      # or http:// stays plaintext. See docs/deployment.md for worked
+      # Honeycomb / Grafana Cloud / DDOT-Collector examples.
+      # WH_OTEL_ENABLED: "true"
+      # WH_OTEL_ADDR: "127.0.0.1:4317"           # or https://api.honeycomb.io:443
+      # WH_OTEL_HEADERS: ""                      # "key=value,key2=value2" for cloud auth
+      # WH_OTEL_TRACES_ENABLED: "true"
+      # WH_OTEL_TRACES_SAMPLE_RATE: "1.0"
+      # WH_OTEL_TRACES_ADDR: ""                  # per-signal endpoint override; empty = inherit WH_OTEL_ADDR
+      # WH_OTEL_METRICS_ENABLED: "true"
+      # WH_OTEL_METRICS_ADDR: ""                 # per-signal endpoint override
+      # WH_OTEL_LOGS_ENABLED: "true"
+      # WH_OTEL_LOGS_SAMPLE_RATE: "1.0"          # DEBUG/INFO OTLP rate; WARN+ always 100%
+      # WH_OTEL_LOGS_ADDR: ""                    # per-signal endpoint override
+      # Prometheus exposition is independent of OTLP push — pull-based
+      # scrapers (Alloy / Mimir) can use this alone with no collector.
+      # WH_PROMETHEUS_ENABLED: "true"
+      # WH_PROMETHEUS_PATH: "/metrics"
+      # WH_PROMETHEUS_PORT: "0"                  # 0 mounts on server.port; non-zero = sidecar listener
     volumes:
       - wavehouse-data:/app/data
       # - ./my-pipes:/app/pipes:ro    # uncomment alongside WH_PIPES_DIR
