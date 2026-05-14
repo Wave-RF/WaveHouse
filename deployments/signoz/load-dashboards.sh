@@ -45,7 +45,7 @@ fi
 AUTH=(-H "Authorization: Bearer ${TOKEN}")
 
 # --- existing dashboards: title -> id ---------------------------------------
-existing="$(curl -fsS "${AUTH[@]}" "${SIGNOZ_URL}/api/v1/dashboards")"
+existing="$(curl -fsS --max-time 30 "${AUTH[@]}" "${SIGNOZ_URL}/api/v1/dashboards")"
 
 shopt -s nullglob
 files=("${DIR}"/*.json)
