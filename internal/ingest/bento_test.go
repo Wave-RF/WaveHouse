@@ -394,6 +394,18 @@ func TestJsInput_Read_DeleteExecErrorDLQPublishFails(t *testing.T) {
 	assert.False(t, delMsg.naked, "delete must not be Nak'd even when DLQ publish fails")
 	assert.True(t, delMsg.doubleAcked, "delete must still be DoubleAck'd to avoid infinite redelivery")
 
+	// Prove the DLQ publish was actually attempted before we DoubleAck'd. A
+	// regression that skipped PublishMsg entirely (jumping straight to
+	// DoubleAck) would still satisfy the no-Nak/DoubleAck assertions above,
+	// but it would silently drop messages on every transient NATS hiccup
+	// instead of giving the operator a single DLQ-dropped error to grep on.
+	require.Len(t, js.published, 1, "DLQ publish must still be attempted once even when NATS is unavailable")
+	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
+	assert.JSONEq(t, string(delData), string(js.published[0].Data),
+		"the attempted DLQ payload must still be the original delete envelope")
+	assert.Equal(t, "delete-envelope", js.published[0].Header.Get("Wave-DLQ-Type"),
+		"discriminator header must be set on the attempted publish, not only on successful ones")
+
 	table, _ := msg.MetaGet("table_name")
 	assert.Equal(t, "events", table)
 }
@@ -640,13 +652,17 @@ func TestJsInput_Read_DeleteCancelledCtx(t *testing.T) {
 type bentoMockJSWithError struct {
 	jetstream.JetStream
 	publishErr error
+	published  []publishedMsg
 }
 
 func (m *bentoMockJSWithError) Publish(_ context.Context, _ string, _ []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	return nil, m.publishErr
 }
 
-func (m *bentoMockJSWithError) PublishMsg(_ context.Context, _ *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+// Capture the published message before returning the error so tests can
+// distinguish "DLQ publish failed" from "DLQ publish never attempted".
+func (m *bentoMockJSWithError) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	m.published = append(m.published, publishedMsg{Subject: msg.Subject, Data: msg.Data, Header: msg.Header})
 	return nil, m.publishErr
 }
 
