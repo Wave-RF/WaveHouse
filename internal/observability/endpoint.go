@@ -50,6 +50,12 @@ func ParseEndpoint(addr string) (host string, useTLS bool) {
 // Returns an error (rather than silently dropping the segment) for malformed
 // entries so Validate() can fail loud at boot rather than letting a typo
 // silently disable auth in production.
+//
+// MUST stay in sync with config.validateOTelHeaders in
+// internal/config/config.go. config can't import observability without
+// transitively pulling the OTel SDK into every config consumer, so the
+// parsing rules are hand-mirrored. Any rule change here needs the same
+// change there, and vice versa.
 func ParseOTelHeaders(s string) (map[string]string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
