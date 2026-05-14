@@ -239,7 +239,7 @@ SIGNOZ_SECRET_FILE  := deployments/signoz/.signoz-secret.local
 # per-checkout value once and caches it in a gitignored file, then exports
 # it for every signoz-* target. signoz-wipe rotates it. Avoids the
 # shared-default-secret risk of a publicly-checked-in compose file.
-SIGNOZ_COMPOSE       = SIGNOZ_TOKENIZER_JWT_SECRET=$$(cat $(SIGNOZ_SECRET_FILE)) docker compose -f $(SIGNOZ_COMPOSE_FILE)
+SIGNOZ_COMPOSE       = SIGNOZ_TOKENIZER_JWT_SECRET=$$(cat $(SIGNOZ_SECRET_FILE) 2>/dev/null) docker compose -f $(SIGNOZ_COMPOSE_FILE)
 
 $(SIGNOZ_SECRET_FILE):
 	@command -v openssl >/dev/null 2>&1 || { echo "$(RED)==> 'openssl' is required to generate the SigNoz JWT secret$(RESET)"; exit 1; }
