@@ -89,7 +89,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [],
               "having": {
@@ -147,7 +147,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [
                 {
@@ -212,7 +212,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [],
               "having": {
@@ -270,7 +270,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [],
               "having": {
@@ -328,7 +328,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [],
               "having": {
@@ -385,7 +385,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [
                 {
@@ -449,7 +449,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [
                 {
@@ -513,7 +513,7 @@
               "disabled": false,
               "expression": "A",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [],
               "having": {
@@ -538,7 +538,7 @@
               "disabled": false,
               "expression": "B",
               "filter": {
-                "expression": ""
+                "expression": "service.name = 'wavehouse'"
               },
               "groupBy": [],
               "having": {

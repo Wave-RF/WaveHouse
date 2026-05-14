@@ -184,7 +184,7 @@ When `SIGNOZ_TOKEN` is set, `dev-obs` runs the dashboard loader best-effort (fai
 
 The two version-controlled dashboards live under `deployments/signoz/dashboards/`: `wavehouse-overview` (HTTP traffic, latency, OTLP intake) and `wavehouse-runtime-internals` (Go runtime, embedded NATS, ingest pipeline). To edit one, change it in the SigNoz UI, then re-export via the API: `GET /api/v1/dashboards/<id>` and save the response's `.data.data` over the JSON file.
 
-The SigNoz `clickhouse` service is intentionally **separate** from WaveHouse's `clickhouse` (`deployments/compose/dependencies.yaml`). Don't dual-home a WaveHouse container onto both networks — the unqualified hostname becomes ambiguous; see `WHissues.md` §4. The dev-mode flow stays on `127.0.0.1:4317` and side-steps this entirely.
+The SigNoz `clickhouse` service is intentionally **separate** from WaveHouse's `clickhouse` (`deployments/compose/dependencies.yaml`). Don't dual-home a WaveHouse container onto both networks — the unqualified hostname becomes ambiguous. The dev-mode flow stays on `127.0.0.1:4317` and side-steps this entirely.
 
 ### Using the SDK playground against `make dev`
 

@@ -81,7 +81,7 @@ services:
         esac
         echo "Fetching histogram-quantile binary for $${node_os}/$${node_arch}"
         cd /tmp
-        wget -q -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        wget -q --timeout=30 --tries=3 -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
         echo "$${expected_sha}  histogram-quantile.tar.gz" | sha256sum -c -
         tar -xzf histogram-quantile.tar.gz
         mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
