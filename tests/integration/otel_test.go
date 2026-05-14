@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/log/global"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -380,23 +381,27 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	require.NoError(t, shutdown(drainCtx))
 
 	// gRPC metadata keys are lowercased on the wire — assert in lowercase.
-	for _, sig := range []struct {
+	// Every configured header is checked on every signal so a per-exporter
+	// header-propagation bug (e.g. one exporter built with a stale headers
+	// map) fails loud instead of silently 401'ing on the missing signal.
+	signals := []struct {
 		name string
-		md   func() []string
+		md   func() metadata.MD
 	}{
-		{"traces", func() []string { return r.LastTraceHeaders().Get("authorization") }},
-		{"metrics", func() []string { return r.LastMetricHeaders().Get("authorization") }},
-		{"logs", func() []string { return r.LastLogHeaders().Get("authorization") }},
-	} {
+		{"traces", func() metadata.MD { return r.LastTraceHeaders() }},
+		{"metrics", func() metadata.MD { return r.LastMetricHeaders() }},
+		{"logs", func() metadata.MD { return r.LastLogHeaders() }},
+	}
+	for _, sig := range signals {
 		t.Run(sig.name, func(t *testing.T) {
-			vals := sig.md()
-			require.NotEmpty(t, vals, "%s exporter dropped the authorization header", sig.name)
-			assert.Equal(t, "Bearer test-token", vals[0])
+			md := sig.md()
+			authz := md.Get("authorization")
+			require.NotEmpty(t, authz, "%s exporter dropped the authorization header", sig.name)
+			assert.Equal(t, "Bearer test-token", authz[0])
+			assert.Equal(t, []string{"abc123"}, md.Get("x-honeycomb-team"),
+				"%s exporter dropped the x-honeycomb-team header", sig.name)
 		})
 	}
-	// Spot-check the second header on at least one signal — same map flows
-	// through all three so one check confirms multi-header support.
-	assert.Equal(t, []string{"abc123"}, r.LastTraceHeaders().Get("x-honeycomb-team"))
 }
 
 // TestOTel_PerSignalEndpoint_Override verifies that TracesEndpoint,
