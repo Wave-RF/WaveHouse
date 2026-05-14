@@ -313,3 +313,121 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 		_ = shutdown(drainCtx)
 	}()
 }
+
+// TestOTel_TLSPath_Traces locks in the https:// → TLS dial path. The fake
+// receiver listens with an ephemeral self-signed cert; the exporter is given
+// the matching client tls.Config via ProviderConfig.TLSConfig. If TLS wiring
+// regresses (e.g. someone re-adds WithInsecure unconditionally), the dial
+// will TLS-handshake against a plaintext server and the export drops.
+func TestOTel_TLSPath_Traces(t *testing.T) {
+	guardOTelGlobals(t)
+	r := testutil.NewFakeOTLPTLS(t)
+
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
+		Endpoint:         "https://" + r.Addr(),
+		TLSConfig:        r.TLSConfig(),
+		TracesEnabled:    true,
+		TracesSampleRate: 1.0,
+	})
+
+	_, span := otel.Tracer("test").Start(context.Background(), "tls-op")
+	span.End()
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	require.NoError(t, shutdown(drainCtx))
+
+	assert.Equal(t, 1, r.SpanCount(), "TLS path must deliver the span end-to-end")
+}
+
+// TestOTel_Headers_AppliedToAllSignals verifies that ProviderConfig.Headers
+// propagates as gRPC metadata on every OTLP exporter (traces, metrics, logs).
+// Direct-to-cloud auth depends on this — Honeycomb/Grafana Cloud both
+// authenticate per-RPC via a header, so a single missing exporter would 401
+// silently for that signal.
+func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
+	guardOTelGlobals(t)
+	r := testutil.NewFakeOTLP(t)
+
+	headers := map[string]string{
+		"authorization":    "Bearer test-token",
+		"x-honeycomb-team": "abc123",
+	}
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
+		Endpoint:         r.Addr(),
+		Headers:          headers,
+		TracesEnabled:    true,
+		TracesSampleRate: 1.0,
+		MetricsEnabled:   true,
+		LogsEnabled:      true,
+	})
+
+	// Emit one of each signal.
+	_, span := otel.Tracer("test").Start(context.Background(), "auth-op")
+	span.End()
+
+	counter, err := otel.GetMeterProvider().Meter("test").Int64Counter("hdr_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelInfo)
+	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
+	logger.Info("auth-log")
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	require.NoError(t, shutdown(drainCtx))
+
+	// gRPC metadata keys are lowercased on the wire — assert in lowercase.
+	for _, sig := range []struct {
+		name string
+		md   func() []string
+	}{
+		{"traces", func() []string { return r.LastTraceHeaders().Get("authorization") }},
+		{"metrics", func() []string { return r.LastMetricHeaders().Get("authorization") }},
+		{"logs", func() []string { return r.LastLogHeaders().Get("authorization") }},
+	} {
+		t.Run(sig.name, func(t *testing.T) {
+			vals := sig.md()
+			require.NotEmpty(t, vals, "%s exporter dropped the authorization header", sig.name)
+			assert.Equal(t, "Bearer test-token", vals[0])
+		})
+	}
+	// Spot-check the second header on at least one signal — same map flows
+	// through all three so one check confirms multi-header support.
+	assert.Equal(t, []string{"abc123"}, r.LastTraceHeaders().Get("x-honeycomb-team"))
+}
+
+// TestOTel_PerSignalEndpoint_Override sends traces to one receiver and metrics
+// to another by setting TracesEndpoint on top of a default Endpoint. Grafana
+// Cloud's distinct gateway hosts per signal are the headline use case.
+func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
+	guardOTelGlobals(t)
+	rDefault := testutil.NewFakeOTLP(t)
+	rTraces := testutil.NewFakeOTLP(t)
+
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
+		Endpoint:         rDefault.Addr(), // metrics + logs land here
+		TracesEndpoint:   rTraces.Addr(),  // traces override
+		TracesEnabled:    true,
+		TracesSampleRate: 1.0,
+		MetricsEnabled:   true,
+	})
+
+	_, span := otel.Tracer("test").Start(context.Background(), "split-op")
+	span.End()
+
+	counter, err := otel.GetMeterProvider().Meter("test").Int64Counter("split_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	require.NoError(t, shutdown(drainCtx))
+
+	assert.Equal(t, 1, rTraces.SpanCount(), "trace endpoint should have received the span")
+	assert.Zero(t, rDefault.SpanCount(), "default endpoint must NOT receive traces when overridden")
+	assert.GreaterOrEqual(t, rDefault.MetricCount(), 1, "default endpoint should receive metrics (no override)")
+	assert.Zero(t, rTraces.MetricCount(), "trace endpoint should NOT receive metrics")
+}

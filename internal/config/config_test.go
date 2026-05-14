@@ -39,6 +39,10 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.True(t, cfg.OTel.Metrics.Enabled)
 	assert.True(t, cfg.OTel.Logs.Enabled)
 	assert.InEpsilon(t, 1.0, cfg.OTel.Logs.SampleRate, 0.0001)
+	assert.Equal(t, "", cfg.OTel.Headers)
+	assert.Equal(t, "", cfg.OTel.Traces.Addr)
+	assert.Equal(t, "", cfg.OTel.Metrics.Addr)
+	assert.Equal(t, "", cfg.OTel.Logs.Addr)
 }
 
 func TestLoad_FromYAML(t *testing.T) {
@@ -310,6 +314,65 @@ func TestValidate_RejectsEmptyOTelAddrWhenEnabled(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "otel.addr")
+}
+
+func TestValidate_RejectsMalformedHeaders(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		headers string
+	}{
+		{name: "missing equals", headers: "not-a-pair"},
+		{name: "empty key", headers: "=value"},
+		{name: "mixed valid and invalid", headers: "a=1,broken"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				Server:     Server{Port: 8080},
+				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				Schema:     Schema{RefreshInterval: 60},
+				OTel: OTel{
+					Enabled: true,
+					Addr:    "127.0.0.1:4317",
+					Headers: tc.headers,
+				},
+			}
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "otel.headers")
+		})
+	}
+}
+
+func TestValidate_AcceptsValidHeaders(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: true,
+			Addr:    "127.0.0.1:4317",
+			Headers: "authorization=Basic dXNlcjpwYXNz==,x-tenant-id=acme",
+		},
+	}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_HeadersIgnoredWhenOTelDisabled(t *testing.T) {
+	t.Parallel()
+	// Iterating on yaml shouldn't fail boot for headers in a disabled block.
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		OTel: OTel{
+			Enabled: false,
+			Headers: "not-a-pair",
+		},
+	}
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {

@@ -32,9 +32,23 @@ type Config struct {
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
 // when false, no signals are initialized regardless of the per-signal toggles.
+//
+// Addr accepts plain `host:port` (plaintext gRPC, backward-compat), `http://`
+// (also plaintext), or `https://` (TLS — required for direct-to-cloud OTLP).
+// A URL path component is tolerated and stripped (gRPC ignores it).
+//
+// Headers is a comma-separated list of `key=value` pairs applied to every OTLP
+// exporter — the standard knob for auth against cloud endpoints
+// (`authorization=Basic <b64>`, `x-honeycomb-team=<key>`, etc.). Values may
+// contain `=` (only the first `=` per segment splits key from value).
+//
+// Per-signal Addr overrides (Traces.Addr, Metrics.Addr, Logs.Addr) point one
+// signal at a different endpoint than the top-level Addr — useful for Grafana
+// Cloud, which uses distinct gateway hosts per signal. Empty means inherit.
 type OTel struct {
 	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
 	Addr    string      `yaml:"addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
+	Headers string      `yaml:"headers" env:"WH_OTEL_HEADERS"`
 	Traces  OTelTraces  `yaml:"traces"`
 	Metrics OTelMetrics `yaml:"metrics"`
 	Logs    OTelLogs    `yaml:"logs"`
@@ -43,10 +57,12 @@ type OTel struct {
 type OTelTraces struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
+	Addr       string  `yaml:"addr" env:"WH_OTEL_TRACES_ADDR"`
 }
 
 type OTelMetrics struct {
-	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Enabled bool   `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
+	Addr    string `yaml:"addr" env:"WH_OTEL_METRICS_ADDR"`
 }
 
 // Prometheus controls a Prometheus exposition endpoint served alongside (or
@@ -78,6 +94,7 @@ type Prometheus struct {
 type OTelLogs struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
+	Addr       string  `yaml:"addr" env:"WH_OTEL_LOGS_ADDR"`
 }
 
 type Server struct {
@@ -146,6 +163,30 @@ type DLQ struct {
 	Enabled bool `yaml:"enabled" env:"WH_DLQ_ENABLED" env-default:"true"`
 }
 
+// validateOTelHeaders mirrors observability.ParseOTelHeaders for boot-time
+// validation. Kept here (rather than importing observability) so config stays
+// at the bottom of the dependency graph.
+func validateOTelHeaders(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	for _, seg := range strings.Split(s, ",") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		i := strings.IndexByte(seg, '=')
+		if i < 0 {
+			return fmt.Errorf("header segment %q missing '='", seg)
+		}
+		if strings.TrimSpace(seg[:i]) == "" {
+			return fmt.Errorf("header segment %q has empty key", seg)
+		}
+	}
+	return nil
+}
+
 // Validate checks the loaded configuration for logical consistency.
 func (c *Config) Validate() error {
 	if c.ClickHouse.HTTPScheme != "http" && c.ClickHouse.HTTPScheme != "https" {
@@ -191,6 +232,13 @@ func (c *Config) Validate() error {
 			if r := c.OTel.Logs.SampleRate; r < 0 || r > 1 {
 				return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
 			}
+		}
+		// Parse headers eagerly so a malformed entry fails at boot rather than
+		// silently dropping auth in production. The same parser runs again at
+		// provider init; duplicating the validation here keeps config from
+		// importing the observability package.
+		if err := validateOTelHeaders(c.OTel.Headers); err != nil {
+			return fmt.Errorf("otel.headers: %w", err)
 		}
 	}
 
