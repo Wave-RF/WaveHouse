@@ -20,6 +20,13 @@ func TestParseEndpoint(t *testing.T) {
 		{name: "https with port and path", in: "https://otlp.example.com:443/v1/traces", wantHost: "otlp.example.com:443", wantTLS: true},
 		{name: "empty", in: "", wantHost: ""},
 		{name: "ipv4 plaintext", in: "127.0.0.1:4317", wantHost: "127.0.0.1:4317"},
+		// IPv6 cases pin the bracketed-literal behavior end-to-end. The
+		// current implementation handles them correctly via the path-strip
+		// loop, but a future refactor to net/url would need to preserve the
+		// brackets — these cases would catch any regression there.
+		{name: "ipv6 bare", in: "[::1]:4317", wantHost: "[::1]:4317"},
+		{name: "ipv6 https", in: "https://[::1]:4317", wantHost: "[::1]:4317", wantTLS: true},
+		{name: "ipv6 https with path", in: "https://[::1]:4317/otlp", wantHost: "[::1]:4317", wantTLS: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
