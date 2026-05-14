@@ -102,9 +102,17 @@ func run() int {
 	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
 	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		// Headers already passed config validation; the parser cannot fail
-		// here for input that satisfied Validate().
-		headers, _ := observability.ParseOTelHeaders(cfg.OTel.Headers)
+		// Validate() ran validateOTelHeaders, which mirrors ParseOTelHeaders —
+		// in practice the parse always succeeds here. The defensive check
+		// exists so that any future drift between the two implementations
+		// surfaces loudly instead of silently shipping OTLP exporters with no
+		// auth metadata (which would only show up as rejected-on-the-wire
+		// telemetry, not as a startup error).
+		headers, err := observability.ParseOTelHeaders(cfg.OTel.Headers)
+		if err != nil {
+			logger.Error("otel.headers parse failed after Validate accepted them; refusing to start with bad auth config", "error", err)
+			return 1
+		}
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
 			Endpoint:          cfg.OTel.Addr,
 			Headers:           headers,
