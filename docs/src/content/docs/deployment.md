@@ -342,7 +342,7 @@ export WH_OTEL_HEADERS=x-honeycomb-team=YOUR_API_KEY
 export WH_OTEL_ENABLED=true
 export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
 # instanceID:token, base64-encoded (tr -d '\n' strips base64's 76-char line wrap)
-export WH_OTEL_HEADERS=authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')
+export WH_OTEL_HEADERS="authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')"
 ```
 
 If different signals need different gateway hosts (Grafana Cloud's traces/metrics/logs endpoints differ in some regions), set `WH_OTEL_TRACES_ADDR` / `WH_OTEL_METRICS_ADDR` / `WH_OTEL_LOGS_ADDR` to override the default per signal. Empty means inherit from `otel.addr`. Headers always apply to every exporter — there is intentionally no per-signal header override.
