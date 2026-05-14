@@ -40,6 +40,10 @@ func TestHeaderParsers_StayInSync(t *testing.T) {
 		{name: "empty key", in: "=value", wantErr: true},
 		{name: "empty value", in: "k=", wantErr: true},
 		{name: "whitespace-only value", in: "authorization=   ", wantErr: true},
+		{name: "space in key", in: "my key=v", wantErr: true},
+		{name: "colon in key", in: "x:y=v", wantErr: true},
+		{name: "non-ascii key", in: "x-héader=v", wantErr: true},
+		{name: "mixed-case key", in: "Authorization=Bearer x", wantErr: false},
 		{name: "mixed valid and invalid", in: "a=1,broken", wantErr: true},
 	}
 

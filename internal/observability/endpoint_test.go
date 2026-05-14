@@ -48,6 +48,10 @@ func TestParseOTelHeaders(t *testing.T) {
 		{name: "empty key", in: "=value", wantErr: true},
 		{name: "empty value rejected", in: "k=", wantErr: true},
 		{name: "whitespace-only value rejected", in: "authorization=   ", wantErr: true},
+		{name: "space in key rejected", in: "my key=v", wantErr: true},
+		{name: "colon in key rejected", in: "x:y=v", wantErr: true},
+		{name: "non-ascii key rejected", in: "x-héader=v", wantErr: true},
+		{name: "mixed-case key accepted", in: "Authorization=Bearer x", want: map[string]string{"Authorization": "Bearer x"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

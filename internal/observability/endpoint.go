@@ -7,14 +7,17 @@ import (
 )
 
 // tlsConfigOrDefault returns the supplied config when non-nil. The OTel SDK's
-// credentials.NewTLS expects a non-nil *tls.Config; passing nil panics. An
-// empty &tls.Config{} delegates to system defaults (system root CAs, ALPN
-// negotiation), which is what production wants for cloud OTLP endpoints.
+// credentials.NewTLS expects a non-nil *tls.Config; passing nil panics. The
+// production default delegates to system root CAs / ALPN negotiation but
+// pins MinVersion to TLS 1.3 — every TLS-terminated cloud OTLP gateway in
+// scope (Grafana Cloud, Honeycomb) supports it, and the floor matches OWASP
+// modern guidance. Test callers supplying their own *tls.Config keep full
+// control over the version range.
 func tlsConfigOrDefault(c *tls.Config) *tls.Config {
 	if c != nil {
 		return c
 	}
-	return &tls.Config{}
+	return &tls.Config{MinVersion: tls.VersionTLS13}
 }
 
 // ParseEndpoint splits an OTLP endpoint string into the gRPC dial host and a
@@ -45,10 +48,15 @@ func ParseEndpoint(addr string) (host string, useTLS bool) {
 // (`OTEL_EXPORTER_OTLP_HEADERS`) — comma-separated `key=value` pairs — into a
 // map. Whitespace around the key and value is trimmed. Only the first `=` per
 // segment splits key from value, so base64 trailing `=` in an Authorization
-// header round-trips unchanged. An empty input yields an empty map. Both an
-// empty key and an empty-or-whitespace-only value are rejected — the latter
-// turns "authorization=   " (a typo) from a silent 401 against the cloud
-// gateway into a fail-loud boot error.
+// header round-trips unchanged. An empty input yields an empty map.
+//
+// Both empty keys and empty-or-whitespace-only values are rejected (e.g.
+// `authorization=   ` would otherwise ship as `authorization: ""` to the
+// cloud gateway and 401 silently). Keys are also validated against the
+// RFC 7230 `token` production (the HTTP header-name grammar) so a typo like
+// `my key=...` fails at boot rather than blowing up inside the gRPC stack
+// on first export. gRPC normalizes ASCII case on the wire, so mixed-case
+// keys (`Authorization`, `X-Honeycomb-Team`) are accepted.
 //
 // Returns an error (rather than silently dropping the segment) for malformed
 // entries so Validate() can fail loud at boot rather than letting a typo
@@ -81,10 +89,37 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 		if key == "" {
 			return nil, fmt.Errorf("header segment %q has empty key", seg)
 		}
+		if bad, ok := firstNonTokenChar(key); !ok {
+			return nil, fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, tokenPunctuationDoc)
+		}
 		if val == "" {
 			return nil, fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
 		}
 		out[key] = val
 	}
 	return out, nil
+}
+
+// tokenPunctuationDoc lists the punctuation characters legal in an RFC 7230
+// `token` (HTTP header field name). Surfaced in error messages so the
+// reported "what's allowed" matches what the validator actually accepts.
+const tokenPunctuationDoc = "!#$%&'*+-.^_`|~"
+
+// firstNonTokenChar reports whether s consists entirely of RFC 7230 `token`
+// characters (the HTTP header-name grammar): ALPHA / DIGIT / one of the
+// punctuation chars in tokenPunctuationDoc. Returns the first offending
+// rune and false on the first non-token char; returns (0, true) when s is
+// fully valid.
+func firstNonTokenChar(s string) (rune, bool) {
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case strings.ContainsRune(tokenPunctuationDoc, c):
+		default:
+			return c, false
+		}
+	}
+	return 0, true
 }

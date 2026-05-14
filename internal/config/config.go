@@ -178,7 +178,9 @@ type DLQ struct {
 //
 // Empty-or-whitespace-only values are rejected (e.g. `authorization=   `)
 // to surface auth typos at boot rather than as silent 401s against the
-// cloud gateway.
+// cloud gateway. Keys are validated against the RFC 7230 `token` production
+// so `my key=...` (space) fails at boot rather than at the gRPC stack on
+// first export.
 func validateOTelHeaders(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -193,14 +195,39 @@ func validateOTelHeaders(s string) error {
 		if i < 0 {
 			return fmt.Errorf("header segment %q missing '='", seg)
 		}
-		if strings.TrimSpace(seg[:i]) == "" {
+		key := strings.TrimSpace(seg[:i])
+		if key == "" {
 			return fmt.Errorf("header segment %q has empty key", seg)
+		}
+		if bad, ok := firstNonHeaderTokenChar(key); !ok {
+			return fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, headerTokenPunctuation)
 		}
 		if strings.TrimSpace(seg[i+1:]) == "" {
 			return fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
 		}
 	}
 	return nil
+}
+
+// headerTokenPunctuation lists the punctuation characters legal in an RFC
+// 7230 `token` (HTTP header field name). MUST stay in sync with
+// observability.tokenPunctuationDoc.
+const headerTokenPunctuation = "!#$%&'*+-.^_`|~"
+
+// firstNonHeaderTokenChar mirrors observability.firstNonTokenChar — see
+// the doc on validateOTelHeaders for the parity rationale.
+func firstNonHeaderTokenChar(s string) (rune, bool) {
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case strings.ContainsRune(headerTokenPunctuation, c):
+		default:
+			return c, false
+		}
+	}
+	return 0, true
 }
 
 // Validate checks the loaded configuration for logical consistency.
