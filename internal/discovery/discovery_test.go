@@ -490,6 +490,40 @@ func TestRetryRefresh_ReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestRetryRefresh_DoesNotFireOnAttemptDuringCancel pins the shutdown-noise
+// guard added per Gemini's review on f854274: when the context is already
+// cancelled going into the loop, the failed Refresh's error is a downstream
+// reflection of cancellation (or arrives before the select can catch
+// ctx.Done() — either way), and surfacing it via onAttempt would write
+// "context canceled" into BootState as a spurious /health diagnostic during
+// the normal shutdown window. The guard is a single `ctx.Err() == nil`
+// check on the callback site; this test pins it.
+func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
+	t.Parallel()
+	// fakeConn doesn't inspect ctx, so the first Refresh against a
+	// pre-cancelled ctx returns "transient" rather than ctx.Canceled.
+	// That's exactly the case the guard needs to handle — the error
+	// looks real, but ctx.Err() reveals we're shutting down anyway.
+	conn := &fakeConn{errsThenSuccess: []error{errors.New("transient")}}
+	sr, _ := newFakeRegistry(t, nil)
+	sr.conn = conn // override the no-error conn from newFakeRegistry
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before RetryRefresh starts
+
+	var attempts atomic.Int32
+	err := sr.RetryRefresh(ctx, time.Second, time.Second, func(_ error) {
+		attempts.Add(1)
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(0), attempts.Load(),
+		"onAttempt must not fire when ctx is already cancelled — that would surface shutdown as a /health diagnostic")
+	// Sanity: Refresh actually ran at least once (so we exercised the
+	// callback site, not a short-circuit that skipped Refresh entirely).
+	assert.Equal(t, int32(1), conn.calls.Load(), "Refresh should have been called exactly once before the select caught ctx.Done()")
+}
+
 // TestRetryRefresh_BackoffIsBounded verifies that maxBackoff caps the
 // exponential growth. We use small bounds so the test stays fast.
 func TestRetryRefresh_BackoffIsBounded(t *testing.T) {

@@ -142,7 +142,15 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 	for {
 		if err := sr.Refresh(ctx); err == nil {
 			return nil
-		} else if onAttempt != nil {
+		} else if ctx.Err() == nil && onAttempt != nil {
+			// Skip the callback when Refresh's error is just a downstream
+			// reflection of ctx cancellation — that's a shutdown signal,
+			// not a real diagnostic. Without this guard, a clean shutdown
+			// fires onAttempt with `context.Canceled`, which the wavehouse
+			// boot path then writes into BootState as
+			//   "schema discovery: context canceled"
+			// — visible to anyone curl'ing /health during the shutdown
+			// window. Not wrong, just noise.
 			onAttempt(err)
 		}
 		select {
