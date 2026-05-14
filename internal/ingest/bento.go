@@ -189,14 +189,27 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 					"error", err,
 				)
 
-				// DLQ shape note: insert failures route through dlqOutput.WriteBatch
-				// and publish `raw.Payload` (the inner data field only). This path
-				// publishes the full NATS envelope (`{"action":"delete","table_name":...,"id":...}`)
-				// so a DLQ consumer can re-issue the delete with full context. A consumer
-				// of `dlq.<table>` must branch on the `"action"` field to distinguish the
-				// two shapes; Phase 2 (issue #91) may normalize this.
+				// DLQ shape contract: `dlq.<table>` carries two structurally different
+				// payloads — insert-failure inner-data via dlqOutput.WriteBatch, and
+				// delete-failure full envelopes via this branch
+				// (`{"action":"delete","table_name":...,"id":...}`). Consumers must NOT
+				// branch on a JSON field to tell them apart: under BYOS a user row can
+				// carry any key, including `action`. We instead set a non-user-controlled
+				// NATS header here (`Wave-DLQ-Type: delete-envelope`) so consumers can
+				// detect the shape via header presence. The insert path has no header
+				// today; absence means insert-payload. Phase 2 (issue #91) will add
+				// `Wave-DLQ-Type: insert-payload` on the insert path and may normalize
+				// the shapes. observability.InjectNATS also propagates the
+				// `clickhouse_delete` span into the message so a Phase 2 consumer can
+				// stitch its own trace to the worker's.
 				dlqSubject := "dlq." + raw.TableName
-				if _, pubErr := j.js.Publish(spanCtx, dlqSubject, m.Data()); pubErr != nil {
+				dlqMsg := &nats.Msg{
+					Subject: dlqSubject,
+					Data:    m.Data(),
+					Header:  nats.Header{"Wave-DLQ-Type": []string{"delete-envelope"}},
+				}
+				observability.InjectNATS(spanCtx, dlqMsg)
+				if _, pubErr := j.js.PublishMsg(spanCtx, dlqMsg); pubErr != nil {
 					slog.ErrorContext(spanCtx, "DLQ publish failed for permanent delete error — message dropped",
 						"subject", dlqSubject,
 						"error", pubErr,

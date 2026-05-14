@@ -24,7 +24,11 @@ import (
 // Different names from sweeper_test.go mocks to avoid redeclaration.
 // ---------------------------------------------------------------------------
 
-// bentoMockJS satisfies jetstream.JetStream; only Publish is overridden.
+// bentoMockJS satisfies jetstream.JetStream; Publish and PublishMsg are overridden.
+// Publish is used by dlqOutput.WriteBatch (insert-failure path).
+// PublishMsg is used by jsInput.Read's delete-failure branch, which needs to set
+// a non-user-controlled `Wave-DLQ-Type` header to discriminate DLQ payload shapes
+// under BYOS (see internal/ingest/bento.go).
 type bentoMockJS struct {
 	jetstream.JetStream
 	published []publishedMsg
@@ -33,10 +37,16 @@ type bentoMockJS struct {
 type publishedMsg struct {
 	Subject string
 	Data    []byte
+	Header  nats.Header
 }
 
 func (m *bentoMockJS) Publish(_ context.Context, subject string, payload []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	m.published = append(m.published, publishedMsg{Subject: subject, Data: payload})
+	return &jetstream.PubAck{}, nil
+}
+
+func (m *bentoMockJS) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	m.published = append(m.published, publishedMsg{Subject: msg.Subject, Data: msg.Data, Header: msg.Header})
 	return &jetstream.PubAck{}, nil
 }
 
@@ -341,6 +351,12 @@ func TestJsInput_Read_DeleteExecError(t *testing.T) {
 	require.Len(t, js.published, 1, "failed delete should be published to DLQ exactly once")
 	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
 	assert.JSONEq(t, string(delData), string(js.published[0].Data), "DLQ payload should preserve the original delete envelope")
+	// BYOS-safe shape discriminator: a `Wave-DLQ-Type: delete-envelope` NATS
+	// header tells consumers this is a full-envelope payload, not an insert
+	// row. Header is non-user-controlled — a user column named `action` in an
+	// insert row can't forge it.
+	assert.Equal(t, "delete-envelope", js.published[0].Header.Get("Wave-DLQ-Type"),
+		"delete failures must be tagged with Wave-DLQ-Type header so DLQ consumers can distinguish them from insert-failure payloads under BYOS")
 
 	// Next message in queue should be the follow-up insert.
 	table, _ := msg.MetaGet("table_name")
@@ -627,6 +643,10 @@ type bentoMockJSWithError struct {
 }
 
 func (m *bentoMockJSWithError) Publish(_ context.Context, _ string, _ []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	return nil, m.publishErr
+}
+
+func (m *bentoMockJSWithError) PublishMsg(_ context.Context, _ *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	return nil, m.publishErr
 }
 
