@@ -46,7 +46,8 @@ func TestParseOTelHeaders(t *testing.T) {
 		{name: "trailing comma tolerated", in: "a=1,", want: map[string]string{"a": "1"}},
 		{name: "missing equals", in: "not-a-pair", wantErr: true},
 		{name: "empty key", in: "=value", wantErr: true},
-		{name: "empty value allowed", in: "k=", want: map[string]string{"k": ""}},
+		{name: "empty value rejected", in: "k=", wantErr: true},
+		{name: "whitespace-only value rejected", in: "authorization=   ", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

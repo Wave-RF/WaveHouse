@@ -315,30 +315,51 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	}()
 }
 
-// TestOTel_TLSPath_Traces locks in the https:// → TLS dial path. The fake
-// receiver listens with an ephemeral self-signed cert; the exporter is given
-// the matching client tls.Config via ProviderConfig.TLSConfig. If TLS wiring
-// regresses (e.g. someone re-adds WithInsecure unconditionally), the dial
-// will TLS-handshake against a plaintext server and the export drops.
-func TestOTel_TLSPath_Traces(t *testing.T) {
+// TestOTel_TLSPath_AllSignals locks in the https:// → TLS dial path on every
+// OTLP exporter. The fake receiver listens with an ephemeral self-signed cert;
+// each exporter is given the matching client tls.Config via the test-only
+// SetTLSConfigForTesting setter. If TLS wiring regresses on any signal (e.g.
+// someone re-adds WithInsecure unconditionally on just the metrics or logs
+// branch of provider.go), that signal will TLS-handshake against a plaintext
+// server and the export drops — caught here as a missing count on the right
+// receiver.
+//
+// Headers are intentionally not asserted; TestOTel_Headers_AppliedToAllSignals
+// owns the header-propagation invariant. This test owns the TLS-dial invariant
+// across signals.
+func TestOTel_TLSPath_AllSignals(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLPTLS(t)
 
-	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
+	cfg := observability.ProviderConfig{
 		Endpoint:         "https://" + r.Addr(),
-		TLSConfig:        r.TLSConfig(),
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
-	})
+		MetricsEnabled:   true,
+		LogsEnabled:      true,
+	}
+	cfg.SetTLSConfigForTesting(r.TLSConfig())
+	shutdown, _ := initAndShutdown(t, cfg)
 
 	_, span := otel.Tracer("test").Start(context.Background(), "tls-op")
 	span.End()
+
+	counter, err := otel.GetMeterProvider().Meter("test").Int64Counter("tls_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelInfo)
+	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
+	logger.Info("tls-log")
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
 	assert.Equal(t, 1, r.SpanCount(), "TLS path must deliver the span end-to-end")
+	assert.GreaterOrEqual(t, r.MetricCount(), 1, "TLS path must deliver metrics end-to-end")
+	assert.GreaterOrEqual(t, r.LogCount(), 1, "TLS path must deliver logs end-to-end")
 }
 
 // TestOTel_Headers_AppliedToAllSignals verifies that ProviderConfig.Headers

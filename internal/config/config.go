@@ -170,9 +170,15 @@ type DLQ struct {
 //
 // MUST stay in sync with observability.ParseOTelHeaders in
 // internal/observability/endpoint.go. cmd/wavehouse/main.go's defensive
-// error-check on the post-Validate parse exists to catch any drift loudly,
-// but the right answer is to not drift in the first place: any rule change
-// here needs the same change there, and vice versa.
+// error-check on the post-Validate parse catches any drift loudly at
+// startup, and the cross-parser parity test in header_parity_test.go pins
+// both parsers to the same accept/reject decisions at CI time — but the
+// right answer is to not drift in the first place: any rule change here
+// needs the same change there, and vice versa.
+//
+// Empty-or-whitespace-only values are rejected (e.g. `authorization=   `)
+// to surface auth typos at boot rather than as silent 401s against the
+// cloud gateway.
 func validateOTelHeaders(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -189,6 +195,9 @@ func validateOTelHeaders(s string) error {
 		}
 		if strings.TrimSpace(seg[:i]) == "" {
 			return fmt.Errorf("header segment %q has empty key", seg)
+		}
+		if strings.TrimSpace(seg[i+1:]) == "" {
+			return fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
 		}
 	}
 	return nil

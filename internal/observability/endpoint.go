@@ -45,7 +45,10 @@ func ParseEndpoint(addr string) (host string, useTLS bool) {
 // (`OTEL_EXPORTER_OTLP_HEADERS`) — comma-separated `key=value` pairs — into a
 // map. Whitespace around the key and value is trimmed. Only the first `=` per
 // segment splits key from value, so base64 trailing `=` in an Authorization
-// header round-trips unchanged. An empty input yields an empty map.
+// header round-trips unchanged. An empty input yields an empty map. Both an
+// empty key and an empty-or-whitespace-only value are rejected — the latter
+// turns "authorization=   " (a typo) from a silent 401 against the cloud
+// gateway into a fail-loud boot error.
 //
 // Returns an error (rather than silently dropping the segment) for malformed
 // entries so Validate() can fail loud at boot rather than letting a typo
@@ -54,8 +57,10 @@ func ParseEndpoint(addr string) (host string, useTLS bool) {
 // MUST stay in sync with config.validateOTelHeaders in
 // internal/config/config.go. config can't import observability without
 // transitively pulling the OTel SDK into every config consumer, so the
-// parsing rules are hand-mirrored. Any rule change here needs the same
-// change there, and vice versa.
+// parsing rules are hand-mirrored. The cross-parser parity test in
+// internal/config/header_parity_test.go pins both parsers to the same
+// accept/reject decisions, so a rule change here fails CI until the
+// matching change lands there (and vice versa).
 func ParseOTelHeaders(s string) (map[string]string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -75,6 +80,9 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 		val := strings.TrimSpace(seg[i+1:])
 		if key == "" {
 			return nil, fmt.Errorf("header segment %q has empty key", seg)
+		}
+		if val == "" {
+			return nil, fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
 		}
 		out[key] = val
 	}

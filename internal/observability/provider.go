@@ -53,10 +53,12 @@ var runtimeStartOnce sync.Once
 // Headers (set, key=value pairs already parsed by config) is applied to every
 // OTLP exporter — the standard knob for auth against cloud endpoints.
 //
-// TLSConfig is a test-only escape hatch: when non-nil it overrides the default
-// system-roots TLS config for `https://` endpoints. Production code leaves it
-// nil; only the FakeOTLPTLS-driven integration tests populate it (with
-// InsecureSkipVerify against an ephemeral self-signed cert).
+// tlsConfig is unexported and reserved for the integration-test escape hatch
+// (FakeOTLPTLS — InsecureSkipVerify against an ephemeral self-signed cert).
+// Production code must NOT set it; the system-root TLS config picked from the
+// `https://` scheme on Endpoint is what production wants. Test callers reach
+// it via SetTLSConfigForTesting so production callers don't get the field
+// surfaced in IDE autocomplete.
 type ProviderConfig struct {
 	Endpoint          string
 	Headers           map[string]string
@@ -68,7 +70,16 @@ type ProviderConfig struct {
 	PrometheusEnabled bool
 	LogsEndpoint      string
 	LogsEnabled       bool
-	TLSConfig         *tls.Config
+	tlsConfig         *tls.Config
+}
+
+// SetTLSConfigForTesting injects a client *tls.Config that overrides the
+// default system-roots config for `https://` endpoints. The deliberately
+// awkward name signals intent: only the FakeOTLPTLS integration helpers
+// should call this. Production code path keeps tlsConfig nil and falls
+// through to system roots.
+func (c *ProviderConfig) SetTLSConfigForTesting(cfg *tls.Config) {
+	c.tlsConfig = cfg
 }
 
 // pickEndpoint returns override if set, otherwise fallback.
@@ -144,7 +155,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		host, useTLS := ParseEndpoint(pickEndpoint(cfg.TracesEndpoint, cfg.Endpoint))
 		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(host)}
 		if useTLS {
-			opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConfigOrDefault(cfg.TLSConfig))))
+			opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConfigOrDefault(cfg.tlsConfig))))
 		} else {
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
@@ -174,7 +185,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 			host, useTLS := ParseEndpoint(pickEndpoint(cfg.MetricsEndpoint, cfg.Endpoint))
 			opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(host)}
 			if useTLS {
-				opts = append(opts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsConfigOrDefault(cfg.TLSConfig))))
+				opts = append(opts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsConfigOrDefault(cfg.tlsConfig))))
 			} else {
 				opts = append(opts, otlpmetricgrpc.WithInsecure())
 			}
@@ -238,7 +249,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		host, useTLS := ParseEndpoint(pickEndpoint(cfg.LogsEndpoint, cfg.Endpoint))
 		opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(host)}
 		if useTLS {
-			opts = append(opts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsConfigOrDefault(cfg.TLSConfig))))
+			opts = append(opts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsConfigOrDefault(cfg.tlsConfig))))
 		} else {
 			opts = append(opts, otlploggrpc.WithInsecure())
 		}

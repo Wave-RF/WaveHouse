@@ -324,6 +324,8 @@ func TestValidate_RejectsMalformedHeaders(t *testing.T) {
 	}{
 		{name: "missing equals", headers: "not-a-pair"},
 		{name: "empty key", headers: "=value"},
+		{name: "empty value", headers: "k="},
+		{name: "whitespace-only value", headers: "authorization=   "},
 		{name: "mixed valid and invalid", headers: "a=1,broken"},
 	}
 	for _, tc := range cases {
