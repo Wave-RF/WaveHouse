@@ -108,10 +108,22 @@ func run() int {
 		// surfaces loudly instead of silently shipping OTLP exporters with no
 		// auth metadata (which would only show up as rejected-on-the-wire
 		// telemetry, not as a startup error).
-		headers, err := observability.ParseOTelHeaders(cfg.OTel.Headers)
-		if err != nil {
-			logger.Error("otel.headers parse failed after Validate accepted them; refusing to start with bad auth config", "error", err)
-			return 1
+		//
+		// Guarded on cfg.OTel.Enabled because Validate() also skips
+		// validateOTelHeaders when OTLP is off — in Prometheus-only mode a
+		// stale WH_OTEL_HEADERS env var would otherwise fail here with the
+		// misleading "parse failed after Validate accepted them" message
+		// when the parsers are in fact in sync (Validate just didn't run).
+		// Headers do nothing without an OTLP exporter, so leaving them
+		// unparsed in that mode is safe.
+		var headers map[string]string
+		if cfg.OTel.Enabled {
+			var err error
+			headers, err = observability.ParseOTelHeaders(cfg.OTel.Headers)
+			if err != nil {
+				logger.Error("otel.headers parse failed after Validate accepted them; refusing to start with bad auth config", "error", err)
+				return 1
+			}
 		}
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
 			Endpoint:          cfg.OTel.Addr,

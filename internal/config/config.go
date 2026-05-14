@@ -200,7 +200,7 @@ func validateOTelHeaders(s string) error {
 			return fmt.Errorf("header segment %q has empty key", seg)
 		}
 		if bad, ok := firstNonHeaderTokenChar(key); !ok {
-			return fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, headerTokenPunctuation)
+			return fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, headerNamePunctuation)
 		}
 		if strings.TrimSpace(seg[i+1:]) == "" {
 			return fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
@@ -209,10 +209,10 @@ func validateOTelHeaders(s string) error {
 	return nil
 }
 
-// headerTokenPunctuation lists the punctuation characters legal in an RFC
-// 7230 `token` (HTTP header field name). MUST stay in sync with
-// observability.tokenPunctuationDoc.
-const headerTokenPunctuation = "!#$%&'*+-.^_`|~"
+// headerNamePunctuation lists the punctuation characters legal in an RFC
+// 7230 `token` (HTTP header field name). MUST stay in sync with the
+// const of the same name in internal/observability/endpoint.go.
+const headerNamePunctuation = "!#$%&'*+-.^_`|~"
 
 // firstNonHeaderTokenChar mirrors observability.firstNonTokenChar — see
 // the doc on validateOTelHeaders for the parity rationale.
@@ -222,7 +222,7 @@ func firstNonHeaderTokenChar(s string) (rune, bool) {
 		case c >= 'a' && c <= 'z':
 		case c >= 'A' && c <= 'Z':
 		case c >= '0' && c <= '9':
-		case strings.ContainsRune(headerTokenPunctuation, c):
+		case strings.ContainsRune(headerNamePunctuation, c):
 		default:
 			return c, false
 		}

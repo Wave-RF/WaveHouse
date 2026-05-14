@@ -90,7 +90,7 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 			return nil, fmt.Errorf("header segment %q has empty key", seg)
 		}
 		if bad, ok := firstNonTokenChar(key); !ok {
-			return nil, fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, tokenPunctuationDoc)
+			return nil, fmt.Errorf("header segment %q has invalid key character %q (RFC 7230 token: letters, digits, and %s)", seg, bad, headerNamePunctuation)
 		}
 		if val == "" {
 			return nil, fmt.Errorf("header segment %q has empty or whitespace-only value", seg)
@@ -100,14 +100,14 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 	return out, nil
 }
 
-// tokenPunctuationDoc lists the punctuation characters legal in an RFC 7230
+// headerNamePunctuation lists the punctuation characters legal in an RFC 7230
 // `token` (HTTP header field name). Surfaced in error messages so the
 // reported "what's allowed" matches what the validator actually accepts.
-const tokenPunctuationDoc = "!#$%&'*+-.^_`|~"
+const headerNamePunctuation = "!#$%&'*+-.^_`|~"
 
 // firstNonTokenChar reports whether s consists entirely of RFC 7230 `token`
 // characters (the HTTP header-name grammar): ALPHA / DIGIT / one of the
-// punctuation chars in tokenPunctuationDoc. Returns the first offending
+// punctuation chars in headerNamePunctuation. Returns the first offending
 // rune and false on the first non-token char; returns (0, true) when s is
 // fully valid.
 func firstNonTokenChar(s string) (rune, bool) {
@@ -116,7 +116,7 @@ func firstNonTokenChar(s string) (rune, bool) {
 		case c >= 'a' && c <= 'z':
 		case c >= 'A' && c <= 'Z':
 		case c >= '0' && c <= '9':
-		case strings.ContainsRune(tokenPunctuationDoc, c):
+		case strings.ContainsRune(headerNamePunctuation, c):
 		default:
 			return c, false
 		}
