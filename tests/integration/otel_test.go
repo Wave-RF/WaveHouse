@@ -399,26 +399,30 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	assert.Equal(t, []string{"abc123"}, r.LastTraceHeaders().Get("x-honeycomb-team"))
 }
 
-// TestOTel_PerSignalEndpoint_Override verifies that TracesEndpoint and
-// MetricsEndpoint each route their own signal to a distinct receiver while
-// the default Endpoint sees neither. Grafana Cloud's per-signal gateway hosts
-// are the headline use case. Both signal-type overrides go through the same
-// pickEndpoint() helper in provider.go, so a copy-paste bug (e.g. the
-// metrics exporter being wired to TracesEndpoint) would surface here as
-// metrics landing on the wrong receiver — caught by the cross-asserts below.
+// TestOTel_PerSignalEndpoint_Override verifies that TracesEndpoint,
+// MetricsEndpoint, and LogsEndpoint each route their own signal to a distinct
+// receiver while the default Endpoint sees none. Grafana Cloud's per-signal
+// gateway hosts are the headline use case. All three signal overrides go
+// through the same pickEndpoint() helper in provider.go, so a copy-paste bug
+// (e.g. the metrics exporter being wired to TracesEndpoint, or the logs
+// exporter inheriting TracesEndpoint) would surface here as a signal landing
+// on the wrong receiver — caught by the cross-asserts below.
 func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
 	guardOTelGlobals(t)
 	rDefault := testutil.NewFakeOTLP(t)
 	rTraces := testutil.NewFakeOTLP(t)
 	rMetrics := testutil.NewFakeOTLP(t)
+	rLogs := testutil.NewFakeOTLP(t)
 
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         rDefault.Addr(), // both signals overridden → default sees nothing
+		Endpoint:         rDefault.Addr(), // all three signals overridden → default sees nothing
 		TracesEndpoint:   rTraces.Addr(),
 		MetricsEndpoint:  rMetrics.Addr(),
+		LogsEndpoint:     rLogs.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   true,
+		LogsEnabled:      true,
 	})
 
 	_, span := otel.Tracer("test").Start(context.Background(), "split-op")
@@ -428,14 +432,25 @@ func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
 	require.NoError(t, err)
 	counter.Add(context.Background(), 1)
 
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelInfo)
+	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
+	logger.Info("split-log")
+
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
 	assert.Equal(t, 1, rTraces.SpanCount(), "TracesEndpoint should receive the span")
 	assert.GreaterOrEqual(t, rMetrics.MetricCount(), 1, "MetricsEndpoint should receive the metric")
+	assert.GreaterOrEqual(t, rLogs.LogCount(), 1, "LogsEndpoint should receive the log")
 	assert.Zero(t, rDefault.SpanCount(), "default endpoint must NOT receive traces when overridden")
 	assert.Zero(t, rDefault.MetricCount(), "default endpoint must NOT receive metrics when overridden")
+	assert.Zero(t, rDefault.LogCount(), "default endpoint must NOT receive logs when overridden")
 	assert.Zero(t, rTraces.MetricCount(), "TracesEndpoint should NOT receive metrics (catches metrics-to-traces wiring bug)")
+	assert.Zero(t, rTraces.LogCount(), "TracesEndpoint should NOT receive logs (catches logs-to-traces wiring bug)")
 	assert.Zero(t, rMetrics.SpanCount(), "MetricsEndpoint should NOT receive spans (catches traces-to-metrics wiring bug)")
+	assert.Zero(t, rMetrics.LogCount(), "MetricsEndpoint should NOT receive logs (catches logs-to-metrics wiring bug)")
+	assert.Zero(t, rLogs.SpanCount(), "LogsEndpoint should NOT receive spans (catches traces-to-logs wiring bug)")
+	assert.Zero(t, rLogs.MetricCount(), "LogsEndpoint should NOT receive metrics (catches metrics-to-logs wiring bug)")
 }
