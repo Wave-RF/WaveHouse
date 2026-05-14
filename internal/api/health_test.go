@@ -100,7 +100,7 @@ func TestBootState_SetAndGet(t *testing.T) {
 func TestHealth_Liveness_BootDegraded(t *testing.T) {
 	t.Parallel()
 	// When BootState reports a non-nil error, Liveness must return 503 with
-	// the diagnostic in the JSON body. This is the behaviour the gateway
+	// the diagnostic in the JSON body. This is the behavior the gateway
 	// relies on so an operator can `curl /health` during a boot-time
 	// ClickHouse outage instead of grepping a restart-loop log.
 	h := NewHealthHandler(nil)

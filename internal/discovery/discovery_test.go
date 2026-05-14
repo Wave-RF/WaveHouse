@@ -1,10 +1,13 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -578,4 +581,67 @@ func TestStartAutoRefresh_ExitsOnContextCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("StartAutoRefresh did not return after ctx cancel")
 	}
+}
+
+// concurrentBuffer wraps bytes.Buffer with a mutex so the test goroutine can
+// read the buffer while slog's JSON handler writes to it from another. slog
+// serialises its own writes via an internal mutex, but the test's reads sit
+// outside that mutex — without external synchronisation, `go test -race`
+// reports the buf access as a data race.
+type concurrentBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (c *concurrentBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.b.Write(p)
+}
+
+func (c *concurrentBuffer) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.b.String()
+}
+
+// TestStartAutoRefresh_LogsAndContinuesOnError covers the error branch in
+// StartAutoRefresh's ticker loop: a failed Refresh logs an ERROR line and
+// the loop keeps going. Operators rely on this so transient ClickHouse
+// blips after boot don't kill the auto-refresh goroutine — the schema
+// cache stays warm until the next successful tick.
+//
+// Uses a perpetual-error fake conn + a 5ms refresh interval to trigger the
+// branch in milliseconds, then asserts the log line is present via
+// assert.Eventually (no time.Sleep-based scheduling assumption).
+func TestStartAutoRefresh_LogsAndContinuesOnError(t *testing.T) {
+	t.Parallel()
+	errs := make([]error, 50)
+	for i := range errs {
+		errs[i] = errors.New("transient")
+	}
+	conn := &fakeConn{errsThenSuccess: errs}
+
+	var buf concurrentBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sr := NewSchemaRegistry(conn, "test", 5*time.Millisecond, logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sr.StartAutoRefresh(ctx)
+		close(done)
+	}()
+
+	assert.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), "schema auto-refresh failed")
+	}, 2*time.Second, 5*time.Millisecond, "expected auto-refresh failure log line within 2s")
+
+	cancel()
+	<-done
+
+	// Sanity: the ticker actually fired Refresh at least once. Without
+	// this, an off-by-one that skipped the first tick would silently let
+	// the test pass off a stale buffer assertion on a never-run loop.
+	assert.Greater(t, conn.calls.Load(), int32(0), "ticker never fired Refresh")
 }
