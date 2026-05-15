@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,29 +144,30 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 
 	admitted := l.cache.SetWithTTL(key, &cacheValue{key: key, data: value, version: version}, int64(len(value)), ttl)
 
-	if admitted {
-		l.keyVersion[key] = version
-		l.removeKeyFromTagsLocked(key)
+	if !admitted {
+		slog.Warn("ristretto rejected cache entry; MaxCost may be undersized",
+			"key", key,
+			"bytes", len(value),
+		)
+		return nil
+	}
 
-		if ttl > 0 {
-			l.ttls.Store(key, exp)
-		} else {
-			// Clear any expiry left by a prior Set with ttl>0. The
-			// version-guarded OnEvict path returns before reaching
-			// ttls.Delete for the old version, so without this branch the
-			// stale expiry would orphan and silently drop this live,
-			// no-TTL value once the prior TTL elapses (see Get).
-			l.ttls.Delete(key)
-		}
+	l.keyVersion[key] = version
+	l.removeKeyFromTagsLocked(key)
 
-		if len(tags) > 0 {
-			l.keyTags[key] = tags
-			for _, tag := range tags {
-				if l.tagsMap[tag] == nil {
-					l.tagsMap[tag] = make(map[string]struct{})
-				}
-				l.tagsMap[tag][key] = struct{}{}
+	if ttl > 0 {
+		l.ttls.Store(key, exp)
+	} else {
+		l.ttls.Delete(key)
+	}
+
+	if len(tags) > 0 {
+		l.keyTags[key] = tags
+		for _, tag := range tags {
+			if l.tagsMap[tag] == nil {
+				l.tagsMap[tag] = make(map[string]struct{})
 			}
+			l.tagsMap[tag][key] = struct{}{}
 		}
 	}
 

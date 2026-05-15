@@ -64,3 +64,44 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	_, hasDLQ := tables["dlq."+table]
 	assert.False(t, hasDLQ, "successful inserts should not produce DLQ entries")
 }
+
+// TestIngest_InvalidatesCacheTag is the read-your-writes regression guard.
+// A regression in the invalidation call site — InvalidateByTags silently not
+// called, the wrong tableName used as the tag, or Wait() removed from
+// InvalidateByTags so the Del races the still-buffered Set — would otherwise
+// pass every other test in this package. We plant a cache entry tagged with
+// the destination table, drive a real ingest through the worker, and assert
+// the entry is gone before the row's TTL would have ever expired it.
+func TestIngest_InvalidatesCacheTag(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	table := createTable(t,
+		"user_id String, event_type String, value Float64",
+		"ORDER BY user_id",
+	)
+
+	cacheKey := "ryw-test:" + table
+	cacheVal := []byte(`{"planted":true}`)
+	require.NoError(t, e.cache.Set(ctx, cacheKey, cacheVal, time.Hour, []string{table}))
+
+	require.Eventually(t, func() bool {
+		data, _, err := e.cache.Get(ctx, cacheKey)
+		return err == nil && data != nil
+	}, 5*time.Second, 50*time.Millisecond, "planted cache entry must be visible before ingest")
+
+	body := `{"user_id":"bob","event_type":"click","value":7}`
+	resp, err := http.Post(
+		e.server.URL+"/v1/ingest/"+table,
+		"application/json",
+		strings.NewReader(body),
+	)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Eventually(t, func() bool {
+		data, _, err := e.cache.Get(ctx, cacheKey)
+		return err == nil && data == nil
+	}, 30*time.Second, 200*time.Millisecond, "ingest must invalidate the table-tagged cache entry")
+}

@@ -185,9 +185,14 @@ func TestExtractCacheTags(t *testing.T) {
 			expected: []string{"users", "clicks"},
 		},
 		{
-			name:     "comma separated tables (known limitation)",
+			name:     "comma separated tables",
 			sql:      "SELECT * FROM t1, t2",
-			expected: []string{"t1"}, // t2 is missed by current simple regex, documented stop-gap
+			expected: []string{"t1", "t2"},
+		},
+		{
+			name:     "comma separated tables with schema prefix and quoting",
+			sql:      "SELECT * FROM `db`.`t1`, \"t2\", t3",
+			expected: []string{"t1", "t2", "t3"},
 		},
 		{
 			name:     "cte alias captured",

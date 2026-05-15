@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -21,9 +22,16 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// qualifiedIdent matches one table reference: an optional `db.` schema prefix
+// plus the table name, each segment optionally wrapped in backticks or double
+// quotes. Shared with tableExtractionRe so the comma-list capture stays in sync.
+const qualifiedIdent = `(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?`
+
 // tableExtractionRe extracts table names following FROM, JOIN, INTO, UPDATE, or TABLE.
-// Supports optional schema prefixes (db.table) and ClickHouse quoted identifiers (backticks or quotes).
-var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`" + `"]?`)
+// Capture group 1 is the full comma-separated table list (e.g. "t1, db.t2, `t3`")
+// so callers can split it via splitTableList — this covers `FROM a, b` joins that
+// a single-table capture would silently leave half-tagged (only `a` invalidated).
+var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(` + qualifiedIdent + `(?:\s*,\s*` + qualifiedIdent + `)*)`)
 
 // mutationRe detects queries that modify data or schema to trigger cache invalidation.
 // Run against cleaned SQL with string literals, comments, AND quoted identifiers
@@ -74,14 +82,34 @@ func extractCacheTagsFromCleaned(cleanedSQL string) []string {
 	seen := make(map[string]bool)
 	for _, m := range matches {
 		if len(m) > 1 {
-			tbl := m[1]
-			if !seen[tbl] && query.SafeIdentifierRe.MatchString(tbl) {
-				seen[tbl] = true
-				tags = append(tags, tbl)
+			for _, tbl := range splitTableList(m[1]) {
+				if !seen[tbl] && query.SafeIdentifierRe.MatchString(tbl) {
+					seen[tbl] = true
+					tags = append(tags, tbl)
+				}
 			}
 		}
 	}
 	return tags
+}
+
+// splitTableList splits a captured comma-separated table list ("t1, db.t2, `t3`")
+// into bare identifiers ("t1", "t2", "t3"). The schema prefix and any
+// backtick/double-quote wrapping are stripped so SafeIdentifierRe accepts the result.
+func splitTableList(list string) []string {
+	parts := strings.Split(list, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if i := strings.LastIndex(p, "."); i >= 0 {
+			p = p[i+1:]
+		}
+		p = strings.Trim(p, "`\"")
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // extractMutationTargets returns only the tables a mutation writes to.

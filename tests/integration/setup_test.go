@@ -52,6 +52,7 @@ type testEnv struct {
 	embeddedMQ *mq.EmbeddedNATS
 	server     *httptest.Server
 	registry   *discovery.SchemaRegistry
+	cache      cache.Cache
 }
 
 var sharedEnv *testEnv
@@ -172,6 +173,7 @@ func setup() (int, func()) {
 		fmt.Fprintf(os.Stderr, "integration setup: new tiered cache: %v\n", err)
 		return 1, cleanup
 	}
+	cleanups.push(func() { _ = tiered.Close() })
 
 	if _, err := ingest.StartIngestWorker(
 		ctx,
@@ -192,7 +194,7 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
-	server, err := buildServer(ch.conn, embeddedMQ, registry, logger)
+	server, err := buildServer(ch.conn, embeddedMQ, registry, tiered, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: build server: %v\n", err)
 		return 1, cleanup
@@ -205,6 +207,7 @@ func setup() (int, func()) {
 		embeddedMQ: embeddedMQ,
 		server:     server,
 		registry:   registry,
+		cache:      tiered,
 	}
 	return 0, cleanup
 }
@@ -313,19 +316,10 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // against the test ClickHouse + embedded NATS, with auth disabled so tests
 // can hit endpoints without minting JWTs. Auth-enforcement coverage lives
 // in the unit tests for middleware.go and the e2e SDK suite.
-func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
+func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, tiered cache.Cache, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
 	hub := api.NewHub()
-	l1, err := cache.NewLocal(1024 * 1024)
-	if err != nil {
-		return nil, fmt.Errorf("local cache: %w", err)
-	}
-
-	tiered, err := cache.NewTiered(l1, nil)
-	if err != nil {
-		return nil, fmt.Errorf("tiered cache: %w", err)
-	}
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ),
