@@ -66,6 +66,10 @@ extensions:
     endpoint: 0.0.0.0:13133
   pprof:
     endpoint: 0.0.0.0:1777
+# Dev-only: DSNs intentionally omit credentials — ClickHouse's default user
+# has an empty password (deployments/signoz/clickhouse/users.xml) and port 9000
+# is not published externally (deployments/signoz/compose.yaml). For
+# production, restore: tcp://${env:SIGNOZ_CH_USER}:${env:SIGNOZ_CH_PASSWORD}@clickhouse:9000/...
 exporters:
   clickhousetraces:
     datasource: tcp://clickhouse:9000/signoz_traces

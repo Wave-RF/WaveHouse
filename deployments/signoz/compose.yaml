@@ -131,7 +131,7 @@ services:
       # directly: `export SIGNOZ_TOKENIZER_JWT_SECRET=$(openssl rand -hex 32)`.
       - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_TOKENIZER_JWT_SECRET:?Set SIGNOZ_TOKENIZER_JWT_SECRET — e.g. via 'make signoz-up' or 'export SIGNOZ_TOKENIZER_JWT_SECRET=$$(openssl rand -hex 32)'}
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 5s
       retries: 3
