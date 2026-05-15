@@ -24,7 +24,11 @@ import (
 // Different names from sweeper_test.go mocks to avoid redeclaration.
 // ---------------------------------------------------------------------------
 
-// bentoMockJS satisfies jetstream.JetStream; only Publish is overridden.
+// bentoMockJS satisfies jetstream.JetStream; Publish and PublishMsg are overridden.
+// Publish is used by dlqOutput.WriteBatch (insert-failure path).
+// PublishMsg is used by jsInput.Read's delete-failure branch, which needs to set
+// a non-user-controlled `Wave-DLQ-Type` header to discriminate DLQ payload shapes
+// under BYOS (see internal/ingest/bento.go).
 type bentoMockJS struct {
 	jetstream.JetStream
 	published []publishedMsg
@@ -33,10 +37,16 @@ type bentoMockJS struct {
 type publishedMsg struct {
 	Subject string
 	Data    []byte
+	Header  nats.Header
 }
 
 func (m *bentoMockJS) Publish(_ context.Context, subject string, payload []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	m.published = append(m.published, publishedMsg{Subject: subject, Data: payload})
+	return &jetstream.PubAck{}, nil
+}
+
+func (m *bentoMockJS) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	m.published = append(m.published, publishedMsg{Subject: msg.Subject, Data: msg.Data, Header: msg.Header})
 	return &jetstream.PubAck{}, nil
 }
 
@@ -328,14 +338,76 @@ func TestJsInput_Read_DeleteExecError(t *testing.T) {
 	iter.msgs <- delMsg
 	iter.msgs <- insertMsg
 
-	input := &jsInput{iter: iter, chConn: conn}
+	js := &bentoMockJS{}
+	input := &jsInput{iter: iter, chConn: conn, js: js}
 	msg, _, err := input.Read(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "execute delete: db error")
-	assert.Nil(t, msg)
+	require.NoError(t, err, "delete error should be handled as permanent (no error returned)")
+	require.NotNil(t, msg, "Read should advance to the next message after a failed delete")
 
-	// On exec error, message should be Nak'd for retry.
-	assert.True(t, delMsg.naked, "delete message should be nak'd on exec error")
+	// Permanent-fail policy: original envelope routed to dlq.<table>, message DoubleAck'd, not Nak'd.
+	assert.False(t, delMsg.naked, "delete message must not be Nak'd (would cause infinite retry)")
+	assert.True(t, delMsg.doubleAcked, "delete message should be DoubleAck'd after routing to DLQ")
+
+	require.Len(t, js.published, 1, "failed delete should be published to DLQ exactly once")
+	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
+	assert.JSONEq(t, string(delData), string(js.published[0].Data), "DLQ payload should preserve the original delete envelope")
+	// BYOS-safe shape discriminator: a `Wave-DLQ-Type: delete-envelope` NATS
+	// header tells consumers this is a full-envelope payload, not an insert
+	// row. Header is non-user-controlled — a user column named `action` in an
+	// insert row can't forge it.
+	assert.Equal(t, "delete-envelope", js.published[0].Header.Get("Wave-DLQ-Type"),
+		"delete failures must be tagged with Wave-DLQ-Type header so DLQ consumers can distinguish them from insert-failure payloads under BYOS")
+
+	// Next message in queue should be the follow-up insert.
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table)
+}
+
+func TestJsInput_Read_DeleteExecErrorDLQPublishFails(t *testing.T) {
+	t.Parallel()
+	// Even when the DLQ publish itself fails (NATS unavailable), the worker must
+	// still DoubleAck the message — Nak'ing here would re-create the infinite
+	// retry loop that the permanent-fail policy is designed to prevent.
+	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "fail"}
+	delData, _ := json.Marshal(del)
+	delMsg := &bentoMockMsg{data: delData}
+
+	good := EventMessage{TableName: "events", Data: map[string]any{"id": "1"}}
+	goodData, _ := json.Marshal(good)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	conn := &bentoMockConn{
+		execFn: func(context.Context, string, ...any) error { return errors.New("syntax error") },
+	}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- delMsg
+	iter.msgs <- goodMsg
+
+	js := &bentoMockJSWithError{publishErr: errors.New("NATS unavailable")}
+	input := &jsInput{iter: iter, chConn: conn, js: js}
+
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+
+	assert.False(t, delMsg.naked, "delete must not be Nak'd even when DLQ publish fails")
+	assert.True(t, delMsg.doubleAcked, "delete must still be DoubleAck'd to avoid infinite redelivery")
+
+	// Prove the DLQ publish was actually attempted before we DoubleAck'd. A
+	// regression that skipped PublishMsg entirely (jumping straight to
+	// DoubleAck) would still satisfy the no-Nak/DoubleAck assertions above,
+	// but it would silently drop messages on every transient NATS hiccup
+	// instead of giving the operator a single DLQ-dropped error to grep on.
+	require.Len(t, js.published, 1, "DLQ publish must still be attempted once even when NATS is unavailable")
+	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
+	assert.JSONEq(t, string(delData), string(js.published[0].Data),
+		"the attempted DLQ payload must still be the original delete envelope")
+	assert.Equal(t, "delete-envelope", js.published[0].Header.Get("Wave-DLQ-Type"),
+		"discriminator header must be set on the attempted publish, not only on successful ones")
+
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "events", table)
 }
 
 func TestJsInput_Read_DeleteDrainSuccess(t *testing.T) {
@@ -580,9 +652,17 @@ func TestJsInput_Read_DeleteCancelledCtx(t *testing.T) {
 type bentoMockJSWithError struct {
 	jetstream.JetStream
 	publishErr error
+	published  []publishedMsg
 }
 
 func (m *bentoMockJSWithError) Publish(_ context.Context, _ string, _ []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	return nil, m.publishErr
+}
+
+// Capture the published message before returning the error so tests can
+// distinguish "DLQ publish failed" from "DLQ publish never attempted".
+func (m *bentoMockJSWithError) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	m.published = append(m.published, publishedMsg{Subject: msg.Subject, Data: msg.Data, Header: msg.Header})
 	return nil, m.publishErr
 }
 
