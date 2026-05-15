@@ -62,7 +62,13 @@ func NewFakeOTLPTLS(t *testing.T) *FakeOTLP {
 	t.Helper()
 
 	cert, clientCfg := ephemeralTLSPair(t)
-	serverCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+	// Pinned to TLS 1.3 on both sides to match the production floor in
+	// observability.tlsConfigOrDefault — a regression below TLS 1.3 should
+	// fail the handshake here rather than negotiate to 1.2 silently.
+	serverCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	}
 
 	return newFakeOTLP(t, &fakeOTLPTLS{server: serverCfg, client: clientCfg})
 }
@@ -141,7 +147,11 @@ func ephemeralTLSPair(t *testing.T) (tls.Certificate, *tls.Config) {
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(parsed)
-	return cert, &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"}
+	return cert, &tls.Config{
+		RootCAs:    pool,
+		ServerName: "127.0.0.1",
+		MinVersion: tls.VersionTLS13,
+	}
 }
 
 // Addr returns the listener address (e.g. "127.0.0.1:42891") suitable for
@@ -212,25 +222,36 @@ func (r *FakeOTLP) LogCountAtLevel(minSeverity int32) int {
 	return n
 }
 
-// LastTraceHeaders returns the gRPC metadata captured from the most recent
-// trace Export RPC, or nil if none.
-func (r *FakeOTLP) LastTraceHeaders() metadata.MD { return lastMD(&r.mu, r.traceHeaders) }
+// LastTraceHeaders returns a copy of the gRPC metadata captured from the
+// most recent trace Export RPC, or nil if none.
+func (r *FakeOTLP) LastTraceHeaders() metadata.MD {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return lastMDCopy(r.traceHeaders)
+}
 
-// LastMetricHeaders returns the gRPC metadata captured from the most recent
-// metric Export RPC, or nil if none.
-func (r *FakeOTLP) LastMetricHeaders() metadata.MD { return lastMD(&r.mu, r.metricHeaders) }
+// LastMetricHeaders returns a copy of the gRPC metadata captured from the
+// most recent metric Export RPC, or nil if none.
+func (r *FakeOTLP) LastMetricHeaders() metadata.MD {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return lastMDCopy(r.metricHeaders)
+}
 
-// LastLogHeaders returns the gRPC metadata captured from the most recent log
-// Export RPC, or nil if none.
-func (r *FakeOTLP) LastLogHeaders() metadata.MD { return lastMD(&r.mu, r.logHeaders) }
+// LastLogHeaders returns a copy of the gRPC metadata captured from the most
+// recent log Export RPC, or nil if none.
+func (r *FakeOTLP) LastLogHeaders() metadata.MD {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return lastMDCopy(r.logHeaders)
+}
 
-func lastMD(mu *sync.Mutex, slice []metadata.MD) metadata.MD {
-	mu.Lock()
-	defer mu.Unlock()
+// lastMDCopy must be called with r.mu held — it reads the slice header.
+func lastMDCopy(slice []metadata.MD) metadata.MD {
 	if len(slice) == 0 {
 		return nil
 	}
-	return slice[len(slice)-1]
+	return slice[len(slice)-1].Copy()
 }
 
 // Reset clears all captured payloads. Useful between test phases.

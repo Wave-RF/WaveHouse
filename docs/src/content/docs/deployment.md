@@ -314,6 +314,38 @@ Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at th
 
 WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
+### Observability via Compose
+
+`deployments/compose/standalone.yaml` ships with observability disabled. To enable it, add the variables below to the `wavehouse` service's `environment:` block. All are optional and default off.
+
+```yaml
+services:
+  wavehouse:
+    environment:
+      # OTLP push: scheme on WH_OTEL_ADDR selects transport — https:// → TLS
+      # via system roots; bare host:port or http:// stays plaintext. Use the
+      # Compose service name (or host.docker.internal for a host process),
+      # not 127.0.0.1, which won't reach a separate container.
+      WH_OTEL_ENABLED: "true"
+      WH_OTEL_ADDR: "otel-collector:4317"        # or https://api.honeycomb.io:443
+      WH_OTEL_HEADERS: ""                        # "key=value,key2=value2" for cloud auth
+      WH_OTEL_TRACES_ENABLED: "true"
+      WH_OTEL_TRACES_SAMPLE_RATE: "1.0"
+      WH_OTEL_TRACES_ADDR: ""                    # per-signal override; empty = inherit WH_OTEL_ADDR
+      WH_OTEL_METRICS_ENABLED: "true"
+      WH_OTEL_METRICS_ADDR: ""
+      WH_OTEL_LOGS_ENABLED: "true"
+      WH_OTEL_LOGS_SAMPLE_RATE: "1.0"            # DEBUG/INFO OTLP rate; WARN+ always 100%
+      WH_OTEL_LOGS_ADDR: ""
+      # Prometheus exposition is independent of OTLP push — pull-based
+      # scrapers (Alloy / Mimir) can use this alone with no collector.
+      WH_PROMETHEUS_ENABLED: "true"
+      WH_PROMETHEUS_PATH: "/metrics"
+      WH_PROMETHEUS_PORT: "0"                    # 0 mounts on server.port; non-zero = sidecar listener
+```
+
+Worked end-to-end examples (Honeycomb, Grafana Cloud, Datadog DDOT) follow below.
+
 ### Pattern: SigNoz / OTel-native backends (local collector)
 
 Point `otel.addr` at a plaintext OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
