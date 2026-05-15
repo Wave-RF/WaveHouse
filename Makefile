@@ -240,8 +240,7 @@ SIGNOZ_COMPOSE       = SIGNOZ_TOKENIZER_JWT_SECRET="$$(cat $(SIGNOZ_SECRET_FILE)
 
 $(SIGNOZ_SECRET_FILE):
 	@command -v openssl >/dev/null 2>&1 || { echo "$(RED)==> 'openssl' is required to generate the SigNoz JWT secret$(RESET)"; exit 1; }
-	@openssl rand -hex 32 > $@
-	@chmod 600 $@
+	@umask 077 && openssl rand -hex 32 > $@
 
 .PHONY: signoz-up
 signoz-up: $(SIGNOZ_SECRET_FILE) ## Start SigNoz stack (idempotent; blocks until UI + collector healthy)
