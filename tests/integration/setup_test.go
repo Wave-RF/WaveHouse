@@ -36,6 +36,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -194,7 +195,13 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
-	server, err := buildServer(ch.conn, embeddedMQ, registry, tiered, logger)
+	policyStore, err := policy.NewStore(ctx, js, "", testutil.NopLogger())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: policy store: %v\n", err)
+		return 1, cleanup
+	}
+
+	server, err := buildServer(ch.conn, embeddedMQ, registry, tiered, policyStore, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: build server: %v\n", err)
 		return 1, cleanup
@@ -316,21 +323,27 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // against the test ClickHouse + embedded NATS, with auth disabled so tests
 // can hit endpoints without minting JWTs. Auth-enforcement coverage lives
 // in the unit tests for middleware.go and the e2e SDK suite.
-func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, tiered cache.Cache, logger *slog.Logger) (*httptest.Server, error) {
+//
+// StructuredQuery is wired with the shared tiered cache so the RYW
+// invariant (ingest → cache invalidation → fresh read) can be exercised
+// end-to-end through the HTTP layer, not just by reaching into the cache
+// directly.
+func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, tiered cache.Cache, policyStore *policy.Store, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
 	hub := api.NewHub()
 
 	deps := api.Dependencies{
-		Ingest: api.NewIngestHandler(registry, embeddedMQ),
-		Query:  api.NewQueryHandler(chConn, tiered, 5*time.Second),
-		SSE:    api.NewSSEHandler(hub, js),
-		WS:     api.NewWSHandler(hub, js, nil),
-		Health: api.NewHealthHandler(chConn),
-		Schema: api.NewSchemaHandler(registry),
-		DLQ:    api.NewDLQHandler(js, logger),
-		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
-		JS:     js,
+		Ingest:          api.NewIngestHandler(registry, embeddedMQ),
+		Query:           api.NewQueryHandler(chConn, tiered, 5*time.Second),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, tiered, 5*time.Second, registry, policyStore, 60),
+		SSE:             api.NewSSEHandler(hub, js),
+		WS:              api.NewWSHandler(hub, js, nil),
+		Health:          api.NewHealthHandler(chConn),
+		Schema:          api.NewSchemaHandler(registry),
+		DLQ:             api.NewDLQHandler(js, logger),
+		AuthMW:          api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
+		JS:              js,
 	}
 
 	server := httptest.NewServer(api.NewRouter(deps))

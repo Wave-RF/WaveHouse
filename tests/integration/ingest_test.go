@@ -65,6 +65,89 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	assert.False(t, hasDLQ, "successful inserts should not produce DLQ entries")
 }
 
+// TestStructuredQuery_ReadYourWritesAfterIngest exercises the full RYW path
+// the PR is designed to deliver: a cached structured query result is
+// invalidated by a subsequent ingest to the same table, served through the
+// real HTTP layer (StructuredQueryHandler → TieredCache → Bento).
+//
+// This guards against regressions that would silently pass the lower-level
+// TestIngest_InvalidatesCacheTag — wrong tag plumbing in
+// structured_query.go's Cache.Set, missing X-Cache header changes, or a
+// router that forgets to wire StructuredQuery into the deps. The flow is:
+//
+//  1. POST /v1/tables/{t}/query   → expect X-Cache: MISS (cold)
+//  2. POST /v1/tables/{t}/query   → expect X-Cache: HIT  (warm; tagged with t)
+//  3. POST /v1/ingest/{t}         → drives Bento flush → InvalidateByTags(t)
+//  4. POST /v1/tables/{t}/query   → expect X-Cache: MISS (invalidation fired)
+func TestStructuredQuery_ReadYourWritesAfterIngest(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	table := createTable(t,
+		"user_id String, event_type String, value Float64",
+		"ORDER BY user_id",
+	)
+
+	// Seed one row so the count() result is non-zero and we can see it climb
+	// after the second ingest (separately from the cache header check).
+	require.NoError(t, e.chConn.Exec(ctx,
+		fmt.Sprintf("INSERT INTO %s (user_id, event_type, value) VALUES ('seed','click',1.0)", table),
+	))
+
+	queryBody := `{"aggregations":[{"fn":"count","column":"*","alias":"n"}]}`
+	doQuery := func() *http.Response {
+		t.Helper()
+		resp, err := http.Post(
+			e.server.URL+"/v1/tables/"+table+"/query",
+			"application/json",
+			strings.NewReader(queryBody),
+		)
+		require.NoError(t, err)
+		return resp
+	}
+
+	// 1. Cold read — should populate the cache tagged with `table`.
+	r1 := doQuery()
+	require.Equal(t, http.StatusOK, r1.StatusCode)
+	assert.Equal(t, "MISS", r1.Header.Get("X-Cache"), "first read must be a cache miss")
+	r1.Body.Close()
+
+	// Ristretto admission is async; give the entry a moment to land in the
+	// store so the next read can observe it.
+	require.Eventually(t, func() bool {
+		r := doQuery()
+		defer r.Body.Close()
+		return r.Header.Get("X-Cache") == "HIT"
+	}, 5*time.Second, 50*time.Millisecond, "cache should warm after the cold read")
+
+	// 2. Warm read — explicit assertion for the test record.
+	r2 := doQuery()
+	require.Equal(t, http.StatusOK, r2.StatusCode)
+	assert.Equal(t, "HIT", r2.Header.Get("X-Cache"), "second read must be a cache hit")
+	r2.Body.Close()
+
+	// 3. Ingest a new row — Bento will flush and call InvalidateByTags(table).
+	body := `{"user_id":"alice","event_type":"click","value":42.5}`
+	ingestResp, err := http.Post(
+		e.server.URL+"/v1/ingest/"+table,
+		"application/json",
+		strings.NewReader(body),
+	)
+	require.NoError(t, err)
+	ingestResp.Body.Close()
+	require.Equal(t, http.StatusOK, ingestResp.StatusCode)
+
+	// 4. Post-ingest read — must be a fresh MISS once the Bento flush
+	// completes and InvalidateByTags drops the warm entry. 30s upper bound
+	// covers Bento's 5s batch window plus loaded-runner slack, matching
+	// TestIngest_FlowsToClickHouseWithoutDLQ.
+	assert.Eventually(t, func() bool {
+		r := doQuery()
+		defer r.Body.Close()
+		return r.Header.Get("X-Cache") == "MISS"
+	}, 30*time.Second, 200*time.Millisecond, "ingest must invalidate the structured-query cache entry")
+}
+
 // TestIngest_InvalidatesCacheTag is the read-your-writes regression guard.
 // A regression in the invalidation call site — InvalidateByTags silently not
 // called, the wrong tableName used as the tag, or Wait() removed from

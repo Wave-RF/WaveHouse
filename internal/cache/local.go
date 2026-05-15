@@ -174,7 +174,17 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 	return nil
 }
 
-func (l *LocalCache) InvalidateByTags(_ context.Context, tags []string) error {
+// InvalidateByTags evicts every key carrying any of the supplied tags.
+//
+// ctx is accepted for interface compatibility but intentionally not forwarded:
+// neither ristretto.Cache.Wait() nor tagsMu.Lock() accept a context, so callers'
+// deadlines cannot cancel this call. In practice Wait() drains a 32K-slot ring
+// buffer in microseconds and the lock-hold window is similarly bounded, so the
+// pragmatic risk is low. If that ever changes — e.g., a Ristretto regression
+// stalls Wait() under load — wrap Wait() in a goroutine and select on ctx.Done()
+// so an ingest WriteBatch caller's 5s timeout can still escape.
+func (l *LocalCache) InvalidateByTags(ctx context.Context, tags []string) error {
+	_ = ctx
 	// Flush Ristretto's async write buffer before deleting. SetWithTTL returns
 	// admitted=true before the item reaches the store; without Wait(), Del may
 	// be a no-op for recently-admitted keys, leaving stale untracked entries.
