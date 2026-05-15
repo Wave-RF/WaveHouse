@@ -30,21 +30,8 @@ type Config struct {
 	Prometheus Prometheus `yaml:"prometheus"`
 }
 
-// OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
-// when false, no signals are initialized regardless of the per-signal toggles.
-//
-// Addr accepts plain `host:port` (plaintext gRPC, backward-compat), `http://`
-// (also plaintext), or `https://` (TLS — required for direct-to-cloud OTLP).
-// A URL path component is tolerated and stripped (gRPC ignores it).
-//
-// Headers is a comma-separated list of `key=value` pairs applied to every OTLP
-// exporter — the standard knob for auth against cloud endpoints
-// (`authorization=Basic <b64>`, `x-honeycomb-team=<key>`, etc.). Values may
-// contain `=` (only the first `=` per segment splits key from value).
-//
-// Per-signal Addr overrides (Traces.Addr, Metrics.Addr, Logs.Addr) point one
-// signal at a different endpoint than the top-level Addr — useful for Grafana
-// Cloud, which uses distinct gateway hosts per signal. Empty means inherit.
+// OTel configures the OpenTelemetry pipeline. See docs/configuration.md for
+// scheme/headers/per-signal-override semantics.
 type OTel struct {
 	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
 	Addr    string      `yaml:"addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
@@ -65,32 +52,17 @@ type OTelMetrics struct {
 	Addr    string `yaml:"addr" env:"WH_OTEL_METRICS_ADDR"`
 }
 
-// Prometheus controls a Prometheus exposition endpoint served alongside (or
-// independently of) the OTLP push exporter. It is its own top-level block so
-// operators using Prometheus scraping (Grafana Alloy / Mimir / etc.) don't
-// have to hunt through `[otel]` for an output they don't otherwise care about.
-// Internally the same OTel MeterProvider drives both — the Prometheus exporter
-// is an additional Reader — but the user-facing config keeps the two outputs
-// distinct.
-//
-// Works in any of three combinations: OTel only, Prometheus only, or both. If
-// only Prometheus is enabled, the MeterProvider is still created so runtime +
-// custom metrics flow to `/metrics`; no OTLP push is attempted.
-//
-// Port `0` mounts the endpoint on the existing API server router. A non-zero
-// port spins up a dedicated HTTP listener — useful for firewalling metrics
-// off the public API surface in production.
+// Prometheus configures the Prometheus exposition endpoint. Independent of
+// OTLP push — works alone or alongside. Port 0 mounts on the API router; a
+// non-zero port spins a dedicated listener. See docs/configuration.md.
 type Prometheus struct {
 	Enabled bool   `yaml:"enabled" env:"WH_PROMETHEUS_ENABLED" env-default:"false"`
 	Path    string `yaml:"path" env:"WH_PROMETHEUS_PATH" env-default:"/metrics"`
 	Port    int    `yaml:"port" env:"WH_PROMETHEUS_PORT" env-default:"0"`
 }
 
-// OTelLogs sample rate applies to OTLP export of DEBUG/INFO only.
-// WARN and ERROR always export at 100% — dropping them silently during
-// incidents is too dangerous to expose as a knob. Stdout receives 100% of
-// records regardless of this rate (sampling for scraped-log pipelines like
-// Loki/Promtail belongs at the scraper, not the application).
+// OTelLogs.SampleRate applies to DEBUG/INFO OTLP export only.
+// WARN/ERROR always export at 100% (non-configurable); stdout is always 100%.
 type OTelLogs struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
@@ -164,23 +136,8 @@ type DLQ struct {
 }
 
 // validateOTelHeaders mirrors observability.ParseOTelHeaders for boot-time
-// validation. Kept here (rather than importing observability) so config stays
-// at the bottom of the dependency graph — importing observability would
-// transitively pull the OTel SDK into every config consumer.
-//
-// MUST stay in sync with observability.ParseOTelHeaders in
-// internal/observability/endpoint.go. cmd/wavehouse/main.go's defensive
-// error-check on the post-Validate parse catches any drift loudly at
-// startup, and the cross-parser parity test in header_parity_test.go pins
-// both parsers to the same accept/reject decisions at CI time — but the
-// right answer is to not drift in the first place: any rule change here
-// needs the same change there, and vice versa.
-//
-// Empty-or-whitespace-only values are rejected (e.g. `authorization=   `)
-// to surface auth typos at boot rather than as silent 401s against the
-// cloud gateway. Keys are validated against the RFC 7230 `token` production
-// so `my key=...` (space) fails at boot rather than at the gRPC stack on
-// first export.
+// validation. Hand-mirrored to keep config out of the OTel SDK's import graph;
+// the parity is pinned by internal/config/header_parity_test.go.
 func validateOTelHeaders(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -191,9 +148,8 @@ func validateOTelHeaders(s string) error {
 		if seg == "" {
 			continue
 		}
-		// Error messages quote only the key, never the full segment — same
-		// credential-exposure concern as observability.ParseOTelHeaders.
-		// See the doc on ParseOTelHeaders for the rationale.
+		// Error messages quote only the key, never the segment — `seg`
+		// can contain a real API token.
 		i := strings.IndexByte(seg, '=')
 		if i < 0 {
 			return fmt.Errorf("header entry missing '=' separator (format is key=value)")
@@ -213,12 +169,10 @@ func validateOTelHeaders(s string) error {
 }
 
 // headerNamePunctuation lists the punctuation characters legal in an RFC
-// 7230 `token` (HTTP header field name). MUST stay in sync with the
-// const of the same name in internal/observability/endpoint.go.
+// 7230 `token`. Mirrors the const of the same name in observability/endpoint.go.
 const headerNamePunctuation = "!#$%&'*+-.^_`|~"
 
-// firstNonHeaderTokenChar mirrors observability.firstNonTokenChar — see
-// the doc on validateOTelHeaders for the parity rationale.
+// firstNonHeaderTokenChar mirrors observability.firstNonTokenChar.
 func firstNonHeaderTokenChar(s string) (rune, bool) {
 	for _, c := range s {
 		switch {
@@ -279,10 +233,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("otel.logs.sample_rate %g out of range [0.0, 1.0]", r)
 			}
 		}
-		// Parse headers eagerly so a malformed entry fails at boot rather than
-		// silently dropping auth in production. The same parser runs again at
-		// provider init; duplicating the validation here keeps config from
-		// importing the observability package.
+		// Fail at boot rather than silently dropping auth in production.
 		if err := validateOTelHeaders(c.OTel.Headers); err != nil {
 			return fmt.Errorf("otel.headers: %w", err)
 		}
@@ -309,10 +260,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("prometheus.path %q conflicts with reserved endpoint", p.Path)
 			}
 		}
-		// Same-port mode mounts the (unauthenticated) metrics handler on the
-		// main router. A path inside the /v1 namespace would shadow the
-		// authenticated API subtree with a public handler — worse than the
-		// /health shadow case because it leaks at an authenticated-looking URL.
+		// Same-port mode would shadow the authenticated /v1 subtree with an
+		// unauthenticated metrics handler — leaks at an authenticated-looking URL.
 		if p.Port == 0 && (p.Path == "/v1" || strings.HasPrefix(p.Path, "/v1/")) {
 			return fmt.Errorf("prometheus.path %q conflicts with authenticated /v1 API namespace when prometheus.port is 0", p.Path)
 		}

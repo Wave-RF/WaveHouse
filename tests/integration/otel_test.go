@@ -1,17 +1,9 @@
 //go:build integration
 
-// OTel pipeline integration tests.
+// OTel pipeline integration tests against testutil.FakeOTLP.
 //
-// These tests exercise observability.InitProvider against an in-process
-// OTLP gRPC receiver (testutil.FakeOTLP). They verify that sampling rates,
-// per-signal gates, and unreachable-endpoint behavior all do what config
-// says they do — the kind of regression that unit tests against a no-op
-// global can miss.
-//
-// InitProvider mutates global OTel state (tracer/meter/logger providers,
-// propagator). Tests in this file MUST NOT run in parallel and MUST save/
-// restore the globals on entry/exit. They share the `env(t)` infrastructure
-// only incidentally — none of them touch ClickHouse or the API server.
+// InitProvider mutates global OTel state; tests must NOT run in parallel
+// and must save/restore globals via guardOTelGlobals.
 
 package tests
 
@@ -34,8 +26,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
-// guardOTelGlobals saves and restores the package-global OTel providers so a
-// test's InitProvider call doesn't leak its state into later tests.
+// guardOTelGlobals saves and restores the OTel package-global providers so
+// a test's InitProvider call doesn't leak into later tests.
 func guardOTelGlobals(t *testing.T) {
 	t.Helper()
 	savedProp := otel.GetTextMapPropagator()
@@ -50,10 +42,9 @@ func guardOTelGlobals(t *testing.T) {
 	})
 }
 
-// initAndShutdown installs the OTel pipeline with the given config and
-// returns the shutdown func plus the Prometheus handler (non-nil only when
-// cfg.PrometheusEnabled is true). Caller is responsible for calling
-// shutdown to drain pending exports before asserting on the receiver.
+// initAndShutdown installs the OTel pipeline and returns shutdown + the
+// Prometheus handler (non-nil iff cfg.PrometheusEnabled). Caller drains via
+// shutdown before asserting on the receiver.
 func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) (func(context.Context) error, http.Handler) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -65,11 +56,8 @@ func initAndShutdown(t *testing.T, cfg observability.ProviderConfig) (func(conte
 }
 
 func TestOTel_TraceSampling(t *testing.T) {
-	// TraceIDRatioBased over random trace IDs is binomial(n, rate). For
-	// rate=0.5 / n=2000 the stddev is ~22; ±200 is ~9σ — flake-proof but tight
-	// enough to catch a sampler accidentally pinned at 25% / 75% (would land
-	// at 500 / 1500 and slip past a wider window). Bypass (count→n) and
-	// broken (count→0) failure modes still fail loud regardless of tolerance.
+	// Binomial(n, rate); ±200 over n=2000 is ~9σ — flake-proof and still
+	// catches a sampler pinned at 25%/75% (would land at 500/1500).
 	cases := []struct {
 		name   string
 		rate   float64
@@ -124,8 +112,6 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
 
-	// Logs path: enable the OTel logger pipeline first, then build the
-	// slog logger that fans out to (stdout, OTLP) and sample DEBUG/INFO.
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		Endpoint:    r.Addr(),
 		LogsEnabled: true,
@@ -133,7 +119,7 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 
 	lvl := &slog.LevelVar{}
 	lvl.Set(slog.LevelDebug)
-	// sample_rate=0.0 → DEBUG/INFO entirely dropped from OTLP, WARN+ still 100%.
+	// rate=0.0 → DEBUG/INFO dropped from OTLP; WARN+ still 100%.
 	logger := observability.NewLogger("wavehouse-test", lvl, true, 0.0)
 
 	const n = 50
@@ -147,9 +133,8 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
-	// OTel severity numbers: DEBUG=5, INFO=9, WARN=13, ERROR=17.
-	// `LogCountAtLevel(13)` is "WARN and above" (testutil semantics), so the
-	// complement is DEBUG+INFO — the records the rate=0.0 sampler should drop.
+	// OTel severity: DEBUG=5, INFO=9, WARN=13, ERROR=17. LogCountAtLevel(13)
+	// = WARN+; complement is DEBUG+INFO (what rate=0.0 should drop).
 	lowSevCount := r.LogCount() - r.LogCountAtLevel(13)
 	warnAndAboveCount := r.LogCountAtLevel(13)
 	assert.Zero(t, lowSevCount, "DEBUG+INFO records should have been dropped at sample_rate=0.0")
@@ -175,11 +160,9 @@ func TestOTel_PerSignal_TracesOnly(t *testing.T) {
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
-	// Span emitted before shutdown — count should be set on return.
 	assert.Equal(t, 1, r.SpanCount())
-	// Negative assertions: poll for 100ms in case a misconfigured exporter
-	// would emit a stray RPC. require.Never is the testify-native primitive
-	// for "this must stay false for window X" — clearer than a bare sleep.
+	// require.Never polls for 100ms to catch any stray RPC from a
+	// misconfigured exporter.
 	require.Never(t, func() bool { return r.MetricCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond,
 		"metrics disabled — no metric records should appear")
 	require.Never(t, func() bool { return r.LogCount() > 0 }, 100*time.Millisecond, 10*time.Millisecond,
@@ -202,16 +185,11 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	})
 	require.NotNil(t, promHandler, "prometheus handler should be non-nil when PrometheusEnabled=true")
 
-	// Record a known custom metric so we can assert it appears at /metrics.
-	// OTel→Prometheus name translation: dots/dashes become underscores,
-	// counter suffix `_total` is appended automatically.
 	meter := otel.GetMeterProvider().Meter("wavehouse-test")
 	counter, err := meter.Int64Counter("test_widget_received")
 	require.NoError(t, err)
 	counter.Add(context.Background(), 7)
 
-	// Scrape via httptest. We don't go over the wire; the handler is the
-	// same one main.go would mount on the API router or sidecar listener.
 	server := httptest.NewServer(promHandler)
 	t.Cleanup(server.Close)
 
@@ -224,8 +202,7 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	require.NoError(t, err)
 
 	bodyStr := string(body)
-	// Counter ending in _total is the standard Prometheus convention; the
-	// OTel exporter applies it automatically.
+	// The OTel→Prometheus exporter appends _total to counters automatically.
 	assert.Contains(t, bodyStr, "test_widget_received_total", "/metrics must list the custom counter we recorded")
 	assert.Contains(t, bodyStr, "# HELP", "Prometheus format includes HELP lines")
 	assert.Contains(t, bodyStr, "# TYPE", "Prometheus format includes TYPE lines")
@@ -262,10 +239,8 @@ func TestOTel_PerSignal_LogsOnly(t *testing.T) {
 func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	guardOTelGlobals(t)
 
-	// 127.0.0.1:1 is in the unassigned-port range — connect should never
-	// succeed. gRPC exporters dial lazily, so InitProvider must still
-	// succeed regardless. This is the critical "OTel down doesn't kill
-	// the binary" invariant.
+	// 127.0.0.1:1 never connects. Pins the "OTel down doesn't kill the
+	// binary" invariant — gRPC exporters dial lazily.
 	cfg := observability.ProviderConfig{
 		Endpoint:         "127.0.0.1:1",
 		TracesEnabled:    true,
@@ -280,10 +255,8 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	require.NoError(t, err, "InitProvider must not fail on unreachable endpoint")
 	require.NotNil(t, shutdown)
 
-	// Emit work — neither span.End nor logger.Info may block on the failed
-	// export. The SDK buffers in-memory and the batch processor handles
-	// drops asynchronously; this is the contract that lets the request hot
-	// path survive collector outages.
+	// span.End / logger.Info must never block on the failed export — the
+	// SDK buffers in-memory and the batch processor handles drops async.
 	lvl := &slog.LevelVar{}
 	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
 
@@ -303,11 +276,9 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 		t.Fatal("emits blocked on unreachable endpoint")
 	}
 
-	// Best-effort shutdown in a goroutine so the test doesn't leak the
-	// runtime-metrics goroutine. We don't assert anything about it — the
-	// OTel SDK doesn't fully honor the shutdown deadline against an
-	// unreachable gRPC endpoint, and main.go bounds the timeout for the
-	// same reason. See the defer wrapping otelShutdown in cmd/wavehouse/main.go.
+	// Best-effort shutdown in a goroutine — the OTel SDK doesn't fully
+	// honor shutdown deadlines against an unreachable endpoint (same reason
+	// main.go bounds its shutdown context).
 	go func() {
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer drainCancel()
@@ -315,18 +286,10 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	}()
 }
 
-// TestOTel_TLSPath_AllSignals locks in the https:// → TLS dial path on every
-// OTLP exporter. The fake receiver listens with an ephemeral self-signed cert;
-// each exporter is given the matching client tls.Config via the test-only
-// SetTLSConfigForTesting setter. If TLS wiring regresses on any signal (e.g.
-// someone re-adds WithInsecure unconditionally on just the metrics or logs
-// branch of provider.go), that signal will TLS-handshake against a plaintext
-// server and the export drops — caught here as a missing count on the right
-// receiver.
-//
-// Headers are intentionally not asserted; TestOTel_Headers_AppliedToAllSignals
-// owns the header-propagation invariant. This test owns the TLS-dial invariant
-// across signals.
+// TestOTel_TLSPath_AllSignals pins the https:// → TLS dial path on every
+// OTLP exporter (traces, metrics, logs). A regression that re-adds
+// WithInsecure on one branch would TLS-handshake against the plaintext side
+// and surface as a missing count on the corresponding receiver.
 func TestOTel_TLSPath_AllSignals(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLPTLS(t)
@@ -362,11 +325,9 @@ func TestOTel_TLSPath_AllSignals(t *testing.T) {
 	assert.GreaterOrEqual(t, r.LogCount(), 1, "TLS path must deliver logs end-to-end")
 }
 
-// TestOTel_Headers_AppliedToAllSignals verifies that ProviderConfig.Headers
-// propagates as gRPC metadata on every OTLP exporter (traces, metrics, logs).
-// Direct-to-cloud auth depends on this — Honeycomb/Grafana Cloud both
-// authenticate per-RPC via a header, so a single missing exporter would 401
-// silently for that signal.
+// TestOTel_Headers_AppliedToAllSignals verifies ProviderConfig.Headers
+// propagates as gRPC metadata on every OTLP exporter — a single missing
+// exporter would silently 401 against cloud OTLP gateways.
 func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
@@ -401,10 +362,7 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	defer drainCancel()
 	require.NoError(t, shutdown(drainCtx))
 
-	// gRPC metadata keys are lowercased on the wire — assert in lowercase.
-	// Every configured header is checked on every signal so a per-exporter
-	// header-propagation bug (e.g. one exporter built with a stale headers
-	// map) fails loud instead of silently 401'ing on the missing signal.
+	// gRPC metadata keys are lowercased on the wire.
 	signals := []struct {
 		name string
 		md   func() metadata.MD
@@ -425,14 +383,9 @@ func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	}
 }
 
-// TestOTel_PerSignalEndpoint_Override verifies that TracesEndpoint,
-// MetricsEndpoint, and LogsEndpoint each route their own signal to a distinct
-// receiver while the default Endpoint sees none. Grafana Cloud's per-signal
-// gateway hosts are the headline use case. All three signal overrides go
-// through the same pickEndpoint() helper in provider.go, so a copy-paste bug
-// (e.g. the metrics exporter being wired to TracesEndpoint, or the logs
-// exporter inheriting TracesEndpoint) would surface here as a signal landing
-// on the wrong receiver — caught by the cross-asserts below.
+// TestOTel_PerSignalEndpoint_Override verifies each per-signal endpoint
+// routes its own signal to a distinct receiver. The cross-asserts catch
+// copy-paste wiring bugs (e.g. metrics exporter pointed at TracesEndpoint).
 func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
 	guardOTelGlobals(t)
 	rDefault := testutil.NewFakeOTLP(t)

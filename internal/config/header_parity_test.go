@@ -1,9 +1,7 @@
+// External test package so the cross-parser check can import observability
+// without dragging the OTel SDK into the production import graph of
+// internal/config (see validateOTelHeaders).
 package config_test
-
-// External test package so the cross-parser check can import the
-// observability package without dragging the OTel SDK into the
-// production import graph of internal/config — see the doc on
-// validateOTelHeaders for the dependency-graph rationale.
 
 import (
 	"testing"
@@ -13,14 +11,9 @@ import (
 )
 
 // TestHeaderParsers_StayInSync pins config.validateOTelHeaders and
-// observability.ParseOTelHeaders to the same accept/reject decisions on a
-// shared corpus of inputs. The two parsers are hand-mirrored — config can't
-// import observability in production without pulling the OTel SDK into every
-// config consumer — and the runtime double-parse in cmd/wavehouse/main.go
-// only flags drift that *rejects* a previously-valid input. Drift in the
-// other direction (config silently accepts what the SDK parser rejects, or
-// vice versa) reaches production as misconfigured auth. This test makes
-// either kind of drift a CI failure.
+// observability.ParseOTelHeaders to identical accept/reject decisions. The
+// runtime double-parse in main.go only catches one direction (config-accepts
+// / SDK-rejects); this test catches the other direction at CI time.
 func TestHeaderParsers_StayInSync(t *testing.T) {
 	t.Parallel()
 
@@ -64,8 +57,7 @@ func TestHeaderParsers_StayInSync(t *testing.T) {
 			validateErr := cfg.Validate()
 			_, parseErr := observability.ParseOTelHeaders(tc.in)
 
-			// Compare on the accept/reject boolean — error wording is allowed
-			// to differ between the two parsers, but their decisions must not.
+			// Error wording may differ; the accept/reject decision must not.
 			if (validateErr != nil) != (parseErr != nil) {
 				t.Fatalf("parser drift on %q: validateOTelHeaders=%v ParseOTelHeaders=%v",
 					tc.in, validateErr, parseErr)

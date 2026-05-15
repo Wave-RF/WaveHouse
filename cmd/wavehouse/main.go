@@ -98,24 +98,12 @@ func run() int {
 	slog.SetDefault(logger)
 
 	var promHandler http.Handler
-	// Provider init runs whenever either OTLP push or Prometheus exposition is
-	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
-	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		// Validate() ran validateOTelHeaders, which mirrors ParseOTelHeaders —
-		// in practice the parse always succeeds here. The defensive check
-		// exists so that any future drift between the two implementations
-		// surfaces loudly instead of silently shipping OTLP exporters with no
-		// auth metadata (which would only show up as rejected-on-the-wire
-		// telemetry, not as a startup error).
-		//
-		// Guarded on cfg.OTel.Enabled because Validate() also skips
-		// validateOTelHeaders when OTLP is off — in Prometheus-only mode a
-		// stale WH_OTEL_HEADERS env var would otherwise fail here with the
-		// misleading "parse failed after Validate accepted them" message
-		// when the parsers are in fact in sync (Validate just didn't run).
-		// Headers do nothing without an OTLP exporter, so leaving them
-		// unparsed in that mode is safe.
+		// Validate() already ran validateOTelHeaders; this re-parse exists
+		// only to catch drift between the two parsers (header_parity_test.go
+		// pins them at CI time, but a runtime sanity check is cheap). Skip
+		// in Prometheus-only mode — Validate() skips headers there too, so
+		// a stale WH_OTEL_HEADERS would produce a misleading error.
 		var headers map[string]string
 		if cfg.OTel.Enabled {
 			var err error
@@ -142,9 +130,9 @@ func run() int {
 		} else {
 			promHandler = ph
 			defer func() {
-				// Bound shutdown so an unreachable collector doesn't hang
-				// process exit. The OTel SDK's batch processors don't fully
-				// honor the context deadline during gRPC retry/backoff.
+				// Bounded — OTel batch processors don't fully honor context
+				// deadlines during gRPC retry/backoff against an unreachable
+				// collector.
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				_ = otelShutdown(ctx)

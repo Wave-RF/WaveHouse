@@ -1,23 +1,8 @@
 // Package testutil — OTLP gRPC test receiver.
 //
-// FakeOTLP is an in-process OTLP gRPC server for verifying telemetry export
-// in tests. It accepts trace, metric, and log Export RPCs, records the
-// received payloads, and exposes counts (and the raw payloads) for assertions.
-//
-// Usage:
-//
-//	r := testutil.NewFakeOTLP(t)
-//	cfg := observability.ProviderConfig{Endpoint: r.Addr(), ...}
-//	shutdown, _ := observability.InitProvider(ctx, "svc", cfg)
-//	... emit spans/metrics/logs ...
-//	_ = shutdown(ctx)  // forces a final flush
-//	assert.Equal(t, expected, r.SpanCount())
-//
-// Always call shutdown before asserting counts — the OTel SDK batches
-// exports and only drains on shutdown (or after the batch timeout).
-//
-// For TLS verification, use NewFakeOTLPTLS which mints an ephemeral self-signed
-// cert and exposes TLSConfig() for a matching client-side config.
+// FakeOTLP captures trace/metric/log Export RPCs for test assertions. Call
+// the InitProvider shutdown before asserting counts — the OTel SDK only
+// drains on shutdown or batch timeout. NewFakeOTLPTLS is the TLS variant.
 package testutil
 
 import (
@@ -46,9 +31,8 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-// FakeOTLP is a single gRPC server that implements the trace, metric, and
-// log Export RPCs and captures every received payload. Cleanup is registered
-// on the *testing.T automatically.
+// FakeOTLP is a gRPC server implementing trace/metric/log Export and
+// capturing each request's payload + metadata. Cleanup is auto-registered.
 type FakeOTLP struct {
 	addr      string
 	server    *grpc.Server
@@ -59,8 +43,6 @@ type FakeOTLP struct {
 	metrics []*metricspb.ResourceMetrics
 	logs    []*logspb.ResourceLogs
 
-	// Captured gRPC request metadata, indexed by signal. Each Export call
-	// appends an entry. Tests assert on auth/header propagation through these.
 	traceHeaders  []metadata.MD
 	metricHeaders []metadata.MD
 	logHeaders    []metadata.MD
@@ -74,11 +56,8 @@ func NewFakeOTLP(t *testing.T) *FakeOTLP {
 	return newFakeOTLP(t, nil)
 }
 
-// NewFakeOTLPTLS is the TLS variant: an ephemeral self-signed cert (SAN
-// 127.0.0.1) is generated, and the server listens with that cert. The matching
-// client config is available via TLSConfig() — wire it into ProviderConfig so
-// the OTel exporters trust the cert. Production code never sets ProviderConfig.TLSConfig;
-// only this test path does.
+// NewFakeOTLPTLS is the TLS variant: mints an ephemeral self-signed cert
+// (SAN 127.0.0.1) and exposes the matching client *tls.Config via TLSConfig().
 func NewFakeOTLPTLS(t *testing.T) *FakeOTLP {
 	t.Helper()
 

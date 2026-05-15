@@ -34,31 +34,10 @@ import (
 // the Do() call site for the trade-off.
 var runtimeStartOnce sync.Once
 
-// ProviderConfig wires the metrics/traces/logs pipeline. Each output is
-// independently gated; SampleRate values must be in [0.0, 1.0] and only apply
-// to head-based trace sampling. Log sampling is enforced inside NewLogger
-// (per-level).
-//
-// MetricsEnabled drives the OTLP-push metric exporter; PrometheusEnabled
-// drives the Prometheus exposition reader. Either, both, or neither may be
-// set — the underlying OTel MeterProvider is the shared substrate. When
-// PrometheusEnabled is true InitProvider returns a non-nil promHandler.
-//
-// Endpoint is the OTLP gRPC target consulted by every enabled OTLP exporter
-// unless that signal sets its own TracesEndpoint / MetricsEndpoint /
-// LogsEndpoint override (empty means inherit). Each endpoint is parsed via
-// ParseEndpoint, so `https://` selects TLS while bare `host:port` or `http://`
-// stays plaintext for backward compatibility.
-//
-// Headers (set, key=value pairs already parsed by config) is applied to every
-// OTLP exporter — the standard knob for auth against cloud endpoints.
-//
-// tlsConfig is unexported and reserved for the integration-test escape hatch
-// (FakeOTLPTLS — InsecureSkipVerify against an ephemeral self-signed cert).
-// Production code must NOT set it; the system-root TLS config picked from the
-// `https://` scheme on Endpoint is what production wants. Test callers reach
-// it via SetTLSConfigForTesting so production callers don't get the field
-// surfaced in IDE autocomplete.
+// ProviderConfig wires the metrics/traces/logs pipeline. Endpoint is the
+// default OTLP gRPC target; per-signal {Traces,Metrics,Logs}Endpoint values
+// override it (empty inherits). MetricsEnabled and PrometheusEnabled are
+// independent — either, both, or neither may be set.
 type ProviderConfig struct {
 	Endpoint          string
 	Headers           map[string]string
@@ -73,11 +52,9 @@ type ProviderConfig struct {
 	tlsConfig         *tls.Config
 }
 
-// SetTLSConfigForTesting injects a client *tls.Config that overrides the
-// default system-roots config for `https://` endpoints. The deliberately
-// awkward name signals intent: only the FakeOTLPTLS integration helpers
-// should call this. Production code path keeps tlsConfig nil and falls
-// through to system roots.
+// SetTLSConfigForTesting injects a client *tls.Config for `https://`
+// endpoints. Test-only — FakeOTLPTLS uses it to trust its self-signed cert.
+// Production keeps tlsConfig nil (system roots).
 func (c *ProviderConfig) SetTLSConfigForTesting(cfg *tls.Config) {
 	c.tlsConfig = cfg
 }
@@ -92,17 +69,12 @@ func pickEndpoint(override, fallback string) string {
 
 // InitProvider sets up the OpenTelemetry pipeline, registering only the
 // signals enabled in cfg. Always installs the W3C TraceContext + Baggage
-// propagator (cheap, harmless when traces are off — in-process span
-// extraction still works against a no-op tracer provider).
-//
-// Returns a shutdown function (always non-nil) and a Prometheus HTTP handler
-// (non-nil iff PrometheusEnabled). The handler reads from a private
-// prometheus.Registry — global registry pollution is avoided.
+// propagator. Returns a non-nil shutdown function and a Prometheus HTTP
+// handler (non-nil iff PrometheusEnabled; reads from a private registry).
 func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (func(context.Context) error, http.Handler, error) {
-	// Snapshot the OTel globals on entry. On a partial init failure we want to
-	// roll them back to whatever was installed before — otherwise the caller
-	// (which continues on init error per main.go) keeps using shut-down
-	// providers as the global state, strictly worse than the no-op defaults.
+	// Snapshot globals so a partial-init failure can roll them back — main.go
+	// continues on init error, and shut-down providers as global state are
+	// worse than the no-op defaults.
 	prevProp := otel.GetTextMapPropagator()
 	prevTP := otel.GetTracerProvider()
 	prevMP := otel.GetMeterProvider()
@@ -119,12 +91,9 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		return err
 	}
 
-	// On any setup error we run partial shutdown to release whatever was
-	// already registered AND restore the prior globals so the caller falls back
-	// to clean state. The setup error itself flows back via the return value;
-	// the shutdown error is diagnostic-only — surface it on stdout so
-	// partial-init failures are debuggable in production rather than silently
-	// swallowed.
+	// On setup error, release whatever was already registered and restore
+	// prior globals. Shutdown errors are diagnostic-only — log them rather
+	// than swallowing.
 	handleErr := func(inErr error) {
 		otel.SetTextMapPropagator(prevProp)
 		otel.SetTracerProvider(prevTP)
@@ -201,11 +170,9 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		}
 
 		if cfg.PrometheusEnabled {
-			// Private Registry — keeps WaveHouse metrics out of the global
-			// prometheus.DefaultRegisterer (which the prometheus client
-			// library's process/Go collectors auto-register into). Tests
-			// and embedded use cases would otherwise see those default
-			// metrics leak into the /metrics output.
+			// Private Registry keeps WaveHouse metrics out of
+			// prometheus.DefaultRegisterer (which the client library's
+			// process/Go collectors auto-register into).
 			reg := prometheus.NewRegistry()
 			promExporter, err := otelprom.New(otelprom.WithRegisterer(reg))
 			if err != nil {
@@ -224,19 +191,12 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 		otel.SetMeterProvider(meterProvider)
 
-		// `runtime.Start` spawns goroutines that the upstream package exposes
-		// no way to stop. In production InitProvider is called exactly once,
-		// but tests re-init the provider repeatedly — sync.Once caps the leak
-		// at one goroutine for the whole process. Trade-off: the runtime
-		// callbacks stay bound to the FIRST MeterProvider, so subsequent
-		// re-inits get no runtime metrics on their new MeterProvider. No test
-		// asserts on runtime metric presence and production never re-inits,
-		// so this is acceptable until upstream adds a Stop().
-		//
-		// Errors here are intentionally non-fatal: a runtime-instrumentation
-		// failure shouldn't tear down a fully-initialized OTel pipeline. Log
-		// and continue with degraded host metrics rather than routing through
-		// handleErr (which would roll back the globals).
+		// runtime.Start spawns goroutines with no upstream Stop(); sync.Once
+		// caps the leak across test re-inits. Trade-off: runtime callbacks
+		// stay bound to the FIRST MeterProvider, so subsequent re-inits get
+		// no runtime metrics on their new provider. Errors here are
+		// non-fatal — a runtime-instrumentation failure shouldn't tear down
+		// a fully-initialized OTel pipeline.
 		runtimeStartOnce.Do(func() {
 			if err := runtime.Start(runtime.WithMinimumReadMemStatsInterval(15 * time.Second)); err != nil {
 				slog.Warn("OTel runtime instrumentation failed to start; continuing with degraded host metrics",

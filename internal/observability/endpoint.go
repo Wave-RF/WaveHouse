@@ -6,13 +6,9 @@ import (
 	"strings"
 )
 
-// tlsConfigOrDefault returns the supplied config when non-nil. The OTel SDK's
-// credentials.NewTLS expects a non-nil *tls.Config; passing nil panics. The
-// production default delegates to system root CAs / ALPN negotiation but
-// pins MinVersion to TLS 1.3 — every TLS-terminated cloud OTLP gateway in
-// scope (Grafana Cloud, Honeycomb) supports it, and the floor matches OWASP
-// modern guidance. Test callers supplying their own *tls.Config keep full
-// control over the version range.
+// tlsConfigOrDefault returns c, or a TLS 1.3 floor config when c is nil.
+// credentials.NewTLS panics on a nil *tls.Config; the production default
+// uses system roots with MinVersion=TLS1.3.
 func tlsConfigOrDefault(c *tls.Config) *tls.Config {
 	if c != nil {
 		return c
@@ -45,30 +41,13 @@ func ParseEndpoint(addr string) (host string, useTLS bool) {
 }
 
 // ParseOTelHeaders parses the OpenTelemetry-spec headers env-var format
-// (`OTEL_EXPORTER_OTLP_HEADERS`) — comma-separated `key=value` pairs — into a
-// map. Whitespace around the key and value is trimmed. Only the first `=` per
-// segment splits key from value, so base64 trailing `=` in an Authorization
-// header round-trips unchanged. An empty input yields an empty map.
+// (comma-separated `key=value` pairs) into a map. Only the first `=` per
+// segment splits key from value, so base64 trailing `=` round-trips. Keys
+// are validated against RFC 7230 `token`; empty or whitespace-only values
+// are rejected.
 //
-// Both empty keys and empty-or-whitespace-only values are rejected (e.g.
-// `authorization=   ` would otherwise ship as `authorization: ""` to the
-// cloud gateway and 401 silently). Keys are also validated against the
-// RFC 7230 `token` production (the HTTP header-name grammar) so a typo like
-// `my key=...` fails at boot rather than blowing up inside the gRPC stack
-// on first export. gRPC normalizes ASCII case on the wire, so mixed-case
-// keys (`Authorization`, `X-Honeycomb-Team`) are accepted.
-//
-// Returns an error (rather than silently dropping the segment) for malformed
-// entries so Validate() can fail loud at boot rather than letting a typo
-// silently disable auth in production.
-//
-// MUST stay in sync with config.validateOTelHeaders in
-// internal/config/config.go. config can't import observability without
-// transitively pulling the OTel SDK into every config consumer, so the
-// parsing rules are hand-mirrored. The cross-parser parity test in
-// internal/config/header_parity_test.go pins both parsers to the same
-// accept/reject decisions, so a rule change here fails CI until the
-// matching change lands there (and vice versa).
+// Kept in lockstep with config.validateOTelHeaders by the cross-parser parity
+// test in internal/config/header_parity_test.go.
 func ParseOTelHeaders(s string) (map[string]string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -80,10 +59,9 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 		if seg == "" {
 			continue
 		}
-		// Error messages quote only the key, never the full segment. A real
-		// misconfiguration could be `WH_OTEL_HEADERS="x:y=$REAL_API_TOKEN"`
-		// — quoting `seg` would log the token to every sink the structured
-		// "error" field reaches (Loki, Datadog, CloudWatch, etc.).
+		// Error messages quote only the key, never the full segment — `seg`
+		// can contain a real API token that would be logged to every sink
+		// the structured error field reaches.
 		i := strings.IndexByte(seg, '=')
 		if i < 0 {
 			return nil, fmt.Errorf("header entry missing '=' separator (format is key=value)")
@@ -105,15 +83,11 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 }
 
 // headerNamePunctuation lists the punctuation characters legal in an RFC 7230
-// `token` (HTTP header field name). Surfaced in error messages so the
-// reported "what's allowed" matches what the validator actually accepts.
+// `token` (HTTP header field name).
 const headerNamePunctuation = "!#$%&'*+-.^_`|~"
 
-// firstNonTokenChar reports whether s consists entirely of RFC 7230 `token`
-// characters (the HTTP header-name grammar): ALPHA / DIGIT / one of the
-// punctuation chars in headerNamePunctuation. Returns the first offending
-// rune and false on the first non-token char; returns (0, true) when s is
-// fully valid.
+// firstNonTokenChar returns the first non-RFC-7230-token rune in s, or
+// (0, true) when s is fully valid.
 func firstNonTokenChar(s string) (rune, bool) {
 	for _, c := range s {
 		switch {
