@@ -68,8 +68,8 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 
 // removeKeyFromTagsLocked performs a bi-directional metadata cleanup to prevent memory leaks.
 // It uses the reverse index (keyTags) to find every tag set (tagsMap) the key belongs to
-// and removes the key from those sets. This ensures that if a key is evicted due to 
-// one tag (e.g., "orders"), it doesn't leave "ghost" references behind in other 
+// and removes the key from those sets. This ensures that if a key is evicted due to
+// one tag (e.g., "orders"), it doesn't leave "ghost" references behind in other
 // associated tag sets (e.g., "users" or "clicks").
 //
 // MUST be called while holding tagsMu.Lock().

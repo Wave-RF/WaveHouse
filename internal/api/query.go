@@ -28,7 +28,7 @@ var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE
 // mutationRe detects queries that modify data or schema to trigger cache invalidation.
 // Run against cleaned SQL with string literals, comments, AND quoted identifiers
 // stripped (see stripForMutationDetect) so that a table or column named after a
-// DML keyword (e.g., `` `INSERT` ``) doesn't false-positive. \b anchors prevent
+// DML keyword (e.g., “ `INSERT` “) doesn't false-positive. \b anchors prevent
 // false positives on identifiers such as `insert_time` that share a prefix.
 var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
 
@@ -47,8 +47,8 @@ var mutationTargetRe = regexp.MustCompile(`(?i)\b(?:` +
 	`ALTER\s+TABLE(?:\s+IF\s+EXISTS)?` +
 	`)\s+(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`" + `"]?`)
 
-// These four regexes below are used to strip out /* comments */, -- comments, 
-// 'string literals', and 'quoted indentifies' so that the SQL parser doesn't 
+// These four regexes below are used to strip out /* comments */, -- comments,
+// 'string literals', and 'quoted indentifies' so that the SQL parser doesn't
 // accidentally read a keyword hidden inside the text.
 var (
 	blockCommentRe     = regexp.MustCompile(`(?s)/\*.*?\*/`)
@@ -59,7 +59,7 @@ var (
 
 // stripForMutationDetect returns cleanSQL with backtick- and double-quote-wrapped
 // identifiers blanked out, so a table named after a reserved word (e.g.,
-// `` SELECT * FROM `INSERT` ``) doesn't trick mutationRe into reporting a write.
+// “ SELECT * FROM `INSERT` “) doesn't trick mutationRe into reporting a write.
 // The result is suitable only for mutationRe matching; extractMutationTargets
 // and extractCacheTagsFromCleaned still need the unblanked cleanSQL so they can
 // capture the actual identifier.
