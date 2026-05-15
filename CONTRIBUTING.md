@@ -100,7 +100,7 @@ All submissions require review before merging. Reviewers will look for:
 - Correctness and test coverage
 - Adherence to existing architecture patterns
 - Documentation updates where applicable
-- No security regressions (tenant isolation, input validation)
+- No security regressions (role-based access control, input validation)
 
 ## License
 
