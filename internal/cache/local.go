@@ -132,6 +132,13 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 
 		if ttl > 0 {
 			l.ttls.Store(key, exp)
+		} else {
+			// Clear any expiry left by a prior Set with ttl>0. The
+			// version-guarded OnEvict path returns before reaching
+			// ttls.Delete for the old version, so without this branch the
+			// stale expiry would orphan and silently drop this live,
+			// no-TTL value once the prior TTL elapses (see Get).
+			l.ttls.Delete(key)
 		}
 
 		if len(tags) > 0 {

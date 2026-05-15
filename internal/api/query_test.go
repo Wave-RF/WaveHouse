@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -290,19 +289,62 @@ func TestQueryHandler_StringLiteralMutationBypass(t *testing.T) {
 	sql := `SELECT * FROM events WHERE message = 'INSERT INTO secret_table VALUES (1)'`
 	cleaned := cleanSQLForTags(sql)
 
-	// The word "INSERT" should be gone from the cleaned SQL
-	assert.NotContains(t, cleaned, "INSERT")
+	// The literal must be stripped so its INSERT keyword can't fool mutationRe.
+	assert.NotContains(t, cleaned, "INSERT", "string literal must be stripped from cleaned SQL")
 
-	// Logic Check: Simulate the new first-word logic
-	fields := strings.Fields(cleaned)
-	isMutation := false
-	if len(fields) > 0 {
-		switch strings.ToUpper(fields[0]) {
-		case "INSERT", "UPDATE", "DELETE", "TRUNCATE", "DROP", "ALTER", "REPLACE":
-			isMutation = true
-		}
+	// Drive the actual production detection path — not a re-implementation.
+	assert.False(t,
+		mutationRe.MatchString(stripForMutationDetect(cleaned)),
+		"mutationRe must not fire when INSERT only appears inside a (stripped) string literal",
+	)
+}
+
+func TestExtractMutationTargets(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		sql      string
+		expected []string
+	}{
+		{
+			name:     "insert select excludes source",
+			sql:      "INSERT INTO target SELECT * FROM source",
+			expected: []string{"target"},
+		},
+		{
+			name:     "delete from",
+			sql:      "DELETE FROM events WHERE id = 1",
+			expected: []string{"events"},
+		},
+		{
+			name:     "truncate table",
+			sql:      "TRUNCATE TABLE metrics",
+			expected: []string{"metrics"},
+		},
+		{
+			name:     "alter table",
+			sql:      "ALTER TABLE logs ADD COLUMN ts Int64",
+			expected: []string{"logs"},
+		},
+		{
+			name:     "drop table if exists",
+			sql:      "DROP TABLE IF EXISTS scratch",
+			expected: []string{"scratch"},
+		},
+		{
+			name:     "cte wrapped insert",
+			sql:      "WITH src AS (SELECT * FROM staging) INSERT INTO target SELECT * FROM src",
+			expected: []string{"target"},
+		},
 	}
 
-	assert.False(t, isMutation, "keyword inside a string literal at index > 0 should not trigger isMutation")
-	assert.Equal(t, "SELECT", strings.ToUpper(fields[0]))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cleaned := cleanSQLForTags(tc.sql)
+			got := extractMutationTargets(cleaned)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
 }

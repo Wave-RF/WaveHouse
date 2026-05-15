@@ -33,10 +33,10 @@ var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE
 var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
 
 // mutationTargetRe extracts the table that a mutation writes to, anchored on
-// the DML/DDL verb so FROM/JOIN tables inside SELECT subqueries are ignored.
-// Used to scope cache invalidation to only the written table (e.g.,
-// `INSERT INTO target SELECT … FROM source` evicts `target`, leaving `source`
-// cache entries intact).
+// the DML/DDL (Data Manipulation and Data Definition Language) verb so FROM/JOIN
+// tables inside SELECT subqueries are ignored. Used to scope cache invalidation
+// to only the written table (e.g., `INSERT INTO target SELECT … FROM source`
+// evicts `target`, leaving `source` cache entries intact).
 var mutationTargetRe = regexp.MustCompile(`(?i)\b(?:` +
 	`INSERT\s+INTO|` +
 	`REPLACE\s+INTO|` +

@@ -76,6 +76,34 @@ func TestLocalCache_Overwrite(t *testing.T) {
 	assert.Equal(t, []byte("v2"), val)
 }
 
+// TestLocalCache_OverwriteWithZeroTTLClearsStaleExpiry locks in the fix for a
+// subtle bug: Set(ttl>0) followed by Set(ttl=0) used to leave the original
+// expiry in l.ttls, so Get would silently drop the live no-TTL entry once
+// that prior TTL elapsed.
+func TestLocalCache_OverwriteWithZeroTTLClearsStaleExpiry(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+
+	require.NoError(t, c.Set(ctx, "k", []byte("v1"), 50*time.Millisecond, nil))
+	c.Wait()
+
+	require.NoError(t, c.Set(ctx, "k", []byte("v2"), 0, nil))
+	c.Wait()
+
+	// Wait past the original TTL. With the fix the no-TTL entry survives;
+	// without it, Get sees the stale expiry and deletes the live value.
+	time.Sleep(100 * time.Millisecond)
+
+	val, ttl, err := c.Get(ctx, "k")
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("v2"), val, "no-TTL overwrite must survive past the prior TTL")
+	assert.Zero(t, ttl, "remaining TTL should be zero after overwrite to ttl=0")
+}
+
 func TestLocalCache_ZeroTTL(t *testing.T) {
 	t.Parallel()
 	c, err := NewLocal(1 << 20)
