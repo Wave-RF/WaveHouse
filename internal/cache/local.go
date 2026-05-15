@@ -93,6 +93,18 @@ func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, 
 		return nil, 0, nil
 	}
 
+	// Reject orphaned entries that slipped into the store after a concurrent
+	// InvalidateByTags sweep. Ristretto's Del runs immediately against the
+	// store, so a Set whose item was still in setBuf during the sweep can be
+	// admitted afterward with no metadata anywhere. Treat as miss; the entry
+	// will be reaped by TTL or LFU later.
+	l.tagsMu.RLock()
+	_, tracked := l.keyVersion[key]
+	l.tagsMu.RUnlock()
+	if !tracked {
+		return nil, 0, nil
+	}
+
 	var remaining time.Duration
 	if expVal, ok := l.ttls.Load(key); ok {
 		exp := expVal.(time.Time)
@@ -119,6 +131,11 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 		exp = time.Now().Add(ttl)
 	}
 
+	// tagsMu is held across SetWithTTL intentionally: version assignment, the
+	// Ristretto write, and the metadata-map updates must be a single critical
+	// section so OnEvict (which also takes tagsMu) sees a consistent version
+	// snapshot. OnEvict will queue behind this Set; the lock-hold window is
+	// microseconds, and Ristretto's setBuf (32K slots) absorbs the backpressure.
 	l.tagsMu.Lock()
 	defer l.tagsMu.Unlock()
 

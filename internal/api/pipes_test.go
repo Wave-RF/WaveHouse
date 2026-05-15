@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -326,4 +328,32 @@ func TestPipesHandler_Execute_NoRolesAllowsAll(t *testing.T) {
 
 	assert.NotEqual(t, http.StatusForbidden, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+func TestPipesHandler_Execute_CacheTags(t *testing.T) {
+	t.Parallel()
+
+	mockCache := testutil.NewMockCache()
+	mockConn := &testutil.MockConn{}
+
+	pipe := &pipes.NamedQuery{
+		Name: "active_users",
+		SQL:  "SELECT * FROM users WHERE active = 1",
+	}
+	store := pipes.NewMemoryStore(pipe)
+	h := NewPipesHandler(store, mockConn, mockCache, time.Minute)
+
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/active_users/execute", "active_users", nil)
+	w := httptest.NewRecorder()
+	h.Execute(w, r)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Reconstruct the key the handler computed so we can probe the mock.
+	sql, params, err := pipes.BindParams(pipe, map[string]any{})
+	require.NoError(t, err)
+	key := queryCacheKey(sql, params)
+
+	assert.Equal(t, []string{"users"}, mockCache.TagsForKey(key),
+		"Execute must call Cache.Set with the table tags extracted from the pipe SQL")
 }

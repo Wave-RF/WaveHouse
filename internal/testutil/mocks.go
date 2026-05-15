@@ -167,6 +167,15 @@ func (m *MockCache) InvalidateByTags(_ context.Context, tags []string) error {
 	return nil
 }
 
+func (m *MockCache) TagsForKey(key string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if entry, ok := m.store[key]; ok {
+		return entry.tags
+	}
+	return nil
+}
+
 func (m *MockCache) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
