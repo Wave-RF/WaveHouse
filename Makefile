@@ -251,8 +251,10 @@ signoz-up: $(SIGNOZ_SECRET_FILE) ## Start SigNoz stack (idempotent; blocks until
 	@echo "    OTLP gRPC:  $(GREEN)localhost:4317$(RESET)"
 	@echo "    OTLP HTTP:  $(GREEN)localhost:4318$(RESET)"
 
-# No $(SIGNOZ_SECRET_FILE) prereq on signoz-down/signoz-logs: would silently
-# regenerate the secret after `signoz-wipe`, leaving an orphan file.
+# No $(SIGNOZ_SECRET_FILE) prereq on signoz-down/signoz-logs/signoz-wipe:
+# JWT is irrelevant for teardown + log tailing (SIGNOZ_COMPOSE uses the
+# teardown-placeholder fallback), and listing it as a prereq would silently
+# regenerate the secret on the next invocation, leaving an orphan file.
 .PHONY: signoz-down
 signoz-down: ## Stop SigNoz stack (preserves volumes — UI history kept)
 	@echo "$(YELLOW)==> Stopping SigNoz...$(RESET)"
@@ -263,7 +265,7 @@ signoz-logs: ## Tail SigNoz UI + collector logs (Ctrl+C to detach)
 	@$(SIGNOZ_COMPOSE) logs -f signoz otel-collector
 
 .PHONY: signoz-wipe
-signoz-wipe: $(SIGNOZ_SECRET_FILE) ## Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin account reset)
+signoz-wipe: ## Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin account reset)
 	@echo "$(RED)==> Wiping SigNoz (containers + volumes)...$(RESET)"
 	@$(SIGNOZ_COMPOSE) down -v --remove-orphans
 	@rm -f $(SIGNOZ_SECRET_FILE)

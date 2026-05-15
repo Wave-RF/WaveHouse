@@ -33,18 +33,24 @@ shopt -s nullglob
 files=("${DIR}"/*.json)
 [ "${#files[@]}" -gt 0 ] || { echo "error: no dashboard JSON files in ${DIR}" >&2; exit 1; }
 
-# Reject duplicate titles across the local JSON files. `existing` is snapshot
-# once above, so two files sharing a .title would both miss the lookup and
-# silently POST — producing duplicate dashboards instead of an upsert.
-dupe="$(jq -r '.title' "${files[@]}" | sort | uniq -d | head -1)"
-[ -z "$dupe" ] || { echo "error: duplicate dashboard .title '$dupe' across local JSON files — titles must be unique (used as the upsert key)" >&2; exit 1; }
-
+# Validate every dashboard's .title (non-empty + unique across files) before
+# the first API mutation. Doing this inline with the PUT/POST loop would let
+# a late-file failure leave earlier dashboards half-applied. `existing` is
+# also snapshot once above, so two files sharing a .title would both miss
+# the lookup and silently POST — producing duplicate dashboards instead of
+# an upsert.
 for f in "${files[@]}"; do
   title="$(jq -r '.title' "$f")"
   if [ -z "$title" ] || [ "$title" = "null" ]; then
     echo "error: dashboard file '$f' must contain a non-empty .title" >&2
     exit 1
   fi
+done
+dupe="$(jq -r '.title' "${files[@]}" | sort | uniq -d | head -1)"
+[ -z "$dupe" ] || { echo "error: duplicate dashboard .title '$dupe' across local JSON files — titles must be unique (used as the upsert key)" >&2; exit 1; }
+
+for f in "${files[@]}"; do
+  title="$(jq -r '.title' "$f")"
   id="$(printf '%s' "$existing" | jq -r --arg t "$title" 'first(.data[] | select(.data.title == $t) | .id) // empty')"
   if [ -n "$id" ]; then
     echo "↻ updating  ${title}  (${id})"

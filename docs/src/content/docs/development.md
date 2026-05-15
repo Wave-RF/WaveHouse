@@ -20,6 +20,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Node.js** | 20+ | Runtime for pnpm and the Vitest suites | [nodejs.org](https://nodejs.org/) or `nvm`/`fnm`/`volta` |
 | **pnpm** | 10.33+ (pinned via `packageManager` in `clients/ts/package.json`, `tests/e2e/sdk/package.json`, and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site; `make build-sdk`, `make test-sdk`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@10.33.0 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
+| **openssl** + **jq** | any recent | Only required for the observability stack: `make signoz-up` uses `openssl rand -hex 32` to mint a per-checkout JWT secret; `make signoz-dashboards` / `load-dashboards.sh` uses `jq` to parse the SigNoz dashboards API. Both targets fail fast with a friendly error if either is missing | macOS: usually preinstalled (or `brew install openssl jq`); Linux: `apt-get install openssl jq` |
 
 ### Auto-installed by `make tools`
 
