@@ -1,23 +1,8 @@
-# Self-contained SigNoz stack for running an OTel-native observability backend
-# locally. Modelled on the upstream SigNoz `deploy/docker/docker-compose.yaml`
-# (SigNoz v0.122.0 / signoz-otel-collector v0.144.3), trimmed to a single node
-# and adapted to this repo's layout.
+# Local-dev SigNoz stack — single-node mirror of upstream SigNoz v0.122.0's
+# deploy/docker/docker-compose.yaml. Operator docs (bring-up, ports, dashboard
+# loader) live in docs/src/content/docs/{deployment,development}.md.
 #
-# Bring it up (via the Makefile wrapper, or directly):
-#   make signoz-up
-#   docker compose -f deployments/signoz/compose.yaml up -d
-#
-# UI:        http://localhost:3301   (host 3301 → container 8080; WaveHouse owns 8080)
-# OTLP gRPC: localhost:4317          (point WaveHouse at it: WH_OTEL_ADDR=127.0.0.1:4317,
-#                                     or host.docker.internal:4317 from another container)
-# OTLP HTTP: localhost:4318
-#
-# Long-running services: clickhouse, zookeeper-1, signoz, otel-collector.
-# One-shot init containers (normal to see them as `Exited (0)`):
-#   - init-clickhouse: fetches the histogramQuantile UDF binary ClickHouse loads
-#   - signoz-telemetrystore-migrator: creates the signoz_* ClickHouse schema, then exits
-#
-# Dev posture only — no resource limits set. For prod, add
+# Dev posture only — no resource limits. For prod, add
 # `deploy.resources.limits.{memory,cpus}` to clickhouse + signoz +
 # otel-collector (the trace ingest path can be hungry under load).
 

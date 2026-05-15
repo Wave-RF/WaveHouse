@@ -230,18 +230,12 @@ deps-wipe: ## Stop ClickHouse AND destroy its data volume (DESTRUCTIVE — use t
 
 ##@ Observability
 
-# SigNoz stack lives in its own compose file. Same DEV_COMPOSE pattern —
-# alias once, keep recipes terse, easy to swap binaries (e.g. podman compose).
 SIGNOZ_COMPOSE_FILE := deployments/signoz/compose.yaml
 SIGNOZ_SECRET_FILE  := deployments/signoz/.signoz-secret.local
-# SIGNOZ_TOKENIZER_JWT_SECRET is required by compose (the :? modifier fails
-# fast for raw `docker compose` users). The Makefile generates a random
-# per-checkout value once and caches it in a gitignored file, then exports
-# it for every signoz-* target. signoz-wipe rotates it. Avoids the
-# shared-default-secret risk of a publicly-checked-in compose file.
-# The teardown-placeholder fallback keeps `clean-all` working when the
-# secret file has already been wiped — compose's :? guard would otherwise
-# abort `down -v` (a JWT is irrelevant for teardown).
+# Per-checkout JWT, cached in a gitignored file, rotated by signoz-wipe.
+# Avoids a shared default secret in a public repo. The teardown-placeholder
+# fallback keeps `down -v` working after the secret has been wiped (compose's
+# :? guard would otherwise abort teardown).
 SIGNOZ_COMPOSE       = SIGNOZ_TOKENIZER_JWT_SECRET="$$(cat $(SIGNOZ_SECRET_FILE) 2>/dev/null || printf teardown-placeholder)" docker compose -f $(SIGNOZ_COMPOSE_FILE)
 
 $(SIGNOZ_SECRET_FILE):
@@ -249,10 +243,6 @@ $(SIGNOZ_SECRET_FILE):
 	@openssl rand -hex 32 > $@
 	@chmod 600 $@
 
-# `--wait` blocks on the named long-running services' healthchecks:
-#   signoz          → /api/v1/health on :8080
-#   otel-collector  → health_check extension on :13133
-# clickhouse + zookeeper-1 reach healthy first via the dependency chain.
 .PHONY: signoz-up
 signoz-up: $(SIGNOZ_SECRET_FILE) ## Start SigNoz stack (idempotent; blocks until UI + collector healthy)
 	@echo "$(CYAN)==> Starting SigNoz stack...$(RESET)"
@@ -261,11 +251,8 @@ signoz-up: $(SIGNOZ_SECRET_FILE) ## Start SigNoz stack (idempotent; blocks until
 	@echo "    OTLP gRPC:  $(GREEN)localhost:4317$(RESET)"
 	@echo "    OTLP HTTP:  $(GREEN)localhost:4318$(RESET)"
 
-# signoz-down + signoz-logs don't list $(SIGNOZ_SECRET_FILE) as a prereq:
-# the JWT value is irrelevant for teardown and log-tailing, SIGNOZ_COMPOSE
-# already handles the missing-file case via the teardown-placeholder
-# fallback, and listing the file as a prereq here would silently
-# regenerate it after `signoz-wipe` — leaving an orphan file lying around.
+# No $(SIGNOZ_SECRET_FILE) prereq on signoz-down/signoz-logs: would silently
+# regenerate the secret after `signoz-wipe`, leaving an orphan file.
 .PHONY: signoz-down
 signoz-down: ## Stop SigNoz stack (preserves volumes — UI history kept)
 	@echo "$(YELLOW)==> Stopping SigNoz...$(RESET)"
@@ -281,11 +268,10 @@ signoz-wipe: $(SIGNOZ_SECRET_FILE) ## Stop SigNoz AND destroy its volumes (DESTR
 	@$(SIGNOZ_COMPOSE) down -v --remove-orphans
 	@rm -f $(SIGNOZ_SECRET_FILE)
 
-# Dashboard loader auths to the SigNoz API with a JWT (SIGNOZ_TOKEN, pulled
-# from the UI's localStorage AUTH_TOKEN). v0.122.0 moved password login to an
-# endpoint that needs an org UUID we can't externally discover, so the token
-# is the only supported path. The guard fails fast with a pointer to the
-# first-run flow rather than letting the loader emit a less obvious 401.
+# Token-only: SigNoz v0.122.0 moved password login behind an org UUID that
+# isn't externally discoverable, so AUTH_TOKEN from the UI's localStorage is
+# the only supported path. Guard fails fast with the first-run pointer
+# rather than letting the loader emit a less obvious 401.
 .PHONY: signoz-dashboards
 signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNOZ_TOKEN)
 	@if [ -z "$$SIGNOZ_TOKEN" ]; then \
@@ -296,10 +282,9 @@ signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNO
 	fi
 	@deployments/signoz/load-dashboards.sh
 
-# dev-obs = `make dev` + the SigNoz layer + WaveHouse pointed at the
-# collector. `WH_OTEL_ENABLED` is the only flip needed; `WH_OTEL_ADDR`
-# already defaults to 127.0.0.1:4317 in internal/config/config.go but is
-# set explicitly so the recipe doubles as documentation.
+# WH_OTEL_ADDR already defaults to 127.0.0.1:4317 in
+# internal/config/config.go but is set explicitly so the recipe doubles as
+# documentation for what dev-obs wires together.
 .PHONY: dev-obs
 dev-obs: deps-up signoz-up $(AIR) ## Hot-reload dev server with SigNoz observability
 	@echo "$(CYAN)==> Starting WaveHouse with SigNoz observability$(RESET)"

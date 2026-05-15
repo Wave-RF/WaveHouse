@@ -1,18 +1,11 @@
 # Override for standalone.yaml that points WaveHouse's OTLP export at the
-# SigNoz collector from deployments/signoz/compose.yaml.
+# SigNoz collector. Usage docs: docs/src/content/docs/deployment.md.
 #
-# The SigNoz collector publishes 4317 on the host, so WaveHouse reaches it
-# via host.docker.internal — no shared Docker network. Joining the SigNoz
-# stack's network is tempting but breaks ClickHouse resolution: that stack
+# Reaches the collector via host.docker.internal — no shared Docker network.
+# Joining the SigNoz stack's network breaks ClickHouse resolution: that stack
 # also defines a service named `clickhouse`, so the unqualified hostname
-# `clickhouse` becomes ambiguous and WaveHouse may dial SigNoz's ClickHouse
-# (non-empty password) instead of its own.
-#
-# Usage (bring the SigNoz stack up first):
-#   make signoz-up                # or: docker compose -f deployments/signoz/compose.yaml up -d
-#   docker compose -p wavehouse \
-#     -f deployments/compose/standalone.yaml \
-#     -f deployments/compose/standalone.signoz.yaml up -d --build
+# becomes ambiguous and WaveHouse may dial SigNoz's ClickHouse instead of
+# its own.
 
 services:
   clickhouse:
