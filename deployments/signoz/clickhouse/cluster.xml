@@ -1,64 +1,43 @@
 <?xml version="1.0"?>
-<clickhouse>
-    <!-- ZooKeeper is used to store metadata about replicas, when using Replicated tables.
-         Optional. If you don't use replicated tables, you could omit that.
+<!--
+  Cluster + ZooKeeper topology for the SigNoz ClickHouse. Mounted at
+  /etc/clickhouse-server/config.d/cluster.xml via deployments/signoz/compose.yaml.
 
-         See https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/replication/
-      -->
+  Single-node by design; the commented-out blocks below are templates for
+  expanding to multi-shard / multi-replica if this stack ever leaves a
+  laptop.
+
+  Modeled on upstream SigNoz v0.122.0:
+    https://github.com/SigNoz/signoz/blob/v0.122.0/deploy/docker/clickhouse-setup/cluster.xml
+-->
+<clickhouse>
     <zookeeper>
         <node index="1">
             <host>zookeeper-1</host>
             <port>2181</port>
         </node>
-        <!-- <node index="2">
+        <!-- Quorum template — uncomment if running multi-node ZK:
+        <node index="2">
             <host>zookeeper-2</host>
             <port>2181</port>
         </node>
         <node index="3">
             <host>zookeeper-3</host>
             <port>2181</port>
-        </node> -->
+        </node>
+        -->
     </zookeeper>
 
-    <!-- Configuration of clusters that could be used in Distributed tables.
-         https://clickhouse.com/docs/en/operations/table_engines/distributed/
-      -->
     <remote_servers>
         <cluster>
-            <!-- Inter-server per-cluster secret for Distributed queries
-                 default: no secret (no authentication will be performed)
-
-                 If set, then Distributed queries will be validated on shards, so at least:
-                 - such cluster should exist on the shard,
-                 - such cluster should have the same secret.
-
-                 And also (and which is more important), the initial_user will
-                 be used as current user for the query.
-
-                 Right now the protocol is pretty simple and it only takes into account:
-                 - cluster name
-                 - query
-
-                 Also it will be nice if the following will be implemented:
-                 - source hostname (see interserver_http_host), but then it will depends from DNS,
-                   it can use IP address instead, but then the you need to get correct on the initiator node.
-                 - target hostname / ip address (same notes as for source hostname)
-                 - time-based security tokens
-            -->
-            <!-- <secret></secret> -->
             <shard>
-                <!-- Optional. Whether to write data to just one of the replicas. Default: false (write data to all replicas). -->
-                <!-- <internal_replication>false</internal_replication> -->
-                <!-- Optional. Shard weight when writing data. Default: 1. -->
-                <!-- <weight>1</weight> -->
                 <replica>
                     <host>clickhouse</host>
                     <port>9000</port>
-                    <!-- Optional. Priority of the replica for load_balancing. Default: 1 (less value has more priority). -->
-                    <!-- <priority>1</priority> -->
                 </replica>
             </shard>
-            <!-- <shard>
+            <!-- Additional shards — uncomment to scale out:
+            <shard>
                 <replica>
                     <host>clickhouse-2</host>
                     <port>9000</port>
@@ -69,7 +48,8 @@
                     <host>clickhouse-3</host>
                     <port>9000</port>
                 </replica>
-            </shard> -->
+            </shard>
+            -->
         </cluster>
     </remote_servers>
 </clickhouse>

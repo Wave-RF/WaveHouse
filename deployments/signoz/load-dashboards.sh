@@ -1,28 +1,7 @@
 #!/usr/bin/env bash
 #
-# Load (upsert) the WaveHouse SigNoz dashboards in ./dashboards/*.json into a
-# running SigNoz instance. Existing dashboards are matched by title and updated
-# in place (so bookmarked URLs survive); new ones are created. Re-run any time
-# the JSON files change.
-#
-# SigNoz OSS has no on-disk dashboard provisioning (unlike Grafana) and disables
-# self-registration, so this can't be folded into `docker compose up` — run it
-# once after you've created your SigNoz account in the UI.
-#
-# Auth: SIGNOZ_TOKEN (the JWT used by the SPA itself).
-#   1. Sign in at ${SIGNOZ_URL} (default http://localhost:3301).
-#   2. DevTools → Application → Local Storage → http://localhost:3301 → copy
-#      the value of `AUTH_TOKEN`.
-#   3. Export it: `export SIGNOZ_TOKEN='eyJ...'`.
-#
-# (SigNoz v0.122.0 moved username/password login to `/api/v2/sessions/email_password`
-# and requires an org UUID that isn't externally discoverable, so we no longer
-# offer email/password login here — the token is one click away.)
-#
-# Optional:
-#   SIGNOZ_URL=http://localhost:3301                      (default)
-#
-# Requires: curl, jq.
+# Upsert dashboards/*.json into a running SigNoz instance, matching by title.
+# Auth + first-run flow: see deployments/signoz/dashboards/README.md.
 set -euo pipefail
 
 SIGNOZ_URL="${SIGNOZ_URL:-http://localhost:3301}"

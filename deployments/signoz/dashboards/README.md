@@ -11,13 +11,18 @@ Format: SigNoz query-builder **v5** schema (the `version` field). Each file is e
 
 ## Loading them
 
-SigNoz OSS doesn't provision dashboards from disk, so after the stack is up and you've created your account in the UI, grab the `AUTH_TOKEN` from DevTools → Application → Local Storage → `http://localhost:3301`, then:
+SigNoz OSS doesn't provision dashboards from disk and disables self-registration, so loading can't be folded into `docker compose up` — run it once after you've created your SigNoz account in the UI.
 
-```bash
-SIGNOZ_TOKEN='eyJ…' ../load-dashboards.sh
-```
+Auth uses `SIGNOZ_TOKEN`, the JWT the SPA itself uses:
 
-`../load-dashboards.sh` upserts by title (existing dashboards are updated in place), so re-run it whenever these files change. See its header for the full token-grab walkthrough and `SIGNOZ_URL` overrides.
+1. Sign in at `http://localhost:3301` — create your admin account on first visit.
+2. DevTools → Application → Local Storage → `http://localhost:3301` → copy the value of `AUTH_TOKEN`.
+3. `export SIGNOZ_TOKEN='eyJ...'`.
+4. Run `make signoz-dashboards` from the repo root (or `../load-dashboards.sh` from this directory).
+
+> SigNoz v0.122.0 moved username/password login to `/api/v2/sessions/email_password` and requires an org UUID that isn't externally discoverable, so token auth is the only supported path — but the token is one DevTools click away.
+
+`load-dashboards.sh` upserts by title: existing dashboards are updated in place (so bookmarked URLs survive), new ones are created. Re-run it whenever these JSON files change. Override the target with `SIGNOZ_URL=http://localhost:3301` (the default). Requires `curl` and `jq`.
 
 ## Editing a dashboard
 
