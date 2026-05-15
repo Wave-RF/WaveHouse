@@ -15,16 +15,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pollCount returns the row count for `SELECT count() FROM <table> WHERE id = '<id>'`,
+// pollCount returns the row count for SELECT count() FROM `<table>` WHERE id = ?,
 // or -1 on query error. Used by the happy-path delete test to poll for both
 // the insert landing and the row disappearing post-delete.
+//
+// `id` is bound via the driver's parameterized form rather than interpolated
+// into the SQL, mirroring the production pattern in internal/ingest/bento.go.
+// `table` still uses fmt.Sprintf because ClickHouse identifiers can't be bound
+// as parameters — backtick quoting is the same defense bento.go uses.
 func pollCount(t *testing.T, table, id string) int64 {
 	t.Helper()
 	var count uint64
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := env(t).chConn.QueryRow(ctx,
-		fmt.Sprintf("SELECT count() FROM %s WHERE id = '%s'", table, id),
+		fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
+		id,
 	).Scan(&count)
 	if err != nil {
 		return -1

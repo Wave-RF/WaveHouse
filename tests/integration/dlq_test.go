@@ -125,19 +125,18 @@ func TestDelete_FailureRoutesToDLQWithHeader(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Snapshot the buffer consumer's ack state before publishing. After the
-	// DLQ receive we'll assert AckFloor caught up to Delivered — a DoubleAck
-	// advances both; a Nak advances Delivered but leaves AckFloor stuck
-	// until AckWait elapses (30s default), the symptom of the infinite-Nak
-	// loop this PR fixes.
 	bufferCons, err := js.Consumer(ctx, mq.StreamName(), ingest.BufferConsumerName)
-	require.NoError(t, err)
-	preInfo, err := bufferCons.Info(ctx)
 	require.NoError(t, err)
 
 	// Publish the delete envelope directly to ingest.<table>. The worker
 	// picks it up, fails the CH Exec (no such table), and routes the
 	// envelope to dlq.<table> via PublishMsg + Wave-DLQ-Type header.
+	//
+	// We capture the publish ack's stream sequence so the no-redelivery
+	// assertion below can target *this specific message*. A coarser
+	// "NumAckPending == 0" check would be a global claim about the buffer
+	// consumer's state — fragile if any other test (now or future) leaves a
+	// Nak'd message in pending state while AckWait elapses.
 	envelope := map[string]any{
 		"action":     "delete",
 		"table_name": table,
@@ -145,8 +144,9 @@ func TestDelete_FailureRoutesToDLQWithHeader(t *testing.T) {
 	}
 	payload, err := json.Marshal(envelope)
 	require.NoError(t, err)
-	_, err = js.Publish(ctx, "ingest."+table, payload)
+	pubAck, err := js.Publish(ctx, "ingest."+table, payload)
 	require.NoError(t, err)
+	require.NotNil(t, pubAck)
 
 	// Wait up to 30s for the DLQ message — covers Bento's batch window plus
 	// loaded-CI slack. Fetch(1, …) is the simplest "pull next" primitive.
@@ -186,22 +186,19 @@ func TestDelete_FailureRoutesToDLQWithHeader(t *testing.T) {
 	// observability/tracer_test.go:TestInjectExtractNATS_Roundtrip, so the
 	// signal-per-effort here is low.
 
-	// Buffer consumer state: AckFloor must have caught up to Delivered,
-	// proving the worker DoubleAck'd our delete rather than Nak'ing it.
-	// Use Eventually with a short window — the DoubleAck and ack-floor
-	// update happen post-DLQ-publish but typically within a few ms.
+	// Buffer consumer state: AckFloor.Stream must have advanced to at least
+	// our publish's stream sequence, proving the worker DoubleAck'd *our*
+	// delete (not a global "everything is quiet" claim that could be tripped
+	// by an unrelated test leaving a Nak'd message pending). A Nak would
+	// leave AckFloor.Stream stuck below pubAck.Sequence until AckWait
+	// elapses (30s default) — the symptom of the infinite-Nak loop this PR
+	// fixes.
 	require.Eventually(t, func() bool {
 		postInfo, err := bufferCons.Info(ctx)
 		if err != nil {
 			return false
 		}
-		// Our publish advanced Delivered by at least 1.
-		if postInfo.Delivered.Consumer < preInfo.Delivered.Consumer+1 {
-			return false
-		}
-		// Nothing should be stuck pending an ack — neither our message
-		// (which must have been DoubleAck'd) nor any earlier test's.
-		return postInfo.NumAckPending == 0
+		return postInfo.AckFloor.Stream >= pubAck.Sequence
 	}, 5*time.Second, 100*time.Millisecond,
-		"buffer consumer must DoubleAck the failed delete (NumAckPending=0); a Nak would leave it pending until AckWait elapses")
+		fmt.Sprintf("buffer consumer's AckFloor.Stream must reach %d (our publish seq), proving the worker DoubleAck'd this specific delete rather than Nak'ing it", pubAck.Sequence))
 }
