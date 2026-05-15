@@ -54,6 +54,8 @@ type jsInput struct {
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
 	chConn   driver.Conn
+	cache    cache.Cache
+	js       jetstream.JetStream
 	inFlight atomic.Int32
 }
 
@@ -103,7 +105,25 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		// Validate table name to prevent SQL injection.
 		if !query.SafeIdentifierRe.MatchString(raw.TableName) {
 			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
-			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
+
+			// Forward the raw payload to a fixed DLQ subject for forensic review.
+			// We deliberately do NOT splice the untrusted table name into the subject
+			// to avoid letting a producer create arbitrary NATS subject hierarchies;
+			// the original table_name is preserved inside the payload itself.
+			if j.js != nil {
+				const subject = "dlq.unsafe_table"
+				if _, err := j.js.Publish(msgCtx, subject, m.Data()); err != nil {
+					slog.ErrorContext(msgCtx, "DLQ publish failed for unsafe table message",
+						"subject", subject,
+						"table", raw.TableName,
+						"error", err,
+					)
+					bentoDLQDropped.Add(msgCtx, 1, metric.WithAttributes(
+						attribute.String("table", raw.TableName),
+					))
+				}
+			}
+
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
@@ -183,6 +203,22 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				span.End()
 				return nil, nil, fmt.Errorf("execute delete: %w", err)
 			}
+			// Invalidate cache entries tagged with this table so read-your-writes
+			// holds for subsequent SELECTs against the same row id (and any
+			// aggregations over the table). Use a detached context so a parent
+			// shutdown doesn't leave the cache stale after a successful delete.
+			if j.cache != nil {
+				invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := j.cache.InvalidateByTags(invCtx, []string{raw.TableName}); err != nil {
+					slog.WarnContext(spanCtx, "cache invalidation failed after delete",
+						"table", raw.TableName,
+						"id", raw.ID,
+						"error", err,
+					)
+				}
+				invCancel()
+			}
+
 			// Log the success with all context
 			slog.InfoContext(spanCtx, "successfully deleted record",
 				"table", raw.TableName,
@@ -497,6 +533,8 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, a
 				return &jsInput{
 					consumer: cons,
 					chConn:   chConn,
+					cache:    apiCache,
+					js:       js,
 				}, nil
 			},
 		); err != nil {

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -26,15 +25,71 @@ import (
 // Supports optional schema prefixes (db.table) and ClickHouse quoted identifiers (backticks or quotes).
 var tableExtractionRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`" + `"]?`)
 
+// mutationRe detects queries that modify data or schema to trigger cache invalidation.
+// Run against cleaned SQL with string literals, comments, AND quoted identifiers
+// stripped (see stripForMutationDetect) so that a table or column named after a
+// DML keyword (e.g., `` `INSERT` ``) doesn't false-positive. \b anchors prevent
+// false positives on identifiers such as `insert_time` that share a prefix.
+var mutationRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|REPLACE)\b`)
+
+// mutationTargetRe extracts the table that a mutation writes to, anchored on
+// the DML/DDL verb so FROM/JOIN tables inside SELECT subqueries are ignored.
+// Used to scope cache invalidation to only the written table (e.g.,
+// `INSERT INTO target SELECT … FROM source` evicts `target`, leaving `source`
+// cache entries intact).
+var mutationTargetRe = regexp.MustCompile(`(?i)\b(?:` +
+	`INSERT\s+INTO|` +
+	`REPLACE\s+INTO|` +
+	`UPDATE|` +
+	`DELETE\s+FROM|` +
+	`TRUNCATE(?:\s+TABLE)?(?:\s+IF\s+EXISTS)?|` +
+	`DROP\s+TABLE(?:\s+IF\s+EXISTS)?|` +
+	`ALTER\s+TABLE(?:\s+IF\s+EXISTS)?` +
+	`)\s+(?:[` + "`" + `"]?[a-zA-Z_][a-zA-Z0-9_]*[` + "`" + `"]?\.)?[` + "`" + `"]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`" + `"]?`)
+
+// These four regexes below are used to strip out /* comments */, -- comments, 
+// 'string literals', and 'quoted indentifies' so that the SQL parser doesn't 
+// accidentally read a keyword hidden inside the text.
 var (
-	blockCommentRe  = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	lineCommentRe   = regexp.MustCompile(`--.*`)
-	stringLiteralRe = regexp.MustCompile(`'(?:''|\\'|[^'])*'`)
+	blockCommentRe     = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	lineCommentRe      = regexp.MustCompile(`--.*`)
+	stringLiteralRe    = regexp.MustCompile(`'(?:''|\\'|[^'])*'`)
+	quotedIdentifierRe = regexp.MustCompile("`[^`]*`" + `|"[^"]*"`)
 )
+
+// stripForMutationDetect returns cleanSQL with backtick- and double-quote-wrapped
+// identifiers blanked out, so a table named after a reserved word (e.g.,
+// `` SELECT * FROM `INSERT` ``) doesn't trick mutationRe into reporting a write.
+// The result is suitable only for mutationRe matching; extractMutationTargets
+// and extractCacheTagsFromCleaned still need the unblanked cleanSQL so they can
+// capture the actual identifier.
+func stripForMutationDetect(cleanSQL string) string {
+	return quotedIdentifierRe.ReplaceAllString(cleanSQL, " ")
+}
 
 // extractCacheTagsFromCleaned expects SQL with comments and string literals already removed.
 func extractCacheTagsFromCleaned(cleanedSQL string) []string {
 	matches := tableExtractionRe.FindAllStringSubmatch(cleanedSQL, -1)
+	var tags []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) > 1 {
+			tbl := m[1]
+			if !seen[tbl] && query.SafeIdentifierRe.MatchString(tbl) {
+				seen[tbl] = true
+				tags = append(tags, tbl)
+			}
+		}
+	}
+	return tags
+}
+
+// extractMutationTargets returns only the tables a mutation writes to.
+// Using this on the invalidation path so reads via FROM/JOIN in subqueries
+// are not unnecessarily evicted. Input must have comments and string
+// literals stripped (see cleanSQLForTags).
+func extractMutationTargets(cleanedSQL string) []string {
+	matches := mutationTargetRe.FindAllStringSubmatch(cleanedSQL, -1)
 	var tags []string
 	seen := make(map[string]bool)
 	for _, m := range matches {
@@ -111,14 +166,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	cleanSQL := cleanSQLForTags(req.SQL)
 
-	isMutation := false
-	fields := strings.Fields(cleanSQL)
-	if len(fields) > 0 {
-		switch strings.ToUpper(fields[0]) {
-		case "INSERT", "UPDATE", "DELETE", "TRUNCATE", "DROP", "ALTER", "REPLACE":
-			isMutation = true
-		}
-	}
+	isMutation := mutationRe.MatchString(stripForMutationDetect(cleanSQL))
 
 	var execCtx context.Context
 	if isMutation {
@@ -154,7 +202,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Cache Invalidation
 	if isMutation && h.Cache != nil {
-		tags := extractCacheTagsFromCleaned(cleanSQL)
+		tags := extractMutationTargets(cleanSQL)
 		if len(tags) > 0 {
 			invCtx, invCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer invCancel()

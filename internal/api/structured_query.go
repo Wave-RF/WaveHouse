@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 // StructuredQueryHandler handles POST /v1/tables/{table}/query.
 type StructuredQueryHandler struct {
 	CHConn      driver.Conn
-	Cache       *cache.TieredCache
+	Cache       cache.Cache
 	DefaultTTL  time.Duration
 	Registry    *discovery.SchemaRegistry
 	PolicyStore *policy.Store
@@ -29,7 +30,7 @@ type StructuredQueryHandler struct {
 
 func NewStructuredQueryHandler(
 	conn driver.Conn,
-	c *cache.TieredCache,
+	c cache.Cache,
 	defaultTTL time.Duration,
 	registry *discovery.SchemaRegistry,
 	policyStore *policy.Store,
@@ -146,7 +147,18 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, ttl, []string{table})
+			// Detach from r.Context() so a cancelled originating request doesn't
+			// abort the cache populate — singleflight followers may already have
+			// received the result, and the next request should be served warm.
+			setCtx, setCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.Cache.Set(setCtx, cacheKey, data, ttl, []string{table}); err != nil {
+				slog.WarnContext(r.Context(), "cache set failed for structured query",
+					"key", cacheKey,
+					"table", table,
+					"error", err,
+				)
+			}
+			setCancel()
 		}
 		return data, nil
 	})

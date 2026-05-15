@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -17,12 +18,12 @@ import (
 type PipesHandler struct {
 	Store      *pipes.Store
 	CHConn     driver.Conn
-	Cache      *cache.TieredCache
+	Cache      cache.Cache
 	DefaultTTL time.Duration
 	sf         singleflight.Group
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *PipesHandler {
+func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, defaultTTL time.Duration) *PipesHandler {
 	return &PipesHandler{Store: store, CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
 }
 
@@ -153,7 +154,17 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 			cleanedSQL := cleanSQLForTags(sql)
 			tags := extractCacheTagsFromCleaned(cleanedSQL)
 
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL, tags)
+			// Detach from r.Context() so a cancelled originating request doesn't
+			// abort the cache populate — singleflight followers may already have
+			// received the result, and the next request should be served warm.
+			setCtx, setCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.Cache.Set(setCtx, cacheKey, data, h.DefaultTTL, tags); err != nil {
+				slog.WarnContext(r.Context(), "cache set failed for pipe execution",
+					"key", cacheKey,
+					"error", err,
+				)
+			}
+			setCancel()
 		}
 		return data, nil
 	})

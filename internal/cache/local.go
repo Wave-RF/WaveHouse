@@ -66,7 +66,13 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 	return l, nil
 }
 
-// removeKeyFromTagsLocked handles cross-tag cleanup. MUST be called with tagsMu locked.
+// removeKeyFromTagsLocked performs a bi-directional metadata cleanup to prevent memory leaks.
+// It uses the reverse index (keyTags) to find every tag set (tagsMap) the key belongs to
+// and removes the key from those sets. This ensures that if a key is evicted due to 
+// one tag (e.g., "orders"), it doesn't leave "ghost" references behind in other 
+// associated tag sets (e.g., "users" or "clicks").
+//
+// MUST be called while holding tagsMu.Lock().
 func (l *LocalCache) removeKeyFromTagsLocked(key string) {
 	if tags, exists := l.keyTags[key]; exists {
 		for _, tag := range tags {
