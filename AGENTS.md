@@ -12,7 +12,7 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Twelve internal packages under `internal/`:
+Eleven internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/WS/schema/DLQ/policy/pipes handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
@@ -56,8 +56,7 @@ Twelve internal packages under `internal/`:
 
 ## Build & Test Commands
 
-`make help` is the source of truth — run it to see every target with its
-one-line description. Common targets, grouped:
+`make help` is the source of truth — run it to see every target with its one-line description. Common targets, grouped:
 
 ```bash
 # Setup
@@ -121,20 +120,10 @@ Build tags: `make build TAGS="foo bar"`.
 
 Tooling notes:
 
-- Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`,
-  `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via
-  native `tool` directives and invoked with `go tool <name>` — no manual
-  install needed.
-- `golangci-lint` is pinned in the Makefile (currently v2.11.4) and
-  auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via
-  `make tools`). Not in `go.mod` — its dependency tree conflicts with the
-  main module.
-- `pnpm` (>= 10.33) and `Node.js` (>= 20) must be on your PATH; the SDK and
-  E2E test harnesses both shell out to `pnpm`. `make tools` runs
-  `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
-- `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD
-  Make 3.81 which will not parse the Makefile. See `docs/development.md` §
-  Prerequisites for the full setup checklist.
+- Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
+- `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
+- `pnpm` (>= 10.33) and `Node.js` (>= 20) must be on your PATH; the SDK and E2E test harnesses both shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
+- `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 
 ## Testing Conventions
 
@@ -207,20 +196,20 @@ Every code change should update the corresponding docs in the same PR. A code ch
 
 | Change | Files to update |
 | ------ | --------------- |
-| Add/modify API endpoint | `docs/api.md`, `README.md` (if user-facing) |
-| Add/modify config option | `docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/deployment.md` |
-| Change architecture / add a package | `docs/architecture.md`, `AGENTS.md` |
-| Change ingest / event format | `docs/api.md`, `docs/deployment.md` (CH schema) |
-| Change deployment / Docker | `docs/deployment.md`, compose files |
-| Change build / test process | `docs/development.md`, `Makefile` |
+| Add/modify API endpoint | `docs/src/content/docs/api.md`, `README.md` (if user-facing) |
+| Add/modify config option | `docs/src/content/docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
+| Change architecture / add a package | `docs/src/content/docs/architecture.md`, `AGENTS.md` |
+| Change ingest / event format | `docs/src/content/docs/api.md`, `docs/src/content/docs/deployment.md` (CH schema) |
+| Change deployment / Docker | `docs/src/content/docs/deployment.md`, compose files |
+| Change build / test process | `docs/src/content/docs/development.md`, `Makefile` |
 | Any notable change | `CHANGELOG.md` under `[Unreleased]` |
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔ `docs/configuration.md`, `config.yaml`, compose env blocks
-- `EventMessage` JSON tags ↔ `docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
-- Route registrations in `router.go` ↔ `docs/api.md` endpoint list
-- Handler error responses ↔ `docs/api.md` error tables
+- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.md`, `config.yaml`, compose env blocks
+- `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
+- Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
+- Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
 
@@ -231,24 +220,23 @@ Before finishing a task, grep for the identifiers you touched (field names, env 
 1. Create or modify a handler in `internal/api/` (follow existing patterns like `ingest.go`).
 2. Register the route in `internal/api/router.go`.
 3. If it needs new dependencies, add to the `Dependencies` struct in `router.go`.
-4. Wire dependencies in the relevant `cmd/*/main.go` file(s).
+4. Wire dependencies in `cmd/wavehouse/main.go`.
 5. Add tests.
-6. Document in `docs/api.md`.
+6. Document in `docs/src/content/docs/api.md`.
 
 ### Adding a new config option
 
 1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
-2. Use the new config value in the relevant `cmd/*/main.go` or internal package.
-3. Document in `docs/configuration.md`.
+2. Use the new config value in `cmd/wavehouse/main.go` or the relevant internal package.
+3. Document in `docs/src/content/docs/configuration.md`.
 
 ### Adding a new internal package
 
 1. Create the package under `internal/`.
 2. Define an interface if there will be multiple implementations.
-3. Wire it into the appropriate `cmd/*/main.go`.
-4. Document in `docs/architecture.md`.
-5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it.
-6. **Update the area enumeration** in `.github/workflows/triage.yml` (the `system-prompt:` block lists every legal area the LLM is allowed to return). Without this, the triager can't categorize issues about the new package.
+3. Wire it into `cmd/wavehouse/main.go`.
+4. Document in `docs/src/content/docs/architecture.md`.
+5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it. `triage.yml` discovers `area/*` labels at runtime via `gh label list`, so the new label is picked up automatically — no workflow edit needed.
 
 ### Writing tests
 
@@ -278,8 +266,8 @@ internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
-tests/fixtures/         → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/              → E2E test stack
+tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/compose.yaml  → Docker Compose with profiles (ClickHouse always; WaveHouse via --profile app)
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
 deployments/compose/    → Docker Compose files

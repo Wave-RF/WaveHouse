@@ -7,13 +7,11 @@
   - changed-files:
     - any-glob-to-any-file:
       - "internal/api/**"
-      - "cmd/wavehouse-api/**"
 
 "area/ingest":
   - changed-files:
     - any-glob-to-any-file:
       - "internal/ingest/**"
-      - "cmd/wavehouse-worker/**"
 
 "area/query":
   - changed-files:
@@ -45,7 +43,7 @@
   - changed-files:
     - any-glob-to-any-file:
       - "clients/ts/**"
-      - "tests/sdk/**"
+      - "tests/e2e/sdk/**"
 
 "area/docs":
   - changed-files:
@@ -67,12 +65,13 @@
       - "Dockerfile*"
       - ".goreleaser.yaml"
       - "deployments/**"
-      - "tests/compose.yaml"
+      - "tests/e2e/compose.yaml"
       - ".golangci.yml"
       - ".air.toml"
       - ".markdownlint.json"
       - "go.mod"
       - "go.sum"
+      - "cmd/wavehouse/**"
 
 "area/observability":
   - changed-files:

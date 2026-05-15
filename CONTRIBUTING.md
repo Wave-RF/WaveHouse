@@ -5,7 +5,7 @@ Thank you for your interest in contributing to WaveHouse! This guide will help y
 ## Getting Started
 
 1. [Fork the repository](https://github.com/Wave-RF/WaveHouse/fork) and clone your fork.
-2. Follow the [Development Guide](docs/development.md) to set up your local environment.
+2. Follow the [Development Guide](docs/src/content/docs/development.md) to set up your local environment.
 3. Create a feature branch: `git checkout -b feat/my-feature`
 
 ## How to Contribute
@@ -40,10 +40,10 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag.
 
 3. Update documentation if your change affects:
-   - API endpoints → update `docs/api.md`
-   - Configuration options → update `docs/configuration.md`
-   - Deployment → update `docs/deployment.md`
-   - Architecture → update `docs/architecture.md`
+   - API endpoints → update `docs/src/content/docs/api.md`
+   - Configuration options → update `docs/src/content/docs/configuration.md`
+   - Deployment → update `docs/src/content/docs/deployment.md`
+   - Architecture → update `docs/src/content/docs/architecture.md`
 
 4. Follow the commit message format (see below).
 

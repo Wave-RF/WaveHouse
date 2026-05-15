@@ -57,19 +57,11 @@ Severity-tag every security finding `CRITICAL` / `HIGH` / `MEDIUM` / `LOW`.
 - Missing edge-case coverage (nil inputs, empty batches, cancelled contexts, invalid JWT)
 - Mocks where an integration test would catch more (per `AGENTS.md` testing conventions)
 - Tests that don't actually exercise the path they claim
-- Coverage ≥60% is CI-enforced (interim; #67 tracks restoring 70%); flag drops below threshold as `[MUST]`
+- CI gates coverage against the thresholds in `.testcoverage.yml` (project-wide total + per-suite). Flag drops below threshold as `[MUST]`
 
 ### 5. Documentation sync — `[MUST]` when missed
 
-`AGENTS.md` §"Documentation & Consistency Sync (MANDATORY)" lists exactly which docs must update for which code changes. Diff the changed files against that table:
-
-- Handler / router changes → `docs/api.md`, README if user-facing
-- Config struct / env var → `docs/configuration.md`, `config.yaml`, compose files, `docs/deployment.md`
-- Architecture / package changes → `docs/architecture.md`, `AGENTS.md`
-- Notable changes → `CHANGELOG.md` under `[Unreleased]`
-- Build / test process → `docs/development.md`, `Makefile`
-
-Flag every missed sync.
+`AGENTS.md` §"Documentation Sync" lists exactly which docs must update for which code changes (handler/router, config, architecture, build/test, etc.). Diff the changed files against that table and flag every missed sync.
 
 ### 6. Go idiom — `[SHOULD]` for quality
 
