@@ -236,7 +236,7 @@ func run() int {
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
 			return 1
 		}
@@ -252,14 +252,14 @@ func run() int {
 	defer func() { _ = tiered.Close() }()
 
 	// Policy store (NATS KV + optional file bootstrap).
-	policyStore, err := policy.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
+	policyStore, err := policy.NewStore(ctx, embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
 	if err != nil {
 		logger.Error("policy store init", "error", err)
 		return 1
 	}
 
 	// Pipes store (NATS KV + optional SQL file directory).
-	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
+	pipesStore, err := pipes.NewStore(ctx, embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
 		return 1
