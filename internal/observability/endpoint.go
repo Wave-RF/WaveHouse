@@ -77,6 +77,12 @@ func ParseOTelHeaders(s string) (map[string]string, error) {
 		if val == "" {
 			return nil, fmt.Errorf("header key %q has empty or whitespace-only value", key)
 		}
+		// Reject duplicates rather than silently letting the last entry win
+		// — in an auth-sensitive context, two `authorization=…` segments
+		// would ship the wrong token with no boot-time indication.
+		if _, exists := out[key]; exists {
+			return nil, fmt.Errorf("header key %q appears more than once", key)
+		}
 		out[key] = val
 	}
 	return out, nil

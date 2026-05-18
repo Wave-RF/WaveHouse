@@ -38,6 +38,7 @@ func TestHeaderParsers_StayInSync(t *testing.T) {
 		{name: "non-ascii key", in: "x-héader=v", wantErr: true},
 		{name: "mixed-case key", in: "Authorization=Bearer x", wantErr: false},
 		{name: "mixed valid and invalid", in: "a=1,broken", wantErr: true},
+		{name: "duplicate key", in: "authorization=t1,authorization=t2", wantErr: true},
 	}
 
 	for _, tc := range cases {

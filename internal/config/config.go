@@ -143,6 +143,7 @@ func validateOTelHeaders(s string) error {
 	if s == "" {
 		return nil
 	}
+	seen := map[string]struct{}{}
 	for _, seg := range strings.Split(s, ",") {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
@@ -164,6 +165,10 @@ func validateOTelHeaders(s string) error {
 		if strings.TrimSpace(seg[i+1:]) == "" {
 			return fmt.Errorf("header key %q has empty or whitespace-only value", key)
 		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("header key %q appears more than once", key)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

@@ -9,6 +9,8 @@ package tests
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"log/slog"
 	"net/http"
@@ -432,4 +434,73 @@ func TestOTel_PerSignalEndpoint_Override(t *testing.T) {
 	assert.Zero(t, rMetrics.LogCount(), "MetricsEndpoint should NOT receive logs (catches logs-to-metrics wiring bug)")
 	assert.Zero(t, rLogs.SpanCount(), "LogsEndpoint should NOT receive spans (catches traces-to-logs wiring bug)")
 	assert.Zero(t, rLogs.MetricCount(), "LogsEndpoint should NOT receive metrics (catches metrics-to-logs wiring bug)")
+}
+
+// TestOTel_TLSPath_PerSignalEndpoint pins the production Grafana-Cloud
+// wiring: distinct https:// per-signal endpoints (traces / metrics / logs
+// going to separate hosts) AND TLS on every leg. Each receiver mints its
+// own self-signed cert; the test merges all three certs into one client
+// trust pool because ProviderConfig holds a single tlsConfig that the SDK
+// applies to every exporter. A regression where per-signal endpoint parsing
+// silently drops the `https://` scheme would fall back to plaintext and the
+// gRPC handshake against the TLS receivers would fail.
+func TestOTel_TLSPath_PerSignalEndpoint(t *testing.T) {
+	guardOTelGlobals(t)
+	rTraces := testutil.NewFakeOTLPTLS(t)
+	rMetrics := testutil.NewFakeOTLPTLS(t)
+	rLogs := testutil.NewFakeOTLPTLS(t)
+
+	pool := x509.NewCertPool()
+	for _, r := range []*testutil.FakeOTLP{rTraces, rMetrics, rLogs} {
+		pool.AddCert(r.Cert())
+	}
+	clientCfg := &tls.Config{
+		RootCAs:    pool,
+		ServerName: "127.0.0.1",
+		MinVersion: tls.VersionTLS13,
+	}
+
+	cfg := observability.ProviderConfig{
+		// Endpoint stays plaintext intentionally — it must never receive
+		// traffic because every signal is overridden. If a future regression
+		// causes a per-signal override to be ignored, the exporter would
+		// dial the plaintext default and the test's TLS-only receivers
+		// would record nothing.
+		Endpoint:         "127.0.0.1:1", // unreachable; deliberately not a fake
+		TracesEndpoint:   "https://" + rTraces.Addr(),
+		MetricsEndpoint:  "https://" + rMetrics.Addr(),
+		LogsEndpoint:     "https://" + rLogs.Addr(),
+		TracesEnabled:    true,
+		TracesSampleRate: 1.0,
+		MetricsEnabled:   true,
+		LogsEnabled:      true,
+	}
+	cfg.SetTLSConfigForTesting(clientCfg)
+	shutdown, _ := initAndShutdown(t, cfg)
+
+	_, span := otel.Tracer("test").Start(context.Background(), "tls-split-op")
+	span.End()
+
+	counter, err := otel.GetMeterProvider().Meter("test").Int64Counter("tls_split_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	lvl := &slog.LevelVar{}
+	lvl.Set(slog.LevelInfo)
+	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
+	logger.Info("tls-split-log")
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	require.NoError(t, shutdown(drainCtx))
+
+	assert.Equal(t, 1, rTraces.SpanCount(), "TLS TracesEndpoint should receive the span")
+	assert.GreaterOrEqual(t, rMetrics.MetricCount(), 1, "TLS MetricsEndpoint should receive the metric")
+	assert.GreaterOrEqual(t, rLogs.LogCount(), 1, "TLS LogsEndpoint should receive the log")
+	assert.Zero(t, rTraces.MetricCount(), "TLS TracesEndpoint should NOT receive metrics")
+	assert.Zero(t, rTraces.LogCount(), "TLS TracesEndpoint should NOT receive logs")
+	assert.Zero(t, rMetrics.SpanCount(), "TLS MetricsEndpoint should NOT receive spans")
+	assert.Zero(t, rMetrics.LogCount(), "TLS MetricsEndpoint should NOT receive logs")
+	assert.Zero(t, rLogs.SpanCount(), "TLS LogsEndpoint should NOT receive spans")
+	assert.Zero(t, rLogs.MetricCount(), "TLS LogsEndpoint should NOT receive metrics")
 }
