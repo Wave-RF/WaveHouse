@@ -49,8 +49,31 @@ type config struct {
 	} `yaml:"threshold"`
 	Suites  map[string]int `yaml:"suites"`
 	Exclude struct {
+		// Paths applies to every per-suite render AND to the merged total.
+		// Use for paths that aren't meaningful coverage anywhere (e.g.,
+		// internal/testutil/, tests/, scripts/).
 		Paths []string `yaml:"paths"`
+		// PerSuite applies on top of Paths but only when rendering the
+		// named suite's profile — not when computing the merged total.
+		// Use for files that legitimately can't be covered by one suite
+		// (e.g., cmd/wavehouse/main.go is untestable by unit but exercised
+		// by e2e); excluding from `unit` keeps that suite's gate clean
+		// without hiding the file's e2e-derived coverage from the merged
+		// total.
+		PerSuite map[string][]string `yaml:"per-suite"`
 	} `yaml:"exclude"`
+}
+
+// excludesFor returns the regex patterns that apply when rendering the
+// given suite: global Paths plus that suite's PerSuite list (if any).
+// Pass an empty suite name (or "total") to get only global excludes —
+// what the merged-total render uses.
+func (c *config) excludesFor(suite string) []string {
+	out := append([]string(nil), c.Exclude.Paths...)
+	if suite != "" && suite != "total" {
+		out = append(out, c.Exclude.PerSuite[suite]...)
+	}
+	return out
 }
 
 const (
@@ -141,7 +164,7 @@ func renderSuite(c *config, suite string) error {
 		return err
 	}
 	threshold := thresholdFor(c, suite)
-	rows, total, covered, err := parseCoverage(profile, c)
+	rows, total, covered, err := parseCoverage(profile, c, c.excludesFor(suite))
 	if err != nil {
 		return err
 	}
@@ -150,9 +173,10 @@ func renderSuite(c *config, suite string) error {
 	printBreakdown(rows, threshold)
 	fmt.Printf("\n  HTML: %s\n\n", htmlOut)
 
-	if err := gate(profile, threshold); err != nil {
-		fmt.Fprintf(os.Stderr, "%s==> %s gate FAILED (below %d%%)%s\n", red, suite, threshold, reset)
-		return err
+	if !meetsThreshold(covered, total, threshold) {
+		fmt.Fprintf(os.Stderr, "%s==> %s gate FAILED (%s < %d%%)%s\n",
+			red, suite, formatPct(covered, total), threshold, reset)
+		return fmt.Errorf("%s gate failed: %s < %d%%", suite, formatPct(covered, total), threshold)
 	}
 	fmt.Printf("%s==> %s gate passed (≥ %d%%)%s\n", green, suite, threshold, reset)
 	return nil
@@ -201,7 +225,11 @@ func merge(c *config) error {
 	}
 
 	threshold := c.Threshold.Total
-	rows, _, _, err := parseCoverage(profile, c)
+	// Merged total uses only global excludes — per-suite excludes are
+	// intentionally NOT applied here, so a file that's untestable by one
+	// suite (e.g., cmd/wavehouse/main.go vs unit) still counts toward the
+	// project-wide gate via the suite(s) that DO cover it (e2e).
+	rows, total, covered, err := parseCoverage(profile, c, c.excludesFor(""))
 	if err != nil {
 		return err
 	}
@@ -210,11 +238,13 @@ func merge(c *config) error {
 	fmt.Printf("\n  HTML: %s\n\n", htmlOut)
 	fmt.Printf("%s==> Combined coverage gate (threshold %d%%):%s\n", cyan, threshold, reset)
 
-	if err := gate(profile, threshold); err != nil {
-		fmt.Fprintf(os.Stderr, "%s==> Total gate FAILED%s\n", red, reset)
-		return err
+	if !meetsThreshold(covered, total, threshold) {
+		fmt.Fprintf(os.Stderr, "%s==> Total gate FAILED (%s < %d%%)%s\n",
+			red, formatPct(covered, total), threshold, reset)
+		return fmt.Errorf("total gate failed: %s < %d%%", formatPct(covered, total), threshold)
 	}
-	fmt.Printf("%s==> Total gate passed%s\n", green, reset)
+	fmt.Printf("%s==> Total gate passed (%s ≥ %d%%)%s\n",
+		green, formatPct(covered, total), threshold, reset)
 	return nil
 }
 
@@ -224,17 +254,23 @@ type pkgRow struct {
 }
 
 // parseCoverage reads a textfmt coverage profile, groups statements by
-// package, applies local-prefix stripping and exclude.paths from the config,
+// package, applies local-prefix stripping and the supplied exclude patterns,
 // and returns the per-package rows plus aggregate totals. The aggregates
 // match what go-test-coverage's gate evaluates, so callers can render
 // headers that line up with its "Total test coverage" output.
-func parseCoverage(profile string, c *config) (rows []pkgRow, total, covered int, err error) {
+//
+// Callers control which excludes apply by passing the patterns directly
+// (see config.excludesFor). This is the seam that makes per-suite excludes
+// possible: a unit-only exclude lives in c.Exclude.PerSuite["unit"], the
+// renderSuite call passes it in, and merge() omits it so the file still
+// shows up in the merged total when e2e covers it.
+func parseCoverage(profile string, c *config, excludePatterns []string) (rows []pkgRow, total, covered int, err error) {
 	// #nosec G304,G703 — profile is a coverage.txt path we rendered ourselves.
 	raw, err := os.ReadFile(profile)
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	excludes := compileRegexes(c.Exclude.Paths)
+	excludes := compileRegexes(excludePatterns)
 	pkgs := map[string]*pkgRow{}
 	for i, line := range strings.Split(string(raw), "\n") {
 		if i == 0 || line == "" {
@@ -258,9 +294,16 @@ func parseCoverage(profile string, c *config) (rows []pkgRow, total, covered int
 		if c.LocalPrefix != "" && strings.HasPrefix(pkg, c.LocalPrefix+"/") {
 			pkg = pkg[len(c.LocalPrefix)+1:]
 		}
-		// Match exclusions against pkg+"/" so a pattern like
-		// ^internal/testutil/ matches a bare-directory pkg string.
-		if matchesAny(excludes, pkg+"/") {
+		shortPath := path
+		if c.LocalPrefix != "" && strings.HasPrefix(shortPath, c.LocalPrefix+"/") {
+			shortPath = shortPath[len(c.LocalPrefix)+1:]
+		}
+		// Match exclusions against either pkg+"/" (directory-level) or
+		// shortPath (file-level). Directory patterns like ^internal/testutil/
+		// match the former; single-file patterns like ^cmd/wavehouse/main\.go$
+		// match the latter, useful for excluding binary entry points that
+		// can't be unit-tested without dragging the suite gate.
+		if matchesAny(excludes, pkg+"/") || matchesAny(excludes, shortPath) {
 			continue
 		}
 		stmts, _ := strconv.Atoi(f[1])
@@ -369,21 +412,30 @@ func suitePct(c *config, suite string) string {
 		}
 		profile = tmp.Name()
 	}
-	_, total, covered, err := parseCoverage(profile, c)
+	_, total, covered, err := parseCoverage(profile, c, c.excludesFor(suite))
 	if err != nil || total == 0 {
 		return "?"
 	}
 	return formatPct(covered, total)
 }
 
-// gate runs go-test-coverage with the given total threshold. Exclusions
-// (testutil, tests/) come from the same .testcoverage.yml.
-func gate(profile string, threshold int) error {
-	return sh("go", "tool", "go-test-coverage",
-		"--config="+configPath,
-		"--profile="+profile,
-		"--threshold-total="+strconv.Itoa(threshold),
-	)
+// meetsThreshold returns true iff covered/total * 100 ≥ threshold, using
+// integer arithmetic to avoid floating-point rounding at the boundary
+// (e.g., 69.99999% should fail the 70% gate; covered*100 >= total*threshold
+// is exact). Empty profile (total == 0) is treated as passing — same
+// semantics as `go test -cover` reporting "no test files" rather than 0%.
+//
+// Replaces the previous `go-test-coverage --threshold-total=N` subprocess
+// call. That tool predated this PR's per-suite excludes (.testcoverage.yml
+// `exclude.per-suite`) and re-parsed the YAML with global-only semantics,
+// which made the gate disagree with our breakdown for any suite that had
+// per-suite excludes. Doing the check inline guarantees gate and breakdown
+// use the same exclude set, computed once.
+func meetsThreshold(covered, total, threshold int) bool {
+	if total == 0 {
+		return true
+	}
+	return covered*100 >= total*threshold
 }
 
 // sh runs an external command with stdio wired through. Every call site
