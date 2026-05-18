@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`; a failed delete is treated as permanent — the original envelope is routed to `dlq.{table}` and the message is `DoubleAck`'d to break the infinite-Nak retry loop a bad query would otherwise produce. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`. **DLQ shape note**: insert-failure messages on `dlq.{table}` carry the inner data payload only (`{"id":"abc","field":...}`) because `dlqOutput.WriteBatch` publishes the Bento message bytes (already-extracted `data`); delete-failure messages carry the full NATS envelope (`{"action":"delete","table_name":"...","id":"..."}`) so a consumer can re-issue the delete with full context. To stay BYOS-safe — a user row can have any column name, including `action` — consumers MUST discriminate via the `Wave-DLQ-Type` NATS header (set by the worker, non-user-controlled), not via any JSON field: `Wave-DLQ-Type: delete-envelope` → delete-failure shape; header absent → insert-payload shape. Delete-failure messages also carry W3C `traceparent`/`tracestate` headers via `observability.InjectNATS` so a consumer can stitch its trace to the worker's `clickhouse_delete` span. Phase 2 (issue #91) will tag insert-failure messages with `Wave-DLQ-Type: insert-payload` and may normalize the payload shapes.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -156,7 +156,9 @@ Bento ingest pipeline (StartIngestWorker):
   → Validate table name against safeIdentifierRe
   → Batch events per table, bulk INSERT to ClickHouse
   → Delete actions handled inline (chConn.Exec)
-  → On success: Ack messages
+    → On success: DoubleAck and continue
+    → On failure: route original envelope to dlq.{table} and DoubleAck (Phase 1: all delete errors treated as permanent to prevent infinite Nak loops)
+  → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
 
 Active Sweeper (async goroutine, every 60s):
