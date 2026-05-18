@@ -39,6 +39,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -137,7 +138,13 @@ func run() error {
 	// #nosec G204 — binPath is filepath.Join(repoRoot, "bin", "wavehouse-cov"),
 	// not user-controlled. The test harness must launch the cover binary.
 	whCmd := exec.CommandContext(ctx, binPath)
-	whCmd.Env = append(os.Environ(),
+	whCmd.Env = append(filterEnv(os.Environ(),
+		"GOCOVERDIR", "WH_SERVER_PORT", "WH_CH_ADDR", "WH_CH_HTTP_PORT",
+		"WH_DATA_DIR", "WH_MQ_MAX_BYTES_GB", "WH_AUTH_ENABLED",
+		"WH_AUTH_JWT_SECRET", "WH_AUTH_DEV_MODE", "WH_AUTH_ROLE_CLAIM",
+		"WH_DEDUPE_ENABLED", "WH_SCHEMA_REFRESH_INTERVAL", "WH_DLQ_ENABLED",
+		"WH_SERVER_CORS_ALLOWED_ORIGINS", "WH_OTEL_ENABLED", "WH_OTEL_ADDR",
+	),
 		"GOCOVERDIR="+coverDir,
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
 		"WH_CH_ADDR="+chAddr,
@@ -214,7 +221,7 @@ func run() error {
 	log.Println("→ running vitest harness...")
 	vitest := exec.CommandContext(ctx, "pnpm", "run", "test")
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")
-	vitest.Env = append(os.Environ(),
+	vitest.Env = append(filterEnv(os.Environ(), "WAVEHOUSE_URL", "CLICKHOUSE_URL"),
 		"WAVEHOUSE_URL="+whURL,
 		"CLICKHOUSE_URL="+chHTTPURL,
 	)
@@ -335,11 +342,33 @@ func runSelfHealthProbe(ctx context.Context, binPath string, port int, coverDir 
 	// #nosec G204 — binPath is the cover binary the orchestrator already
 	// launched; port/coverDir are locally constructed.
 	cmd := exec.CommandContext(ctx, binPath, "health")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(filterEnv(os.Environ(), "GOCOVERDIR", "WH_SERVER_PORT"),
 		"GOCOVERDIR="+coverDir,
 		"WH_SERVER_PORT="+strconv.Itoa(port),
 	)
 	return cmd.Run()
+}
+
+// filterEnv returns env with any KEY=VALUE entries for the given keys
+// removed. Needed because os.Exec inherits the parent's environment, and
+// `append(os.Environ(), "K=v")` is silently wrong when K already exists:
+// glibc/darwin getenv() returns the FIRST match, so the appended value is
+// shadowed by whatever the developer's shell already had set.
+func filterEnv(env []string, keys ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		keep := true
+		for _, k := range keys {
+			if strings.HasPrefix(e, k+"=") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // SIGINT-shutdown of a Go program returns nil (clean exit) but the

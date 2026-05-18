@@ -52,13 +52,6 @@ type ProviderConfig struct {
 	tlsConfig         *tls.Config
 }
 
-// SetTLSConfigForTesting injects a client *tls.Config for `https://`
-// endpoints. Test-only — FakeOTLPTLS uses it to trust its self-signed cert.
-// Production keeps tlsConfig nil (system roots).
-func (c *ProviderConfig) SetTLSConfigForTesting(cfg *tls.Config) {
-	c.tlsConfig = cfg
-}
-
 // pickEndpoint returns override if set, otherwise fallback.
 func pickEndpoint(override, fallback string) string {
 	if override != "" {
