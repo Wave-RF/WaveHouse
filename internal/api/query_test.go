@@ -225,7 +225,7 @@ func TestExtractCacheTags(t *testing.T) {
 			expected: []string{"my_table", "other_table"},
 		},
 		{
-			name:     "column named drop does not trigger mutation logic",
+			name:     "column with DML-keyword prefix is not extracted as a table",
 			sql:      "SELECT id, drop_rate FROM metrics",
 			expected: []string{"metrics"},
 		},
@@ -243,6 +243,15 @@ func TestExtractCacheTags(t *testing.T) {
 			}
 		})
 	}
+
+	// mutationRe must not fire when a DML keyword appears only as a prefix of
+	// an unquoted column name (drop_rate, insert_count, etc.). The \b anchor
+	// in mutationRe makes this safe today; the assertion pins the invariant
+	// so a future regex edit can't silently break it.
+	assert.False(t,
+		mutationRe.MatchString(stripForMutationDetect(cleanSQLForTags("SELECT id, drop_rate FROM metrics"))),
+		"mutationRe must not fire when DROP appears as a prefix in an unquoted column name",
+	)
 }
 
 func TestQueryHandler_MutationInvalidation(t *testing.T) {
@@ -341,6 +350,11 @@ func TestExtractMutationTargets(t *testing.T) {
 			name:     "cte wrapped insert",
 			sql:      "WITH src AS (SELECT * FROM staging) INSERT INTO target SELECT * FROM src",
 			expected: []string{"target"},
+		},
+		{
+			name:     "replace into",
+			sql:      "REPLACE INTO orders SELECT * FROM staging",
+			expected: []string{"orders"},
 		},
 	}
 

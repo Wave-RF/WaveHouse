@@ -151,6 +151,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 			// abort the cache populate — singleflight followers may already have
 			// received the result, and the next request should be served warm.
 			setCtx, setCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer setCancel()
 			if err := h.Cache.Set(setCtx, cacheKey, data, ttl, []string{table}); err != nil {
 				slog.WarnContext(r.Context(), "cache set failed for structured query",
 					"key", cacheKey,
@@ -158,7 +159,6 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 					"error", err,
 				)
 			}
-			setCancel()
 		}
 		return data, nil
 	})

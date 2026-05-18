@@ -75,12 +75,12 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **structured_query.go** — Handler for `POST /v1/tables/{table}/query`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest/{table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`.
 - **query.go** — Executes SQL queries directly against ClickHouse. Results are cached. UUID/DateTime columns are converted to strings.
-- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Default topic is `ingest.>` (all tables). Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
+- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Callers select a table with the `?table=` query parameter (required for SSE); WS additionally accepts in-band `{"action":"subscribe","table":"..."}` commands. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
-- **health.go** — Liveness (`/health`) and readiness (`/ready`) probes.
+- **health.go** — Liveness (`/health`) and readiness (`/ready`) probes. Both consult an optional `BootState` so they can return 503 with a diagnostic while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/health` returns 200 and stays there.
 
 ### `cache/` — Query Cache
 
@@ -99,13 +99,13 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `discovery/` — Schema Discovery & Validation
 
-- **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Supports periodic auto-refresh and on-demand refresh. Thread-safe via `sync.RWMutex`.
+- **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Supports periodic auto-refresh, on-demand refresh, and `RetryRefresh` (boot-time exponential backoff loop used by `cmd/wavehouse` so a transiently unreachable ClickHouse doesn't crash-loop the binary). Thread-safe via `sync.RWMutex`.
 - **validation.go** — `Validate(schema, data)` checks incoming JSON against the discovered schema: unknown fields, type compatibility, missing required columns, null handling.
 - **discovery_test.go** — Unit tests for validation logic.
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`; a failed delete is treated as permanent — the original envelope is routed to `dlq.{table}` and the message is `DoubleAck`'d to break the infinite-Nak retry loop a bad query would otherwise produce. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`. **DLQ shape note**: insert-failure messages on `dlq.{table}` carry the inner data payload only (`{"id":"abc","field":...}`) because `dlqOutput.WriteBatch` publishes the Bento message bytes (already-extracted `data`); delete-failure messages carry the full NATS envelope (`{"action":"delete","table_name":"...","id":"..."}`) so a consumer can re-issue the delete with full context. To stay BYOS-safe — a user row can have any column name, including `action` — consumers MUST discriminate via the `Wave-DLQ-Type` NATS header (set by the worker, non-user-controlled), not via any JSON field: `Wave-DLQ-Type: delete-envelope` → delete-failure shape; header absent → insert-payload shape. Delete-failure messages also carry W3C `traceparent`/`tracestate` headers via `observability.InjectNATS` so a consumer can stitch its trace to the worker's `clickhouse_delete` span. Phase 2 (issue #91) will tag insert-failure messages with `Wave-DLQ-Type: insert-payload` and may normalize the payload shapes.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -156,10 +156,12 @@ Bento ingest pipeline (StartIngestWorker):
   → Validate table name against query.SafeIdentifierRe (internal/query/sqlutil.go)
   → Batch events per table, bulk INSERT to ClickHouse
   → Delete actions handled inline (chConn.Exec)
+    → On success: DoubleAck and continue
+    → On failure: route original envelope to dlq.{table} and DoubleAck (Phase 1: all delete errors treated as permanent to prevent infinite Nak loops)
   → On success:
-    → Trigger Cache.InvalidateByTags([table_name]) 
+    → Trigger Cache.InvalidateByTags([table_name])
     → (Purges all L1/L2 entries associated with that table)
-    → Ack messages to NATS
+    → DoubleAck messages to NATS
   → On failure:
     → Route batch to DLQ output (subject: dlq.{table})
     → Ack to NATS to prevent infinite retry loops
