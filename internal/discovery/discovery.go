@@ -113,6 +113,58 @@ func (sr *SchemaRegistry) List() []*TableSchema {
 	return result
 }
 
+// clampBackoff guards RetryRefresh against busy-looping when callers pass
+// zero/negative durations. Any non-positive initialBackoff falls back to 1s,
+// and maxBackoff is widened to at least initialBackoff. Extracted so the
+// clamp behaviour is unit-testable without observing real wall-clock sleeps.
+func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time.Duration) {
+	if initialBackoff <= 0 {
+		initialBackoff = time.Second
+	}
+	if maxBackoff < initialBackoff {
+		maxBackoff = initialBackoff
+	}
+	return initialBackoff, maxBackoff
+}
+
+// RetryRefresh repeatedly calls Refresh with exponential backoff until it
+// succeeds or ctx is cancelled. onAttempt is invoked after each failed
+// attempt with the resulting error, letting callers surface the latest
+// diagnostic (e.g. via /health) while the registry is still degraded.
+//
+// The first attempt fires immediately. After a failure the loop sleeps for
+// initialBackoff, then doubles up to maxBackoff between attempts. Returns
+// nil on success or ctx.Err() on cancellation. Zero/negative bounds are
+// clamped via clampBackoff rather than busy-looping.
+func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxBackoff time.Duration, onAttempt func(err error)) error {
+	initialBackoff, maxBackoff = clampBackoff(initialBackoff, maxBackoff)
+	backoff := initialBackoff
+	for {
+		if err := sr.Refresh(ctx); err == nil {
+			return nil
+		} else if ctx.Err() == nil && onAttempt != nil {
+			// Skip the callback when Refresh's error is just a downstream
+			// reflection of ctx cancellation — that's a shutdown signal,
+			// not a real diagnostic. Without this guard, a clean shutdown
+			// fires onAttempt with `context.Canceled`, which the wavehouse
+			// boot path then writes into BootState as
+			//   "schema discovery: context canceled"
+			// — visible to anyone curl'ing /health during the shutdown
+			// window. Not wrong, just noise.
+			onAttempt(err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
 // StartAutoRefresh runs a background goroutine that refreshes schemas
 // at the configured interval. Blocks until ctx is cancelled.
 func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
