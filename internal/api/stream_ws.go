@@ -22,16 +22,16 @@ import (
 // WSHandler handles GET /v1/stream/ws.
 // Supports multiplexed subscriptions via in-band JSON commands:
 //
-//	{"action":"subscribe","topic":"ingest.clicks"}
-//	{"action":"unsubscribe","topic":"ingest.clicks"}
+//	{"action":"subscribe","table":"clicks"}
+//	{"action":"unsubscribe","table":"clicks"}
 //
-// Outbound messages are wrapped in a topic envelope:
+// Outbound messages are wrapped in a table envelope:
 //
-//	{"topic":"ingest.clicks","data":{...event...}}
+//	{"table":"clicks","data":{...event...}}
 //
-// For backward compatibility, the ?topic= query parameter auto-subscribes
-// on connect. If no ?topic= is set, the connection starts with no
-// subscriptions and waits for in-band subscribe commands.
+// The optional ?table= query parameter auto-subscribes on connect. If no
+// ?table= is set, the connection starts with no subscriptions and waits
+// for in-band subscribe commands.
 type WSHandler struct {
 	Hub            *Hub
 	JS             jetstream.JetStream
@@ -46,10 +46,20 @@ func NewWSHandler(hub *Hub, js jetstream.JetStream, allowedOrigins []string) *WS
 // wsCommand represents an in-band subscribe/unsubscribe command.
 type wsCommand struct {
 	Action string `json:"action"`
-	Topic  string `json:"topic"`
+	Table  string `json:"table"`
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	// Validate ?table= before upgrading. Empty is OK — the client can
+	// still subscribe via in-band commands after connect. Reject NATS
+	// wildcards / unsafe chars here so the gap-fill path that builds
+	// FilterSubject: "ingest."+table can't be tricked into a wildcard
+	// consumer.
+	if t := r.URL.Query().Get("table"); t != "" && !validTableNameRe.MatchString(t) {
+		writeJSONError(w, http.StatusBadRequest, "invalid table name")
+		return
+	}
+
 	origins := h.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"*"}
@@ -68,68 +78,75 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Merged channel receives messages from all subscribed topics.
-	merged := make(chan []byte, 64)
+	// Merged channel receives messages from all subscribed tables. Each message
+	// carries the subscribing table name so the dispatcher doesn't need to
+	// re-unmarshal the payload to label the outbound envelope — and so the
+	// envelope's "table" field is correct even when the payload isn't an
+	// ingest.EventMessage (e.g. raw JSON pass-through).
+	merged := make(chan wsOutbound, 64)
 
-	// Track active topic subscriptions and their per-topic channels.
+	// Track active subscriptions by table name, with their per-table channels.
 	var mu sync.Mutex
-	subs := make(map[string]chan []byte) // topic → per-topic channel
+	subs := make(map[string]chan []byte) // table → per-table channel
 
-	subscribeTopic := func(topic string) {
+	subscribeTable := func(table string) {
 		mu.Lock()
 		defer mu.Unlock()
-		if _, exists := subs[topic]; exists {
+		if _, exists := subs[table]; exists {
 			return
 		}
 		ch := make(chan []byte, 64)
-		subs[topic] = ch
-		h.Hub.Subscribe(topic, ch)
+		subs[table] = ch
+		h.Hub.Subscribe("ingest."+table, ch)
 
-		// Pump per-topic channel into merged channel
+		// Pump per-table channel into merged channel, tagging each message with
+		// the subscribing table so the writer keeps the subscription context.
 		go func() {
 			for msg := range ch {
 				select {
-				case merged <- msg:
+				case merged <- wsOutbound{table: table, data: msg}:
 				default:
 				}
 			}
 		}()
 	}
 
-	unsubscribeTopic := func(topic string) {
+	unsubscribeTable := func(table string) {
 		mu.Lock()
-		ch, exists := subs[topic]
+		ch, exists := subs[table]
 		if !exists {
 			mu.Unlock()
 			return
 		}
-		delete(subs, topic)
+		delete(subs, table)
 		mu.Unlock()
-		h.Hub.Unsubscribe(topic, ch) // closes ch, which stops the pump goroutine
+		h.Hub.Unsubscribe("ingest."+table, ch) // closes ch, which stops the pump goroutine
 	}
 
 	unsubscribeAll := func() {
 		mu.Lock()
-		topics := make([]string, 0, len(subs))
+		tables := make([]string, 0, len(subs))
 		for t := range subs {
-			topics = append(topics, t)
+			tables = append(tables, t)
 		}
 		mu.Unlock()
-		for _, t := range topics {
-			unsubscribeTopic(t)
+		for _, t := range tables {
+			unsubscribeTable(t)
 		}
 	}
 	defer unsubscribeAll()
 
-	// Backward compat: auto-subscribe if ?topic= is set.
-	if topic := r.URL.Query().Get("topic"); topic != "" {
-		subscribeTopic(topic)
+	// Auto-subscribe if ?table= is set.
+	if table := r.URL.Query().Get("table"); table != "" {
+		subscribeTable(table)
 
-		// Gap fill from NATS.
+		// Gap fill from NATS. RFC3339Nano subsumes RFC3339 (the fractional
+		// component is optional), matching the SSE handler's acceptance of
+		// high-precision client timestamps.
 		if since := r.URL.Query().Get("since"); since != "" {
-			if ts, parseErr := time.Parse(time.RFC3339, since); parseErr == nil && h.JS != nil {
-				h.replayFromNATS(ctx, ts, topic, func(data []byte) bool {
-					out := h.applyStreamPolicy(data, role, map[string]any(claims), topic)
+			if ts, parseErr := time.Parse(time.RFC3339Nano, since); parseErr == nil && h.JS != nil {
+				h.replayFromNATS(ctx, ts, "ingest."+table, func(data []byte) bool {
+					out := h.applyStreamPolicy(data, role, map[string]any(claims), table)
 					if out == nil {
 						return true
 					}
@@ -147,14 +164,20 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var cmd wsCommand
-			if json.Unmarshal(data, &cmd) != nil || cmd.Topic == "" {
+			if json.Unmarshal(data, &cmd) != nil || cmd.Table == "" {
+				continue
+			}
+			// Hub lookups are exact-match so wildcards here are inert, but
+			// reject them anyway for consistency with the ?table= path and
+			// to keep the contract crisp.
+			if !validTableNameRe.MatchString(cmd.Table) {
 				continue
 			}
 			switch cmd.Action {
 			case "subscribe":
-				subscribeTopic(cmd.Topic)
+				subscribeTable(cmd.Table)
 			case "unsubscribe":
-				unsubscribeTopic(cmd.Topic)
+				unsubscribeTable(cmd.Table)
 			}
 		}
 	}()
@@ -166,22 +189,13 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		// Determine the event's table_name to use as the topic in the envelope.
-		case data := <-merged:
+		case m := <-merged:
 			var envelope struct {
 				TraceHeaders map[string]string `json:"trace_headers"`
 				Payload      []byte            `json:"payload"`
 			}
-			if err := json.Unmarshal(data, &envelope); err != nil {
+			if err := json.Unmarshal(m.data, &envelope); err != nil {
 				continue
-			}
-
-			var rawEvt struct {
-				TableName string `json:"table_name"`
-			}
-			evtTopic := ""
-			if json.Unmarshal(envelope.Payload, &rawEvt) == nil && rawEvt.TableName != "" {
-				evtTopic = "ingest." + rawEvt.TableName
 			}
 
 			parentCtx := otel.GetTextMapPropagator().Extract(
@@ -191,7 +205,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 			_, pushSpan := tracer.Start(parentCtx, "WS.PushEvent")
 
-			out := h.applyStreamPolicy(envelope.Payload, role, map[string]any(claims), evtTopic)
+			out := h.applyStreamPolicy(envelope.Payload, role, map[string]any(claims), m.table)
 			if out == nil {
 				pushSpan.End()
 				continue
@@ -206,16 +220,23 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// wsOutbound pairs a message with the subscribing table name so the WS write
+// loop can label the outbound envelope without re-unmarshalling the payload.
+type wsOutbound struct {
+	table string
+	data  []byte
+}
+
 // applyStreamPolicy transforms raw event data for the client, filtering columns
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
-// The result is wrapped in a topic envelope: {"topic":"...","data":{...}}.
-func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any, topic string) []byte {
+// The result is wrapped in a table envelope: {"table":"...","data":{...}}.
+func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any, table string) []byte {
 	var evt ingest.EventMessage
 	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
 		if !json.Valid(raw) {
 			return nil
 		}
-		envelope := map[string]any{"topic": topic, "data": json.RawMessage(raw)}
+		envelope := map[string]any{"table": table, "data": json.RawMessage(raw)}
 		data, err := json.Marshal(envelope)
 		if err != nil {
 			return nil
@@ -238,7 +259,7 @@ func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string
 		"data":               evt.Data,
 	}
 	envelope := map[string]any{
-		"topic": "ingest." + evt.TableName,
+		"table": evt.TableName,
 		"data":  inner,
 	}
 	data, err := json.Marshal(envelope)
