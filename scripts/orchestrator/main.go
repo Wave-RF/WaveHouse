@@ -138,13 +138,7 @@ func run() error {
 	// #nosec G204 — binPath is filepath.Join(repoRoot, "bin", "wavehouse-cov"),
 	// not user-controlled. The test harness must launch the cover binary.
 	whCmd := exec.CommandContext(ctx, binPath)
-	whCmd.Env = append(filterEnv(os.Environ(),
-		"GOCOVERDIR", "WH_SERVER_PORT", "WH_CH_ADDR", "WH_CH_HTTP_PORT",
-		"WH_DATA_DIR", "WH_MQ_MAX_BYTES_GB", "WH_AUTH_ENABLED",
-		"WH_AUTH_JWT_SECRET", "WH_AUTH_DEV_MODE", "WH_AUTH_ROLE_CLAIM",
-		"WH_DEDUPE_ENABLED", "WH_SCHEMA_REFRESH_INTERVAL", "WH_DLQ_ENABLED",
-		"WH_SERVER_CORS_ALLOWED_ORIGINS", "WH_OTEL_ENABLED", "WH_OTEL_ADDR",
-	),
+	whCmd.Env = append(filterEnv(os.Environ(), "WH_", "GOCOVERDIR"),
 		"GOCOVERDIR="+coverDir,
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
 		"WH_CH_ADDR="+chAddr,
@@ -342,24 +336,33 @@ func runSelfHealthProbe(ctx context.Context, binPath string, port int, coverDir 
 	// #nosec G204 — binPath is the cover binary the orchestrator already
 	// launched; port/coverDir are locally constructed.
 	cmd := exec.CommandContext(ctx, binPath, "health")
-	cmd.Env = append(filterEnv(os.Environ(), "GOCOVERDIR", "WH_SERVER_PORT"),
+	cmd.Env = append(filterEnv(os.Environ(), "WH_", "GOCOVERDIR"),
 		"GOCOVERDIR="+coverDir,
 		"WH_SERVER_PORT="+strconv.Itoa(port),
 	)
 	return cmd.Run()
 }
 
-// filterEnv returns env with any KEY=VALUE entries for the given keys
-// removed. Needed because os.Exec inherits the parent's environment, and
-// `append(os.Environ(), "K=v")` is silently wrong when K already exists:
-// glibc/darwin getenv() returns the FIRST match, so the appended value is
-// shadowed by whatever the developer's shell already had set.
-func filterEnv(env []string, keys ...string) []string {
+// filterEnv returns env without entries whose KEY matches any pat. A pat
+// ending in "_" is treated as a key prefix ("WH_" → drop WH_FOO, WH_BAR,
+// …); otherwise it's an exact key match.
+//
+// Why bother: cgo paths (and some C deps of the wavehouse-cov binary) use
+// libc getenv() which returns the FIRST match on duplicates, so
+// append(os.Environ(), "K=v") silently shadows the override when K is
+// already set in a developer's shell. Prefix-matching WH_ covers every
+// current and future wavehouse-owned env var without enumeration.
+func filterEnv(env []string, pats ...string) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
 		keep := true
-		for _, k := range keys {
-			if strings.HasPrefix(e, k+"=") {
+		for _, p := range pats {
+			if strings.HasSuffix(p, "_") {
+				if strings.HasPrefix(e, p) {
+					keep = false
+					break
+				}
+			} else if strings.HasPrefix(e, p+"=") {
 				keep = false
 				break
 			}
