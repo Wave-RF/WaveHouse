@@ -188,6 +188,29 @@ func run() error {
 	}
 	log.Println("✓ WaveHouse healthy")
 
+	// /ready exercises the readiness probe (BootState check + ClickHouse
+	// ping). It's the kubelet/k8s contract — separate from /health which
+	// is liveness-only. CH ping may need a moment after the testcontainer
+	// reports listening, hence the retry budget.
+	if err := waitForHealth(ctx, whURL+"/ready", 10*time.Second); err != nil {
+		_ = whCmd.Process.Signal(syscall.SIGINT)
+		<-whDone
+		dumpLogTail(whLogPath, "wavehouse never became ready")
+		return fmt.Errorf("wavehouse not ready: %w", err)
+	}
+	log.Println("✓ WaveHouse ready")
+
+	// Self-probe via the `wavehouse health` subcommand — same code path the
+	// distroless Dockerfile HEALTHCHECK uses. Running it here confirms the
+	// probe binary itself stays in sync with the in-process /health route.
+	if err := runSelfHealthProbe(ctx, binPath, whPort, coverDir); err != nil {
+		_ = whCmd.Process.Signal(syscall.SIGINT)
+		<-whDone
+		dumpLogTail(whLogPath, "wavehouse health subcommand probe failed")
+		return fmt.Errorf("wavehouse health subcommand: %w", err)
+	}
+	log.Println("✓ wavehouse health subcommand OK")
+
 	log.Println("→ running vitest harness...")
 	vitest := exec.CommandContext(ctx, "pnpm", "run", "test")
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")
@@ -302,6 +325,21 @@ func waitForHealth(ctx context.Context, url string, timeout time.Duration) error
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("not reachable within %s", timeout)
+}
+
+// runSelfHealthProbe execs `bin/wavehouse-cov health` against the running
+// server. Mirrors the distroless Dockerfile HEALTHCHECK invocation. Coverage
+// from the short-lived subprocess flushes into the same GOCOVERDIR as the
+// long-running daemon.
+func runSelfHealthProbe(ctx context.Context, binPath string, port int, coverDir string) error {
+	// #nosec G204 — binPath is the cover binary the orchestrator already
+	// launched; port/coverDir are locally constructed.
+	cmd := exec.CommandContext(ctx, binPath, "health")
+	cmd.Env = append(os.Environ(),
+		"GOCOVERDIR="+coverDir,
+		"WH_SERVER_PORT="+strconv.Itoa(port),
+	)
+	return cmd.Run()
 }
 
 // SIGINT-shutdown of a Go program returns nil (clean exit) but the
