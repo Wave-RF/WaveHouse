@@ -78,15 +78,14 @@ Prefer a type-safe query builder over raw SQL? See the [structured query endpoin
 Every ingested event is broadcast to SSE and WebSocket subscribers **before** it's flushed to ClickHouse, so dashboards see new data with zero perceived lag.
 
 ```bash
-# All tables
-curl -N http://localhost:8080/v1/stream/sse
-
-# Specific table
-curl -N "http://localhost:8080/v1/stream/sse?topic=ingest.clicks"
+# Specific table (?table= is required)
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 
 # With historical replay (RFC 3339 timestamp)
-curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 ```
+
+To consume multiple tables on a single connection, use the WebSocket endpoint (`/v1/stream/ws`) with in-band `subscribe` commands — see the [API reference](api.md) for the envelope format.
 
 ## Next steps
 
