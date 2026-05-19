@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -198,8 +200,9 @@ func TestIsMutation(t *testing.T) {
 
 		{"leading whitespace", "   \n\tTRUNCATE TABLE t", true},
 		{"line comment then mutation", "-- drop guard\nDROP TABLE t", true},
+		{"hash line comment then mutation", "# audit\nDROP TABLE t", true},
 		{"block comment then mutation", "/* admin */ ALTER TABLE t ADD COLUMN c Int", true},
-		{"mixed comments then select", "-- foo\n/* bar */ SELECT 1", false},
+		{"mixed comments then select", "-- foo\n# bar\n/* baz */ SELECT 1", false},
 
 		{"empty", "", false},
 		{"comment only", "-- just a comment", false},
@@ -213,24 +216,24 @@ func TestIsMutation(t *testing.T) {
 	}
 }
 
-// stubConn records whether Exec or Query was called and returns canned
-// results. The embedded nil driver.Conn keeps every method we don't override
-// undefined-method-call-panic'd, which is what we want — the test fails
-// loudly if executeQuery starts touching new surface area.
+// stubConn records how many times Exec or Query was called and returns
+// canned results. The embedded nil driver.Conn keeps every method we don't
+// override undefined-method-call-panic'd, which is what we want — the test
+// fails loudly if executeQuery starts touching new surface area.
 type stubConn struct {
 	driver.Conn
-	execCalled  bool
-	queryCalled bool
-	execErr     error
+	execCount  int
+	queryCount int
+	execErr    error
 }
 
 func (c *stubConn) Exec(_ context.Context, _ string, _ ...any) error {
-	c.execCalled = true
+	c.execCount++
 	return c.execErr
 }
 
 func (c *stubConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
-	c.queryCalled = true
+	c.queryCount++
 	return &chainEmptyRows{}, nil
 }
 
@@ -253,8 +256,8 @@ func TestExecuteQuery_MutationRoutesToExec(t *testing.T) {
 			h := NewQueryHandler(conn, nil, 0)
 			rows, err := h.executeQuery(context.Background(), sql, nil)
 			require.NoError(t, err)
-			assert.True(t, conn.execCalled, "Exec must be used for mutations")
-			assert.False(t, conn.queryCalled, "Query must not be used for mutations")
+			assert.Equal(t, 1, conn.execCount, "Exec must be used for mutations")
+			assert.Zero(t, conn.queryCount, "Query must not be used for mutations")
 			assert.Equal(t, []map[string]any{}, rows, "mutation result must marshal to [] not null")
 		})
 	}
@@ -266,7 +269,60 @@ func TestExecuteQuery_SelectRoutesToQuery(t *testing.T) {
 	h := NewQueryHandler(conn, nil, 0)
 	rows, err := h.executeQuery(context.Background(), "SELECT 1", nil)
 	require.NoError(t, err)
-	assert.False(t, conn.execCalled, "Exec must not be used for SELECT")
-	assert.True(t, conn.queryCalled, "Query must be used for SELECT")
+	assert.Zero(t, conn.execCount, "Exec must not be used for SELECT")
+	assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
 	assert.Equal(t, []map[string]any{}, rows, "zero-row SELECT must marshal to [] not null")
+}
+
+// TestQueryHandler_MutationBypassesCache pins the cache-bypass contract for
+// mutations. Without the bypass, the first TRUNCATE would land its `[]`
+// response in the cache under the SQL key, and the second identical
+// TRUNCATE would hit the cache and return `[]` without re-executing — the
+// silent-data-loss scenario claude-review flagged on the #118 PR. With the
+// bypass, both calls reach Exec.
+//
+// The test also asserts the cache is *empty* after the mutation completes,
+// so a regression that re-introduces `Cache.Set` post-execution (instead
+// of fully early-returning) would also fail loudly.
+func TestQueryHandler_MutationBypassesCache(t *testing.T) {
+	t.Parallel()
+
+	local, err := cache.NewLocal(1 << 20) // 1MiB is plenty for one entry
+	require.NoError(t, err)
+	defer func() { _ = local.Close() }()
+	tiered := cache.NewTiered(local, nil)
+
+	conn := &stubConn{}
+	h := NewQueryHandler(conn, tiered, 5*time.Minute)
+
+	const sql = "TRUNCATE TABLE clicks"
+	body, _ := json.Marshal(queryRequest{SQL: sql})
+
+	doRequest := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query", bytes.NewReader(body))
+		h.Handle(w, r)
+		return w
+	}
+
+	w1 := doRequest()
+	require.Equal(t, http.StatusOK, w1.Code)
+	assert.Equal(t, "[]", w1.Body.String(), "first mutation response must be []")
+	assert.Equal(t, "MISS", w1.Header().Get("X-Cache"), "mutations never serve from cache")
+
+	// After the first call, the cache must NOT carry the mutation result.
+	// Ristretto buffers writes asynchronously, so flush before reading.
+	local.Wait()
+	cached, _, err := tiered.Get(context.Background(), queryCacheKey(sql, nil))
+	require.NoError(t, err)
+	assert.Nil(t, cached, "mutation result must not be written to cache (silent-data-loss guard)")
+
+	w2 := doRequest()
+	require.Equal(t, http.StatusOK, w2.Code)
+	assert.Equal(t, "[]", w2.Body.String())
+	assert.Equal(t, "MISS", w2.Header().Get("X-Cache"))
+
+	assert.Equal(t, 2, conn.execCount,
+		"second identical mutation must re-execute against ClickHouse, not be served from cache")
+	assert.Zero(t, conn.queryCount, "mutations must never route through Query")
 }

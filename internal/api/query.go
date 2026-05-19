@@ -71,6 +71,31 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mutations bypass cache + singleflight entirely. Caching `[]` under
+	// the SQL cache key would let a subsequent identical mutation hit the
+	// cache and skip ClickHouse within DefaultTTL — silent data loss on
+	// the second TRUNCATE/INSERT/etc. Singleflight collapsing concurrent
+	// identical mutations would drop one of two writes the caller asked
+	// for. Neither is what the caller meant.
+	if isMutation(req.SQL) {
+		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "MISS")
+		_, _ = w.Write(data)
+		return
+	}
+
 	cacheKey := queryCacheKey(req.SQL, req.Params)
 
 	// Try cache.
@@ -150,12 +175,11 @@ func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []an
 }
 
 // mutationVerbs is a set of SQL leading keywords that don't return a result
-// set which include anything that mutates schema or data. Routed through
-// Exec rather than Query (take a look at executeQuery). Sourced from the
-// ClickHouse statement reference: DML, DDL, role/privilege management, and
-// runtime control (SYSTEM/KILL/SET). Read-only verbs
-// (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/ EXISTS) intentionally fall through to
-// the default Query path.
+// set — anything that mutates schema or data. Routed through Exec rather
+// than Query (see executeQuery). Sourced from the ClickHouse statement
+// reference: DML, DDL, role/privilege management, and runtime control
+// (SYSTEM/KILL/SET). Read-only verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/
+// EXISTS) intentionally fall through to the default Query path.
 var mutationVerbs = map[string]struct{}{
 	"INSERT":   {},
 	"UPDATE":   {},
@@ -198,7 +222,8 @@ func isMutation(sql string) bool {
 	return ok
 }
 
-// stripLeadingSQLComments trims whitespace plus `-- line` and `/* block */`
+// stripLeadingSQLComments trims whitespace plus line comments (`-- …` and
+// MySQL-compat `# …`, both accepted by ClickHouse) and `/* block */`
 // comments from the front of sql, returning the remainder with no leading
 // whitespace. Unclosed block comments swallow the rest of the string —
 // matches what ClickHouse itself would do at parse time.
@@ -206,7 +231,7 @@ func stripLeadingSQLComments(sql string) string {
 	s := strings.TrimLeft(sql, " \t\r\n")
 	for {
 		switch {
-		case strings.HasPrefix(s, "--"):
+		case strings.HasPrefix(s, "--"), strings.HasPrefix(s, "#"):
 			if i := strings.IndexByte(s, '\n'); i >= 0 {
 				s = strings.TrimLeft(s[i+1:], " \t\r\n")
 			} else {

@@ -110,14 +110,24 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			continue
 		}
 
-		// Insert-only pipeline. Everything other than `action: "insert"` (or
-		// absent — older clients omit the field) is dropped. The policy engine
-		// authorizes mutations by evaluating row/column rules against the
-		// *payload* of an operation, which only works cleanly for inserts;
-		// predicate-driven mutations (DELETE/UPDATE WHERE …) can't be authorized
-		// that way today. Non-insert mutations (delete/update/truncate/drop/
-		// alter/replace/…) must be issued through POST /v1/query, which is
-		// gated on admin/service or a policy role with RawSQL: true.
+		// Insert-only pipeline. Two action values are accepted as equivalent:
+		//   1. "insert" — explicit.
+		//   2. "" (absent or empty) — implicit. EventMessage (types.go) has
+		//      no Action field, and internal/api/ingest.go builds envelopes
+		//      via EventMessage{TableName, ReceivedTimestamp, Data}. So every
+		//      envelope from the HTTP API arrives here with action unset;
+		//      rejecting absent would break the only legitimate producer we
+		//      have today. The action field is set explicitly only by
+		//      external NATS publishers (test fixtures, the removed delete
+		//      envelope path) — for those, "insert" and absent are
+		//      interchangeable.
+		// Anything else (delete/update/truncate/drop/alter/replace/…) is
+		// DoubleAck'd and dropped. The policy engine authorizes mutations by
+		// evaluating row/column rules against the *payload* of an operation,
+		// which only works cleanly for inserts; predicate-driven mutations
+		// (DELETE/UPDATE WHERE …) can't be authorized that way today. Those
+		// must go through POST /v1/query, gated on admin/service or a policy
+		// role with RawSQL: true.
 		if raw.Action != "insert" && raw.Action != "" {
 			slog.WarnContext(msgCtx, "rejecting non-insert message: ingest pipeline is insert-only", "action", raw.Action)
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {

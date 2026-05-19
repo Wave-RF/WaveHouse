@@ -120,7 +120,9 @@ Accepts a flat JSON object, validates it against the ClickHouse schema for `{tab
 
 The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
-> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/query`](#post-v1query--query-clickhouse) under the `admin` / `service` role (or a policy role with `RawSQL: true`). The policy engine authorizes mutations by inspecting the columns being written, which works for inserts but not for predicate-driven mutations like `DELETE … WHERE`; routing them through the admin-gated raw-SQL surface keeps the policy contract honest.
+> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/query`](#post-v1query--query-clickhouse) under the `admin` / `service` role (or a policy role with `RawSQL: true`).
+>
+> The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
 
 **Request:**
 
