@@ -8,9 +8,10 @@
       <stop offset="0" stop-color="#06B0BF" stop-opacity="0.30"/>
       <stop offset="1" stop-color="#06B0BF" stop-opacity="0"/>
     </radialGradient>
-    <!-- Subtle accent grid; reads as faint scaffolding under the type. -->
+    <!-- Accent-tinted scaffolding grid. Visible enough to read as structure
+         without competing with the wordmark / tagline. -->
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#06B0BF" stroke-width="0.5" stroke-opacity="0.08"/>
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#06B0BF" stroke-width="0.75" stroke-opacity="0.16"/>
     </pattern>
   </defs>
 
@@ -19,36 +20,41 @@
   <rect width="1200" height="630" fill="url(#grid)"/>
   <rect width="1200" height="630" fill="url(#glow)"/>
 
-  <!-- Mark — clickwave geometry spliced in by scripts/branding/generate.sh
-       (`currentColor` substituted for the OG-card brand color). Scaled 1.6×
-       so the 100-unit mark renders 160 px and reads alongside the 130 px
-       wordmark sitting to its right. Translate puts the mark's top-left at
-       (120, 130) so its visual center lands near y=210, lined up with the
-       wordmark cap height. -->
-  <g transform="translate(120 130) scale(1.6)">
+  <!-- Mark + wordmark form a single lockup. Both visual centers sit on the
+       same y axis (212) and the mark's visual height is tuned to match the
+       wordmark's cap height so they read as one unit, not two stacked pieces.
+
+       Mark math: source mark.svg has visible content from y=11 to y=89
+       (waves + round-stroke caps), span 78 units. At scale 1.45 that's
+       113 px visual height. Translate origin = 212 (target center) − 50×1.45
+       (half the mark's 100-unit viewBox) = 139.5.
+
+       Wordmark math: Inter 140 px, font-weight 700. No descenders in
+       "WaveHouse", so visual height = cap height ≈ 71% × 140 = 99.4 px
+       (within ~12% of the mark's 113 px). Baseline = 212 + 99.4/2 ≈ 262. -->
+  <g transform="translate(120 139.5) scale(1.45)">
     __MARK_GROUP__
   </g>
 
-  <!-- Wordmark + ClickHouse-highlighted tagline live in the left two-thirds;
-       the right third stays clean so the radial glow can read. -->
-  <text x="300" y="245" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="130" font-weight="700" fill="#F1F3F7" letter-spacing="-3">WaveHouse</text>
+  <text x="300" y="262" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="140" font-weight="700" fill="#F1F3F7" letter-spacing="-3">WaveHouse</text>
 
-  <!-- Multi-line tagline. SVG `<text>` doesn't auto-wrap, so we pre-break
-       on tspan dy. ClickHouse is highlighted in the dark-mode accent to
-       echo the "for ClickHouse" relationship visually. -->
-  <text x="120" y="390" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="38" font-weight="400" fill="#9CA3AF">
-    <tspan x="120" dy="0">The open-source real-time API gateway for <tspan fill="#06B0BF" font-weight="500">ClickHouse</tspan></tspan>
-    <tspan x="120" dy="58">— schema-aware ingest, async batching, real-time</tspan>
-    <tspan x="120" dy="58">streaming.</tspan>
+  <!-- Two-line tagline. Matches the landing-page hero's two-sentence
+       cadence: the value-prop sentence + the capability roll-up sentence.
+       SVG <text> doesn't auto-wrap; lines are pre-broken via tspan dy.
+       ClickHouse is highlighted in the dark-mode accent color to echo the
+       for-ClickHouse relationship visually. -->
+  <text x="120" y="400" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="40" font-weight="400" fill="#9CA3AF">
+    <tspan x="120" dy="0">The open-source real-time API gateway for <tspan fill="#06B0BF" font-weight="500">ClickHouse</tspan>.</tspan>
+    <tspan x="120" dy="60">Schema-aware ingest, async batching, real-time streaming.</tspan>
   </text>
 
   <!-- Footer row: identity attribution on the left, URL on the right.
-       The URL doubles as a CTA when the card surfaces in Twitter / Slack /
-       LinkedIn previews. -->
+       Sized to read at a glance in Twitter / Slack / LinkedIn link
+       previews (the URL doubles as a CTA). -->
   <text x="120" y="580" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="22" font-weight="400" fill="#6B7280">A Wave RF open-source project</text>
+        font-size="30" font-weight="400" fill="#9CA3AF">A Wave RF open-source project</text>
   <text x="1080" y="580" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="22" font-weight="500" fill="#06B0BF" text-anchor="end">wavehouse.dev</text>
+        font-size="30" font-weight="500" fill="#06B0BF" text-anchor="end">wavehouse.dev</text>
 </svg>
