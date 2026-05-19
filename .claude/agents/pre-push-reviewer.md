@@ -11,7 +11,7 @@ You are reviewing the current branch's delta against main, using the same prompt
 
 Read `.github/prompts/pr-review.md` first. That file is the canonical WaveHouse review prompt and applies here verbatim — including the focus areas (correctness → security → performance → testing → docs/sdk-sync), the severity tags `[MUST]`/`[SHOULD]`/`[MAY]`, the noise filter, and the verdict rules.
 
-The diff source here is the local working state, computed as `git diff $(git merge-base HEAD main)` (or equivalently `git diff main...HEAD`).
+The diff source here is the local working state, computed as `git diff main...HEAD` (three dots — equivalent to `git diff $(git merge-base main HEAD) HEAD`, i.e. merge-base vs HEAD). Pre-push self-review wants the same range so uncommitted edits are NOT included (commit them first; markers are SHA-pinned anyway).
 
 ## Process
 
@@ -20,7 +20,7 @@ The diff source here is the local working state, computed as `git diff $(git mer
 2. Compute the branch diff:
 
    ```bash
-   git diff $(git merge-base HEAD main)
+   git diff main...HEAD
    ```
 
 3. For each changed file, read its current state. Don't just look at the diff — context matters.
@@ -84,13 +84,17 @@ VERDICT: ship_it
 
 (or `VERDICT: iterate` / `VERDICT: block`)
 
-## Verdict mapping (matches `.gemini/styleguide.md` + `.github/prompts/pr-review.md`)
+## Verdict mapping
 
-- **`Ship it`** + `VERDICT: ship_it` — no `[MUST]`s; few or no `[SHOULD]`s. Pre-push marker auto-writes, push proceeds.
-- **`Iterate`** + `VERDICT: iterate` — one or more `[MUST]`s that aren't `Block`-level, or multiple `[SHOULD]`s. Fix and re-invoke (always in fresh context).
-- **`Block`** + `VERDICT: block` — a `[MUST]` that's CRITICAL/HIGH security, data-loss risk, or broken core invariant. Cannot proceed without addressing.
+WaveHouse uses a stricter rule than `.gemini/styleguide.md` / `.github/prompts/pr-review.md`: **`ship_it` requires zero findings at any severity**. If there is anything left to do, the PR isn't shippable — "ship it, just do this one thing first" is iteration, not shipping.
 
-`[MAY]` findings alone don't preclude `Ship it`.
+- **`Ship it`** + `VERDICT: ship_it` — `[MUST]`, `[SHOULD]`, and `[MAY]` sections are all empty. Pre-push marker auto-writes, push proceeds.
+- **`Iterate`** + `VERDICT: iterate` — any `[MUST]` / `[SHOULD]` / `[MAY]` finding exists, but none are block-level. The orchestrator fixes the findings and re-invokes this subagent (always in fresh context) until ship_it.
+- **`Block`** + `VERDICT: block` — a `[MUST]` that's CRITICAL/HIGH security, data-loss risk, broken core invariant, or otherwise needs human/maintainer attention (architectural disagreement, missing CI signal, etc.). Cannot proceed without addressing.
+
+### What this means for `[MAY]`
+
+Under this rubric, **`[MAY]` is a real commitment** — "I'd actually do this before merge," not "optional polish." If you're tempted to raise a finding because it's nice-to-have but you wouldn't ask the author to act on it before merge, drop it from the findings list. Put it in the prose preamble as an observation, or leave it out entirely. The noise filter from `pr-review.md` is even stronger here: any finding in the list is a blocker to ship_it.
 
 ## Framing
 

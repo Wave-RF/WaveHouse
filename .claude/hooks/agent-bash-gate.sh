@@ -9,12 +9,17 @@
 #   3. gh pr ready (humans only — draft→ready is a deliberate human signal)
 #   4. gh pr edit --add-reviewer / --add-assignee (human reviewer assignment is humans-only;
 #      bot reviewers are re-triggered via PR comments, not the reviewer API)
-#   5. gh api .../requested_reviewers POST (the API form of --add-reviewer)
+#   5. gh api .../requested_reviewers POST/PUT (the API form of --add-reviewer)
 #   6. gh pr review --approve / --request-changes (only humans take formal review actions;
 #      bot reviewers use inline review comments + sticky summaries instead)
-#   7. Direct marker forgery (touch / redirect / sh -c wrappers writing to
-#      tmp/(ci|review)-passed-*)
-#   8. git push without required markers (ci-passed always; review-passed on PR branches)
+#   7. git push without required markers (ci-passed always; review-passed on PR branches)
+#
+# Marker forgery (writing tmp/(ci|review)-passed-* by any means) is NOT blocked
+# here. The .claude/settings.json deny list catches the obvious tool-level
+# attempts (Bash(touch tmp/...:*), Write/Edit on the paths); everything else
+# relies on the honest-agent model documented in AGENTS.md §"Agent PR
+# Discipline" — Bash can write a file by a dozen paths and regex enforcement
+# becomes a porous game of whack-a-mole that oversells what it delivers.
 #
 # Anything blocked here can typically be re-run by a human from terminal — these
 # rules are for the agent path, not the underlying git/gh capabilities.
@@ -77,11 +82,14 @@ if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:
   fi
 fi
 
-# --- 5. gh api .../requested_reviewers POST (humans-only reviewer-add API) --
+# --- 5. gh api .../requested_reviewers any write verb (humans-only API) -----
+# Both POST (add) and PUT (replace) on /pulls/<n>/requested_reviewers are
+# reviewer-write operations. Neither has a legitimate agent use case — bot
+# reviewers are re-triggered via PR comments. Match any reviewer-write idiom.
 if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' && \
    printf '%s\n' "$cmd" | grep -qE 'requested_reviewers'; then
-  if printf '%s\n' "$cmd" | grep -qE '(-X[[:space:]]*POST|--method[[:space:]]*POST|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)'; then
-    block "POST to /requested_reviewers is the API form of --add-reviewer; humans-only. For bot reviewers, post a PR comment mentioning them."
+  if printf '%s\n' "$cmd" | grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)'; then
+    block "Write requests to /requested_reviewers are the API form of --add-reviewer; humans-only. For bot reviewers, post a PR comment mentioning them."
   fi
 fi
 
@@ -95,25 +103,7 @@ if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:
   fi
 fi
 
-# --- 7. Marker forgery ------------------------------------------------------
-# Block any *write-like* operation targeting tmp/(ci|review)-passed-*.
-# Read operations (ls/cat/find) on the markers are fine.
-if printf '%s\n' "$cmd" | grep -qE 'tmp/(ci|review)-passed-'; then
-  if printf '%s\n' "$cmd" | grep -qE '(touch|install)[[:space:]]+[^&|;]*tmp/(ci|review)-passed-'; then
-    block "Direct marker creation is forbidden. Markers are written by 'make ci' (ci-passed) and the pre-push-reviewer agent's PostToolUse hook (review-passed)."
-  fi
-  if printf '%s\n' "$cmd" | grep -qE '(cp|mv)[[:space:]]+[^&|;]+[[:space:]]+[^&|;]*tmp/(ci|review)-passed-'; then
-    block "Direct marker creation via cp/mv is forbidden."
-  fi
-  if printf '%s\n' "$cmd" | grep -qE '>[[:space:]]*tmp/(ci|review)-passed-'; then
-    block "Direct marker creation via output redirect is forbidden."
-  fi
-  if printf '%s\n' "$cmd" | grep -qE '\b(sh|bash|zsh|env)\b[[:space:]]+-c[[:space:]]+.*tmp/(ci|review)-passed-'; then
-    block "Wrapping marker creation in a shell -c to bypass the gate is forbidden."
-  fi
-fi
-
-# --- 8. git push: check markers ---------------------------------------------
+# --- 7. git push: check markers ---------------------------------------------
 # Only on actual `git push` invocations (not `git push --help`, not `gh pr push`).
 if git_subcmd 'push'; then
   head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
@@ -122,7 +112,7 @@ if git_subcmd 'push'; then
     ci_marker="tmp/ci-passed-${head_sha}"
     review_marker="tmp/review-passed-${head_sha}"
 
-    # 8a. ci-passed required for every push (mirrors the universal git pre-push hook;
+    # 7a. ci-passed required for every push (mirrors the universal git pre-push hook;
     # firing here too gives Claude a more actionable error inside its session).
     if [ ! -f "$ci_marker" ]; then
       cat >&2 <<EOF
@@ -140,7 +130,7 @@ EOF
       exit 2
     fi
 
-    # 8b. review-passed required when HEAD branch has an open PR.
+    # 7b. review-passed required when HEAD branch has an open PR.
     branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
     if [ -n "$branch" ] && [ "$branch" != "main" ]; then
       pr_state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
@@ -163,9 +153,11 @@ If the agent returns VERDICT: iterate or VERDICT: block, address the findings
 and re-invoke the agent (always in fresh context — never the same session)
 until ship_it.
 
-Per AGENTS.md §"Agent PR Discipline", you cannot bypass this with --no-verify
-or by writing the marker file directly. CI's claude-review will also fire on
-push, but pre-push review catches issues before consuming shared capacity.
+Per AGENTS.md §"Agent PR Discipline", agents do not bypass this with
+--no-verify, and you do not write the marker file directly by any means —
+the marker is wrong-shaped if you're the one writing it. CI's claude-review
+will also fire on push, but pre-push review catches issues before consuming
+shared capacity.
 EOF
           exit 2
         fi

@@ -253,17 +253,17 @@ Before pushing to any branch with an open PR, agents must invoke the `pre-push-r
 - CI status / failing checks
 - Linked issues' acceptance criteria
 
-When the subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes `tmp/review-passed-<HEAD-sha>` and the next `git push` succeeds. On `VERDICT: iterate` or `VERDICT: block`, no marker — fix the findings and re-invoke the subagent (always fresh context — never reuse the same session) until ship_it.
+The subagent's verdict is one of `ship_it`, `iterate`, or `block`. **`ship_it` requires zero findings at any severity** (`[MUST]`, `[SHOULD]`, `[MAY]` sections all empty). Anything in the findings list — including `[MAY]` — forces `iterate`. The rule is: if there's anything left to do, the PR isn't shippable. "Ship it, just do this one thing first" is iteration, not shipping.
+
+When the subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes `tmp/review-passed-<HEAD-sha>` and the next `git push` succeeds. On `VERDICT: iterate` or `VERDICT: block`, no marker — the orchestrator agent **loops**: address every finding, commit, re-invoke `pre-push-reviewer` in fresh context, repeat until `ship_it`. Never push with open findings.
 
 The orchestrator agent cannot override the subagent's system prompt (it's the fixed file content of `.claude/agents/pre-push-reviewer.md`), and the subagent runs in a clean conversation context, so it doesn't share the orchestrator's bias toward its own work.
 
 ### No bypass for agents
 
-- `git push --no-verify` and `git commit --no-verify` are blocked.
-- Writing `tmp/ci-passed-*` or `tmp/review-passed-*` directly (via `touch`, redirect, `cp`, `sh -c` wrapper, `Write`/`Edit` tools) is blocked.
-- Markers are written exclusively by `make ci` (ci-passed) and the `pre-push-reviewer` PostToolUse hook (review-passed). Any other path is a discipline violation.
-
-Humans retain `--no-verify` for explicit intentional bypass — see §"Local-First Validation".
+- `git push --no-verify` and `git commit --no-verify` are blocked at the `.claude/hooks/agent-bash-gate.sh` PreToolUse layer for agents. Humans retain `--no-verify` for explicit intentional bypass (see §"Local-First Validation").
+- The obvious tool-level writes to `tmp/ci-passed-*` or `tmp/review-passed-*` are denied at the `.claude/settings.json` permission layer (`Bash(touch tmp/ci-passed:*)`, `Write(tmp/ci-passed-*)`, `Edit(tmp/ci-passed-*)`, and the review-passed equivalents).
+- **Markers are written exclusively by `make ci` (ci-passed) and the `pre-push-reviewer` PostToolUse hook (review-passed). You do not write a marker file by any other means — period.** Bash can write a file by a dozen paths and the deny list does not enumerate all of them; this is an honest-agent rule, not an adversarial gate. If you ever feel tempted to write a marker, stop: the marker is wrong-shaped if you're the one writing it. Run `make ci`, invoke the subagent, get the verdict — that's the path.
 
 ### Reviewing someone else's PR locally
 

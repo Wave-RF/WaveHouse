@@ -32,10 +32,6 @@
 
       "Bash(touch tmp/ci-passed:*)",
       "Bash(touch tmp/review-passed:*)",
-      "Write(./tmp/ci-passed-*)",
-      "Write(./tmp/review-passed-*)",
-      "Edit(./tmp/ci-passed-*)",
-      "Edit(./tmp/review-passed-*)",
       "Write(tmp/ci-passed-*)",
       "Write(tmp/review-passed-*)",
       "Edit(tmp/ci-passed-*)",

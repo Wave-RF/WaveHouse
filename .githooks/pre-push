@@ -31,10 +31,8 @@ CI for the exact commit being published. Run:
 
 …then push again. (\`make ci\` takes ~2min warm, ~5-8min cold.)
 
-Bypass options:
-  • For an intentional WIP / draft push: git push --no-verify
-  • To skip a single push: WAVEHOUSE_SKIP_PUSH_GATE=1 git push (not currently
-    honored — use --no-verify instead; this line is a reminder if you find
-    yourself wanting it often, that's a signal to revisit the gate.)
+Bypass: for an intentional WIP / draft push, use `git push --no-verify`
+(humans only — agents are blocked from --no-verify by
+.claude/hooks/agent-bash-gate.sh).
 EOF
 exit 1

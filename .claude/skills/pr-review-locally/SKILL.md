@@ -64,10 +64,10 @@ The above procedure. Findings stay in your local session. Nothing is posted to t
 If the user explicitly asks for the bot to post on the PR (not just local feedback), the mechanism is the **CI claude-review workflow** — NOT manual comments from the local session. Trigger it:
 
 ```bash
-gh workflow run "Claude PR review" -R Wave-RF/WaveHouse -f pr_number=120
+gh workflow run "Claude PR review" -f pr_number=<N>
 ```
 
-That fires `.github/workflows/claude-review.yml` against PR 120. The workflow:
+That fires `.github/workflows/claude-review.yml` against PR `<N>`. `gh` picks up the repo from the current worktree, matching the convention used elsewhere in AGENTS.md. The workflow:
 
 - Runs the same `.github/prompts/pr-review.md` prompt
 - Posts inline review comments at line-level
