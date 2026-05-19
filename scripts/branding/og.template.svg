@@ -44,13 +44,15 @@
     <tspan x="120" dy="52">Schema-aware ingest, async batching, real-time streaming.</tspan>
   </text>
 
-  <!-- Footer row — identity attribution left, URL right. Sized to read at a
-       glance in downscaled Twitter / Slack / LinkedIn link previews; the URL
-       doubles as a CTA. Both use the tagline gray on the left + accent cyan
-       on the right so the row reads as one balanced bar. Bumped to 42 px so
-       the row holds its own next to the 80-ish-px wordmark above. -->
-  <text x="120" y="590" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="42" font-weight="400" fill="#9CA3AF">A Wave RF open-source project</text>
-  <text x="1080" y="590" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="42" font-weight="500" fill="#06B0BF" text-anchor="end">wavehouse.dev</text>
+  <!-- Footer row — identity attribution left, URL right. Sized BELOW the
+       tagline so the visual hierarchy reads wordmark → tagline → footer
+       (largest → smallest). 28 px is the legibility floor for a 1200×630 OG
+       that gets downscaled to ~500 px wide in Twitter / Slack / LinkedIn
+       previews; smaller than that and the row turns into fine print. Color
+       split (tagline gray left / accent cyan right) gives the URL CTA-weight
+       without enlarging it. -->
+  <text x="120" y="585" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="28" font-weight="400" fill="#9CA3AF">A Wave RF open-source project</text>
+  <text x="1080" y="585" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="28" font-weight="500" fill="#06B0BF" text-anchor="end">wavehouse.dev</text>
 </svg>
