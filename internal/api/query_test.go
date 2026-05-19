@@ -168,24 +168,67 @@ func TestQueryHandler_EmptyBodyMutationReturnsArray(t *testing.T) {
 // TestQueryHandler_ForwardsCHError covers the "ClickHouse rejected the
 // statement" path. ClickHouse returns 4xx/5xx with a plain-text error
 // message in the body (e.g. "Code: 60. DB::Exception: Unknown table x").
-// The proxy must surface that message — admin's whole reason for using
-// this endpoint is to see ClickHouse's view of what went wrong.
+// The proxy must surface that message AND classify the status: 4xx →
+// 400 (caller-fault, the SQL was bad), 5xx → 502 (gateway-fault, the
+// upstream had a problem). Admin tooling that retries on 5xx-but-not-4xx
+// depends on this distinction.
 func TestQueryHandler_ForwardsCHError(t *testing.T) {
 	t.Parallel()
-	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("Code: 60. DB::Exception: Table default.no_such_table doesn't exist.\n"))
-	})
-	h := newProxyHandler(t, fake)
 
-	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM no_such_table"})
-	w := postQuery(h, body)
+	tests := []struct {
+		name           string
+		upstreamStatus int
+		upstreamBody   string
+		wantStatus     int
+		wantMsg        string
+	}{
+		{
+			name:           "caller fault — bad SQL → 400",
+			upstreamStatus: http.StatusBadRequest,
+			upstreamBody:   "Code: 60. DB::Exception: Table default.no_such_table doesn't exist.\n",
+			wantStatus:     http.StatusBadRequest,
+			wantMsg:        "Table default.no_such_table doesn't exist",
+		},
+		{
+			name:           "caller fault — type error → 400",
+			upstreamStatus: http.StatusUnprocessableEntity,
+			upstreamBody:   "Code: 53. DB::Exception: Type mismatch.\n",
+			wantStatus:     http.StatusBadRequest,
+			wantMsg:        "Type mismatch",
+		},
+		{
+			name:           "upstream fault — ClickHouse 500 → 502",
+			upstreamStatus: http.StatusInternalServerError,
+			upstreamBody:   "Code: 999. DB::Exception: Internal error.\n",
+			wantStatus:     http.StatusBadGateway,
+			wantMsg:        "Internal error",
+		},
+		{
+			name:           "upstream fault — ClickHouse 503 → 502",
+			upstreamStatus: http.StatusServiceUnavailable,
+			upstreamBody:   "Server is overloaded.\n",
+			wantStatus:     http.StatusBadGateway,
+			wantMsg:        "Server is overloaded",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+				w.WriteHeader(tt.upstreamStatus)
+				_, _ = w.Write([]byte(tt.upstreamBody))
+			})
+			h := newProxyHandler(t, fake)
 
-	require.Equal(t, http.StatusInternalServerError, w.Code,
-		"ClickHouse 4xx is currently mapped to 500 — proxy distinguishing caller-fault would need ClickHouse error-code parsing")
-	assert.Contains(t, w.Body.String(), "Table default.no_such_table doesn't exist")
-	assertJSONErrorResponse(t, w)
+			body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM no_such_table"})
+			w := postQuery(h, body)
+
+			require.Equal(t, tt.wantStatus, w.Code)
+			assert.Contains(t, w.Body.String(), tt.wantMsg, "ClickHouse's error message must reach the admin verbatim")
+			assertJSONErrorResponse(t, w)
+		})
+	}
 }
 
 // TestQueryHandler_SetsNoStore pins the cache header. Raw SQL is admin-only
@@ -238,17 +281,20 @@ func TestQueryHandler_NoAuthHeadersWhenBlank(t *testing.T) {
 	assert.False(t, hasKeyHeader, "no X-ClickHouse-Key header should be set when password is blank, got %q", gotKey)
 }
 
-// TestQueryHandler_ForwardsRawBodyOnUnexpectedShape covers the
-// belt-and-suspenders branch: ClickHouse returned 200 + a body that isn't
-// the {meta, data, rows} envelope (shouldn't happen with
-// default_format=JSON, but possible if someone overrides FORMAT in their
-// SQL, e.g. `SELECT 1 FORMAT CSV`). In that case the proxy forwards the
-// body verbatim rather than dropping it on the floor.
-func TestQueryHandler_ForwardsRawBodyOnUnexpectedShape(t *testing.T) {
+// TestQueryHandler_ForwardsRawBodyAndContentType covers the
+// FORMAT-override branch: ClickHouse returned 200 + a body that isn't
+// the {meta, data, rows} envelope. Verified empirically against a real
+// ClickHouse: `SELECT 1 FORMAT CSV` with default_format=JSON on the URL
+// returns raw `1\n` + Content-Type: text/csv (inline FORMAT wins). The
+// proxy must (a) forward the body verbatim, and (b) pass through the
+// upstream Content-Type — not stamp application/json on it, or the SDK's
+// `await response.json()` crashes on a non-JSON payload.
+func TestQueryHandler_ForwardsRawBodyAndContentType(t *testing.T) {
 	t.Parallel()
 	const csvBody = "1\n2\n3\n"
+	const upstreamCT = "text/csv; charset=UTF-8; header=absent"
 	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Type", upstreamCT)
 		_, _ = w.Write([]byte(csvBody))
 	})
 	h := newProxyHandler(t, fake)
@@ -258,6 +304,38 @@ func TestQueryHandler_ForwardsRawBodyOnUnexpectedShape(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, csvBody, w.Body.String(), "non-JSON 200 body must be forwarded raw, not dropped")
+	assert.Equal(t, upstreamCT, w.Header().Get("Content-Type"),
+		"upstream Content-Type must pass through — labelling a CSV body as application/json would break SDK consumers")
+}
+
+// TestQueryHandler_ResponseSizeCap pins the memory-safety cap. The proxy
+// buffers the upstream response in memory (no streaming today), so a
+// runaway SELECT could OOM the API server. We bound that at
+// maxCHResponseBytes and surface a clear 502 on overflow rather than
+// silently truncating into a parse error.
+func TestQueryHandler_ResponseSizeCap(t *testing.T) {
+	t.Parallel()
+
+	// Construct a body just over the cap. We don't actually allocate 64
+	// MiB here — we lie about Content-Length and stream a known-large
+	// number of bytes from a zero-reader. The cap check uses len(body)
+	// after io.ReadAll on the LimitReader, so any source > cap suffices.
+	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 64 MiB + 1 byte of 'a' characters. io.Copy from a strings.Reader
+		// works on testservers without buffering the full string at once
+		// for the test's own RAM.
+		oversized := bytes.Repeat([]byte{'a'}, maxCHResponseBytes+1)
+		_, _ = w.Write(oversized)
+	})
+	h := newProxyHandler(t, fake)
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM huge_table"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusBadGateway, w.Code, "oversized response must 502, not OOM")
+	assert.Contains(t, w.Body.String(), "exceeded")
+	assertJSONErrorResponse(t, w)
 }
 
 // TestQueryHandler_ContextCancelBoundedAt30s is a sanity check that the

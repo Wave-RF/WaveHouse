@@ -46,14 +46,30 @@ type QueryHandler struct {
 	Database string
 }
 
+// maxCHResponseBytes caps how much of the ClickHouse response the proxy
+// will buffer in memory. 64 MiB is generous for any reasonable admin query
+// (a SELECT returning ~64 MiB of JSON is itself a smell — admins should be
+// using FORMAT JSONEachRow + streaming clients for genuinely-large results,
+// or the structured query endpoint with its DefaultMaxRows cap). The cap
+// is here as a safety net against a runaway SELECT exhausting the API
+// server's RAM; admin-only doesn't mean operators won't accidentally OOM
+// themselves.
+const maxCHResponseBytes = 64 << 20 // 64 MiB
+
 // NewQueryHandler builds a handler that proxies to ClickHouse over HTTP.
 // endpoint should be the base URL (`http://host:8123`); username/password
 // are forwarded via ClickHouse's `X-ClickHouse-User` / `X-ClickHouse-Key`
 // headers (matching the ingest worker's convention in internal/ingest).
 // database is set as the `?database=` query-string parameter when non-empty.
+//
+// The HTTP client itself has no Timeout — every request gets a 30s deadline
+// from a context derived from the inbound request (see Handle), which
+// bounds the whole exchange including body read. Setting `Timeout` here
+// too would just duplicate that bound (and silently truncate any
+// inbound context longer than 30s).
 func NewQueryHandler(endpoint, username, password, database string) *QueryHandler {
 	return &QueryHandler{
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		HTTPClient: &http.Client{},
 		Endpoint:   endpoint,
 		Username:   username,
 		Password:   password,
@@ -117,24 +133,44 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// Cap the upstream body at maxCHResponseBytes. Read +1 so we can detect
+	// "exactly cap or more" without a second read.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCHResponseBytes+1))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "read clickhouse response: "+err.Error())
+		return
+	}
+	if len(body) > maxCHResponseBytes {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", maxCHResponseBytes))
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		// ClickHouse returns plain-text error messages with non-200 status.
-		// Forward the trimmed message as a JSON error so the response shape
-		// stays consistent with the rest of the API. 500 isn't always
-		// precise (some ClickHouse errors are caller bugs that arguably
-		// merit 4xx) but distinguishing here would require parsing
-		// ClickHouse error codes — out of scope for the escape hatch.
+		// Forward the trimmed message as a JSON error, and map the upstream
+		// status into one of two buckets so admin tooling can tell
+		// caller-fault from upstream-fault:
+		//   4xx (bad SQL, missing table, type error, …) → 400 — the
+		//                                                  request itself
+		//                                                  was bad.
+		//   5xx, anything else                          → 502 — we're a
+		//                                                  gateway and the
+		//                                                  upstream
+		//                                                  service had a
+		//                                                  problem.
+		// Distinguishing ClickHouse's specific error codes (Code: 60 for
+		// "table doesn't exist" etc.) would need a parser and is out of
+		// scope here. The body carries ClickHouse's exact message so the
+		// admin still sees the diagnostic verbatim.
+		status := http.StatusBadGateway
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			status = http.StatusBadRequest
+		}
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {
 			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
 		}
-		writeJSONError(w, http.StatusInternalServerError, msg)
+		writeJSONError(w, status, msg)
 		return
 	}
 
@@ -144,17 +180,17 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// (CDN, browser, corp proxy) would re-introduce the staleness class of
 	// bug the in-process cache strip just removed.
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json")
 
 	// ClickHouse returns an empty body for mutations (TRUNCATE/INSERT/
 	// DELETE/etc. with no result set). Marshal those to `[]` so clients
 	// don't have to special-case "empty success body".
 	if len(body) == 0 {
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("[]"))
 		return
 	}
 
-	// Read-statement response shape:
+	// Read-statement response shape under default_format=JSON:
 	//   {"meta":[{"name":"x","type":"..."}, ...],
 	//    "data":[{"x": ...}, ...],
 	//    "rows":N,
@@ -165,13 +201,24 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var chResp struct {
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(body, &chResp); err != nil || chResp.Data == nil {
-		// Unexpected non-JSON success body or missing `data` key — forward
-		// raw so the caller can see what ClickHouse actually returned. Not
-		// expected in practice since default_format=JSON guarantees the
-		// envelope shape on success.
-		_, _ = w.Write(body)
+	if err := json.Unmarshal(body, &chResp); err == nil && chResp.Data != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(chResp.Data)
 		return
 	}
-	_, _ = w.Write(chResp.Data)
+
+	// Unexpected shape — happens when the SQL contains an explicit FORMAT
+	// directive that overrides default_format=JSON (verified empirically:
+	// `SELECT 1 FORMAT CSV` returns raw `1\n` with Content-Type:
+	// text/csv, regardless of default_format on the URL). Forward the
+	// upstream Content-Type so consumers don't get a CSV body labelled as
+	// JSON. Fall back to application/octet-stream only if ClickHouse
+	// returned no Content-Type (shouldn't happen, but better than the
+	// previous lie of stamping application/json).
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	_, _ = w.Write(body)
 }
