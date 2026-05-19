@@ -156,14 +156,23 @@ func TestIngest_NonInsertActionDropped(t *testing.T) {
 	}, 30*time.Second, 100*time.Millisecond,
 		fmt.Sprintf("buffer consumer's AckFloor.Stream must reach %d (our publish seq), proving the worker DoubleAck'd this specific delete envelope", pubAck.Sequence))
 
-	// Worker has processed it. The row must still be present — proving the
-	// worker dropped the envelope rather than executing a DELETE.
-	var count uint64
-	require.NoError(t, e.chConn.QueryRow(ctx,
-		fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
-		rowID,
-	).Scan(&count))
-	assert.Equal(t, uint64(1), count,
+	// Worker has processed (DoubleAck'd) the envelope. The row must still
+	// be present AND must stay present for a bounded window — a regression
+	// that wrongly Exec'd a DELETE could DoubleAck before ClickHouse has
+	// finished applying the mutation, because ALTER TABLE … DELETE is
+	// asynchronous on MergeTree and returns after the mutation is queued,
+	// not after it lands. A single point-in-time read could miss that.
+	require.Never(t, func() bool {
+		var count uint64
+		err := e.chConn.QueryRow(ctx,
+			fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
+			rowID,
+		).Scan(&count)
+		// Return true (fail) only on observed deletion — query errors
+		// surface as a fail too because they likely indicate the worker
+		// did something destructive (e.g. DROP'd the table).
+		return err != nil || count < 1
+	}, 5*time.Second, 200*time.Millisecond,
 		"non-insert envelope must not mutate ClickHouse — DELETE/UPDATE/etc. require POST /v1/query")
 
 	// And nothing should have leaked to the DLQ either — the dropped

@@ -154,8 +154,12 @@ Client POST /v1/ingest/{table}
 Bento ingest pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
   → Validate table name against safeIdentifierRe
-  → Reject any envelope whose action is not "insert" (DoubleAck and drop —
-    DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/query)
+  → Enforce insert-only contract on the envelope's `action` field:
+    accept when `action == "insert"` OR `action` is absent/empty (the wire
+    format `EventMessage` has no `action` field, so HTTP-API envelopes
+    always arrive with it unset); reject anything else (`delete`, `update`,
+    `truncate`, …) by DoubleAck-and-drop — DELETE/UPDATE/TRUNCATE/DROP/etc.
+    must go through POST /v1/query
   → Batch events per table, bulk INSERT to ClickHouse
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry

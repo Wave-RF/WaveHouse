@@ -197,6 +197,11 @@ func TestIsMutation(t *testing.T) {
 		{"grant", "GRANT SELECT ON t TO u", true},
 		{"revoke", "REVOKE SELECT ON t FROM u", true},
 		{"system", "SYSTEM RELOAD CONFIG", true},
+		{"attach", "ATTACH TABLE t FROM '/path'", true},
+		{"detach", "DETACH TABLE t", true},
+		{"kill", "KILL QUERY WHERE query_id = 'abc'", true},
+		{"set", "SET max_threads = 4", true},
+		{"use", "USE mydb", true},
 
 		{"leading whitespace", "   \n\tTRUNCATE TABLE t", true},
 		{"line comment then mutation", "-- drop guard\nDROP TABLE t", true},
