@@ -195,7 +195,7 @@ dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on 
 # to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
 # `make dev` on :8080.
 .PHONY: dev-docs
-dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
+dev-docs: install-docs-playwright ## Hot-reload docs site dev server (Astro on :4321)
 	@cd $(DOCS_DIR) && $(PNPM) dev
 
 .PHONY: preview-docs
@@ -363,14 +363,16 @@ install-sdk:
 .PHONY: install-docs
 install-docs:
 	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
-	@# rehype-mermaid uses Playwright (Chromium) to render diagrams at build
-	@# time, so the Chromium binary (~130 MB) is fetched unconditionally
-	@# here (and via `make tools`). Only the `--with-deps` flag — which runs
-	@# `apt-get install` for Chromium's system libs (libnspr4 etc.) on
-	@# Linux — is gated behind $CI, since it requires sudo on contributor
-	@# laptops. CI runners on minimal base images need it. Both steps are
-	@# idempotent. See docs/src/content/docs/development.md for the full
-	@# story on Linux dev machines.
+
+# Playwright Chromium (~130 MB) is required by `rehype-mermaid` (build-time
+# diagram SSR) and `starlight-links-validator`. Kept out of `install-docs` so
+# the top-level `make tools` bootstrap doesn't force every Go-only contributor
+# to download Chromium. Wired into `build-docs` / `dev-docs` instead. The
+# `--with-deps` apt step is $CI-gated since it needs sudo on Linux laptops;
+# CI runners on minimal base images need it. Both steps are idempotent. See
+# docs/src/content/docs/development.md for the full Linux-dev-machine story.
+.PHONY: install-docs-playwright
+install-docs-playwright: install-docs
 	@cd $(DOCS_DIR) && $(PNPM) exec playwright install chromium $${CI:+--with-deps} >/dev/null
 
 .PHONY: install-e2e-sdk
@@ -385,7 +387,7 @@ build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by
 # Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
 # Starlight content collection itself — no separate convert step.
 .PHONY: build-docs
-build-docs: install-docs ## Build docs site for production → docs/dist/
+build-docs: install-docs-playwright ## Build docs site for production → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@cd $(DOCS_DIR) && $(PNPM) build
 

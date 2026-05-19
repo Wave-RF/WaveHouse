@@ -86,9 +86,16 @@ const terminalLines: TerminalLine[] = [
   // flag already set and stamp the attribute synchronously, before paint,
   // which suppresses the entrance animations via the [data-hero-played]
   // rules in this file's <style> block.
+  //
+  // Also stamps `[data-screenshot-ready]` on <html> for the
+  // scripts/screenshot.mjs Playwright wait — on first mount the bottom-of-
+  // file animationend listener stamps it once the last terminal line
+  // finishes drawing; on subsequent mounts the animations are suppressed,
+  // so there's no animationend event and we set the ready marker here.
   if (typeof window !== "undefined") {
     if (window.__whHeroPlayed) {
       document.documentElement.setAttribute("data-hero-played", "");
+      document.documentElement.setAttribute("data-screenshot-ready", "");
     } else {
       window.__whHeroPlayed = true;
     }
@@ -285,7 +292,7 @@ const terminalLines: TerminalLine[] = [
             );
           }
           return (
-            <span class="wh-line wh-line--cursor" style={`--i:${i}`}>
+            <span class="wh-line wh-line--cursor" style={`--i:${i}`} data-last={i === terminalLines.length - 1 ? "" : undefined}>
               <span class="wh-cursor">▌</span>
             </span>
           );
@@ -294,6 +301,23 @@ const terminalLines: TerminalLine[] = [
     </div>
   </div>
 </section>
+
+<script is:inline data-astro-rerun>
+  // Stamp `[data-screenshot-ready]` on <html> when the last terminal line
+  // finishes its entrance animation, so scripts/screenshot.mjs can wait on
+  // a real signal rather than a magic timeout that drifts whenever the
+  // terminal line count or stagger constants change.
+  (() => {
+    if (document.documentElement.hasAttribute("data-screenshot-ready")) return;
+    const last = document.querySelector(".wh-line[data-last]");
+    if (!last) return;
+    last.addEventListener(
+      "animationend",
+      () => document.documentElement.setAttribute("data-screenshot-ready", ""),
+      { once: true },
+    );
+  })();
+</script>
 
 <style>
   .wh-hero {

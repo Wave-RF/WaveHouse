@@ -34,12 +34,14 @@ try {
         document.documentElement.setAttribute("data-theme", t);
         try { localStorage.setItem("starlight-theme", t); } catch {}
       }, theme);
-      // Ensure web fonts load + wait past entrance animations. The hero
-      // terminal staggers nine lines at 0.42s each, so the last line lands
-      // around 3.8s after mount — wait a bit past that so the capture is
-      // a fully-rendered frame, not a half-typed terminal.
+      // Wait on web fonts + the hero's own ready signal — Hero.astro stamps
+      // `[data-screenshot-ready]` on <html> via animationend on the last
+      // terminal line (first mount) or synchronously when the replay guard
+      // suppresses the entrance choreography (subsequent mounts). Pages
+      // without a hero never get the attribute, so we cap the wait at 5s
+      // and fall through to the screenshot regardless.
       await page.evaluate(() => document.fonts.ready);
-      await page.waitForTimeout(4500);
+      await page.waitForSelector("html[data-screenshot-ready]", { timeout: 5000 }).catch(() => {});
       const filename = `${p.name}-${theme}.png`;
       await page.screenshot({
         path: resolve(OUT, filename),
