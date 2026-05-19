@@ -189,6 +189,7 @@ var mutationVerbs = map[string]struct{}{
 	"ALTER":    {},
 	"CREATE":   {},
 	"RENAME":   {},
+	"EXCHANGE": {},
 	"OPTIMIZE": {},
 	"REPLACE":  {},
 	"GRANT":    {},

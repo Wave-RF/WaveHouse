@@ -203,13 +203,9 @@ func TestJsInput_Read_InsertMessage(t *testing.T) {
 	assert.True(t, exists)
 	assert.Equal(t, "clicks", table)
 
-	// Verify inFlight counter incremented.
-	assert.Equal(t, int32(1), input.inFlight.Load())
-
 	// Ack with nil error — should increment Ack on NATS msg.
 	require.NoError(t, ackFn(context.Background(), nil))
 	assert.True(t, natsMsg.doubleAcked, "insert message should use DoubleAck, not Ack")
-	assert.Equal(t, int32(0), input.inFlight.Load())
 }
 
 func TestJsInput_Read_InsertNack(t *testing.T) {
@@ -228,7 +224,6 @@ func TestJsInput_Read_InsertNack(t *testing.T) {
 	// Ack with error — should Nak the NATS message.
 	_ = ackFn(context.Background(), errors.New("insert failed"))
 	assert.True(t, natsMsg.naked)
-	assert.Equal(t, int32(0), input.inFlight.Load())
 }
 
 func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {

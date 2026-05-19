@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -54,7 +53,6 @@ var (
 type jsInput struct {
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
-	inFlight atomic.Int32
 }
 
 func (j *jsInput) Connect(ctx context.Context) error {
@@ -161,11 +159,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		msg.MetaSet("bento_start_time", fmt.Sprintf("%d", publishedTime.UnixMilli()))
 
-		j.inFlight.Add(1)
-
 		ackFn := func(ackCtx context.Context, err error) error {
-			defer j.inFlight.Add(-1)
-
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
 				// Log the Nak failure but return nil to Bento so it doesn't treat the Nak-error as a crash

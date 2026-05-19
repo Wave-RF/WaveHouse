@@ -192,6 +192,7 @@ func TestIsMutation(t *testing.T) {
 		{"alter", "ALTER TABLE t ADD COLUMN c String", true},
 		{"create", "CREATE TABLE t (a Int)", true},
 		{"rename", "RENAME TABLE a TO b", true},
+		{"exchange", "EXCHANGE TABLES t1 AND t2", true},
 		{"optimize", "OPTIMIZE TABLE t", true},
 		{"replace", "REPLACE INTO t VALUES (1)", true},
 		{"grant", "GRANT SELECT ON t TO u", true},
