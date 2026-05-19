@@ -74,19 +74,29 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 
 ### `GET /health` — Liveness Probe
 
-Returns `200 OK` if the process is running. No authentication required.
+Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
-**Response:**
+**Response (ready):**
 
 ```json
 {"status": "ok"}
 ```
 
+**Response (boot-degraded):**
+
+```json
+{"status": "degraded", "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"}
+```
+
+Status code: `503 Service Unavailable`
+
+The boot-degraded response lets an operator `curl /health` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
+
 ---
 
 ### `GET /ready` — Readiness Probe
 
-Returns `200 OK` if the process is running and ClickHouse is reachable. No authentication required.
+Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
 
 **Response (ready):**
 
@@ -311,8 +321,8 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `topic` | string | `ingest.>` | NATS subject to subscribe to. Supports NATS wildcards: `*` matches one token, `>` matches one or more remaining tokens. |
-| `since` | string | — | RFC 3339 timestamp. If provided, replays historical events from NATS before switching to live streaming. |
+| `table` | string | (required) | Table name to subscribe to. Must match `^[a-zA-Z_][a-zA-Z0-9_]*$` (rejects NATS wildcards `*` / `>`). Returns 400 if missing or invalid. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp. If provided, replays historical events from NATS before switching to live streaming. |
 | `token` | string | — | JWT token (alternative to `Authorization` header, useful for `EventSource`). Stripped from URL after extraction. |
 
 **Headers:**
@@ -328,36 +338,35 @@ id: 2026-03-24T12:00:00.123Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","data":{"page":"/home","button":"signup"}}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"page_views","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"url":"/dashboard"}}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"page":"/pricing"}}
 ```
+
+Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table or use the WebSocket endpoint with in-band multiplexing.
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
 **curl example:**
 
 ```bash
-# All tables
-curl -N http://localhost:8080/v1/stream/sse
-
-# Specific table
-curl -N "http://localhost:8080/v1/stream/sse?topic=ingest.clicks"
+# Subscribe to a specific table
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 
 # With gap-fill
-curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
 ---
 
 ### `GET /v1/stream/ws` — WebSocket Stream
 
-Opens a WebSocket connection for real-time event streaming. Supports in-band multiplexing — a single WebSocket can subscribe to multiple topics dynamically.
+Opens a WebSocket connection for real-time event streaming. Supports in-band multiplexing — a single WebSocket can subscribe to multiple tables dynamically.
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `topic` | string | — | Optional initial topic to subscribe to (backward compatible). If omitted, the client must send subscribe commands. |
-| `since` | string | — | RFC 3339 timestamp for gap-fill on the initial `?topic=` subscription. |
+| `table` | string | — | Optional initial table to subscribe to. If omitted, the client must send subscribe commands. When present, must match `^[a-zA-Z_][a-zA-Z0-9_]*$` — invalid values return 400 before the WebSocket upgrade. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp for gap-fill on the initial `?table=` subscription. |
 | `token` | string | — | JWT token (alternative to `Authorization` header). Stripped from URL after extraction. |
 
 **In-band commands (client → server):**
@@ -365,17 +374,17 @@ Opens a WebSocket connection for real-time event streaming. Supports in-band mul
 After connecting, send JSON commands to manage subscriptions:
 
 ```json
-{"action": "subscribe", "topic": "ingest.clicks"}
-{"action": "subscribe", "topic": "ingest.page_views"}
-{"action": "unsubscribe", "topic": "ingest.clicks"}
+{"action": "subscribe", "table": "clicks"}
+{"action": "subscribe", "table": "page_views"}
+{"action": "unsubscribe", "table": "clicks"}
 ```
 
 **Outbound message format (server → client):**
 
-Each message is wrapped in an envelope with the topic:
+Each message is wrapped in an envelope labelled with the table name:
 
 ```json
-{"topic": "ingest.clicks", "data": {"table_name": "clicks", "received_timestamp": "...", "data": {...}}}
+{"table": "clicks", "data": {"table_name": "clicks", "received_timestamp": "...", "data": {...}}}
 ```
 
 **JavaScript example:**
@@ -383,12 +392,12 @@ Each message is wrapped in an envelope with the topic:
 ```javascript
 const ws = new WebSocket("ws://localhost:8080/v1/stream/ws?token=<jwt>");
 ws.onopen = () => {
-  ws.send(JSON.stringify({ action: "subscribe", topic: "ingest.clicks" }));
-  ws.send(JSON.stringify({ action: "subscribe", topic: "ingest.page_views" }));
+  ws.send(JSON.stringify({ action: "subscribe", table: "clicks" }));
+  ws.send(JSON.stringify({ action: "subscribe", table: "page_views" }));
 };
 ws.onmessage = (event) => {
-  const { topic, data } = JSON.parse(event.data);
-  console.log(`[${topic}]`, data.table_name, data.data);
+  const { table, data } = JSON.parse(event.data);
+  console.log(`[${table}]`, data.table_name, data.data);
 };
 ```
 

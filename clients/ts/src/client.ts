@@ -81,13 +81,12 @@ export class WaveHouseClient<DB extends Database = Database> {
     return sql<Row>(this._ctx, query, params, opts);
   }
 
-  /** @internal Create a stream for the given table/topic. */
+  /** @internal Create a stream for the given table. */
   private _createStream<T = Record<string, unknown>>(
     table: string,
     opts?: StreamOptions,
   ): StreamController<T> {
     const transportType = opts?.transport ?? this._config.transport ?? 'auto';
-    const topic = `ingest.${table}`;
 
     // The Smart 'auto' Logic
     let useWS = transportType === 'ws';
@@ -126,7 +125,7 @@ export class WaveHouseClient<DB extends Database = Database> {
         connect() {
           // Subscribe to the manager; forward events to the transport callbacks.
           const unsub = mgr.subscribe<T>(
-            topic,
+            table,
             (event) => this.onEvent?.(event),
             (status) => this.onStatus?.(status),
             (error) => this.onError?.(error),
@@ -154,7 +153,7 @@ export class WaveHouseClient<DB extends Database = Database> {
 
     const transport = new SSETransport<T>({
       baseURL: this._ctx.baseURL,
-      topic,
+      table,
       since: opts?.since,
     });
     const controller = new StreamController<T>(transport);

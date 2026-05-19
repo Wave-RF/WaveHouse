@@ -535,12 +535,12 @@ interface StreamEvent<T> {
 
 ### `SharedWSManager`
 
-When using WebSocket transport, the SDK automatically multiplexes all topic subscriptions over a single WebSocket connection per client via `SharedWSManager`. This is transparent — `.stream()` calls route through it automatically.
+When using WebSocket transport, the SDK automatically multiplexes all per-table subscriptions over a single WebSocket connection per client via `SharedWSManager`. This is transparent — `.stream()` calls route through it automatically.
 
 Key behaviors:
-- Ref-counted subscriptions: unsubscribing removes only when the last subscriber for a topic disconnects.
-- Auto-reconnect with exponential backoff; all active topics resubscribed on reconnect.
-- NATS-style wildcard matching (`*` = one token, `>` = one-or-more) on the client side.
+- Ref-counted subscriptions: unsubscribing removes only when the last subscriber for a table disconnects.
+- Auto-reconnect with exponential backoff; all active table subscriptions resubscribed on reconnect.
+- Exact-match dispatch by table name. The legacy NATS-style wildcards (`*`, `>`) are no longer accepted server-side; subscribe to one concrete table per call.
 
 ### Client-Side Stream Filtering
 

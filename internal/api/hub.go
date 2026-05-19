@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"sync"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -84,59 +83,10 @@ func (h *Hub) Broadcast(topic string, msg *mq.Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	sent := make(map[chan []byte]struct{})
-
-	// Exact match. Only mark a channel as "sent" after the send actually
-	// succeeds — if the channel is full and we hit the default case, the
-	// wildcard loop below gets a second chance.
 	for ch := range h.subscribers[topic] {
 		select {
 		case ch <- data:
-			sent[ch] = struct{}{}
 		default:
 		}
 	}
-
-	// Wildcard match: iterate all subscriber patterns.
-	for pattern, chs := range h.subscribers {
-		if pattern == topic {
-			continue // already handled above
-		}
-		if !matchTopic(pattern, topic) {
-			continue
-		}
-		for ch := range chs {
-			if _, dup := sent[ch]; dup {
-				continue
-			}
-			select {
-			case ch <- data:
-				sent[ch] = struct{}{}
-			default:
-			}
-		}
-	}
-}
-
-// matchTopic checks whether a NATS-style pattern matches a subject.
-// Tokens are separated by ".".
-//   - "*" matches exactly one token
-//   - ">" as the last pattern token matches one or more remaining tokens
-func matchTopic(pattern, subject string) bool {
-	pTokens := strings.Split(pattern, ".")
-	sTokens := strings.Split(subject, ".")
-
-	for i, pt := range pTokens {
-		if pt == ">" {
-			// ">" must be the last token and matches 1+ remaining subject tokens.
-			return i < len(sTokens)
-		}
-		if i >= len(sTokens) {
-			return false
-		}
-		if pt != "*" && pt != sTokens[i] {
-			return false
-		}
-	}
-	return len(pTokens) == len(sTokens)
 }
