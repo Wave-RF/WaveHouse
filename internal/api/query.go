@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,9 +25,13 @@ import (
 // `data` array (or `[]` for mutations) back to the caller.
 //
 // Why a proxy instead of clickhouse-go's native Query/Exec:
-//   - ClickHouse classifies statements natively, so multi-statement input
-//     (`SELECT 1; TRUNCATE t`), arbitrary DDL/DML verbs (current and
-//     future), and inline FORMAT directives all just work.
+//   - ClickHouse classifies statements natively, so any single statement
+//     (arbitrary DDL/DML verbs, current and future) and inline FORMAT
+//     directives all just work without WaveHouse-side parsing.
+//     Multi-statement input (`SELECT 1; TRUNCATE t`) also works when
+//     the upstream ClickHouse has multi-query enabled, which is the
+//     default in recent versions; older or restrictively-configured
+//     servers may reject the second statement with a clear error.
 //   - There is no isMutation heuristic to maintain — no leading-verb table,
 //     no comment stripper, no CTE-aware paren scanner, no class of bug
 //     where a future ClickHouse verb routes the wrong way.
@@ -44,17 +49,37 @@ type QueryHandler struct {
 	Username string
 	Password string
 	Database string
+	// maxResponseBytes optionally overrides the default upstream response
+	// buffer cap (maxCHResponseBytes). When 0, the default applies. Exists
+	// so same-package tests can pin the cap-overflow path without
+	// allocating tens of MiB per run; not a production tuning knob, hence
+	// unexported.
+	maxResponseBytes int64
+	// maxRequestBytes optionally overrides the default inbound request
+	// body cap (maxRequestBodyBytes). When 0, the default applies. Same
+	// test-only purpose as maxResponseBytes.
+	maxRequestBytes int64
 }
 
-// maxCHResponseBytes caps how much of the ClickHouse response the proxy
-// will buffer in memory. 64 MiB is generous for any reasonable admin query
-// (a SELECT returning ~64 MiB of JSON is itself a smell — admins should be
-// using FORMAT JSONEachRow + streaming clients for genuinely-large results,
-// or the structured query endpoint with its DefaultMaxRows cap). The cap
-// is here as a safety net against a runaway SELECT exhausting the API
-// server's RAM; admin-only doesn't mean operators won't accidentally OOM
-// themselves.
-const maxCHResponseBytes = 64 << 20 // 64 MiB
+const (
+	// maxCHResponseBytes caps how much of the ClickHouse response the proxy
+	// will buffer in memory. 64 MiB is generous for any reasonable admin
+	// query (a SELECT returning ~64 MiB of JSON is itself a smell — admins
+	// should be using FORMAT JSONEachRow + streaming clients for
+	// genuinely-large results, or the structured query endpoint with its
+	// DefaultMaxRows cap). The cap is here as a safety net against a
+	// runaway SELECT exhausting the API server's RAM; admin-only doesn't
+	// mean operators won't accidentally OOM themselves.
+	maxCHResponseBytes = 64 << 20 // 64 MiB
+
+	// maxRequestBodyBytes caps the inbound SQL request body. 16 MiB is well
+	// above any plausible query (production SQL strings are typically
+	// < 1 KiB); the bound exists to keep a misbehaving admin script from
+	// forcing the handler to buffer arbitrarily large input before the
+	// upstream forward. Symmetry with maxCHResponseBytes on the response
+	// side.
+	maxRequestBodyBytes = 16 << 20 // 16 MiB
+)
 
 // NewQueryHandler builds a handler that proxies to ClickHouse over HTTP.
 // endpoint should be the base URL (`http://host:8123`); username/password
@@ -69,11 +94,21 @@ const maxCHResponseBytes = 64 << 20 // 64 MiB
 // inbound context longer than 30s).
 func NewQueryHandler(endpoint, username, password, database string) *QueryHandler {
 	return &QueryHandler{
-		HTTPClient: &http.Client{},
-		Endpoint:   endpoint,
-		Username:   username,
-		Password:   password,
-		Database:   database,
+		HTTPClient: &http.Client{
+			// ClickHouse's HTTP interface doesn't 3xx in normal operation,
+			// and h.Endpoint is operator-controlled config (not user
+			// input). Don't chase redirects — if an operator misconfigures
+			// the endpoint to point at something that 3xx's, surface the
+			// 3xx response as-is. Our status-mapping below classifies
+			// anything outside 2xx/4xx as 502.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		Endpoint: endpoint,
+		Username: username,
+		Password: password,
+		Database: database,
 	}
 }
 
@@ -82,8 +117,30 @@ type queryRequest struct {
 }
 
 func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	// Every response from this handler is non-cacheable — admins expect
+	// every request to hit ClickHouse, and downstream caches (CDN, browser,
+	// corp proxy) re-introduce the staleness class of bug the in-process
+	// cache strip already removed. Set it once up top so error responses
+	// carry the header too, not only the 200 path.
+	w.Header().Set("Cache-Control", "no-store")
+	// Tell browsers not to MIME-sniff the body. Admins can ask ClickHouse
+	// for arbitrary FORMATs via inline `FORMAT …`, and the proxy passes
+	// the upstream Content-Type through verbatim (e.g. text/html for
+	// `FORMAT HTML`). nosniff defangs the browser-as-renderer concern;
+	// matches writeJSONError's posture on the error path.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	reqCap := int64(maxRequestBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 	var req queryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeded %d bytes", reqCap))
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -133,15 +190,19 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Cap the upstream body at maxCHResponseBytes. Read +1 so we can detect
-	// "exactly cap or more" without a second read.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCHResponseBytes+1))
+	// Cap the upstream body at the configured response limit. Read +1 so we
+	// can detect "exactly cap or more" without a second read.
+	respCap := int64(maxCHResponseBytes)
+	if h.maxResponseBytes > 0 {
+		respCap = h.maxResponseBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "read clickhouse response: "+err.Error())
 		return
 	}
-	if len(body) > maxCHResponseBytes {
-		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", maxCHResponseBytes))
+	if int64(len(body)) > respCap {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", respCap))
 		return
 	}
 
@@ -173,13 +234,6 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, status, msg)
 		return
 	}
-
-	// Discourage downstream HTTP caches. /v1/admin/query has no
-	// read-your-writes guarantees beyond ClickHouse's own and the admin
-	// expects every request to hit the database — caching at any layer
-	// (CDN, browser, corp proxy) would re-introduce the staleness class of
-	// bug the in-process cache strip just removed.
-	w.Header().Set("Cache-Control", "no-store")
 
 	// ClickHouse returns an empty body for mutations (TRUNCATE/INSERT/
 	// DELETE/etc. with no result set). Marshal those to `[]` so clients

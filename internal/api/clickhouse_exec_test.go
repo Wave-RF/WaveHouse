@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +21,9 @@ type stubConn struct {
 	execCount  int
 	queryCount int
 	execErr    error
+	// queryRows, when non-nil, is returned by Query in place of the default
+	// empty rows. Tests that exercise row-scan / transformRow paths use this.
+	queryRows driver.Rows
 }
 
 func (c *stubConn) Exec(_ context.Context, _ string, _ ...any) error {
@@ -27,6 +33,9 @@ func (c *stubConn) Exec(_ context.Context, _ string, _ ...any) error {
 
 func (c *stubConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
 	c.queryCount++
+	if c.queryRows != nil {
+		return c.queryRows, nil
+	}
 	return &chainEmptyRows{}, nil
 }
 
@@ -138,3 +147,75 @@ func TestExecuteCHQuery_SelectRoutesToQuery(t *testing.T) {
 	assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
 	assert.Equal(t, []map[string]any{}, rows, "zero-row SELECT must marshal to [] not null")
 }
+
+// TestExecuteCHQuery_TransformsClickHouseTypes pins transformRow's contract
+// at the unit level: UUIDs become canonical strings, time.Time becomes
+// RFC3339Nano UTC, and other scalars pass through unchanged. The integration
+// suite exercises the same path against a real ClickHouse, but this unit
+// test catches regressions in the type-conversion branches without
+// standing up testcontainers.
+func TestExecuteCHQuery_TransformsClickHouseTypes(t *testing.T) {
+	t.Parallel()
+	id := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	ts := time.Date(2026, 5, 19, 12, 30, 45, 123456789, time.FixedZone("EST", -5*3600))
+	conn := &stubConn{queryRows: &chainOneRow{
+		columns: []chainColumnType{
+			{name: "id", scanType: reflect.TypeFor[uuid.UUID]()},
+			{name: "received_at", scanType: reflect.TypeFor[time.Time]()},
+			{name: "n", scanType: reflect.TypeFor[int64]()},
+		},
+		values: []any{id, ts, int64(42)},
+	}}
+
+	rows, err := executeCHQuery(context.Background(), conn, "SELECT id, received_at, n FROM t", nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, id.String(), rows[0]["id"], "UUID must be stringified")
+	assert.Equal(t, ts.UTC().Format(time.RFC3339Nano), rows[0]["received_at"], "time must be RFC3339Nano in UTC")
+	assert.Equal(t, int64(42), rows[0]["n"], "scalar must pass through unchanged")
+}
+
+// chainOneRow implements driver.Rows for a single canned row. Scan
+// reflect-writes values[i] into the i-th destination pointer that
+// executeCHQuery allocates from ColumnTypes()[i].ScanType().
+type chainOneRow struct {
+	driver.Rows
+	columns []chainColumnType
+	values  []any
+	yielded bool
+}
+
+func (r *chainOneRow) Next() bool {
+	if r.yielded {
+		return false
+	}
+	r.yielded = true
+	return true
+}
+
+func (r *chainOneRow) Scan(dest ...any) error {
+	for i, d := range dest {
+		reflect.ValueOf(d).Elem().Set(reflect.ValueOf(r.values[i]))
+	}
+	return nil
+}
+
+func (*chainOneRow) Close() error { return nil }
+func (*chainOneRow) Err() error   { return nil }
+
+func (r *chainOneRow) ColumnTypes() []driver.ColumnType {
+	out := make([]driver.ColumnType, len(r.columns))
+	for i := range r.columns {
+		out[i] = &r.columns[i]
+	}
+	return out
+}
+
+type chainColumnType struct {
+	driver.ColumnType
+	name     string
+	scanType reflect.Type
+}
+
+func (c *chainColumnType) Name() string           { return c.name }
+func (c *chainColumnType) ScanType() reflect.Type { return c.scanType }

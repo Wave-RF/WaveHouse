@@ -198,19 +198,29 @@ Client POST /v1/admin/query
     → Mutation/DDL: returns 200 + empty body. The handler emits `[]` so
       response shape stays "always an array."
     → Error: returns 4xx/5xx + plain-text error message. The handler
-      maps that to HTTP 500 with the trimmed message inside the JSON
-      error envelope — admins see ClickHouse's exact diagnostic.
+      maps ClickHouse 4xx → HTTP 400 (caller-fault, bad SQL or missing
+      table) and ClickHouse 5xx → HTTP 502 (gateway-fault, upstream
+      problem), with the trimmed message inside the JSON error
+      envelope — admins see ClickHouse's exact diagnostic.
   → Response carries Cache-Control: no-store so no downstream layer
     (browser, CDN, corp proxy) caches the result.
 ```
 
 The proxy-pattern wins are: zero classification logic on the WaveHouse
-side (no isMutation heuristic to maintain), multi-statement input just
-works (`SELECT 1; TRUNCATE t` does both, in order), and any ClickHouse
-statement type — including ones added in future versions — works without
-WaveHouse code changes. The structured query endpoint and pipes still
-go through `clickhouse-go`'s native driver (Query/Exec) for performance
-and to keep the cached row-array shape consistent.
+side (no isMutation heuristic to maintain), and any ClickHouse statement
+type — including verbs added in future versions and inline FORMAT
+overrides — works without WaveHouse code changes. Multi-statement input
+(`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has
+multi-query enabled, which is the default on recent versions; older or
+restrictively-configured servers will return a clear error from
+ClickHouse itself for the second statement. The proxy buffers the response in memory with a
+64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow,
+to keep a runaway `SELECT *` from pinning RAM on the API server), and
+passes ClickHouse's `Content-Type` through when an inline `FORMAT`
+directive overrides the default JSON envelope. The structured query
+endpoint and pipes still go through `clickhouse-go`'s native driver
+(Query/Exec) for performance and to keep the cached row-array shape
+consistent.
 
 ### Streaming Path
 

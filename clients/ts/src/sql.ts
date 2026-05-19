@@ -15,13 +15,13 @@ import { ok, err } from './errors.js';
  * so any ClickHouse-accepted statement works — including multi-statement
  * input (`SELECT 1; TRUNCATE t`) and arbitrary DDL/DML/SYSTEM verbs.
  *
- * **No parameter binding.** Positional `?` substitution is not supported
- * (ClickHouse's HTTP interface uses a different param style entirely).
- * Inline literals into the SQL string, or use ClickHouse's named-param
- * syntax (`WHERE id = {id:UInt32}`) and pass `param_id=42` via custom
- * query-string params if you need a server-evaluated substitution. The
- * structured query builder (`wh.from(...).select(...).where(...)`) is the
- * supported safe-binding path.
+ * **No parameter binding.** Positional `?` substitution is not supported.
+ * The SDK has no way to forward ClickHouse-style named params
+ * (`WHERE id = {id:UInt32}` with `param_id=42` on the query string) —
+ * the proxy doesn't forward arbitrary query-string params to ClickHouse
+ * and the SDK doesn't expose a hook to add them. Inline literals into
+ * the SQL string, or — for safe binding from user-supplied input — use
+ * the structured query builder (`wh.from(...).select(...).where(...)`).
  */
 export async function sql<Row = Record<string, unknown>>(
   ctx: HttpContext,

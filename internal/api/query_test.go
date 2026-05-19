@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,6 +37,20 @@ func postQuery(h *QueryHandler, body []byte) *httptest.ResponseRecorder {
 	return w
 }
 
+// assertSecurityHeaders confirms Cache-Control: no-store and
+// X-Content-Type-Options: nosniff are set. Both are set unconditionally at
+// handler entry (see query.go:Handle), so every response — 200, 4xx, 5xx,
+// 413 — must carry them. A future refactor that hoists either into a
+// branch-specific spot (tempting cleanup) would silently regress without
+// this check.
+func assertSecurityHeaders(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"),
+		"Cache-Control: no-store must be set on every response, not only the 200 path")
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"),
+		"X-Content-Type-Options: nosniff must be set on every response")
+}
+
 func TestQueryHandler_MissingSQL(t *testing.T) {
 	t.Parallel()
 	// No upstream call expected — handler should reject before the proxy.
@@ -46,6 +61,7 @@ func TestQueryHandler_MissingSQL(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing sql")
 	assertJSONErrorResponse(t, w)
+	assertSecurityHeaders(t, w)
 }
 
 func TestQueryHandler_InvalidJSON(t *testing.T) {
@@ -58,6 +74,7 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 	assertJSONErrorResponse(t, w)
+	assertSecurityHeaders(t, w)
 }
 
 // TestQueryHandler_ForwardsSQLToClickHouse pins the proxy contract:
@@ -226,16 +243,20 @@ func TestQueryHandler_ForwardsCHError(t *testing.T) {
 
 			require.Equal(t, tt.wantStatus, w.Code)
 			assert.Contains(t, w.Body.String(), tt.wantMsg, "ClickHouse's error message must reach the admin verbatim")
+			assertSecurityHeaders(t, w)
 			assertJSONErrorResponse(t, w)
 		})
 	}
 }
 
-// TestQueryHandler_SetsNoStore pins the cache header. Raw SQL is admin-only
-// and admins call it for read-your-writes verification — any downstream
-// HTTP cache (CDN, browser, corp proxy) caching a SELECT would re-introduce
-// the staleness class of bug the in-process cache strip just removed.
-func TestQueryHandler_SetsNoStore(t *testing.T) {
+// TestQueryHandler_SetsSecurityHeadersOn200 pins Cache-Control: no-store
+// AND X-Content-Type-Options: nosniff on the success path. Raw SQL is
+// admin-only and admins call it for read-your-writes verification, so any
+// downstream HTTP cache (CDN, browser, corp proxy) caching a SELECT would
+// re-introduce the staleness class of bug the in-process cache strip just
+// removed. nosniff defangs the FORMAT-pass-through branch where ClickHouse
+// could return a renderable MIME like text/html.
+func TestQueryHandler_SetsSecurityHeadersOn200(t *testing.T) {
 	t.Parallel()
 	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -247,8 +268,7 @@ func TestQueryHandler_SetsNoStore(t *testing.T) {
 	w := postQuery(h, body)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"),
-		"raw SQL must not be cached by any downstream layer")
+	assertSecurityHeaders(t, w)
 }
 
 // TestQueryHandler_NoAuthHeadersWhenBlank confirms the proxy doesn't emit
@@ -306,29 +326,29 @@ func TestQueryHandler_ForwardsRawBodyAndContentType(t *testing.T) {
 	assert.Equal(t, csvBody, w.Body.String(), "non-JSON 200 body must be forwarded raw, not dropped")
 	assert.Equal(t, upstreamCT, w.Header().Get("Content-Type"),
 		"upstream Content-Type must pass through — labelling a CSV body as application/json would break SDK consumers")
+	assertSecurityHeaders(t, w)
 }
 
 // TestQueryHandler_ResponseSizeCap pins the memory-safety cap. The proxy
 // buffers the upstream response in memory (no streaming today), so a
-// runaway SELECT could OOM the API server. We bound that at
-// maxCHResponseBytes and surface a clear 502 on overflow rather than
-// silently truncating into a parse error.
+// runaway SELECT could OOM the API server. We bound that at the
+// configured cap and surface a clear 502 on overflow rather than silently
+// truncating into a parse error.
+//
+// The test overrides h.maxResponseBytes to a tiny value so we don't have
+// to allocate 64 MiB+1 per run (which on a parallel suite is real RAM
+// pressure / flake risk on loaded CI runners).
 func TestQueryHandler_ResponseSizeCap(t *testing.T) {
 	t.Parallel()
 
-	// Construct a body just over the cap. We don't actually allocate 64
-	// MiB here — we lie about Content-Length and stream a known-large
-	// number of bytes from a zero-reader. The cap check uses len(body)
-	// after io.ReadAll on the LimitReader, so any source > cap suffices.
+	const testCap = 1024
 	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// 64 MiB + 1 byte of 'a' characters. io.Copy from a strings.Reader
-		// works on testservers without buffering the full string at once
-		// for the test's own RAM.
-		oversized := bytes.Repeat([]byte{'a'}, maxCHResponseBytes+1)
+		oversized := bytes.Repeat([]byte{'a'}, testCap+1)
 		_, _ = w.Write(oversized)
 	})
 	h := newProxyHandler(t, fake)
+	h.maxResponseBytes = testCap
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM huge_table"})
 	w := postQuery(h, body)
@@ -336,6 +356,32 @@ func TestQueryHandler_ResponseSizeCap(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, w.Code, "oversized response must 502, not OOM")
 	assert.Contains(t, w.Body.String(), "exceeded")
 	assertJSONErrorResponse(t, w)
+	assertSecurityHeaders(t, w)
+}
+
+// TestQueryHandler_RequestBodyCap pins the inbound 16 MiB body cap. The
+// handler wraps r.Body in http.MaxBytesReader before the JSON decode and
+// returns 413 with a "request body exceeded N bytes" message — distinct
+// from "invalid json", so admin scripts can tell "you sent garbage" from
+// "you sent too much".
+//
+// Like the response-cap test, this overrides h.maxRequestBytes to a tiny
+// value so we don't allocate 16 MiB per run.
+func TestQueryHandler_RequestBodyCap(t *testing.T) {
+	t.Parallel()
+
+	const testCap = 64
+	h := NewQueryHandler("http://unused.invalid", "", "", "")
+	h.maxRequestBytes = testCap
+
+	body, _ := json.Marshal(queryRequest{SQL: strings.Repeat("x", 200)})
+	require.Greater(t, len(body), testCap, "test body must exceed the cap")
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized request must 413, not 400")
+	assert.Contains(t, w.Body.String(), "request body exceeded")
+	assertJSONErrorResponse(t, w)
+	assertSecurityHeaders(t, w)
 }
 
 // TestQueryHandler_ContextCancelBoundedAt30s is a sanity check that the

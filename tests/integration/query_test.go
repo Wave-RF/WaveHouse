@@ -148,7 +148,8 @@ func TestQuery_DeleteReturnsEmptyArray(t *testing.T) {
 	require.Equal(t, http.StatusOK, qResp.StatusCode, "body: %s", respBytes)
 	assert.JSONEq(t, "[]", string(respBytes))
 
-	// The unparameterized row stays; the parameterized one goes.
+	// The DELETE through /v1/admin/query targets only the row whose id
+	// was inlined into the SQL literal; the other row stays.
 	require.Eventually(t, func() bool {
 		var kept, dropped uint64
 		if err := e.chConn.QueryRow(ctx,
