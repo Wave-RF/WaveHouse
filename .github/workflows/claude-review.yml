@@ -175,7 +175,7 @@ jobs:
             echo 'PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: anthropics/claude-code-action@f4fb5c6cdccc1ee7af63692f5d08d56efaa64cc8 # v1.0.121
+      - uses: anthropics/claude-code-action@24492741e0ccfdef4c1d19da8e11e0f373d07494 # v1.0.124
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
