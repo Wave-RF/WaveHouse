@@ -40,7 +40,7 @@ Two scripts, both committed to the repo:
 | `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Then emits informational stderr nudges for likely doc-sync and SDK-sync misses (see AGENTS.md §Documentation Sync and §SDK Sync). Nudges don't block. |
 | `pre-push` | Checks for `tmp/ci-passed-<HEAD-sha>` marker. The `make ci` target writes this marker on success. **Blocks** if absent — Claude (or you) runs `make ci`, sees output, fixes failures, retries push. |
 
-**Humans** can bypass with `git commit --no-verify` / `git push --no-verify` for intentional WIP / draft pushes. **Agents cannot** — `--no-verify` and direct marker writes are blocked (see [Agent PR Discipline](#agent-pr-discipline)).
+**Humans** can bypass with `git commit --no-verify` / `git push --no-verify` for intentional WIP / draft pushes. **Agents cannot** — `--no-verify` is blocked, the obvious marker-write idioms are denied at the permission layer, and the rest is an honest-agent rule (see [Agent PR Discipline](#agent-pr-discipline)).
 
 The marker invalidates on every commit (HEAD SHA changes), so `make ci` re-runs after each new commit before pushing. That's the AGENTS.md rule made literal.
 
