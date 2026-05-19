@@ -9,7 +9,7 @@ You are reviewing the current branch's delta against main, using the same prompt
 
 ## Source of truth
 
-Read `.github/prompts/pr-review.md` first. That file is the canonical WaveHouse review prompt and applies here verbatim — including the focus areas (correctness → security → performance → testing → docs/sdk-sync), the severity tags `[MUST]`/`[SHOULD]`/`[MAY]`, the noise filter, and the verdict rules.
+Read `.github/prompts/pr-review.md` first. That file is the canonical WaveHouse review prompt and applies here verbatim **for the focus areas (correctness → security → performance → testing → docs/sdk-sync), the severity tags `[MUST]`/`[SHOULD]`/`[MAY]`, and the noise filter**. The verdict rules below override the CI prompt's — WaveHouse pre-push runs a stricter rubric (any finding forces iterate; see §Verdict mapping below).
 
 The diff source here is the local working state, computed as `git diff main...HEAD` (three dots — equivalent to `git diff $(git merge-base main HEAD) HEAD`, i.e. merge-base vs HEAD). Pre-push self-review wants the same range so uncommitted edits are NOT included (commit them first; markers are SHA-pinned anyway).
 

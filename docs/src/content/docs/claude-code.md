@@ -48,7 +48,7 @@ The marker invalidates on every commit (HEAD SHA changes), so `make ci` re-runs 
 
 | Path | Purpose |
 | ---- | ------- |
-| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, --no-verify, marker forgery, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all four hooks wired |
+| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, --no-verify, the obvious marker-write idioms, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all four hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: enforces Agent PR Discipline (drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes) |
 | `.claude/hooks/review-marker.sh` | PostToolUse Agent: writes `tmp/review-passed-<HEAD-sha>` when `pre-push-reviewer` returns `VERDICT: ship_it` |
@@ -97,8 +97,8 @@ Agents (Claude Code etc.) have additional gating beyond what humans face — enf
 - **Drafts only.** `gh pr create` must include `--draft`. Only humans transition draft → ready (`gh pr ready` is blocked), approve (`gh pr review --approve` is blocked), or request changes (`gh pr review --request-changes` is blocked).
 - **No human reviewer assignment.** `gh pr edit --add-reviewer / --add-assignee` and `POST /requested_reviewers` are blocked. The `housekeeping.yml` workflow auto-assigns; humans handle the rest.
 - **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, `@gemini-code-assist /gemini review`, `@claude` or `/review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
-- **Pre-push review required on PR branches.** Before `git push` to a branch with an open PR, the agent must invoke `pre-push-reviewer` (fresh context). On `VERDICT: ship_it`, the marker auto-writes and push proceeds. On iterate/block, fix and re-invoke (always fresh context) until clean.
-- **No bypass.** `--no-verify`, direct marker writes, and creative wrappers (`sh -c "touch ..."`, redirects, etc.) are all blocked. Markers come from `make ci` and the review-marker hook — nowhere else.
+- **Pre-push review required on PR branches.** Before `git push` to a branch with an open PR, the agent must invoke `pre-push-reviewer` (fresh context). `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate. On iterate, fix the findings and re-invoke (always fresh context) — loop until clean.
+- **No bypass.** `--no-verify` is blocked on `git push` / `git commit` for agents. The obvious marker-write idioms (`Bash(touch tmp/ci-passed:*)`, `Write`/`Edit` on `tmp/ci-passed-*` and `tmp/review-passed-*`) are denied at the permission layer. Everything else relies on the honest-agent rule in AGENTS.md §"Agent PR Discipline": markers come from `make ci` and the `review-marker.sh` hook — nowhere else, by any means. Bash can write a file by a dozen paths and regex enforcement is a porous game of whack-a-mole; the rule is documented, not regex-enforced.
 - **PR reviews on others' PRs stay local by default.** Use `pr-review-locally` skill for local-only audits. To make the bot comment on the PR remotely, fire the CI workflow: `gh workflow run "Claude PR review" -f pr_number=<N>` — that's the canonical bot-comment path.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
