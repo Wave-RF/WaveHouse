@@ -1,0 +1,537 @@
+/* ============================================================
+   WaveHouse design system — Tailwind v4 + Starlight overrides.
+
+   Token philosophy:
+     - Dark mode is the brand. Light mode is a high-contrast inversion.
+     - Brand colors come from Wave RF (electric blue #06B0BF) but
+       background gets denser/cooler than the parent site to read
+       as a dev tool, not a marketing page.
+     - Section accents (palette: olive/terracotta/sky) are applied
+       sparingly as wayfinding, not as decoration.
+   ============================================================ */
+
+@layer base, starlight, theme, components, utilities;
+
+@import "@fontsource-variable/inter/index.css";
+@import "@fontsource-variable/jetbrains-mono/index.css";
+
+@import "@astrojs/starlight-tailwind";
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* ---------- Tailwind theme tokens ---------- */
+
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono",
+    Menlo, monospace;
+  --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+
+  /* Brand palette — raw values exposed as utilities (text-wave-blue etc.) */
+  --color-wave-blue: #06B0BF;
+  --color-wave-blue-hi: #1DC9D8;
+  --color-wave-sky: #9CD9DF;
+  --color-wave-olive: #708D57;
+  --color-wave-terracotta: #A0573B;
+  --color-wave-charcoal: #2E2E2E;
+
+  --radius-card: 0.75rem;
+  --radius-pill: 999px;
+}
+
+/* ---------- Semantic tokens (dark mode is default) ---------- */
+
+:root {
+  --wh-bg: #0A0B0E;
+  --wh-bg-grid: #0E1014;
+  --wh-surface: #14171C;
+  --wh-surface-elevated: #1B1F26;
+  --wh-surface-overlay: #232830;
+  --wh-border: #23272F;
+  --wh-border-strong: #2F343F;
+
+  --wh-ink: #F1F3F7;
+  --wh-ink-muted: #9CA3AF;
+  --wh-ink-subtle: #6B7280;
+
+  --wh-accent: #06B0BF;
+  --wh-accent-hi: #1DC9D8;
+  --wh-accent-lo: #054249;
+  --wh-accent-ink: #04171A;
+  --wh-accent-glow: rgba(6, 176, 191, 0.18);
+  --wh-accent-glow-strong: rgba(6, 176, 191, 0.32);
+
+  --wh-sky: #9CD9DF;
+  --wh-olive: #708D57;
+  --wh-terracotta: #A0573B;
+  --wh-amber: #F59E0B;
+  --wh-rose: #F43F5E;
+  --wh-emerald: #10B981;
+
+  --wh-code-bg: #0F1116;
+  --wh-code-border: #1B1E26;
+
+  --wh-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --wh-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.32);
+  --wh-shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.48);
+  --wh-shadow-glow: 0 0 0 1px rgba(6, 176, 191, 0.25),
+    0 18px 48px -16px rgba(6, 176, 191, 0.45);
+
+  --wh-section-accent: var(--wh-accent);
+}
+
+:root[data-theme="light"] {
+  --wh-bg: #FAFAF9;
+  --wh-bg-grid: #F4F5F7;
+  --wh-surface: #FFFFFF;
+  --wh-surface-elevated: #F4F5F7;
+  --wh-surface-overlay: #EAECEF;
+  --wh-border: #E4E6EB;
+  --wh-border-strong: #D1D5DB;
+
+  --wh-ink: #14171C;
+  --wh-ink-muted: #4B5563;
+  --wh-ink-subtle: #6B7280;
+
+  --wh-accent: #086D77;
+  --wh-accent-hi: #06B0BF;
+  --wh-accent-lo: #D8EFF2;
+  --wh-accent-ink: #FFFFFF;
+  --wh-accent-glow: rgba(8, 109, 119, 0.14);
+  --wh-accent-glow-strong: rgba(8, 109, 119, 0.28);
+
+  --wh-sky: #4FA8B1;
+  --wh-olive: #5C7A45;
+  --wh-terracotta: #8A4729;
+
+  --wh-code-bg: #F4F5F7;
+  --wh-code-border: #E4E6EB;
+
+  --wh-shadow-sm: 0 1px 2px rgba(15, 17, 22, 0.04);
+  --wh-shadow-md: 0 8px 24px rgba(15, 17, 22, 0.08);
+  --wh-shadow-lg: 0 24px 60px rgba(15, 17, 22, 0.12);
+  --wh-shadow-glow: 0 0 0 1px rgba(8, 109, 119, 0.22),
+    0 18px 48px -16px rgba(8, 109, 119, 0.32);
+}
+
+/* ---------- Starlight CSS variable mapping ----------
+   These map Starlight's built-in tokens to our semantic ones, so
+   the sidebar, nav, search, etc. inherit the design system without
+   per-component overrides. */
+
+:root {
+  --sl-color-accent-low: var(--wh-accent-lo);
+  --sl-color-accent: var(--wh-accent);
+  --sl-color-accent-high: var(--wh-accent-hi);
+  --sl-color-text-accent: var(--wh-accent-hi);
+
+  --sl-color-white: var(--wh-ink);
+  --sl-color-gray-1: #E5E7EB;
+  --sl-color-gray-2: #C2C9D1;
+  --sl-color-gray-3: var(--wh-ink-muted);
+  --sl-color-gray-4: #4B5563;
+  --sl-color-gray-5: var(--wh-border-strong);
+  --sl-color-gray-6: var(--wh-border);
+  --sl-color-gray-7: #16181D;
+  --sl-color-black: var(--wh-bg);
+
+  --sl-color-bg: var(--wh-bg);
+  --sl-color-bg-nav: color-mix(in oklab, var(--wh-bg) 78%, transparent);
+  --sl-color-bg-sidebar: var(--wh-bg);
+  --sl-color-bg-inline-code: var(--wh-code-bg);
+  --sl-color-hairline: var(--wh-border);
+  --sl-color-hairline-shade: var(--wh-border-strong);
+  --sl-color-hairline-light: var(--wh-border);
+
+  --sl-font: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono",
+    Menlo, monospace;
+
+  --sl-text-h1: 2.75rem;
+  --sl-text-h2: 1.875rem;
+  --sl-text-h3: 1.375rem;
+  --sl-text-h4: 1.125rem;
+  --sl-text-h5: 1rem;
+
+  --sl-sidebar-width: 19rem;
+  --sl-content-width: 50rem;
+  --sl-nav-height: 4rem;
+
+  --sl-shadow-sm: var(--wh-shadow-sm);
+  --sl-shadow-md: var(--wh-shadow-md);
+  --sl-shadow-lg: var(--wh-shadow-lg);
+}
+
+:root[data-theme="light"] {
+  --sl-color-gray-1: #14171C;
+  --sl-color-gray-2: #1F232A;
+  --sl-color-gray-3: #4B5563;
+  --sl-color-gray-4: #6B7280;
+  --sl-color-gray-5: #C2C9D1;
+  --sl-color-gray-6: var(--wh-border);
+  --sl-color-gray-7: var(--wh-surface-elevated);
+}
+
+/* ---------- Base ---------- */
+
+@layer base {
+  html {
+    background: var(--wh-bg);
+    color-scheme: dark;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+  }
+  body {
+    font-feature-settings: "ss01", "cv02", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Selection */
+  ::selection {
+    background: var(--wh-accent-glow-strong);
+    color: var(--wh-ink);
+  }
+
+  /* Focus rings — accent-tinted, never browser-default */
+  :focus-visible {
+    outline: 2px solid var(--wh-accent-hi);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Heading hierarchy tightening */
+  h1, h2, h3, h4, h5, h6 {
+    letter-spacing: -0.02em;
+    font-feature-settings: "ss01", "cv11";
+  }
+}
+
+/* ---------- Starlight tweaks ---------- */
+
+/* Generous heading spacing — keeps the deck-style rhythm from the
+ * previous design but with crisper headings. */
+.sl-markdown-content :is(h2, h3, h4) {
+  scroll-margin-top: 5rem;
+}
+.sl-markdown-content h1 {
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+.sl-markdown-content h2 {
+  margin-top: 3.5rem;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--wh-border);
+}
+.sl-markdown-content h3 {
+  margin-top: 2.5rem;
+  font-weight: 600;
+}
+.sl-markdown-content h4 {
+  margin-top: 2rem;
+  font-weight: 600;
+}
+.sl-markdown-content p {
+  line-height: 1.7;
+}
+
+/* Anchor links in body text — underline-on-hover with accent glow */
+.sl-markdown-content a:not(.not-content a):not(.sl-link-button) {
+  color: var(--wh-accent-hi);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--wh-accent-hi) 35%, transparent);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s ease, color 0.15s ease;
+}
+.sl-markdown-content a:not(.not-content a):hover {
+  text-decoration-color: var(--wh-accent-hi);
+}
+
+/* Inline code — denser, branded surface */
+.sl-markdown-content :not(pre) > code {
+  background: var(--wh-code-bg);
+  border: 1px solid var(--wh-code-border);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  font-size: 0.9em;
+  color: var(--wh-ink);
+}
+
+/* macOS-style colored dots for terminal code blocks — kept from prior design */
+.expressive-code .frame.is-terminal figcaption.header::before {
+  background: #ff5f57 !important;
+  border-radius: 50% !important;
+  width: 12px !important;
+  height: 12px !important;
+  box-shadow: 20px 0 0 #febc2e, 40px 0 0 #28c840 !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+
+/* Code block container — subtle glow border in dark mode */
+.expressive-code .frame {
+  border-radius: 0.625rem;
+  box-shadow: var(--wh-shadow-md);
+}
+
+/* Sidebar: tighter labels, accent indicator on current item */
+.sidebar-content nav > ul > li > a,
+.sidebar-content nav > ul > li > details > summary {
+  font-weight: 500;
+}
+.sidebar-content a[aria-current="page"] {
+  background: var(--wh-accent-lo);
+  color: var(--wh-accent-hi);
+  border-left: 2px solid var(--wh-accent-hi);
+  padding-left: calc(var(--sl-sidebar-item-padding-inline) - 2px);
+}
+
+/* Top nav — translucent glass over content (only when scrolled past 0) */
+header.header {
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  background: color-mix(in oklab, var(--wh-bg) 72%, transparent);
+  border-bottom: 1px solid var(--wh-border);
+}
+
+/* Right-rail TOC — quieter and monospace-y */
+.right-sidebar-panel h2 {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--wh-ink-subtle);
+  font-weight: 600;
+}
+.right-sidebar-panel a {
+  font-size: 0.8125rem;
+  color: var(--wh-ink-muted);
+  transition: color 0.12s ease;
+}
+.right-sidebar-panel a[aria-current="true"] {
+  color: var(--wh-accent-hi);
+  font-weight: 500;
+}
+
+/* "Hero" actions: refresh Starlight's default button styles */
+.action.primary {
+  background: var(--wh-accent);
+  color: var(--wh-accent-ink);
+  border: 1px solid var(--wh-accent-hi);
+  font-weight: 600;
+  box-shadow: var(--wh-shadow-glow);
+  transition: transform 0.15s ease, box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+.action.primary:hover {
+  background: var(--wh-accent-hi);
+  transform: translateY(-1px);
+}
+.action.minimal {
+  color: var(--wh-ink);
+  border: 1px solid var(--wh-border-strong);
+  background: var(--wh-surface);
+  font-weight: 500;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.action.minimal:hover {
+  border-color: var(--wh-accent);
+  background: var(--wh-surface-elevated);
+}
+
+/* Card grid: subtle glow on hover */
+.sl-link-card {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-card);
+  transition: border-color 0.15s ease, transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.sl-link-card:hover {
+  border-color: var(--wh-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--wh-shadow-glow);
+}
+
+/* Page title — slight gradient on h1 in main content */
+.content-panel h1 {
+  background: linear-gradient(
+    180deg,
+    var(--wh-ink) 0%,
+    color-mix(in oklab, var(--wh-ink) 70%, var(--wh-ink-muted)) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---------- Reusable section-accent system ----------
+ * Pages can opt in to a section accent by adding a class to the
+ * <body> via the template-key frontmatter route. The accent flows
+ * into the page title's underline and inline anchor color. */
+
+body[data-section="start"]      { --wh-section-accent: var(--wh-accent); }
+body[data-section="guides"]     { --wh-section-accent: var(--wh-olive); }
+body[data-section="reference"]  { --wh-section-accent: var(--wh-terracotta); }
+body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
+
+/* Underline on page H1 — color tied to the section */
+.content-panel > .sl-container h1::after {
+  content: "";
+  display: block;
+  width: 3rem;
+  height: 3px;
+  margin-top: 0.75rem;
+  background: var(--wh-section-accent);
+  border-radius: 999px;
+}
+
+/* ---------- Utility classes for landing page ---------- */
+
+.wh-grid-bg {
+  background-image:
+    linear-gradient(var(--wh-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wh-border) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: -1px -1px;
+  mask-image: radial-gradient(
+    ellipse at center,
+    black 0%,
+    black 40%,
+    transparent 75%
+  );
+  -webkit-mask-image: radial-gradient(
+    ellipse at center,
+    black 0%,
+    black 40%,
+    transparent 75%
+  );
+}
+
+.wh-glow-orb {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(80px);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.wh-glass {
+  background: color-mix(in oklab, var(--wh-surface) 88%, transparent);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  border: 1px solid var(--wh-border);
+}
+
+.wh-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  font-size: 0.8125rem;
+  color: var(--wh-ink-muted);
+  font-weight: 500;
+}
+.wh-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--wh-accent-hi);
+  box-shadow: 0 0 8px var(--wh-accent-glow-strong);
+}
+
+/* ---------- Landing-page stat strip ---------- */
+
+.wh-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 4rem;
+  padding: 0;
+}
+.wh-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1.25rem 1.25rem 1rem;
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-card);
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.18s ease, transform 0.18s ease,
+    box-shadow 0.18s ease;
+}
+.wh-stat::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    135deg,
+    var(--wh-accent-glow) 0%,
+    transparent 55%
+  );
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+.wh-stat:hover {
+  border-color: var(--wh-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--wh-shadow-md);
+}
+.wh-stat:hover::before {
+  opacity: 1;
+}
+.wh-stat__value {
+  font-size: 2.25rem;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  color: var(--wh-ink);
+  font-variant-numeric: tabular-nums;
+}
+.wh-stat__unit {
+  display: inline-block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--wh-accent-hi);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  margin-top: -0.5rem;
+}
+.wh-stat__label {
+  font-size: 0.8125rem;
+  color: var(--wh-ink-subtle);
+  margin-top: 0.5rem;
+  line-height: 1.4;
+}
+.wh-stat:nth-child(2) .wh-stat__unit { color: var(--wh-sky); }
+.wh-stat:nth-child(3) .wh-stat__unit { color: var(--wh-olive); }
+.wh-stat:nth-child(4) .wh-stat__unit { color: var(--wh-terracotta); }
+
+@media (max-width: 60rem) {
+  .wh-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 30rem) {
+  .wh-stats {
+    grid-template-columns: 1fr;
+  }
+  .wh-stat__value { font-size: 1.875rem; }
+}
+
+/* Reduced motion guard for the hero animations */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

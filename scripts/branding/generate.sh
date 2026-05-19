@@ -26,14 +26,14 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 source "$ROOT/scripts/_colors.sh"
 
 # --- Branding configuration ---------------------------------------------------
-# Mark stroke colors — must coexist with $sl-color-accent in docs/src/styles/custom.css.
-COLOR_LIGHT='#0e7f8f'        # deep teal — mark on light backgrounds
-COLOR_DARK='#5bbfcf'         # bright cyan — mark on dark backgrounds
+# Mark stroke colors — must coexist with --wh-accent in docs/src/styles/global.css.
+COLOR_LIGHT='#086D77'        # deep teal — mark on light backgrounds (matches --wh-accent in light mode)
+COLOR_DARK='#06B0BF'         # electric blue — mark on dark backgrounds (Wave RF parent brand)
 # Apple-touch icon is a solid app-icon tile (iOS doesn't theme-swap home-screen icons).
-COLOR_TOUCH_BG='#0e7f8f'
-COLOR_TOUCH_FG='#ffffff'
+COLOR_TOUCH_BG='#0A0B0E'
+COLOR_TOUCH_FG='#06B0BF'
 # OG card mark color — must match the brightest accent the template uses.
-COLOR_OG='#5bbfcf'
+COLOR_OG='#06B0BF'
 
 # --- Source + output paths ----------------------------------------------------
 MARK_SRC="$HERE/mark.svg"
@@ -82,10 +82,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- 1. favicon.svg -----------------------------------------------------------
 # Browsers respect prefers-color-scheme inside SVG favicons specifically — the
-# <style> block sets stroke on every <g> in the mark, which (per CSS spec)
-# overrides the presentation attribute stroke="currentColor" inside.
+# <style> block sets `color` on :root, which the mark's `currentColor` stroke
+# and fill attributes inherit (CSS color inheritance).
 cat > "$OUT_PUBLIC/favicon.svg" <<EOF
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$MARK_INNER<style>g{stroke:$COLOR_LIGHT}@media (prefers-color-scheme:dark){g{stroke:$COLOR_DARK}}</style></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$MARK_INNER<style>:root{color:$COLOR_LIGHT}@media (prefers-color-scheme:dark){:root{color:$COLOR_DARK}}</style></svg>
 EOF
 
 # --- 2. Starlight nav logos (light + dark) ------------------------------------
@@ -108,7 +108,7 @@ magick "$TMP/fav-16.png" "$TMP/fav-32.png" "$TMP/fav-48.png" "$OUT_PUBLIC/favico
 # Mark scaled to ~70% of the tile, centred, white on teal. iOS clips to a
 # rounded square automatically — keep the mark well clear of the edges.
 cat > "$TMP/touch.svg" <<EOF
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect width="180" height="180" fill="$COLOR_TOUCH_BG"/><g transform="translate(28 28) scale(1.9375)">$(mark_with_color "$COLOR_TOUCH_FG")</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect width="180" height="180" fill="$COLOR_TOUCH_BG"/><g transform="translate(28 28) scale(1.24)">$(mark_with_color "$COLOR_TOUCH_FG")</g></svg>
 EOF
 rsvg-convert -w 180 -h 180 "$TMP/touch.svg" -o "$OUT_PUBLIC/apple-touch-icon.png"
 
