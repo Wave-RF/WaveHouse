@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf /:*)",
+      "Bash(rm -rf $HOME:*)",
+      "Bash(rm -rf ~:*)",
+      "Bash(sudo rm:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git reset --hard origin:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(git update-ref -d:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh repo delete:*)",
+      "Bash(gh release delete:*)",
+      "Bash(gh workflow disable:*)",
+      "Bash(gh secret delete:*)",
+      "Bash(make deps-wipe:*)",
+      "Bash(make clean-all:*)",
+
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr review --approve:*)",
+      "Bash(gh pr review -a:*)",
+      "Bash(gh pr review --request-changes:*)",
+      "Bash(gh pr review -r:*)",
+
+      "Bash(git push --no-verify:*)",
+      "Bash(git commit --no-verify:*)",
+
+      "Bash(touch tmp/ci-passed:*)",
+      "Bash(touch tmp/review-passed:*)",
+      "Write(./tmp/ci-passed-*)",
+      "Write(./tmp/review-passed-*)",
+      "Edit(./tmp/ci-passed-*)",
+      "Edit(./tmp/review-passed-*)",
+      "Write(tmp/ci-passed-*)",
+      "Write(tmp/review-passed-*)",
+      "Edit(tmp/ci-passed-*)",
+      "Edit(tmp/review-passed-*)",
+
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
+  },
+
+  "worktree": {
+    "baseRef": "fresh",
+    "symlinkDirectories": [
+      "node_modules",
+      ".bin",
+      "tmp",
+      "data"
+    ]
+  },
+
+  "enableAllProjectMcpServers": false,
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-bash-gate.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gofumpt-on-save.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/review-marker.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

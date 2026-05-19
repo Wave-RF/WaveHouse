@@ -60,7 +60,7 @@ Eleven internal packages under `internal/` (plus `internal/testutil/` for shared
 
 ```bash
 # Setup
-make tools             # Install pinned tools, Go modules, and pnpm deps
+make tools             # Install pinned tools, Go modules, pnpm deps, and git hooks
 make help              # Show all targets with descriptions
 
 # Static checks (parallel-safe: `make -j verify`)
@@ -150,6 +150,15 @@ make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then
 
 If `make ci` passes locally, your commit has crossed the same gates CI will run. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
 
+### Enforced via git hooks
+
+`make tools` installs team-wide git hooks via `git config core.hooksPath .githooks`. They apply to humans and Claude Code alike:
+
+- **`.githooks/pre-commit`** runs `make verify` (~30s) on every commit; blocks on failure. Also emits informational nudges for likely doc-sync / SDK-sync misses (see §Documentation Sync, §SDK Sync).
+- **`.githooks/pre-push`** checks for a `tmp/ci-passed-<HEAD-sha>` marker — written by `make ci` on success. Blocks the push if `make ci` hasn't been run for the exact HEAD being pushed.
+
+Bypass with `git commit --no-verify` / `git push --no-verify` only when explicitly intentional (WIP / draft pushes where you accept the consequences). Don't disable the hooks globally; that defeats the gate.
+
 ### If local passes but CI fails
 
 Treat as environment mismatch first, test bug second. Reproduce the failure locally (`go test -race -run TestFoo ./...`); if it passes, try concurrent copies to simulate runner contention; only then look at the runner itself. Masking environment issues with longer timeouts compounds — today's 5s bump becomes tomorrow's 30s bump.
@@ -190,6 +199,87 @@ Every review comment gets a substantive reply, and every thread gets resolved be
 
 > **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
+## Branch Maintenance
+
+### Syncing a PR branch with main
+
+When the GitHub UI shows "This branch is out-of-date with the base branch" — or a feature branch needs to absorb upstream `main` commits — **merge, don't rebase**:
+
+```bash
+git fetch origin main
+git merge origin/main --no-edit
+git push
+```
+
+Force-pushes (`--force`, `--force-with-lease`) are blocked by `.claude/settings.json`'s `deny` rules and would lose inline review-thread anchors. Rebase changes commit SHAs and requires force-push, so it's wrong for the same reason. Long-lived WaveHouse branches have historically lost `pull_request` event firing (symptom: only `pull_request_target` checks appear) — the recovery is `git merge origin/main`, not close+reopen, not empty commits, not toggling draft/ready.
+
+The `pre-push` hook will block until `make ci` re-runs after the merge (HEAD changed). That's the point — the merge commit itself needs CI to have passed locally.
+
+If merge introduces conflicts: surface them to a human reviewer. Don't auto-resolve — collisions in `internal/api/router.go`, `internal/config/config.go`, or `internal/ingest/types.go` can look mechanically resolvable but break runtime behavior.
+
+See also: `.claude/skills/pr-sync-with-main/SKILL.md` for the same workflow in Claude-Code-skill form.
+
+## Agent PR Discipline
+
+These rules apply to AI agents (Claude Code etc.) working on WaveHouse PRs. Humans keep the standard git/gh affordances; agents have additional gating, enforced by `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) plus deny rules in `.claude/settings.json`.
+
+### Drafts only
+
+Agents must create PRs with `gh pr create --draft`. Only humans transition draft → ready-for-review (`gh pr ready` is blocked for agents). Only humans approve or request changes (`gh pr review --approve` / `--request-changes` are blocked).
+
+### Human reviewer assignment is humans-only
+
+Adding/removing human reviewers (`gh pr edit --add-reviewer <login>`, `gh pr edit --add-assignee <login>`, or `POST /repos/.../pulls/<N>/requested_reviewers`) is blocked for agents. The `housekeeping.yml` workflow auto-assigns the non-author admin on PR open / ready-for-review; humans handle anything else.
+
+### Bot reviewer re-triggers go through PR comments
+
+Agents CAN re-request bot reviewers by mentioning them in PR comments (`gh pr comment` is allowed). This bypasses the reviewer-assignment API entirely:
+
+| Bot | Re-trigger via PR comment |
+| --- | -------------------------- |
+| Claude review | `@claude` or `/review` |
+| Gemini Code Assist | `@gemini-code-assist` or `/gemini review` |
+| CodeRabbit | `@coderabbitai review` |
+| Copilot Pull Request Reviewer | No comment-mention; humans use the GitHub UI's re-request button |
+
+### Pre-push self-review is mandatory on PR branches
+
+Before pushing to any branch with an open PR, agents must invoke the `pre-push-reviewer` subagent in fresh context. The subagent reviews:
+
+- The full PR diff against `main` (merge-base)
+- The latest commit specifically
+- All open PR comments and reviews (top-level + inline)
+- CI status / failing checks
+- Linked issues' acceptance criteria
+
+When the subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes `tmp/review-passed-<HEAD-sha>` and the next `git push` succeeds. On `VERDICT: iterate` or `VERDICT: block`, no marker — fix the findings and re-invoke the subagent (always fresh context — never reuse the same session) until ship_it.
+
+The orchestrator agent cannot override the subagent's system prompt (it's the fixed file content of `.claude/agents/pre-push-reviewer.md`), and the subagent runs in a clean conversation context, so it doesn't share the orchestrator's bias toward its own work.
+
+### No bypass for agents
+
+- `git push --no-verify` and `git commit --no-verify` are blocked.
+- Writing `tmp/ci-passed-*` or `tmp/review-passed-*` directly (via `touch`, redirect, `cp`, `sh -c` wrapper, `Write`/`Edit` tools) is blocked.
+- Markers are written exclusively by `make ci` (ci-passed) and the `pre-push-reviewer` PostToolUse hook (review-passed). Any other path is a discipline violation.
+
+Humans retain `--no-verify` for explicit intentional bypass — see §"Local-First Validation".
+
+### Reviewing someone else's PR locally
+
+For "review PR <N>" workflows, use `.claude/skills/pr-review-locally/SKILL.md`. Procedure:
+
+```bash
+wt switch pr:<N>                # worktrunk + gh CLI; or `gh pr checkout <N>` fallback
+```
+
+Then invoke `pre-push-reviewer`. Findings stay local — agents must not post comments on the PR manually. To make the bot comment on the PR remotely, fire the CI workflow:
+
+```bash
+gh workflow run "Claude PR review" -f pr_number=<N>
+```
+
+That's the canonical path (also reachable via `@claude` / `/review` in a PR comment).
+
 ## Documentation Sync
 
 Every code change should update the corresponding docs in the same PR. A code change without its doc update is incomplete.
@@ -212,6 +302,25 @@ Source-of-truth pairs that must agree:
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
+
+## SDK Sync
+
+The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) is the canonical client and ships from this repo. When backend changes alter the public API surface, the SDK needs corresponding updates. The `pre-commit` git hook flags likely misses informationally; consult this table when deciding what to update.
+
+| Backend change | SDK considerations |
+| -------------- | ------------------ |
+| New user-facing API endpoint | Add a typed client method (in `clients/ts/src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`, etc.); update `docs/src/content/docs/sdk.md` |
+| Change to JWT auth / role extraction | Update auth handling in `clients/ts/src/http.ts` and types in `clients/ts/src/client.ts` |
+| Change to `EventMessage` / ingest event format | Update payload types in `clients/ts/src/` (some are codegen-regenerated — re-run the SDK codegen CLI) |
+| New / changed structured query AST | Update `clients/ts/src/query-builder.ts` types + builder methods |
+| Change to live-query aggregation classification | Update live-query helpers in `clients/ts/src/stream/` |
+| Named pipes API change | Update `clients/ts/src/pipes.ts` |
+| Policy / access-control change | Update `clients/ts/src/policy.ts` |
+| ClickHouse schema-driven type changes | Re-run the SDK codegen CLI; commit regenerated types |
+
+Internal-only backend changes (middleware refactors, observability internals, dedup implementation, sweeper logic, NATS plumbing) generally don't need SDK updates. The `pre-commit` hook can't tell internal-only from public-surface from staged paths alone, so it'll nudge on anything in `internal/api/`. Ignore the nudge for internal-only changes; act on it for anything user-visible.
+
+**The decision test**: would a `@wavehouse/sdk` user's *code* need to change to take advantage of (or be compatible with) this change? If yes, SDK update needed. If no (purely internal optimization), no.
 
 ## Common Tasks
 

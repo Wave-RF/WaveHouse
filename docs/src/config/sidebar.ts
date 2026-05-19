@@ -28,6 +28,7 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     label: "Contributing",
     items: [
       { label: "Development", slug: "development" },
+      { label: "Claude Code & AI agents", slug: "claude-code" },
       {
         label: "Contributing Guide",
         link: "https://github.com/Wave-RF/WaveHouse/blob/main/CONTRIBUTING.md",

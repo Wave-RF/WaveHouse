@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# pre-push: enforces AGENTS.md §Local-First Validation — `make ci` must have
+# passed locally for the exact HEAD being pushed. Checked via marker file
+# `tmp/ci-passed-<HEAD-sha>` which is written by the `ci` Makefile target.
+#
+# Bypass: `git push --no-verify` (per AGENTS.md, only when explicitly intentional —
+# e.g., draft PR push where you'll iterate; CI will still gate the merge).
+# Installed by `make tools` via `git config core.hooksPath .githooks`.
+
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+head_sha=$(git rev-parse HEAD 2>/dev/null)
+marker="tmp/ci-passed-${head_sha}"
+
+if [ -f "$marker" ]; then
+  exit 0
+fi
+
+short_sha=${head_sha:0:8}
+
+cat >&2 <<EOF
+
+🛑 pre-push: 'make ci' has not been run for HEAD (${short_sha}).
+
+Per AGENTS.md §"Local-First Validation", every push must have passing local
+CI for the exact commit being published. Run:
+
+    make ci
+
+…then push again. (\`make ci\` takes ~2min warm, ~5-8min cold.)
+
+Bypass options:
+  • For an intentional WIP / draft push: git push --no-verify
+  • To skip a single push: WAVEHOUSE_SKIP_PUSH_GATE=1 git push (not currently
+    honored — use --no-verify instead; this line is a reminder if you find
+    yourself wanting it often, that's a signal to revisit the gate.)
+EOF
+exit 1
