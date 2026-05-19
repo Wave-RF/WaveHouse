@@ -46,7 +46,7 @@ If any of those are wrong/missing, the Makefile recipes will fail with confusing
 
 | Tool | Why | Install |
 | ---- | --- | ------- |
-| **[Claude Code](https://claude.com/claude-code)** | The repo ships team-wide configuration in `.claude/` — slash commands, subagents, hooks, status line. See [Claude Code & AI agents](claude-code.md) for setup. | `brew install --cask claude-code` (macOS) or follow [official install](https://code.claude.com/docs/en/quickstart) |
+| **[Claude Code](https://claude.com/claude-code)** | The repo ships team-wide configuration in `.claude/` — slash commands, subagents, hooks, status line. See [Claude Code & AI agents](/claude-code) for setup. | `brew install --cask claude-code` (macOS) or follow [official install](https://code.claude.com/docs/en/quickstart) |
 | **[worktrunk](https://worktrunk.dev)** | Wraps `git worktree` for parallel-agent workflows. Project hooks live in `.config/wt.toml` (auto-runs `make tools` on new worktrees, `make verify` on pre-merge). | `brew install worktrunk && wt config shell install` |
 
 ## Quick Start
