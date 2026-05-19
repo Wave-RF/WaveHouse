@@ -7,10 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +24,7 @@ func safeHandle(handler http.HandlerFunc, w *httptest.ResponseRecorder, r *http.
 
 func TestQueryHandler_MissingSQL(t *testing.T) {
 	t.Parallel()
-	h := NewQueryHandler(nil, nil, 0)
+	h := NewQueryHandler(nil)
 	body, _ := json.Marshal(queryRequest{SQL: ""})
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
@@ -39,7 +37,7 @@ func TestQueryHandler_MissingSQL(t *testing.T) {
 
 func TestQueryHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	h := NewQueryHandler(nil, nil, 0)
+	h := NewQueryHandler(nil)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(`{bad}`)))
 	h.Handle(w, r)
@@ -47,19 +45,6 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
 	assertJSONErrorResponse(t, w)
-}
-
-func TestQueryCacheKey_Deterministic(t *testing.T) {
-	t.Parallel()
-	k1 := queryCacheKey("SELECT 1", nil)
-	k2 := queryCacheKey("SELECT 1", nil)
-	assert.Equal(t, k1, k2)
-
-	k3 := queryCacheKey("SELECT 1", []any{"a"})
-	assert.NotEqual(t, k1, k3)
-
-	k4 := queryCacheKey("SELECT 2", nil)
-	assert.NotEqual(t, k1, k4)
 }
 
 func TestIsMutation(t *testing.T) {
@@ -170,7 +155,7 @@ func TestExecuteQuery_MutationRoutesToExec(t *testing.T) {
 		t.Run(sql, func(t *testing.T) {
 			t.Parallel()
 			conn := &stubConn{}
-			h := NewQueryHandler(conn, nil, 0)
+			h := NewQueryHandler(conn)
 			rows, err := h.executeQuery(context.Background(), sql, nil)
 			require.NoError(t, err)
 			assert.Equal(t, 1, conn.execCount, "Exec must be used for mutations")
@@ -183,63 +168,10 @@ func TestExecuteQuery_MutationRoutesToExec(t *testing.T) {
 func TestExecuteQuery_SelectRoutesToQuery(t *testing.T) {
 	t.Parallel()
 	conn := &stubConn{}
-	h := NewQueryHandler(conn, nil, 0)
+	h := NewQueryHandler(conn)
 	rows, err := h.executeQuery(context.Background(), "SELECT 1", nil)
 	require.NoError(t, err)
 	assert.Zero(t, conn.execCount, "Exec must not be used for SELECT")
 	assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
 	assert.Equal(t, []map[string]any{}, rows, "zero-row SELECT must marshal to [] not null")
-}
-
-// TestQueryHandler_MutationBypassesCache pins the cache-bypass contract for
-// mutations. Without the bypass, the first TRUNCATE would land its `[]`
-// response in the cache under the SQL key, and the second identical
-// TRUNCATE would hit the cache and return `[]` without re-executing — the
-// silent-data-loss scenario claude-review flagged on the #118 PR. With the
-// bypass, both calls reach Exec.
-//
-// The test also asserts the cache is *empty* after the mutation completes,
-// so a regression that re-introduces `Cache.Set` post-execution (instead
-// of fully early-returning) would also fail loudly.
-func TestQueryHandler_MutationBypassesCache(t *testing.T) {
-	t.Parallel()
-
-	local, err := cache.NewLocal(1 << 20) // 1MiB is plenty for one entry
-	require.NoError(t, err)
-	defer func() { _ = local.Close() }()
-	tiered := cache.NewTiered(local, nil)
-
-	conn := &stubConn{}
-	h := NewQueryHandler(conn, tiered, 5*time.Minute)
-
-	const sql = "TRUNCATE TABLE clicks"
-	body, _ := json.Marshal(queryRequest{SQL: sql})
-
-	doRequest := func() *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
-		h.Handle(w, r)
-		return w
-	}
-
-	w1 := doRequest()
-	require.Equal(t, http.StatusOK, w1.Code)
-	assert.Equal(t, "[]", w1.Body.String(), "first mutation response must be []")
-	assert.Equal(t, "MISS", w1.Header().Get("X-Cache"), "mutations never serve from cache")
-
-	// After the first call, the cache must NOT carry the mutation result.
-	// Ristretto buffers writes asynchronously, so flush before reading.
-	local.Wait()
-	cached, _, err := tiered.Get(context.Background(), queryCacheKey(sql, nil))
-	require.NoError(t, err)
-	assert.Nil(t, cached, "mutation result must not be written to cache (silent-data-loss guard)")
-
-	w2 := doRequest()
-	require.Equal(t, http.StatusOK, w2.Code)
-	assert.Equal(t, "[]", w2.Body.String())
-	assert.Equal(t, "MISS", w2.Header().Get("X-Cache"))
-
-	assert.Equal(t, 2, conn.execCount,
-		"second identical mutation must re-execute against ClickHouse, not be served from cache")
-	assert.Zero(t, conn.queryCount, "mutations must never route through Query")
 }

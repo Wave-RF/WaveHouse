@@ -331,7 +331,7 @@ func run() int {
 		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
-	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
+	queryHandler := api.NewQueryHandler(chConn)
 
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState

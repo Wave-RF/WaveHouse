@@ -186,20 +186,19 @@ Client POST /v1/admin/query
     surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
     non-admin callers use the structured query endpoint or named pipes
     instead.
-  → Classify by leading SQL verb (always runs before cache):
+  → No cache, no singleflight. Raw SQL is an admin escape hatch with
+    infrequent, ad-hoc traffic, so L1 hit rate is effectively zero — the
+    cache machinery only adds complexity for no win, and the structured
+    query / pipes endpoints carry caching for the high-QPS read paths
+    that actually benefit. Every request goes straight to ClickHouse,
+    mutation or read; no X-Cache header is emitted.
+  → Classify by leading SQL verb to pick the driver call:
     → Mutation/DDL verbs (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/…):
-        bypass cache + singleflight entirely → driver.Exec → return [] on
-        success (HTTP 200, X-Cache: MISS, result never stored in cache).
-        Caching `[]` under the SQL key would let a second identical
-        mutation hit the cache and skip ClickHouse within DefaultTTL —
-        silent data loss; singleflight collapsing would drop concurrent
-        writes the caller asked for.
+        driver.Exec → return [] on success (HTTP 200). Classification
+        is required because clickhouse-go's driver.Query() errors on
+        statements that return no result set.
     → Read verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS):
-      → Check tiered cache (L1 → L2)
-      → Cache HIT: return cached result (X-Cache: HIT header)
-      → Cache MISS: singleflight-collapsed driver.Query, convert
-        UUID/DateTime types, store row array in L1 + L2, return result
-        (X-Cache: MISS header)
+        driver.Query → convert UUID/DateTime types → return row array.
 ```
 
 ### Streaming Path

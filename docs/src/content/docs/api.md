@@ -182,7 +182,9 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ### `POST /v1/admin/query` — Query ClickHouse
 
-Executes a SQL statement directly against ClickHouse. Read queries (`SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`/`EXISTS`) return a JSON array of result rows; mutation/DDL statements (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`DROP`/`ALTER`/`CREATE`/`RENAME`/`OPTIMIZE`/`REPLACE`/…) return HTTP 200 with `[]` on success. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in read responses.
+Executes a SQL statement directly against ClickHouse. Read queries (`SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`/`EXISTS`) return a JSON array of result rows; mutation/DDL statements (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`DROP`/`ALTER`/`CREATE`/`RENAME`/`OPTIMIZE`/`REPLACE`/…) return HTTP 200 with `[]` on success. UUID and DateTime columns are converted to string representations in read responses.
+
+This endpoint **does not cache and does not singleflight** — every request goes straight to ClickHouse, mutation or read. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/tables/{table}/query`](#post-v1tablestablequery--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
 > **Admin / service only.** The route is mounted under `/v1/admin/*`, which sits behind a `RequireRole("admin","service")` gate: callers whose JWT resolves to either role may use it (or any caller when `auth.enabled` is false, the dev/test posture). Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story — but the role set matches the rest of `/v1/admin/*` rather than carving out a separate tighter gate, because service tokens already hold admin-scoped powers across that whole tree (policy CRUD, pipes CRUD, log-level) and the inconsistency would be a footgun without a real authorization win. The normal surfaces for non-admin callers are `POST /v1/ingest/{table}` for writes, `POST /v1/tables/{table}/query` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 
@@ -214,11 +216,6 @@ Executes a SQL statement directly against ClickHouse. Read queries (`SELECT`/`WI
   }
 ]
 ```
-
-The response includes a cache header:
-
-- `X-Cache: HIT` — served from cache
-- `X-Cache: MISS` — fetched from ClickHouse
 
 **Error responses:**
 
@@ -280,7 +277,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 
 **Response:**
 
-Same format as `/v1/admin/query` with `X-Cache` header.
+JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
 
 **Error responses:**
 
@@ -296,7 +293,7 @@ Same format as `/v1/admin/query` with `X-Cache` header.
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/admin/query`.
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -311,7 +308,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-Same format as `/v1/admin/query` with `X-Cache` header.
+JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
 
 **Error responses:**
 

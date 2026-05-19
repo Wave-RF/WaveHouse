@@ -2,19 +2,14 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
 // QueryHandler handles POST /v1/admin/query.
@@ -25,15 +20,23 @@ import (
 // role — there is no per-statement scope check (a full SQL parser would be
 // needed to authorize predicates), and the policy engine is not consulted
 // here. See internal/api/router.go for the role-gate rationale.
+//
+// This handler is intentionally a thin shell: no cache, no singleflight,
+// no policy lookup. Raw SQL is an admin escape hatch — calls are
+// infrequent, often mutations, and the cache hit rate is effectively
+// zero. The high-traffic read paths that need caching are the
+// structured-query endpoint (`POST /v1/tables/{table}/query`) and named
+// pipes (`GET/POST /v1/pipes/{name}`); those carry the TieredCache +
+// singleflight machinery. isMutation routing stays because clickhouse-go's
+// driver.Query() errors on statements that return no result set
+// (TRUNCATE/INSERT/etc.) — verb classification is correctness, not
+// performance.
 type QueryHandler struct {
-	CHConn     driver.Conn
-	Cache      *cache.TieredCache
-	DefaultTTL time.Duration
-	sf         singleflight.Group
+	CHConn driver.Conn
 }
 
-func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
-	return &QueryHandler{CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
+func NewQueryHandler(conn driver.Conn) *QueryHandler {
+	return &QueryHandler{CHConn: conn}
 }
 
 type queryRequest struct {
@@ -52,70 +55,20 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mutations bypass cache + singleflight entirely. Caching `[]` under
-	// the SQL cache key would let a subsequent identical mutation hit the
-	// cache and skip ClickHouse within DefaultTTL — silent data loss on
-	// the second TRUNCATE/INSERT/etc. Singleflight collapsing concurrent
-	// identical mutations would drop one of two writes the caller asked
-	// for. Neither is what the caller meant.
-	if isMutation(req.SQL) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		data, err := json.Marshal(result)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Cache", "MISS")
-		_, _ = w.Write(data)
-		return
-	}
-
-	cacheKey := queryCacheKey(req.SQL, req.Params)
-
-	// Try cache.
-	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data)
-			return
-		}
-	}
-
-	// Execute query with singleflight to protect ClickHouse from thundering herds.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
-		if err != nil {
-			return nil, err
-		}
-
-		data, err := json.Marshal(result)
-		if err != nil {
-			return nil, err
-		}
-
-		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
-		}
-		return data, nil
-	})
+	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
+	data, err := json.Marshal(result)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte))
+	_, _ = w.Write(data)
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
@@ -331,13 +284,4 @@ func transformRow(row map[string]any) map[string]any {
 		}
 	}
 	return row
-}
-
-func queryCacheKey(sql string, params []any) string {
-	h := sha256.New()
-	h.Write([]byte(sql))
-	for _, p := range params {
-		_, _ = fmt.Fprintf(h, "\x00%v", p)
-	}
-	return "query:" + hex.EncodeToString(h.Sum(nil))
 }
