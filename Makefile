@@ -199,7 +199,14 @@ dev-docs: install-docs-playwright ## Hot-reload docs site dev server (Astro on :
 	@cd $(DOCS_DIR) && $(PNPM) dev
 
 .PHONY: preview-docs
-preview-docs: build-docs ## Preview the production docs build locally
+preview-docs: install-docs-playwright ## Preview the production docs build locally (auto-builds if dist/ is missing)
+	@# Skip the build if `dist/` already exists — running `make build-docs`
+	@# and then `make preview-docs` should serve the existing artifact, not
+	@# rebuild from scratch. Re-run `make build-docs` explicitly to refresh.
+	@if [ ! -d $(DOCS_DIR)/dist ]; then \
+	  echo "$(CYAN)==> No dist/ — building docs first...$(RESET)"; \
+	  cd $(DOCS_DIR) && $(PNPM) build; \
+	fi
 	@cd $(DOCS_DIR) && $(PNPM) preview
 
 # `up -d --wait` blocks until the compose healthcheck transitions to
