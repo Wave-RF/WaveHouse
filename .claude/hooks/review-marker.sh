@@ -26,12 +26,29 @@ set -uo pipefail
 
 input=$(cat)
 
+# Failure modes for this hook (jq missing, malformed JSON) should leave
+# stderr breadcrumbs rather than silently no-op — otherwise the orchestrator
+# pushes, gets blocked by the missing review marker, and has no clue why.
+# Mirrors agent-bash-gate.sh's posture, except this hook exits 0 on its own
+# failures (it's the marker writer, not the push gate; the absence of a
+# marker is itself the enforcement signal downstream).
+if ! command -v jq >/dev/null 2>&1; then
+  echo "review-marker: jq not found; cannot parse SubagentStop payload — no marker written." >&2
+  exit 0
+fi
+
 # SubagentStop fires for every subagent completion (no matcher support per
 # Claude Code docs), so we filter by `agent_type` in-script.
-agent_type=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)
+if ! agent_type=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null); then
+  echo "review-marker: malformed SubagentStop payload; could not parse .agent_type — no marker written." >&2
+  exit 0
+fi
 [ "$agent_type" = "pre-push-reviewer" ] || exit 0
 
-response=$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null)
+if ! response=$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null); then
+  echo "review-marker: malformed SubagentStop payload; could not parse .last_assistant_message — no marker written." >&2
+  exit 0
+fi
 [ -z "$response" ] && exit 0
 
 # Parse the parseable verdict line. Format (per .claude/agents/pre-push-reviewer.md):
