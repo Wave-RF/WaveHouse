@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`; a failed delete is treated as permanent — the original envelope is routed to `dlq.{table}` and the message is `DoubleAck`'d to break the infinite-Nak retry loop a bad query would otherwise produce. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`. **DLQ shape note**: insert-failure messages on `dlq.{table}` carry the inner data payload only (`{"id":"abc","field":...}`) because `dlqOutput.WriteBatch` publishes the Bento message bytes (already-extracted `data`); delete-failure messages carry the full NATS envelope (`{"action":"delete","table_name":"...","id":"..."}`) so a consumer can re-issue the delete with full context. To stay BYOS-safe — a user row can have any column name, including `action` — consumers MUST discriminate via the `Wave-DLQ-Type` NATS header (set by the worker, non-user-controlled), not via any JSON field: `Wave-DLQ-Type: delete-envelope` → delete-failure shape; header absent → insert-payload shape. Delete-failure messages also carry W3C `traceparent`/`tracestate` headers via `observability.InjectNATS` so a consumer can stitch its trace to the worker's `clickhouse_delete` span. Phase 2 (issue #91) will tag insert-failure messages with `Wave-DLQ-Type: insert-payload` and may normalize the payload shapes.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**: any envelope whose `action` is something other than `"insert"` (or absent) is `DoubleAck`'d and dropped. All other mutations (`DELETE`/`UPDATE`/`TRUNCATE`/`DROP`/`ALTER`/`REPLACE`/…) must go through `POST /v1/query` under an admin-equivalent role — see the Query Path section below. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -154,10 +154,9 @@ Client POST /v1/ingest/{table}
 Bento ingest pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
   → Validate table name against safeIdentifierRe
+  → Reject any envelope whose action is not "insert" (DoubleAck and drop —
+    DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/query)
   → Batch events per table, bulk INSERT to ClickHouse
-  → Delete actions handled inline (chConn.Exec)
-    → On success: DoubleAck and continue
-    → On failure: route original envelope to dlq.{table} and DoubleAck (Phase 1: all delete errors treated as permanent to prevent infinite Nak loops)
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
 
@@ -173,11 +172,17 @@ Active Sweeper (async goroutine, every 60s):
 ```text
 Client POST /v1/query
   → Optional JWT auth middleware
+  → Policy gate: caller must be admin/service, or have a policy role
+    granting RawSQL: true on some table. /v1/query is the only sanctioned
+    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…)
   → Check tiered cache (L1 → L2)
   → Cache HIT: return cached result (X-Cache: HIT header)
   → Cache MISS:
-    → Execute query directly on ClickHouse
-    → Convert UUID/DateTime types to strings
+    → Classify by leading SQL verb:
+      → Read verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS): run through
+        driver.Query, convert UUID/DateTime types, return the row array
+      → Mutation/DDL verbs (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/…): run
+        through driver.Exec; return [] on success (HTTP 200 with empty body)
     → Store result in L1 + L2
     → Return result (X-Cache: MISS header)
 ```

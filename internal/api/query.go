@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -112,6 +113,13 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
+	if isMutation(sql) {
+		if err := h.CHConn.Exec(ctx, sql, params...); err != nil {
+			return nil, err
+		}
+		return []map[string]any{}, nil
+	}
+
 	rows, err := h.CHConn.Query(ctx, sql, params...)
 	if err != nil {
 		return nil, err
@@ -139,6 +147,81 @@ func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []an
 		results = append(results, transformRow(row))
 	}
 	return results, nil
+}
+
+// mutationVerbs is a set of SQL leading keywords that don't return a result
+// set which include anything that mutates schema or data. Routed through
+// Exec rather than Query (take a look at executeQuery). Sourced from the
+// ClickHouse statement reference: DML, DDL, role/privilege management, and
+// runtime control (SYSTEM/KILL/SET). Read-only verbs
+// (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/ EXISTS) intentionally fall through to
+// the default Query path.
+var mutationVerbs = map[string]struct{}{
+	"INSERT":   {},
+	"UPDATE":   {},
+	"DELETE":   {},
+	"TRUNCATE": {},
+	"DROP":     {},
+	"ALTER":    {},
+	"CREATE":   {},
+	"RENAME":   {},
+	"OPTIMIZE": {},
+	"REPLACE":  {},
+	"GRANT":    {},
+	"REVOKE":   {},
+	"ATTACH":   {},
+	"DETACH":   {},
+	"KILL":     {},
+	"SET":      {},
+	"USE":      {},
+	"SYSTEM":   {},
+}
+
+// isMutation reports whether sql's leading keyword is a non-SELECT statement
+// — i.e. one that returns no result set and must go through Exec, not Query.
+// Leading whitespace and SQL line/block comments are skipped; the first
+// alphabetic token is matched case-insensitively against mutationVerbs.
+func isMutation(sql string) bool {
+	s := stripLeadingSQLComments(sql)
+	end := 0
+	for end < len(s) {
+		c := s[end]
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return false
+	}
+	_, ok := mutationVerbs[strings.ToUpper(s[:end])]
+	return ok
+}
+
+// stripLeadingSQLComments trims whitespace plus `-- line` and `/* block */`
+// comments from the front of sql, returning the remainder with no leading
+// whitespace. Unclosed block comments swallow the rest of the string —
+// matches what ClickHouse itself would do at parse time.
+func stripLeadingSQLComments(sql string) string {
+	s := strings.TrimLeft(sql, " \t\r\n")
+	for {
+		switch {
+		case strings.HasPrefix(s, "--"):
+			if i := strings.IndexByte(s, '\n'); i >= 0 {
+				s = strings.TrimLeft(s[i+1:], " \t\r\n")
+			} else {
+				return ""
+			}
+		case strings.HasPrefix(s, "/*"):
+			if i := strings.Index(s[2:], "*/"); i >= 0 {
+				s = strings.TrimLeft(s[2+i+2:], " \t\r\n")
+			} else {
+				return ""
+			}
+		default:
+			return s
+		}
+	}
 }
 
 // transformRow converts ClickHouse-specific types to JSON-friendly values.

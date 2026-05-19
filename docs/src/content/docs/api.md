@@ -120,6 +120,8 @@ Accepts a flat JSON object, validates it against the ClickHouse schema for `{tab
 
 The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
+> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/query`](#post-v1query--query-clickhouse) under the `admin` / `service` role (or a policy role with `RawSQL: true`). The policy engine authorizes mutations by inspecting the columns being written, which works for inserts but not for predicate-driven mutations like `DELETE … WHERE`; routing them through the admin-gated raw-SQL surface keeps the policy contract honest.
+
 **Request:**
 
 ```json
@@ -178,7 +180,9 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ### `POST /v1/query` — Query ClickHouse
 
-Executes a SQL query directly against ClickHouse. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in the response.
+Executes a SQL statement directly against ClickHouse. Read queries (`SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`/`EXISTS`) return a JSON array of result rows; mutation/DDL statements (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`DROP`/`ALTER`/`CREATE`/`RENAME`/`OPTIMIZE`/`REPLACE`/…) return HTTP 200 with `[]` on success. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in read responses.
+
+`/v1/query` is the only sanctioned surface for non-insert mutations. When policies are configured, the caller must be `admin` / `service` or a policy role with `RawSQL: true` on at least one table; without policies, all callers may invoke this endpoint.
 
 **Request:**
 
@@ -596,7 +600,7 @@ Same as the wire format — events are passed through directly:
 
 ## Dead Letter Queue (DLQ)
 
-When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection.
+When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ payload is the inner data object that failed to insert (`{"id":"abc","field":...}`).
 
 Use `GET /v1/dlq/stats` to monitor DLQ depth.
 

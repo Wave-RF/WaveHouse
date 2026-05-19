@@ -15,29 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pollCount returns the row count for SELECT count() FROM `<table>` WHERE id = ?,
-// or -1 on query error. Used by the happy-path delete test to poll for both
-// the insert landing and the row disappearing post-delete.
-//
-// `id` is bound via the driver's parameterized form rather than interpolated
-// into the SQL, mirroring the production pattern in internal/ingest/bento.go.
-// `table` still uses fmt.Sprintf because ClickHouse identifiers can't be bound
-// as parameters — backtick quoting is the same defense bento.go uses.
-func pollCount(t *testing.T, table, id string) int64 {
-	t.Helper()
-	var count uint64
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := env(t).chConn.QueryRow(ctx,
-		fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
-		id,
-	).Scan(&count)
-	if err != nil {
-		return -1
-	}
-	return int64(count)
-}
-
 // TestIngest_FlowsToClickHouseWithoutDLQ exercises the happy path: POST
 // /v1/ingest/{table} is acknowledged synchronously, Bento batches the event
 // to ClickHouse, and the DLQ stays empty for that table.
@@ -88,17 +65,14 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	assert.False(t, hasDLQ, "successful inserts should not produce DLQ entries")
 }
 
-// TestDelete_HappyPath exercises the worker's success branch for
-// `action: "delete"`: an inserted row is removed end-to-end via a delete
-// envelope published to ingest.<table>. There's no public SDK / HTTP delete
-// surface today — the delete envelope is a NATS-only contract — so the test
-// publishes directly to JetStream and observes ClickHouse state via the
-// shared connection.
-//
-// Pairs with TestDelete_FailureRoutesToDLQWithHeader in dlq_test.go, which
-// covers the failure branch. Together they give the worker's delete path
-// real end-to-end coverage — previously zero.
-func TestDelete_HappyPath(t *testing.T) {
+// TestIngest_NonInsertActionDropped pins the insert-only contract end-to-end:
+// an envelope with `action: "delete"` published directly to the buffer
+// stream is dropped (DoubleAck'd) by the worker and produces no DLQ entry
+// and no ClickHouse mutation. Mirrors the unit-test coverage in
+// internal/ingest/bento_test.go over the real NATS wire format. All
+// non-insert mutations must go through POST /v1/query — see
+// TestQuery_TruncateReturnsEmptyArray.
+func TestIngest_NonInsertActionDropped(t *testing.T) {
 	e := env(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -107,10 +81,8 @@ func TestDelete_HappyPath(t *testing.T) {
 		"id String, page String",
 		"ORDER BY id",
 	)
-	const rowID = "row-to-delete"
+	const rowID = "row-survives-rogue-delete"
 
-	// Insert via the public API so the test exercises the full ingest path
-	// (validation → JetStream → Bento → ClickHouse) before the delete.
 	body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, rowID)
 	resp, err := http.Post(
 		e.server.URL+"/v1/ingest/"+table,
@@ -121,15 +93,20 @@ func TestDelete_HappyPath(t *testing.T) {
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Wait for the insert to land. 30s upper bound on Bento's 5s batch
-	// window + loaded-runner slack, matching other tests in this package.
+	// Wait for the insert to land so we can prove the rogue delete envelope
+	// below didn't remove it.
 	require.Eventually(t, func() bool {
-		return pollCount(t, table, rowID) == 1
-	}, 30*time.Second, 500*time.Millisecond, "insert should land before delete")
+		var count uint64
+		err := e.chConn.QueryRow(ctx,
+			fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
+			rowID,
+		).Scan(&count)
+		return err == nil && count == 1
+	}, 30*time.Second, 500*time.Millisecond, "insert should land")
 
-	// Publish the delete envelope directly to JetStream. The worker reads
-	// it via the buffer-consumer, executes DELETE FROM `<table>` WHERE id=?,
-	// and DoubleAcks on Exec success (internal/ingest/bento.go).
+	// Publish a delete envelope directly to JetStream. The pre-lock pipeline
+	// would have executed DELETE FROM <table> WHERE id=?; the insert-only
+	// pipeline must drop this envelope without touching ClickHouse.
 	envelope := map[string]any{
 		"action":     "delete",
 		"table_name": table,
@@ -140,16 +117,23 @@ func TestDelete_HappyPath(t *testing.T) {
 	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+table, payload)
 	require.NoError(t, err)
 
-	// ClickHouse lightweight DELETE (default in modern CH) marks rows
-	// invisible immediately after the mutation is applied. 30s upper bound
-	// is generous for a single-row mutation on the test runner.
-	require.Eventually(t, func() bool {
-		return pollCount(t, table, rowID) == 0
-	}, 30*time.Second, 500*time.Millisecond,
-		"action:\"delete\" envelope should remove the row from ClickHouse")
+	// The row must still be there after enough time for the worker to have
+	// processed and discarded the delete envelope. We bound by the same
+	// 30s window the ingest happy path uses; if the worker were still
+	// honoring `action: "delete"`, the row would disappear inside that
+	// window.
+	require.Never(t, func() bool {
+		var count uint64
+		err := e.chConn.QueryRow(ctx,
+			fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
+			rowID,
+		).Scan(&count)
+		return err == nil && count == 0
+	}, 5*time.Second, 500*time.Millisecond,
+		"non-insert envelope must not mutate ClickHouse — DELETE/UPDATE/etc. require POST /v1/query")
 
-	// Confirm the success branch didn't tee anything into the DLQ — the
-	// permanent-error policy only fires on Exec failures.
+	// And nothing should have leaked to the DLQ either — the dropped
+	// envelope is not a failure, it's a contract rejection.
 	dlqResp, err := http.Get(e.server.URL + "/v1/dlq/stats")
 	require.NoError(t, err)
 	defer dlqResp.Body.Close()
@@ -158,5 +142,5 @@ func TestDelete_HappyPath(t *testing.T) {
 	tables, ok := stats["tables"].(map[string]any)
 	require.True(t, ok)
 	_, hasDLQ := tables["dlq."+table]
-	assert.False(t, hasDLQ, "successful deletes must not produce DLQ entries")
+	assert.False(t, hasDLQ, "rejected non-insert envelopes must not be routed to the DLQ")
 }

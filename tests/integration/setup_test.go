@@ -165,7 +165,6 @@ func setup() (int, func()) {
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		ch.conn,
 		ch.nativeAddr(),
 		ch.httpPort,
 		"http",
