@@ -34,6 +34,15 @@ const heroTitle = heroData.title || data.title || "";
 const tagline = heroData.tagline;
 const actions = heroData.actions ?? [];
 
+if (import.meta.env.DEV && !heroTitle) {
+  // Surfaces breakage immediately when a Starlight minor-version bump renames
+  // the prop shape — without this, the hero renders silently blank.
+  console.warn(
+    "[Hero] Could not extract heroTitle from Starlight props — the hero will render blank. " +
+      "Check the prop shape against the installed @astrojs/starlight version.",
+  );
+}
+
 type TerminalLine =
   | { kind: "command"; cmd: string }
   | { kind: "ok"; text: string; dim?: string; accent?: string }
@@ -53,6 +62,38 @@ const terminalLines: TerminalLine[] = [
   { kind: "cursor" },
 ];
 ---
+
+{/*
+  The hero's entrance animations (staggered fade-up on text, terminal lines
+  typing in) should play once per tab session. Astro View Transitions
+  re-mount the DOM on every navigation, so without this guard a user who
+  nav'd /getting-started → / would see the whole opening sequence again.
+
+  The inline script below runs synchronously during HTML parse — including
+  on view-transition swaps (`data-astro-rerun`) — and stamps `data-hero-played`
+  on <html> before the section paints when the in-memory flag is already set.
+  CSS in this file's <style> block reads that attribute and short-circuits
+  the entrance animations to their final state. Looping background animations
+  (orb drift, wave drift, cursor blink, etc.) are not affected.
+
+  `window.__whHeroPlayed` survives view transitions (same JS context) but is
+  wiped by a hard page refresh — so a refresh of `/` still replays the hero.
+*/}
+<script is:inline data-astro-rerun>
+  // Order matters: stamp the attribute BEFORE setting the flag, so the
+  // current mount (the first one in this tab session) still gets the full
+  // animation. Subsequent mounts — i.e. view-transition returns — find the
+  // flag already set and stamp the attribute synchronously, before paint,
+  // which suppresses the entrance animations via the [data-hero-played]
+  // rules in this file's <style> block.
+  if (typeof window !== "undefined") {
+    if (window.__whHeroPlayed) {
+      document.documentElement.setAttribute("data-hero-played", "");
+    } else {
+      window.__whHeroPlayed = true;
+    }
+  }
+</script>
 
 <section class="wh-hero">
   <div class="wh-hero__bg" aria-hidden="true">
@@ -641,5 +682,18 @@ const terminalLines: TerminalLine[] = [
       opacity: 1 !important;
       transform: none !important;
     }
+  }
+
+  /* Replay guard: once the entrance animations have played in this tab
+     session, render straight to the final state on subsequent mounts (view
+     transitions). The looping animations (orb drift, node pulse, ring
+     expand, wave drift, cursor blink) keep running — only the one-shot
+     entrance choreography is suppressed. */
+  :root[data-hero-played] .wh-hero__text > [data-stagger],
+  :root[data-hero-played] .wh-hero__visual,
+  :root[data-hero-played] .wh-line {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
   }
 </style>

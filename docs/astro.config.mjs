@@ -50,7 +50,6 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         light: "./src/assets/branding/wavehouse-mark-light.svg",
         dark: "./src/assets/branding/wavehouse-mark-dark.svg",
         alt: "WaveHouse",
-        replacesTitle: false,
       },
       customCss: ["./src/styles/global.css", "katex/dist/katex.min.css"],
       social: [

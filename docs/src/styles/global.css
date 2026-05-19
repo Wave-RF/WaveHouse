@@ -100,7 +100,9 @@
   --wh-accent-glow: rgba(8, 109, 119, 0.14);
   --wh-accent-glow-strong: rgba(8, 109, 119, 0.28);
 
-  --wh-sky: #4FA8B1;
+  /* --wh-sky darkened from #4FA8B1 → #2B7E87 so the .wh-stat__unit labels
+     clear WCAG AA 4.5:1 against the white --wh-surface (was ~2.6:1). */
+  --wh-sky: #2B7E87;
   --wh-olive: #5C7A45;
   --wh-terracotta: #8A4729;
 
@@ -372,7 +374,14 @@ header.header {
 /* ---------- Reusable section-accent system ----------
  * Pages can opt in to a section accent by adding a class to the
  * <body> via the template-key frontmatter route. The accent flows
- * into the page title's underline and inline anchor color. */
+ * into the page title's underline and inline anchor color.
+ *
+ * TODO(follow-up): the body[data-section=…] selectors below have no
+ * matcher yet — no Astro layout or component stamps `data-section`
+ * onto <body>. The H1 underline still renders because
+ * --wh-section-accent inherits the --wh-accent default. Wire up the
+ * route-middleware-based stamping in a follow-on PR before adding
+ * more rules that depend on `data-section`. */
 
 body[data-section="start"]      { --wh-section-accent: var(--wh-accent); }
 body[data-section="guides"]     { --wh-section-accent: var(--wh-olive); }
@@ -529,14 +538,29 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   .wh-stat__value { font-size: 1.875rem; }
 }
 
-/* Reduced-motion guard. Matches the Hero's own `animation: none !important`
-   pattern (component-scoped Astro styles can't fully cover descendants from
-   plugins, hence this site-wide floor). Using `animation: none` rather than
-   `animation-duration: 0.001ms` actually removes the animation rather than
-   running it in one imperceptible frame — the latter is a stale pattern from
-   when browsers needed `animationend` to fire reliably, no longer required. */
+/* Reduced-motion guard, scoped to WaveHouse-specific landing/chrome surfaces
+   so Starlight's own transitions (and any future plugin transitions used for
+   focus/active feedback) keep working. Hero.astro has its own scoped block
+   that covers .wh-hero__* internals; the duplicates here are belt-and-braces
+   for any future external usage of the same classes.
+
+   `animation: none` (vs the older `animation-duration: 0.001ms` pattern)
+   actually removes the animation — browsers no longer need `animationend` to
+   fire for reduced-motion users, so the one-frame trick is unnecessary. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  .wh-hero__orb,
+  .wh-wave,
+  .wh-node,
+  .wh-ring,
+  .wh-mesh-lines line,
+  .wh-cursor,
+  .wh-line,
+  .wh-hero__text > [data-stagger],
+  .wh-hero__visual,
+  .wh-stat,
+  .wh-stat::before,
+  .sl-link-card,
+  .action {
     animation: none !important;
     transition: none !important;
   }
