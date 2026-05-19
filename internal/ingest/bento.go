@@ -56,6 +56,7 @@ type jsInput struct {
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
 	chConn   driver.Conn
+	js       jetstream.JetStream
 	inFlight atomic.Int32
 }
 
@@ -172,18 +173,58 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
 				span.RecordError(err)
-				slog.ErrorContext(spanCtx, "clickhouse delete failed",
+				// Phase 1 (issue #91): treat every delete Exec error as permanent
+				// to break the infinite-Nak retry loop that a bad query (syntax
+				// error, missing table, etc.) would otherwise produce. Route the
+				// original NATS envelope to dlq.<table> and DoubleAck so the
+				// message is removed from the main queue.
+				//
+				// TODO(#91, Phase 2): classify transient (network/timeout) vs
+				// permanent errors and Nak the transient ones so they get retried.
+				// Until that lands, a ClickHouse blip during a delete drops the
+				// message to DLQ instead of retrying — accepted trade-off, see #91.
+				slog.ErrorContext(spanCtx, "clickhouse delete failed — routing to DLQ",
 					"table", raw.TableName,
 					"id", raw.ID,
 					"error", err,
 				)
 
-				if nakErr := m.Nak(); nakErr != nil {
-					slog.WarnContext(spanCtx, "nak failed after delete error", "error", nakErr)
+				// DLQ shape contract: `dlq.<table>` carries two structurally different
+				// payloads — insert-failure inner-data via dlqOutput.WriteBatch, and
+				// delete-failure full envelopes via this branch
+				// (`{"action":"delete","table_name":...,"id":...}`). Consumers must NOT
+				// branch on a JSON field to tell them apart: under BYOS a user row can
+				// carry any key, including `action`. We instead set a non-user-controlled
+				// NATS header here (`Wave-DLQ-Type: delete-envelope`) so consumers can
+				// detect the shape via header presence. The insert path has no header
+				// today; absence means insert-payload. Phase 2 (issue #91) will add
+				// `Wave-DLQ-Type: insert-payload` on the insert path and may normalize
+				// the shapes. observability.InjectNATS also propagates the
+				// `clickhouse_delete` span into the message so a Phase 2 consumer can
+				// stitch its own trace to the worker's.
+				dlqSubject := "dlq." + raw.TableName
+				dlqMsg := &nats.Msg{
+					Subject: dlqSubject,
+					Data:    m.Data(),
+					Header:  nats.Header{"Wave-DLQ-Type": []string{"delete-envelope"}},
+				}
+				observability.InjectNATS(spanCtx, dlqMsg)
+				if _, pubErr := j.js.PublishMsg(spanCtx, dlqMsg); pubErr != nil {
+					slog.ErrorContext(spanCtx, "DLQ publish failed for permanent delete error — message dropped",
+						"subject", dlqSubject,
+						"error", pubErr,
+					)
+					bentoDLQDropped.Add(spanCtx, 1, metric.WithAttributes(attribute.String("table", raw.TableName)))
+				} else {
+					slog.WarnContext(spanCtx, "sent failed delete to DLQ", "subject", dlqSubject)
+				}
+
+				if doubleAckErr := m.DoubleAck(spanCtx); doubleAckErr != nil {
+					slog.WarnContext(spanCtx, "double ack failed after permanent delete error", "error", doubleAckErr)
 				}
 
 				span.End()
-				return nil, nil, fmt.Errorf("execute delete: %w", err)
+				continue
 			}
 			// Log the success with all context
 			slog.InfoContext(spanCtx, "successfully deleted record",
@@ -485,6 +526,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 				return &jsInput{
 					consumer: cons,
 					chConn:   chConn,
+					js:       js,
 				}, nil
 			},
 		); err != nil {

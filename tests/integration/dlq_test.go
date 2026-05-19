@@ -10,8 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
 // TestDLQ_StatsEmptyOnFreshStart verifies the DLQ exposes an empty result
@@ -83,4 +87,118 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 		_, present := tables[dlqSubject]
 		return present
 	}, 30*time.Second, 500*time.Millisecond, "DLQ should receive failed events within timeout")
+}
+
+// TestDelete_FailureRoutesToDLQWithHeader verifies the end-to-end Phase-1
+// permanent-delete-error policy (#91):
+//
+//  1. A bad delete (table doesn't exist in ClickHouse) reaches the worker.
+//  2. The worker publishes the original NATS envelope to `dlq.<table>`.
+//  3. The envelope carries a `Wave-DLQ-Type: delete-envelope` NATS header
+//     that survives the NATS round-trip — that's the BYOS-safe discriminator
+//     a downstream consumer must use (per PR #122 review).
+//  4. The buffer consumer DoubleAcks the original message — no Nak loop.
+//
+// The unit tests in internal/ingest/bento_test.go assert the worker called
+// PublishMsg with the right header on its mock. This test proves the same
+// invariants over real JetStream wire format and consumer-state semantics.
+func TestDelete_FailureRoutesToDLQWithHeader(t *testing.T) {
+	e := env(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	js := e.embeddedMQ.JetStream()
+
+	// Use a table name that intentionally doesn't exist in ClickHouse so the
+	// worker's DELETE Exec fails with the permanent-error path under test.
+	// Per-test suffix keeps state independent across runs / from other tests.
+	table := fmt.Sprintf("nonexistent_delete_dlq_%d", time.Now().UnixNano())
+	deleteID := fmt.Sprintf("test-id-%d", time.Now().UnixNano())
+
+	// Ephemeral DLQ consumer scoped to our subject (no Durable name → no
+	// state leak across tests). DeliverAll covers the case where the worker
+	// publishes before we start listening on busy CI.
+	dlqCons, err := js.CreateOrUpdateConsumer(ctx, mq.DLQStreamName(), jetstream.ConsumerConfig{
+		FilterSubject: "dlq." + table,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+	})
+	require.NoError(t, err)
+
+	bufferCons, err := js.Consumer(ctx, mq.StreamName(), ingest.BufferConsumerName)
+	require.NoError(t, err)
+
+	// Publish the delete envelope directly to ingest.<table>. The worker
+	// picks it up, fails the CH Exec (no such table), and routes the
+	// envelope to dlq.<table> via PublishMsg + Wave-DLQ-Type header.
+	//
+	// We capture the publish ack's stream sequence so the no-redelivery
+	// assertion below can target *this specific message*. A coarser
+	// "NumAckPending == 0" check would be a global claim about the buffer
+	// consumer's state — fragile if any other test (now or future) leaves a
+	// Nak'd message in pending state while AckWait elapses.
+	envelope := map[string]any{
+		"action":     "delete",
+		"table_name": table,
+		"id":         deleteID,
+	}
+	payload, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	pubAck, err := js.Publish(ctx, "ingest."+table, payload)
+	require.NoError(t, err)
+	require.NotNil(t, pubAck)
+
+	// Wait up to 30s for the DLQ message — covers Bento's batch window plus
+	// loaded-CI slack. Fetch(1, …) is the simplest "pull next" primitive.
+	batch, err := dlqCons.Fetch(1, jetstream.FetchMaxWait(30*time.Second))
+	require.NoError(t, err)
+	var got jetstream.Msg
+	for m := range batch.Messages() {
+		got = m
+		break
+	}
+	require.NoError(t, batch.Error())
+	require.NotNil(t, got, "DLQ should receive the failed delete envelope within timeout")
+	defer func() { _ = got.Ack() }()
+
+	// BYOS-safe discriminator: header is set by the worker (non-user-
+	// controlled). A user row with an `action` column can't forge this.
+	assert.Equal(t, "delete-envelope", got.Headers().Get("Wave-DLQ-Type"),
+		"Wave-DLQ-Type header must survive the NATS round-trip end-to-end")
+
+	// Subject and payload are preserved bit-for-bit so a Phase-2 consumer
+	// can re-issue the delete with full context.
+	assert.Equal(t, "dlq."+table, got.Subject())
+	assert.JSONEq(t, string(payload), string(got.Data()),
+		"DLQ envelope must equal the original ingest.<table> envelope verbatim")
+
+	// Note: we intentionally do NOT assert on the W3C `traceparent` header
+	// here. observability.InjectNATS is called by the worker and writes
+	// traceparent in production (where cmd/wavehouse runs
+	// observability.InitProvider, installing a real TracerProvider +
+	// TraceContext propagator). The integration test harness in
+	// setup_test.go intentionally leaves both globals unset so otel_test.go
+	// can save/restore them around its own InitProvider invocations. Adding
+	// trace-propagation coverage to this test would require either wiring
+	// InitProvider into the shared harness (touches otel_test.go's
+	// save/restore dance) or installing a per-test recording tracer.
+	// The propagator round-trip is fully covered by
+	// observability/tracer_test.go:TestInjectExtractNATS_Roundtrip, so the
+	// signal-per-effort here is low.
+
+	// Buffer consumer state: AckFloor.Stream must have advanced to at least
+	// our publish's stream sequence, proving the worker DoubleAck'd *our*
+	// delete (not a global "everything is quiet" claim that could be tripped
+	// by an unrelated test leaving a Nak'd message pending). A Nak would
+	// leave AckFloor.Stream stuck below pubAck.Sequence until AckWait
+	// elapses (30s default) — the symptom of the infinite-Nak loop this PR
+	// fixes.
+	require.Eventually(t, func() bool {
+		postInfo, err := bufferCons.Info(ctx)
+		if err != nil {
+			return false
+		}
+		return postInfo.AckFloor.Stream >= pubAck.Sequence
+	}, 5*time.Second, 100*time.Millisecond,
+		fmt.Sprintf("buffer consumer's AckFloor.Stream must reach %d (our publish seq), proving the worker DoubleAck'd this specific delete rather than Nak'ing it", pubAck.Sequence))
 }
