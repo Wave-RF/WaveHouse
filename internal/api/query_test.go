@@ -210,6 +210,24 @@ func TestIsMutation(t *testing.T) {
 		{"block comment then mutation", "/* admin */ ALTER TABLE t ADD COLUMN c Int", true},
 		{"mixed comments then select", "-- foo\n# bar\n/* baz */ SELECT 1", false},
 
+		// WITH-prefix forms. ClickHouse accepts `WITH cte AS (...) <statement>`
+		// for both reads and mutations — `INSERT INTO x WITH y AS (...) SELECT
+		// * FROM y` and `WITH y AS (...) INSERT INTO x SELECT * FROM y` are
+		// documented as equivalent. The classifier must look past the CTE list
+		// to the real statement verb so WITH-mutations bypass cache+singleflight.
+		{"with insert", "WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
+		{"with insert lower", "with cte as (select 1) insert into t select * from cte", true},
+		{"with delete", "WITH cte AS (SELECT id FROM x) DELETE FROM t WHERE id IN (SELECT id FROM cte)", true},
+		{"with update", "WITH cte AS (SELECT 1) ALTER TABLE t UPDATE a=1 WHERE id IN (SELECT id FROM cte)", true},
+		{"with truncate", "WITH cte AS (SELECT 1) TRUNCATE TABLE t", true},
+		{"with multi-cte insert", "WITH a AS (SELECT 1), b AS (SELECT 2) INSERT INTO t SELECT * FROM a JOIN b", true},
+		{"with nested parens insert", "WITH cte AS (SELECT id FROM t WHERE id IN (1,2,3)) INSERT INTO t2 SELECT * FROM cte", true},
+		{"with paren-in-string insert", "WITH cte AS (SELECT ')' AS x) INSERT INTO t2 SELECT * FROM cte", true},
+		{"with materialized insert", "WITH cte AS MATERIALIZED (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
+		{"with recursive select", "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT * FROM x) SELECT * FROM x", false},
+		{"with nested select", "WITH x AS (SELECT 1) SELECT * FROM (SELECT * FROM x)", false},
+		{"with scalar insert", "WITH '/path' AS p INSERT INTO files VALUES (p)", true},
+
 		{"empty", "", false},
 		{"comment only", "-- just a comment", false},
 		{"unclosed block comment", "/* never closed", false},

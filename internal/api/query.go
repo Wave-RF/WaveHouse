@@ -202,10 +202,17 @@ var mutationVerbs = map[string]struct{}{
 	"SYSTEM":   {},
 }
 
-// isMutation reports whether sql's leading keyword is a non-SELECT statement
-// — i.e. one that returns no result set and must go through Exec, not Query.
-// Leading whitespace and SQL line/block comments are skipped; the first
-// alphabetic token is matched case-insensitively against mutationVerbs.
+// isMutation reports whether sql's leading statement is a non-SELECT — i.e.
+// one that returns no result set and must go through Exec, not Query.
+// Leading whitespace and SQL line/block comments are skipped, then the first
+// alphabetic token is matched case-insensitively against mutationVerbs. A
+// leading WITH clause (CTE) routes through a paren-aware scan because
+// ClickHouse accepts `WITH cte AS (...) INSERT INTO t SELECT * FROM cte` as
+// equivalent to `INSERT INTO t WITH cte AS (...) SELECT * FROM cte` (see
+// https://clickhouse.com/docs/sql-reference/statements/insert-into). Without
+// the skip, the WITH form would classify as a read, route through Query,
+// silently succeed, and cache `[]` — the same silent-data-loss class the
+// mutation-cache-bypass fix closed for TRUNCATE.
 func isMutation(sql string) bool {
 	s := stripLeadingSQLComments(sql)
 	end := 0
@@ -219,8 +226,75 @@ func isMutation(sql string) bool {
 	if end == 0 {
 		return false
 	}
-	_, ok := mutationVerbs[strings.ToUpper(s[:end])]
-	return ok
+	first := strings.ToUpper(s[:end])
+	if first != "WITH" {
+		_, ok := mutationVerbs[first]
+		return ok
+	}
+	return containsMutationVerbAtTopLevel(s[end:])
+}
+
+// containsMutationVerbAtTopLevel scans s for a mutation verb at paren-depth 0,
+// stepping over SQL string literals (`'…'` with `”` escape), quoted
+// identifiers (`"…"` and “ `…` “), and parenthesized CTE subqueries so that
+// keywords inside a CTE body never count. Non-mutation tokens (CTE names,
+// AS / MATERIALIZED / RECURSIVE, SELECT, …) are skipped silently; the absence
+// of a mutation verb at top level means the WITH statement is a read.
+func containsMutationVerbAtTopLevel(s string) bool {
+	depth := 0
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == '(':
+			depth++
+			i++
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		case c == '\'':
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case c == '"' || c == '`':
+			q := c
+			i++
+			for i < len(s) && s[i] != q {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+			start := i
+			for i < len(s) {
+				c2 := s[i]
+				if (c2 < 'A' || c2 > 'Z') && (c2 < 'a' || c2 > 'z') && (c2 < '0' || c2 > '9') && c2 != '_' {
+					break
+				}
+				i++
+			}
+			if depth == 0 {
+				if _, ok := mutationVerbs[strings.ToUpper(s[start:i])]; ok {
+					return true
+				}
+			}
+		default:
+			i++
+		}
+	}
+	return false
 }
 
 // stripLeadingSQLComments trims whitespace plus line comments (`-- …` and
