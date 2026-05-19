@@ -32,7 +32,6 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -304,15 +303,10 @@ func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *disc
 	js := embeddedMQ.JetStream()
 
 	hub := api.NewHub()
-	l1, err := cache.NewLocal(1024 * 1024)
-	if err != nil {
-		return nil, fmt.Errorf("local cache: %w", err)
-	}
-	tiered := cache.NewTiered(l1, nil)
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ),
-		Query:  api.NewQueryHandler(chConn, tiered, 5*time.Second),
+		Query:  api.NewQueryHandler(chConn),
 		SSE:    api.NewSSEHandler(hub, js),
 		WS:     api.NewWSHandler(hub, js, nil),
 		Health: api.NewHealthHandler(chConn),
