@@ -364,10 +364,13 @@ install-sdk:
 install-docs:
 	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
 	@# rehype-mermaid uses Playwright (Chromium) to render diagrams at build
-	@# time. `--with-deps` apt-installs Chromium's system libs (libnspr4 etc.)
-	@# on Linux — required on CI runners that ship a minimal base image, but
-	@# requires sudo on contributor laptops, so gate it behind $CI. Both the
-	@# install and the deps step are idempotent.
+	@# time, so the Chromium binary (~130 MB) is fetched unconditionally
+	@# here (and via `make tools`). Only the `--with-deps` flag — which runs
+	@# `apt-get install` for Chromium's system libs (libnspr4 etc.) on
+	@# Linux — is gated behind $CI, since it requires sudo on contributor
+	@# laptops. CI runners on minimal base images need it. Both steps are
+	@# idempotent. See docs/src/content/docs/development.md for the full
+	@# story on Linux dev machines.
 	@cd $(DOCS_DIR) && $(PNPM) exec playwright install chromium $${CI:+--with-deps} >/dev/null
 
 .PHONY: install-e2e-sdk
