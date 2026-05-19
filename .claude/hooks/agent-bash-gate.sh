@@ -47,10 +47,15 @@ git_subcmd() {
 }
 
 # --- 1. --no-verify on git push/commit --------------------------------------
-if git_subcmd 'push' || git_subcmd 'commit'; then
-  if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])--no-verify\b'; then
-    block "git push/commit with --no-verify is not permitted for agents. Run the gates."
-  fi
+# Match --no-verify only when it appears in the args of `git push|commit`
+# BEFORE any quote (" or '), command substitution ($), or heredoc marker (<).
+# That excludes false positives where the literal string sits inside a quoted
+# commit message body (e.g., when documenting the rule). Honest-agent defense,
+# not adversarial — eval / sh -c wrappers around `git push --no-verify` could
+# still bypass; AGENTS.md §"Agent PR Discipline" makes the rule explicit.
+no_verify_re='(^|[[:space:];|&])git[[:space:]]+(push|commit)\b[^"'\''$<]*[[:space:]]--no-verify\b'
+if printf '%s\n' "$cmd" | grep -qE "$no_verify_re"; then
+  block "git push/commit with --no-verify is not permitted for agents. Run the gates."
 fi
 
 # --- 2. gh pr create without --draft ----------------------------------------
