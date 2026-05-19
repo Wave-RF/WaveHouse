@@ -83,7 +83,13 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 // backlogged and never dequeued the envelope at all.
 func TestIngest_NonInsertActionDropped(t *testing.T) {
 	e := env(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// 120s test-wide deadline: the two sequential require.Eventually
+	// blocks below each allow up to 30s, and the ctx is also threaded
+	// through createTable / chConn.QueryRow / js.Publish / bufferCons.Info.
+	// 60s left no headroom for HTTP/JetStream/ClickHouse overhead on a
+	// loaded CI runner and could trip the outer ctx before the inner
+	// Eventually deadline fired.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	js := e.embeddedMQ.JetStream()

@@ -175,16 +175,20 @@ Client POST /v1/query
   → Policy gate: caller must be admin/service, or have a policy role
     granting RawSQL: true on some table. /v1/query is the only sanctioned
     surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…)
-  → Check tiered cache (L1 → L2)
-  → Cache HIT: return cached result (X-Cache: HIT header)
-  → Cache MISS:
-    → Classify by leading SQL verb:
-      → Read verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS): run through
-        driver.Query, convert UUID/DateTime types, return the row array
-      → Mutation/DDL verbs (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/…): run
-        through driver.Exec; return [] on success (HTTP 200 with empty body)
-    → Store result in L1 + L2
-    → Return result (X-Cache: MISS header)
+  → Classify by leading SQL verb (always runs before cache):
+    → Mutation/DDL verbs (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/…):
+        bypass cache + singleflight entirely → driver.Exec → return [] on
+        success (HTTP 200, X-Cache: MISS, result never stored in cache).
+        Caching `[]` under the SQL key would let a second identical
+        mutation hit the cache and skip ClickHouse within DefaultTTL —
+        silent data loss; singleflight collapsing would drop concurrent
+        writes the caller asked for.
+    → Read verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS):
+      → Check tiered cache (L1 → L2)
+      → Cache HIT: return cached result (X-Cache: HIT header)
+      → Cache MISS: singleflight-collapsed driver.Query, convert
+        UUID/DateTime types, store row array in L1 + L2, return result
+        (X-Cache: MISS header)
 ```
 
 ### Streaming Path
