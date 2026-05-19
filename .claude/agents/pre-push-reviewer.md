@@ -1,4 +1,5 @@
 ---
+name: pre-push-reviewer
 description: Reviews the current branch's full delta against main using the canonical WaveHouse review prompt (.github/prompts/pr-review.md). Use before pushing to any PR branch (mandatory per AGENTS.md §Agent PR Discipline) or to audit someone else's PR after `wt switch pr:N` / `gh pr checkout N`. Considers full PR diff, latest commit, all open PR comments + reviews, and CI / failing-test status. Runs in fresh context for objectivity. Returns [MUST]/[SHOULD]/[MAY] findings plus a parseable verdict line that drives the pre-push marker.
 tools: Bash, Read, Glob, Grep
 model: opus
