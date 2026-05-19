@@ -48,7 +48,7 @@ The marker invalidates on every commit (HEAD SHA changes), so `make ci` re-runs 
 
 | Path | Purpose |
 | ---- | ------- |
-| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, --no-verify, the obvious marker-write idioms, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all four hooks wired |
+| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, --no-verify, the obvious marker-write idioms, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all three hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: enforces Agent PR Discipline (drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes) |
 | `.claude/hooks/review-marker.sh` | PostToolUse Agent: writes `tmp/review-passed-<HEAD-sha>` when `pre-push-reviewer` returns `VERDICT: ship_it` |
