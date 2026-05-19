@@ -91,8 +91,10 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
-# Query events (wait a few seconds for the batch flush)
-curl -s -X POST http://localhost:8080/v1/query \
+# Query events (wait a few seconds for the batch flush). `/v1/admin/query`
+# requires admin/service when auth is on — fine here because `make dev`
+# runs with `auth.enabled=false`.
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 

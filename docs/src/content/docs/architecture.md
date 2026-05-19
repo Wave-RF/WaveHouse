@@ -68,7 +68,7 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
 
-- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest/{table}`, `/v1/query`, `/v1/tables/{table}/query` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema/*`, `/v1/dlq/stats`. Admin: `/v1/admin/policy`, `/v1/admin/pipes/*`.
+- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest/{table}`, `/v1/tables/{table}/query` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema/*`, `/v1/dlq/stats`. Admin (admin/service): `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
 - **middleware.go** — JWT auth middleware supporting HMAC and JWKS validation, role extraction from configurable claim path, and dev mode bypass. Controlled by `auth.enabled`.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/query` under an admin-equivalent role — see the Query Path section below; they're rejected at the API layer, not at this consumer. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; they're rejected at the API layer, not at this consumer. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -161,7 +161,7 @@ Bento ingest pipeline (StartIngestWorker):
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, received_timestamp, data}; non-insert mutations
-  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/query and are
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query and are
   rejected at the API layer, not at this consumer.)
 
 Active Sweeper (async goroutine, every 60s):
@@ -174,11 +174,18 @@ Active Sweeper (async goroutine, every 60s):
 ### Query Path
 
 ```text
-Client POST /v1/query
+Client POST /v1/admin/query
   → Optional JWT auth middleware
-  → Policy gate: caller must be admin/service, or have a policy role
-    granting RawSQL: true on some table. /v1/query is the only sanctioned
-    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…)
+  → /v1/admin RequireRole(admin, service) — single gate shared with the
+    rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Service
+    tokens already hold admin-scoped powers across that whole tree, so
+    raw SQL is gated by the same set rather than carving out a tighter
+    one. Raw SQL has no per-statement scope check (a full SQL parser
+    would be needed to authorize predicates), so the role gate is the
+    entire authorization story. /v1/admin/query is the only sanctioned
+    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
+    non-admin callers use the structured query endpoint or named pipes
+    instead.
   → Classify by leading SQL verb (always runs before cache):
     → Mutation/DDL verbs (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/…):
         bypass cache + singleflight entirely → driver.Exec → return [] on

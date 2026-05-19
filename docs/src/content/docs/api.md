@@ -120,7 +120,7 @@ Accepts a flat JSON object, validates it against the ClickHouse schema for `{tab
 
 The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
-> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/query`](#post-v1query--query-clickhouse) under the `admin` / `service` role (or a policy role with `RawSQL: true`).
+> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), which is restricted to the `admin` / `service` role (the same gate as the rest of `/v1/admin/*`).
 >
 > The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
 
@@ -180,11 +180,13 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ---
 
-### `POST /v1/query` — Query ClickHouse
+### `POST /v1/admin/query` — Query ClickHouse
 
 Executes a SQL statement directly against ClickHouse. Read queries (`SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`/`EXISTS`) return a JSON array of result rows; mutation/DDL statements (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`DROP`/`ALTER`/`CREATE`/`RENAME`/`OPTIMIZE`/`REPLACE`/…) return HTTP 200 with `[]` on success. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in read responses.
 
-`/v1/query` is the only sanctioned surface for non-insert mutations. When policies are configured, the caller must be `admin` / `service` or a policy role with `RawSQL: true` on at least one table; without policies, all callers may invoke this endpoint.
+> **Admin / service only.** The route is mounted under `/v1/admin/*`, which sits behind a `RequireRole("admin","service")` gate: callers whose JWT resolves to either role may use it (or any caller when `auth.enabled` is false, the dev/test posture). Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story — but the role set matches the rest of `/v1/admin/*` rather than carving out a separate tighter gate, because service tokens already hold admin-scoped powers across that whole tree (policy CRUD, pipes CRUD, log-level) and the inconsistency would be a footgun without a real authorization win. The normal surfaces for non-admin callers are `POST /v1/ingest/{table}` for writes, `POST /v1/tables/{table}/query` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+
+`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate as `admin` / `service`. (The endpoint moved here from `/v1/query` as part of the admin-lockdown change — the `policy.RolePermissions.raw_sql` field has been removed and `/v1/query` now returns 404.)
 
 **Request:**
 
@@ -224,12 +226,14 @@ The response includes a cache header:
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
+| 401 | `{"error":"unauthorized"}` | `auth.enabled=true` and the request carries no role claim |
+| 403 | `{"error":"forbidden"}` | Caller's role is not `admin` or `service` |
 | 500 | `{"error":"..."}` | ClickHouse query error |
 
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/query \
+curl -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
@@ -276,7 +280,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 
 **Response:**
 
-Same format as `/v1/query` with `X-Cache` header.
+Same format as `/v1/admin/query` with `X-Cache` header.
 
 **Error responses:**
 
@@ -307,7 +311,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-Same format as `/v1/query` with `X-Cache` header.
+Same format as `/v1/admin/query` with `X-Cache` header.
 
 **Error responses:**
 

@@ -332,7 +332,6 @@ func run() int {
 	}
 
 	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
-	queryHandler.PolicyStore = policyStore
 
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState

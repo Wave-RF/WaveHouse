@@ -66,7 +66,9 @@ Queries are cached in-process (L1 Ristretto) with singleflight coalescing — du
 
 ```bash
 # Wait ~5 seconds for the batch flush to ClickHouse, then:
-curl -s -X POST http://localhost:8080/v1/query \
+# `/v1/admin/query` requires the admin or service role when auth is on.
+# With `auth.enabled=false` (the default for the quickstart) it's open.
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```

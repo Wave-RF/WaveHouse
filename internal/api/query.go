@@ -13,18 +13,23 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
 
-// QueryHandler handles POST /v1/query.
+// QueryHandler handles POST /v1/admin/query.
+//
+// Authorization for this surface is enforced entirely at the router (the
+// /v1/admin/* RequireRole("admin","service") gate in NewRouter). The
+// handler trusts that any request reaching it holds an admin-equivalent
+// role — there is no per-statement scope check (a full SQL parser would be
+// needed to authorize predicates), and the policy engine is not consulted
+// here. See internal/api/router.go for the role-gate rationale.
 type QueryHandler struct {
-	CHConn      driver.Conn
-	Cache       *cache.TieredCache
-	DefaultTTL  time.Duration
-	PolicyStore *policy.Store
-	sf          singleflight.Group
+	CHConn     driver.Conn
+	Cache      *cache.TieredCache
+	DefaultTTL time.Duration
+	sf         singleflight.Group
 }
 
 func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
@@ -37,30 +42,6 @@ type queryRequest struct {
 }
 
 func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	// Raw SQL is restricted when a policy store is configured.
-	if h.PolicyStore != nil {
-		role := RoleFromContext(r.Context())
-		if role != "" && role != "admin" && role != "service" {
-			// Check if the role has raw_sql permission on any table.
-			p := h.PolicyStore.Get()
-			if p != nil {
-				claims, _ := ClaimsFromContext(r.Context())
-				allowed := false
-				for table := range p.Tables {
-					perms := policy.Evaluate(p, role, table, "select", claims)
-					if perms.RawSQL {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					writeJSONError(w, http.StatusForbidden, "raw SQL queries require admin role")
-					return
-				}
-			}
-		}
-	}
-
 	var req queryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid json")

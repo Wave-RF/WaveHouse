@@ -109,9 +109,10 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		// Insert-only pipeline. The wire format `EventMessage` (types.go)
 		// has only TableName / ReceivedTimestamp / Data; the worker only
 		// validates and writes inserts. Non-insert mutations
-		// (DELETE/UPDATE/TRUNCATE/…) must go through POST /v1/query under
-		// admin/service or a policy role with RawSQL: true — they're
-		// rejected at the API layer there, not at this consumer.
+		// (DELETE/UPDATE/TRUNCATE/…) must go through POST /v1/admin/query
+		// under the admin/service role (the same gate as the rest of
+		// /v1/admin/*) — they're rejected at the API layer there, not at
+		// this consumer.
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")

@@ -70,8 +70,10 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
-# Query data (wait ~5s for the batch flush to ClickHouse)
-curl -s -X POST http://localhost:8080/v1/query \
+# Query data (wait ~5s for the batch flush to ClickHouse).
+# /v1/admin/query requires the admin or service role when auth is on. With
+# auth.enabled=false (the default for the quickstart) it's open.
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 

@@ -182,7 +182,6 @@ export interface RolePermissions {
   denied_aggregations?: string[];
   max_rows?: number;
   max_execution_time_ms?: number;
-  raw_sql?: boolean;
 }
 
 export interface PolicyFilter {

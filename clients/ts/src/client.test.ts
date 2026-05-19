@@ -105,7 +105,7 @@ describe('WaveHouseClient.pipe()', () => {
 });
 
 describe('WaveHouseClient.sql()', () => {
-  it('delegates to sql() and POSTs to /v1/query', async () => {
+  it('delegates to sql() and POSTs to /v1/admin/query', async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify([{ count: 42 }]), { status: 200 }),
     );
@@ -114,7 +114,7 @@ describe('WaveHouseClient.sql()', () => {
     const result = await client.sql('SELECT count() FROM clicks');
 
     expect(result.data).toEqual([{ count: 42 }]);
-    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/query');
+    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/admin/query');
   });
 });
 

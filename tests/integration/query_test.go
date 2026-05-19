@@ -17,10 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// `/v1/query` is the only sanctioned surface for non-insert mutations,
+// `/v1/admin/query` is the only sanctioned surface for non-insert mutations,
 // and a mutation must return HTTP 200 with an empty JSON array (`[]`)
 // — not HTTP 500. We insert a row, observe it land, TRUNCATE through
-// `/v1/query`, and then observe the row gone.
+// `/v1/admin/query`, and then observe the row gone.
 //
 // Before the fix `executeQuery` routed every statement through
 // `driver.Query`, which on a TRUNCATE surfaced as "internal driver error"
@@ -59,13 +59,13 @@ func TestQuery_TruncateReturnsEmptyArray(t *testing.T) {
 		return err == nil && count == 1
 	}, 30*time.Second, 500*time.Millisecond, "insert should land before TRUNCATE")
 
-	// Now TRUNCATE through /v1/query. Before, this would have
+	// Now TRUNCATE through /v1/admin/query. Before, this would have
 	// returned 500; now it must return 200 with `[]`.
 	truncateBody, _ := json.Marshal(map[string]string{
 		"sql": fmt.Sprintf("TRUNCATE TABLE `%s`", table),
 	})
 	qResp, err := http.Post(
-		e.server.URL+"/v1/query",
+		e.server.URL+"/v1/admin/query",
 		"application/json",
 		bytes.NewReader(truncateBody),
 	)
@@ -76,9 +76,9 @@ func TestQuery_TruncateReturnsEmptyArray(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, http.StatusOK, qResp.StatusCode,
-		"mutations through /v1/query must return 200, not 500; body: %s", respBytes)
+		"mutations through /v1/admin/query must return 200, not 500; body: %s", respBytes)
 	assert.JSONEq(t, "[]", string(respBytes),
-		"mutations through /v1/query must marshal to [] (empty result set), not null or {}")
+		"mutations through /v1/admin/query must marshal to [] (empty result set), not null or {}")
 
 	// And confirm TRUNCATE was actually executed — not just that the
 	// handler swallowed the statement and returned [] from nowhere.
@@ -93,7 +93,7 @@ func TestQuery_TruncateReturnsEmptyArray(t *testing.T) {
 
 // TestQuery_DeleteReturnsEmptyArray covers the predicate-driven DELETE case
 // — the canonical example of why we routed non-insert mutations through
-// `/v1/query` instead of trying to teach the policy engine to authorize
+// `/v1/admin/query` instead of trying to teach the policy engine to authorize
 // WHERE predicates. The response shape contract is the same as TRUNCATE:
 // HTTP 200 with `[]`. ClickHouse lightweight DELETE marks the matching
 // rows invisible synchronously, so we can poll for the row to disappear.
@@ -134,7 +134,7 @@ func TestQuery_DeleteReturnsEmptyArray(t *testing.T) {
 		"params": []any{dropID},
 	})
 	qResp, err := http.Post(
-		e.server.URL+"/v1/query",
+		e.server.URL+"/v1/admin/query",
 		"application/json",
 		bytes.NewReader(deleteBody),
 	)
@@ -163,5 +163,5 @@ func TestQuery_DeleteReturnsEmptyArray(t *testing.T) {
 		}
 		return kept == 1 && dropped == 0
 	}, 30*time.Second, 500*time.Millisecond,
-		"DELETE through /v1/query must mutate only the targeted row")
+		"DELETE through /v1/admin/query must mutate only the targeted row")
 }

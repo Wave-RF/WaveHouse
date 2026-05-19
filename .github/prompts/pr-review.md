@@ -78,7 +78,7 @@ Review against each of these, in this order:
      - Sensitive data exposure (secrets in logs, error
        messages leaking internal state)
      - Broken access control (policy bypass, raw-SQL
-       without `raw_sql: true` permission)
+       outside the `admin`/`service` role on `/v1/admin/query`)
      - Security misconfiguration (CORS, TLS, default
        credentials, permissive defaults)
      - Insufficient logging / monitoring

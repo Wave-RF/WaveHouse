@@ -12,7 +12,6 @@ func TestEvaluate_NilPolicy(t *testing.T) {
 	perms := Evaluate(nil, "viewer", "clicks", "select", nil)
 	require.NotNil(t, perms)
 	assert.True(t, perms.Allowed)
-	assert.True(t, perms.RawSQL, "nil policy should allow raw SQL")
 }
 
 func TestEvaluate_NoTablePolicy_AdminAllowed(t *testing.T) {
@@ -352,7 +351,6 @@ func TestEvaluate_ServiceRoleTreatedLikeAdmin(t *testing.T) {
 	p := &Policy{Tables: map[string]TablePolicy{}}
 	perms := Evaluate(p, "service", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
-	assert.True(t, perms.RawSQL)
 }
 
 func TestResolveFilters_MultipleOperators(t *testing.T) {

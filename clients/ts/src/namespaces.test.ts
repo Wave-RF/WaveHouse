@@ -22,12 +22,12 @@ describe('sql', () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it('POSTs to /v1/query with sql field', async () => {
+  it('POSTs to /v1/admin/query with sql field', async () => {
     const result = await sql(makeCtx(), 'SELECT count() FROM clicks');
 
     expect(result.data).toEqual([{ count: 10 }]);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/v1/query');
+    expect(url).toContain('/v1/admin/query');
     expect(JSON.parse(init.body)).toEqual({ sql: 'SELECT count() FROM clicks' });
   });
 

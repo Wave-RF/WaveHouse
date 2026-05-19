@@ -98,7 +98,7 @@ describe("Query", () => {
   it("raw SQL query", async () => {
     // Scope to seededIds so the SQL string is unique per run — avoids
     // colliding with admin.test.ts's identical-SQL count which can cache
-    // a stale 0 in /v1/query when it runs first.
+    // a stale 0 in /v1/admin/query when it runs first.
     const admin = adminClient();
     const result = await admin.sql(
       `SELECT count() as cnt FROM default.clicks WHERE event_id IN ('${seededIds.join("','")}')`,
