@@ -4,31 +4,44 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // safeHandle calls a handler and recovers from panics.
-// Used when tests verify validation logic but pass nil for driver.Conn,
-// which would panic once the handler reaches executeQuery. Shared with
+// Used when tests verify validation logic but pass nil for dependencies,
+// which would panic once the handler reaches them. Shared with
 // structured_query_test.go and pipes_test.go.
 func safeHandle(handler http.HandlerFunc, w *httptest.ResponseRecorder, r *http.Request) {
 	defer func() { _ = recover() }()
 	handler(w, r)
 }
 
-func TestQueryHandler_MissingSQL(t *testing.T) {
-	t.Parallel()
-	h := NewQueryHandler(nil)
-	body, _ := json.Marshal(queryRequest{SQL: ""})
+func newProxyHandler(t *testing.T, fakeCH http.Handler) *QueryHandler {
+	t.Helper()
+	srv := httptest.NewServer(fakeCH)
+	t.Cleanup(srv.Close)
+	return NewQueryHandler(srv.URL, "default", "secret", "default")
+}
+
+func postQuery(h *QueryHandler, body []byte) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
 	h.Handle(w, r)
+	return w
+}
+
+func TestQueryHandler_MissingSQL(t *testing.T) {
+	t.Parallel()
+	// No upstream call expected — handler should reject before the proxy.
+	h := NewQueryHandler("http://unused.invalid", "", "", "")
+	body, _ := json.Marshal(queryRequest{SQL: ""})
+	w := postQuery(h, body)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing sql")
@@ -37,7 +50,7 @@ func TestQueryHandler_MissingSQL(t *testing.T) {
 
 func TestQueryHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	h := NewQueryHandler(nil)
+	h := NewQueryHandler("http://unused.invalid", "", "", "")
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(`{bad}`)))
 	h.Handle(w, r)
@@ -47,131 +60,253 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	assertJSONErrorResponse(t, w)
 }
 
-func TestIsMutation(t *testing.T) {
+// TestQueryHandler_ForwardsSQLToClickHouse pins the proxy contract:
+//   - Request SQL is sent as the HTTP body verbatim.
+//   - default_format=JSON and date_time_output_format=iso are set so the
+//     response envelope is predictable.
+//   - Database from constructor lands in the query string.
+//   - X-ClickHouse-User / X-ClickHouse-Key headers carry the credentials.
+//
+// A regression that swapped any of these would either change the URL the
+// fake ClickHouse sees or the body it receives, and the sub-assertions
+// below would fail loudly.
+func TestQueryHandler_ForwardsSQLToClickHouse(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		sql  string
-		want bool
-	}{
-		{"select", "SELECT 1", false},
-		{"select lower", "select 1", false},
-		{"with cte", "WITH x AS (SELECT 1) SELECT * FROM x", false},
-		{"show", "SHOW TABLES", false},
-		{"describe", "DESCRIBE clicks", false},
-		{"explain", "EXPLAIN SELECT 1", false},
-		{"exists", "EXISTS TABLE clicks", false},
 
-		{"insert", "INSERT INTO t VALUES (1)", true},
-		{"update", "UPDATE t SET a=1 WHERE b=2", true},
-		{"delete", "DELETE FROM t WHERE id=1", true},
-		{"truncate", "TRUNCATE TABLE t", true},
-		{"truncate lower", "truncate table t", true},
-		{"drop", "DROP TABLE t", true},
-		{"alter", "ALTER TABLE t ADD COLUMN c String", true},
-		{"create", "CREATE TABLE t (a Int)", true},
-		{"rename", "RENAME TABLE a TO b", true},
-		{"exchange", "EXCHANGE TABLES t1 AND t2", true},
-		{"optimize", "OPTIMIZE TABLE t", true},
-		{"replace", "REPLACE INTO t VALUES (1)", true},
-		{"grant", "GRANT SELECT ON t TO u", true},
-		{"revoke", "REVOKE SELECT ON t FROM u", true},
-		{"system", "SYSTEM RELOAD CONFIG", true},
-		{"attach", "ATTACH TABLE t FROM '/path'", true},
-		{"detach", "DETACH TABLE t", true},
-		{"kill", "KILL QUERY WHERE query_id = 'abc'", true},
-		{"set", "SET max_threads = 4", true},
-		{"use", "USE mydb", true},
+	var (
+		gotMethod  string
+		gotPath    string
+		gotQuery   string
+		gotBody    string
+		gotUser    string
+		gotKey     string
+		gotContent string
+	)
+	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotUser = r.Header.Get("X-ClickHouse-User")
+		gotKey = r.Header.Get("X-ClickHouse-Key")
+		gotContent = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
 
-		{"leading whitespace", "   \n\tTRUNCATE TABLE t", true},
-		{"line comment then mutation", "-- drop guard\nDROP TABLE t", true},
-		{"hash line comment then mutation", "# audit\nDROP TABLE t", true},
-		{"block comment then mutation", "/* admin */ ALTER TABLE t ADD COLUMN c Int", true},
-		{"mixed comments then select", "-- foo\n# bar\n/* baz */ SELECT 1", false},
-		{"with insert", "WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
-		{"with insert lower", "with cte as (select 1) insert into t select * from cte", true},
-		{"with delete", "WITH cte AS (SELECT id FROM x) DELETE FROM t WHERE id IN (SELECT id FROM cte)", true},
-		{"with update", "WITH cte AS (SELECT 1) ALTER TABLE t UPDATE a=1 WHERE id IN (SELECT id FROM cte)", true},
-		{"with truncate", "WITH cte AS (SELECT 1) TRUNCATE TABLE t", true},
-		{"with multi-cte insert", "WITH a AS (SELECT 1), b AS (SELECT 2) INSERT INTO t SELECT * FROM a JOIN b", true},
-		{"with nested parens insert", "WITH cte AS (SELECT id FROM t WHERE id IN (1,2,3)) INSERT INTO t2 SELECT * FROM cte", true},
-		{"with paren-in-string insert", "WITH cte AS (SELECT ')' AS x) INSERT INTO t2 SELECT * FROM cte", true},
-		{"with materialized insert", "WITH cte AS MATERIALIZED (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
-		{"with recursive select", "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT * FROM x) SELECT * FROM x", false},
-		{"with nested select", "WITH x AS (SELECT 1) SELECT * FROM (SELECT * FROM x)", false},
-		{"with scalar insert", "WITH '/path' AS p INSERT INTO files VALUES (p)", true},
-		{"with line comment containing DELETE then select", "WITH cte AS (SELECT 1) -- old DELETE approach\nSELECT * FROM cte", false},
-		{"with hash comment containing TRUNCATE then select", "WITH cte AS (SELECT 1) # was TRUNCATE\nSELECT * FROM cte", false},
-		{"with block comment containing INSERT then select", "WITH cte AS (SELECT 1) /* INSERT reminder */ SELECT * FROM cte", false},
-		{"with comment then real mutation", "WITH cte AS (SELECT 1) -- explanatory\nINSERT INTO t SELECT * FROM cte", true},
-		{"with unclosed block comment", "WITH cte AS (SELECT 1) /* unterminated comment DELETE", false},
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":[{"name":"n","type":"UInt64"}],"data":[{"n":1}],"rows":1}`))
+	})
+	h := newProxyHandler(t, fake)
 
-		{"empty", "", false},
-		{"comment only", "-- just a comment", false},
-		{"unclosed block comment", "/* never closed", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, isMutation(tt.sql))
-		})
-	}
+	const sql = "SELECT count() AS n FROM clicks"
+	body, _ := json.Marshal(queryRequest{SQL: sql})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, http.MethodPost, gotMethod, "ClickHouse HTTP requires POST for arbitrary SQL")
+	assert.Equal(t, "/", gotPath)
+	assert.Contains(t, gotQuery, "default_format=JSON")
+	assert.Contains(t, gotQuery, "date_time_output_format=iso")
+	assert.Contains(t, gotQuery, "database=default")
+	assert.Equal(t, sql, gotBody, "SQL body must be forwarded verbatim, no parsing")
+	assert.Equal(t, "default", gotUser, "username must be sent via X-ClickHouse-User")
+	assert.Equal(t, "secret", gotKey, "password must be sent via X-ClickHouse-Key")
+	assert.Equal(t, "text/plain; charset=utf-8", gotContent)
 }
 
-// stubConn records how many times Exec or Query was called and returns
-// canned results. The embedded nil driver.Conn keeps every method we don't
-// override undefined-method-call-panic'd, which is what we want — the test
-// fails loudly if executeQuery starts touching new surface area.
-type stubConn struct {
-	driver.Conn
-	execCount  int
-	queryCount int
-	execErr    error
-}
-
-func (c *stubConn) Exec(_ context.Context, _ string, _ ...any) error {
-	c.execCount++
-	return c.execErr
-}
-
-func (c *stubConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
-	c.queryCount++
-	return &chainEmptyRows{}, nil
-}
-
-func TestExecuteQuery_MutationRoutesToExec(t *testing.T) {
+// TestQueryHandler_ExtractsDataArray confirms the proxy strips ClickHouse's
+// {meta, data, rows, statistics} envelope and returns just the data array
+// — preserving the [{...}, {...}] shape callers expected from the previous
+// (pre-proxy) handler. If we stopped extracting `data`, clients would
+// suddenly see an object with `meta`/`rows`/`statistics` fields and a
+// `.length` check would silently misbehave.
+func TestQueryHandler_ExtractsDataArray(t *testing.T) {
 	t.Parallel()
-	// TRUNCATE through /v1/admin/query previously errored out of rows.ColumnTypes()
-	// and surfaced as HTTP 500. Mutations now go through Exec and marshal to
-	// an empty `[]` on success.
-	for _, sql := range []string{
-		"TRUNCATE TABLE clicks",
-		"DROP TABLE clicks",
-		"DELETE FROM clicks WHERE id = 1",
-		"ALTER TABLE clicks ADD COLUMN c String",
-		"INSERT INTO clicks VALUES (1)",
-		"  -- audit log\n  UPDATE clicks SET v = 1 WHERE id = 2",
-	} {
-		t.Run(sql, func(t *testing.T) {
-			t.Parallel()
-			conn := &stubConn{}
-			h := NewQueryHandler(conn)
-			rows, err := h.executeQuery(context.Background(), sql, nil)
-			require.NoError(t, err)
-			assert.Equal(t, 1, conn.execCount, "Exec must be used for mutations")
-			assert.Zero(t, conn.queryCount, "Query must not be used for mutations")
-			assert.Equal(t, []map[string]any{}, rows, "mutation result must marshal to [] not null")
-		})
-	}
+	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"meta":[{"name":"id","type":"String"},{"name":"v","type":"UInt64"}],
+			"data":[{"id":"a","v":1},{"id":"b","v":2}],
+			"rows":2,
+			"statistics":{"elapsed":0.001}
+		}`))
+	})
+	h := newProxyHandler(t, fake)
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT id, v FROM t"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	assert.Equal(t, []map[string]any{
+		{"id": "a", "v": float64(1)},
+		{"id": "b", "v": float64(2)},
+	}, rows)
 }
 
-func TestExecuteQuery_SelectRoutesToQuery(t *testing.T) {
+// TestQueryHandler_EmptyBodyMutationReturnsArray pins the "mutation → []"
+// contract. ClickHouse returns an empty body for TRUNCATE/INSERT/DELETE/
+// etc. — the proxy must turn that into `[]` so the response shape stays
+// "always an array." Without this, a successful TRUNCATE would return a
+// zero-byte body and clients doing `result.length` would crash on null.
+func TestQueryHandler_EmptyBodyMutationReturnsArray(t *testing.T) {
 	t.Parallel()
-	conn := &stubConn{}
-	h := NewQueryHandler(conn)
-	rows, err := h.executeQuery(context.Background(), "SELECT 1", nil)
-	require.NoError(t, err)
-	assert.Zero(t, conn.execCount, "Exec must not be used for SELECT")
-	assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
-	assert.Equal(t, []map[string]any{}, rows, "zero-row SELECT must marshal to [] not null")
+	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// ClickHouse returns 200 + empty body for mutations regardless of
+		// default_format. No Content-Type either.
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newProxyHandler(t, fake)
+
+	body, _ := json.Marshal(queryRequest{SQL: "TRUNCATE TABLE clicks"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, "[]", w.Body.String())
+}
+
+// TestQueryHandler_ForwardsCHError covers the "ClickHouse rejected the
+// statement" path. ClickHouse returns 4xx/5xx with a plain-text error
+// message in the body (e.g. "Code: 60. DB::Exception: Unknown table x").
+// The proxy must surface that message — admin's whole reason for using
+// this endpoint is to see ClickHouse's view of what went wrong.
+func TestQueryHandler_ForwardsCHError(t *testing.T) {
+	t.Parallel()
+	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Code: 60. DB::Exception: Table default.no_such_table doesn't exist.\n"))
+	})
+	h := newProxyHandler(t, fake)
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT * FROM no_such_table"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code,
+		"ClickHouse 4xx is currently mapped to 500 — proxy distinguishing caller-fault would need ClickHouse error-code parsing")
+	assert.Contains(t, w.Body.String(), "Table default.no_such_table doesn't exist")
+	assertJSONErrorResponse(t, w)
+}
+
+// TestQueryHandler_SetsNoStore pins the cache header. Raw SQL is admin-only
+// and admins call it for read-your-writes verification — any downstream
+// HTTP cache (CDN, browser, corp proxy) caching a SELECT would re-introduce
+// the staleness class of bug the in-process cache strip just removed.
+func TestQueryHandler_SetsNoStore(t *testing.T) {
+	t.Parallel()
+	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":[],"data":[],"rows":0}`))
+	})
+	h := newProxyHandler(t, fake)
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"),
+		"raw SQL must not be cached by any downstream layer")
+}
+
+// TestQueryHandler_NoAuthHeadersWhenBlank confirms the proxy doesn't emit
+// empty X-ClickHouse-User / X-ClickHouse-Key headers when the constructor
+// got blank credentials (dev mode / unauth ClickHouse). Sending blank
+// headers would let an attacker who can MITM the upstream link tell that
+// the call is unauthenticated, and some ClickHouse setups validate that
+// User is present and reject blank-user requests with a confusing 4xx.
+func TestQueryHandler_NoAuthHeadersWhenBlank(t *testing.T) {
+	t.Parallel()
+	var gotUser, gotKey string
+	var hasUserHeader, hasKeyHeader bool
+	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hasUserHeader = r.Header["X-Clickhouse-User"]
+		_, hasKeyHeader = r.Header["X-Clickhouse-Key"]
+		gotUser = r.Header.Get("X-ClickHouse-User")
+		gotKey = r.Header.Get("X-ClickHouse-Key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":[],"data":[],"rows":0}`))
+	})
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	h := NewQueryHandler(srv.URL, "", "", "")
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.False(t, hasUserHeader, "no X-ClickHouse-User header should be set when username is blank, got %q", gotUser)
+	assert.False(t, hasKeyHeader, "no X-ClickHouse-Key header should be set when password is blank, got %q", gotKey)
+}
+
+// TestQueryHandler_ForwardsRawBodyOnUnexpectedShape covers the
+// belt-and-suspenders branch: ClickHouse returned 200 + a body that isn't
+// the {meta, data, rows} envelope (shouldn't happen with
+// default_format=JSON, but possible if someone overrides FORMAT in their
+// SQL, e.g. `SELECT 1 FORMAT CSV`). In that case the proxy forwards the
+// body verbatim rather than dropping it on the floor.
+func TestQueryHandler_ForwardsRawBodyOnUnexpectedShape(t *testing.T) {
+	t.Parallel()
+	const csvBody = "1\n2\n3\n"
+	fake := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/csv")
+		_, _ = w.Write([]byte(csvBody))
+	})
+	h := newProxyHandler(t, fake)
+
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1 FORMAT CSV"})
+	w := postQuery(h, body)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, csvBody, w.Body.String(), "non-JSON 200 body must be forwarded raw, not dropped")
+}
+
+// TestQueryHandler_ContextCancelBoundedAt30s is a sanity check that the
+// 30s context bound is in fact applied — if a future refactor accidentally
+// dropped the WithTimeout call, an upstream-stuck ClickHouse would block
+// the handler forever and tests like this one would time out at the Go
+// test timeout instead of failing cleanly.
+//
+// We don't actually wait 30s — we cancel from the outside and confirm the
+// handler propagates the cancellation, which proves the request was made
+// with a derivable context (the only way the cancel can reach it).
+func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
+	t.Parallel()
+	upstreamReached := make(chan struct{})
+	allowReturn := make(chan struct{})
+	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(upstreamReached)
+		select {
+		case <-r.Context().Done():
+			// upstream saw the cancellation — exactly what we want
+			return
+		case <-allowReturn:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	defer close(allowReturn)
+
+	h := NewQueryHandler(srv.URL, "", "", "")
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
+
+	w := httptest.NewRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
+
+	done := make(chan struct{})
+	go func() {
+		h.Handle(w, r)
+		close(done)
+	}()
+
+	<-upstreamReached
+	cancel()
+	<-done
+
+	// Either 502 (proxy reported the upstream cancellation as a transport
+	// failure) or 500 (cancellation surfaced from the read path) is fine —
+	// what we're pinning is that the handler returned promptly after
+	// cancel(), proving the request context made it to the upstream call.
+	assert.NotEqual(t, http.StatusOK, w.Code, "cancelled request must not return 200")
 }

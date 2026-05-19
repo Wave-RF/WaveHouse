@@ -177,29 +177,40 @@ Active Sweeper (async goroutine, every 60s):
 Client POST /v1/admin/query
   → Optional JWT auth middleware
   → /v1/admin RequireRole(admin, service) — single gate shared with the
-    rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Service
-    tokens already hold admin-scoped powers across that whole tree, so
-    raw SQL is gated by the same set rather than carving out a tighter
-    one. Raw SQL has no per-statement scope check (a full SQL parser
-    would be needed to authorize predicates), so the role gate is the
-    entire authorization story. /v1/admin/query is the only sanctioned
-    surface for non-SELECT statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…);
-    non-admin callers use the structured query endpoint or named pipes
-    instead.
-  → No cache, no singleflight. Raw SQL is an admin escape hatch with
-    infrequent, ad-hoc traffic, so L1 hit rate is effectively zero — the
-    cache machinery only adds complexity for no win, and the structured
-    query / pipes endpoints carry caching for the high-QPS read paths
-    that actually benefit. Every request goes straight to ClickHouse,
-    mutation or read; no X-Cache header is emitted.
-  → Classify by leading SQL verb to pick the driver call:
-    → Mutation/DDL verbs (INSERT/UPDATE/DELETE/TRUNCATE/DROP/ALTER/…):
-        driver.Exec → return [] on success (HTTP 200). Classification
-        is required because clickhouse-go's driver.Query() errors on
-        statements that return no result set.
-    → Read verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/EXISTS):
-        driver.Query → convert UUID/DateTime types → return row array.
+    rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Raw SQL has
+    no per-statement scope check (a full SQL parser would be needed to
+    authorize predicates), so the role gate is the entire authorization
+    story. /v1/admin/query is the only sanctioned surface for non-SELECT
+    statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…); non-admin callers
+    use the structured query endpoint or named pipes instead.
+  → Decode {"sql": "..."} from the request body.
+  → POST the SQL verbatim to ClickHouse's HTTP interface at
+    <scheme>://<host>:<httpport>/?default_format=JSON
+       &date_time_output_format=iso&database=<db>
+    Auth via X-ClickHouse-User / X-ClickHouse-Key headers.
+    Bound by a 30s context derived from the inbound request — client
+    disconnect cancels the upstream call.
+  → ClickHouse parses the SQL natively and decides what to do:
+    → Read: returns 200 + {"meta":[...], "data":[...], "rows":N,
+      "statistics":{...}} as JSON. The handler extracts `data` and
+      forwards just that array, preserving the [{...}, {...}] response
+      shape callers expect.
+    → Mutation/DDL: returns 200 + empty body. The handler emits `[]` so
+      response shape stays "always an array."
+    → Error: returns 4xx/5xx + plain-text error message. The handler
+      maps that to HTTP 500 with the trimmed message inside the JSON
+      error envelope — admins see ClickHouse's exact diagnostic.
+  → Response carries Cache-Control: no-store so no downstream layer
+    (browser, CDN, corp proxy) caches the result.
 ```
+
+The proxy-pattern wins are: zero classification logic on the WaveHouse
+side (no isMutation heuristic to maintain), multi-statement input just
+works (`SELECT 1; TRUNCATE t` does both, in order), and any ClickHouse
+statement type — including ones added in future versions — works without
+WaveHouse code changes. The structured query endpoint and pipes still
+go through `clickhouse-go`'s native driver (Query/Exec) for performance
+and to keep the cached row-array shape consistent.
 
 ### Streaming Path
 

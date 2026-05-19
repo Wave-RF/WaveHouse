@@ -139,8 +139,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
-		qh := &QueryHandler{CHConn: h.CHConn}
-		rows, err := qh.executeQuery(queryCtx, sql, params)
+		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
 		if err != nil {
 			return nil, err
 		}

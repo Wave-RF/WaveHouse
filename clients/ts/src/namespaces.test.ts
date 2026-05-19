@@ -31,17 +31,19 @@ describe('sql', () => {
     expect(JSON.parse(init.body)).toEqual({ sql: 'SELECT count() FROM clicks' });
   });
 
-  it('includes params when provided', async () => {
-    await sql(makeCtx(), 'SELECT * FROM clicks WHERE page = ?', ['/home']);
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.params).toEqual(['/home']);
-  });
-
-  it('omits params when empty', async () => {
+  // The proxy endpoint doesn't accept positional `?` params — ClickHouse's
+  // HTTP interface uses a different binding model entirely. The SDK no
+  // longer accepts a params array; callers inline literals or use
+  // ClickHouse's named-param syntax in the SQL string. This test pins that
+  // contract: the request body never carries a `params` field, even if the
+  // SQL string itself contains a `?` (which would now be passed to
+  // ClickHouse verbatim and trigger a parse error there — the admin's
+  // responsibility).
+  it('never sends a params field', async () => {
     await sql(makeCtx(), 'SELECT 1');
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body).toEqual({ sql: 'SELECT 1' });
     expect(body.params).toBeUndefined();
   });
 

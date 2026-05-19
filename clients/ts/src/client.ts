@@ -72,13 +72,18 @@ export class WaveHouseClient<DB extends Database = Database> {
     );
   }
 
-  /** Execute a raw SQL query against ClickHouse. Requires admin/service role when policy is active. */
+  /**
+   * Execute a raw SQL query against ClickHouse. Requires admin/service role
+   * when auth is active. The endpoint proxies straight to ClickHouse's HTTP
+   * interface so any ClickHouse-accepted SQL works; positional `?` param
+   * binding is NOT supported — inline literals or use the structured query
+   * builder for safe binding. See sql.ts for details.
+   */
   sql<Row = Record<string, unknown>>(
     query: string,
-    params?: unknown[],
     opts?: { signal?: AbortSignal },
   ): Promise<Result<Row[]>> {
-    return sql<Row>(this._ctx, query, params, opts);
+    return sql<Row>(this._ctx, query, opts);
   }
 
   /** @internal Create a stream for the given table. */

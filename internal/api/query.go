@@ -3,45 +3,66 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
-	"reflect"
+	"net/url"
 	"strings"
 	"time"
-
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/google/uuid"
 )
 
 // QueryHandler handles POST /v1/admin/query.
 //
-// Authorization for this surface is enforced entirely at the router (the
-// /v1/admin/* RequireRole("admin","service") gate in NewRouter). The
-// handler trusts that any request reaching it holds an admin-equivalent
-// role — there is no per-statement scope check (a full SQL parser would be
-// needed to authorize predicates), and the policy engine is not consulted
-// here. See internal/api/router.go for the role-gate rationale.
+// Authorization is enforced at the router (the /v1/admin/* RequireRole gate
+// in NewRouter). The handler trusts any caller that reaches it. See
+// internal/api/router.go for the role-gate rationale.
 //
-// This handler is intentionally a thin shell: no cache, no singleflight,
-// no policy lookup. Raw SQL is an admin escape hatch — calls are
-// infrequent, often mutations, and the cache hit rate is effectively
-// zero. The high-traffic read paths that need caching are the
-// structured-query endpoint (`POST /v1/tables/{table}/query`) and named
-// pipes (`GET/POST /v1/pipes/{name}`); those carry the TieredCache +
-// singleflight machinery. isMutation routing stays because clickhouse-go's
-// driver.Query() errors on statements that return no result set
-// (TRUNCATE/INSERT/etc.) — verb classification is correctness, not
-// performance.
+// Implementation: a thin proxy to ClickHouse's HTTP interface. The SQL
+// string is forwarded verbatim with `default_format=JSON`, ClickHouse
+// returns either a `{"meta":..., "data":[...], ...}` JSON object for read
+// queries or an empty body for mutations, and the handler emits just the
+// `data` array (or `[]` for mutations) back to the caller.
+//
+// Why a proxy instead of clickhouse-go's native Query/Exec:
+//   - ClickHouse classifies statements natively, so multi-statement input
+//     (`SELECT 1; TRUNCATE t`), arbitrary DDL/DML verbs (current and
+//     future), and inline FORMAT directives all just work.
+//   - There is no isMutation heuristic to maintain — no leading-verb table,
+//     no comment stripper, no CTE-aware paren scanner, no class of bug
+//     where a future ClickHouse verb routes the wrong way.
+//   - ClickHouse's own error messages reach the admin verbatim, which is
+//     exactly what they want from an escape hatch.
+//   - The cache (TieredCache + singleflight) was already removed in an
+//     earlier commit; this completes the simplification.
 type QueryHandler struct {
-	CHConn driver.Conn
+	HTTPClient *http.Client
+	// Endpoint is the ClickHouse HTTP base URL (e.g.
+	// `http://localhost:8123`). The handler appends query-string params
+	// (`default_format`, `database`, `date_time_output_format`) per request
+	// and POSTs the SQL as the request body.
+	Endpoint string
+	Username string
+	Password string
+	Database string
 }
 
-func NewQueryHandler(conn driver.Conn) *QueryHandler {
-	return &QueryHandler{CHConn: conn}
+// NewQueryHandler builds a handler that proxies to ClickHouse over HTTP.
+// endpoint should be the base URL (`http://host:8123`); username/password
+// are forwarded via ClickHouse's `X-ClickHouse-User` / `X-ClickHouse-Key`
+// headers (matching the ingest worker's convention in internal/ingest).
+// database is set as the `?database=` query-string parameter when non-empty.
+func NewQueryHandler(endpoint, username, password, database string) *QueryHandler {
+	return &QueryHandler{
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		Endpoint:   endpoint,
+		Username:   username,
+		Password:   password,
+		Database:   database,
+	}
 }
 
 type queryRequest struct {
-	SQL    string `json:"sql"`
-	Params []any  `json:"params,omitempty"`
+	SQL string `json:"sql"`
 }
 
 func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -55,233 +76,102 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	u, err := url.Parse(h.Endpoint)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "invalid clickhouse endpoint: "+err.Error())
+		return
+	}
+	q := u.Query()
+	q.Set("default_format", "JSON")
+	// Format DateTime/DateTime64 as ISO-8601 so JSON consumers don't have to
+	// re-parse ClickHouse's default `YYYY-MM-DD HH:MM:SS`. Matches the prior
+	// handler's RFC3339Nano output close enough for downstream callers.
+	q.Set("date_time_output_format", "iso")
+	if h.Database != "" {
+		q.Set("database", h.Database)
+	}
+	u.RawQuery = q.Encode()
+
+	// Bound the upstream call with a deadline derived from the inbound
+	// request context — client disconnect cancels the ClickHouse call too.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(req.SQL))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	data, err := json.Marshal(result)
+	httpReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if h.Username != "" {
+		httpReq.Header.Set("X-ClickHouse-User", h.Username)
+	}
+	if h.Password != "" {
+		httpReq.Header.Set("X-ClickHouse-Key", h.Password)
+	}
+
+	resp, err := h.HTTPClient.Do(httpReq)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeJSONError(w, http.StatusBadGateway, "clickhouse request failed: "+err.Error())
 		return
 	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "read clickhouse response: "+err.Error())
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		// ClickHouse returns plain-text error messages with non-200 status.
+		// Forward the trimmed message as a JSON error so the response shape
+		// stays consistent with the rest of the API. 500 isn't always
+		// precise (some ClickHouse errors are caller bugs that arguably
+		// merit 4xx) but distinguishing here would require parsing
+		// ClickHouse error codes — out of scope for the escape hatch.
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
+		}
+		writeJSONError(w, http.StatusInternalServerError, msg)
+		return
+	}
+
+	// Discourage downstream HTTP caches. /v1/admin/query has no
+	// read-your-writes guarantees beyond ClickHouse's own and the admin
+	// expects every request to hit the database — caching at any layer
+	// (CDN, browser, corp proxy) would re-introduce the staleness class of
+	// bug the in-process cache strip just removed.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
-}
 
-func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
-	if isMutation(sql) {
-		if err := h.CHConn.Exec(ctx, sql, params...); err != nil {
-			return nil, err
-		}
-		return []map[string]any{}, nil
+	// ClickHouse returns an empty body for mutations (TRUNCATE/INSERT/
+	// DELETE/etc. with no result set). Marshal those to `[]` so clients
+	// don't have to special-case "empty success body".
+	if len(body) == 0 {
+		_, _ = w.Write([]byte("[]"))
+		return
 	}
 
-	rows, err := h.CHConn.Query(ctx, sql, params...)
-	if err != nil {
-		return nil, err
+	// Read-statement response shape:
+	//   {"meta":[{"name":"x","type":"..."}, ...],
+	//    "data":[{"x": ...}, ...],
+	//    "rows":N,
+	//    "statistics":{...}}
+	// Forward just `data` so a caller's `result.length` works regardless of
+	// whether the SQL was a read or a mutation, matching the pre-proxy
+	// response shape.
+	var chResp struct {
+		Data json.RawMessage `json:"data"`
 	}
-	defer func() { _ = rows.Close() }()
-
-	columns := rows.ColumnTypes()
-	// Initialize as empty (not nil) so a zero-row result marshals to `[]`,
-	// not `null`. The SDK does `data!.length` on the response; a `null`
-	// crashes the client on every empty fetch.
-	results := []map[string]any{}
-
-	for rows.Next() {
-		valPtrs := make([]any, len(columns))
-		for i, col := range columns {
-			valPtrs[i] = reflect.New(col.ScanType()).Interface()
-		}
-		if err := rows.Scan(valPtrs...); err != nil {
-			return nil, err
-		}
-		row := make(map[string]any)
-		for i, col := range columns {
-			row[col.Name()] = reflect.ValueOf(valPtrs[i]).Elem().Interface()
-		}
-		results = append(results, transformRow(row))
+	if err := json.Unmarshal(body, &chResp); err != nil || chResp.Data == nil {
+		// Unexpected non-JSON success body or missing `data` key — forward
+		// raw so the caller can see what ClickHouse actually returned. Not
+		// expected in practice since default_format=JSON guarantees the
+		// envelope shape on success.
+		_, _ = w.Write(body)
+		return
 	}
-	return results, nil
-}
-
-// mutationVerbs is a set of SQL leading keywords that don't return a result
-// set — anything that mutates schema or data. Routed through Exec rather
-// than Query (see executeQuery). Sourced from the ClickHouse statement
-// reference: DML, DDL, role/privilege management, and runtime control
-// (SYSTEM/KILL/SET). Read-only verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/
-// EXISTS) intentionally fall through to the default Query path.
-var mutationVerbs = map[string]struct{}{
-	"INSERT":   {},
-	"UPDATE":   {},
-	"DELETE":   {},
-	"TRUNCATE": {},
-	"DROP":     {},
-	"ALTER":    {},
-	"CREATE":   {},
-	"RENAME":   {},
-	"EXCHANGE": {},
-	"OPTIMIZE": {},
-	"REPLACE":  {},
-	"GRANT":    {},
-	"REVOKE":   {},
-	"ATTACH":   {},
-	"DETACH":   {},
-	"KILL":     {},
-	"SET":      {},
-	"USE":      {},
-	"SYSTEM":   {},
-}
-
-// isMutation reports whether sql's leading statement is a non-SELECT — i.e.
-// one that returns no result set and must go through Exec, not Query.
-// Leading whitespace and SQL line/block comments are skipped, then the first
-// alphabetic token is matched case-insensitively against mutationVerbs. A
-// leading WITH clause (CTE) routes through a paren-aware scan because
-// ClickHouse accepts `WITH cte AS (...) INSERT INTO t SELECT * FROM cte` as
-// equivalent to `INSERT INTO t WITH cte AS (...) SELECT * FROM cte` (see
-// https://clickhouse.com/docs/sql-reference/statements/insert-into). Without
-// the skip, the WITH form would classify as a read, route through Query,
-// silently succeed, and cache `[]` — the same silent-data-loss class the
-// mutation-cache-bypass fix closed for TRUNCATE.
-func isMutation(sql string) bool {
-	s := stripLeadingSQLComments(sql)
-	end := 0
-	for end < len(s) {
-		c := s[end]
-		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
-			break
-		}
-		end++
-	}
-	if end == 0 {
-		return false
-	}
-	first := strings.ToUpper(s[:end])
-	if first != "WITH" {
-		_, ok := mutationVerbs[first]
-		return ok
-	}
-	return containsMutationVerbAtTopLevel(s[end:])
-}
-
-// containsMutationVerbAtTopLevel scans s for a mutation verb at paren-depth 0,
-// stepping over SQL string literals (`'…'` with `”` escape), quoted
-// identifiers (`"…"` and “ `…` “), and parenthesized CTE subqueries so that
-// keywords inside a CTE body never count. Non-mutation tokens (CTE names,
-// AS / MATERIALIZED / RECURSIVE, SELECT, …) are skipped silently; the absence
-// of a mutation verb at top level means the WITH statement is a read.
-func containsMutationVerbAtTopLevel(s string) bool {
-	depth := 0
-	i := 0
-	for i < len(s) {
-		c := s[i]
-		switch {
-		case c == '(':
-			depth++
-			i++
-		case c == ')':
-			if depth > 0 {
-				depth--
-			}
-			i++
-		case c == '\'':
-			i++
-			for i < len(s) {
-				if s[i] == '\'' {
-					if i+1 < len(s) && s[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
-		case c == '"' || c == '`':
-			q := c
-			i++
-			for i < len(s) && s[i] != q {
-				i++
-			}
-			if i < len(s) {
-				i++
-			}
-		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
-			start := i
-			for i < len(s) {
-				c2 := s[i]
-				if (c2 < 'A' || c2 > 'Z') && (c2 < 'a' || c2 > 'z') && (c2 < '0' || c2 > '9') && c2 != '_' {
-					break
-				}
-				i++
-			}
-			if depth == 0 {
-				if _, ok := mutationVerbs[strings.ToUpper(s[start:i])]; ok {
-					return true
-				}
-			}
-		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#':
-			for i < len(s) && s[i] != '\n' {
-				i++
-			}
-		case c == '/' && i+1 < len(s) && s[i+1] == '*':
-			i += 2
-			for i+1 < len(s) {
-				if s[i] == '*' && s[i+1] == '/' {
-					i += 2
-					break
-				}
-				i++
-			}
-		default:
-			i++
-		}
-	}
-	return false
-}
-
-// stripLeadingSQLComments trims whitespace plus line comments (`-- …` and
-// MySQL-compat `# …`, both accepted by ClickHouse) and `/* block */`
-// comments from the front of sql, returning the remainder with no leading
-// whitespace. Unclosed block comments swallow the rest of the string —
-// matches what ClickHouse itself would do at parse time.
-func stripLeadingSQLComments(sql string) string {
-	s := strings.TrimLeft(sql, " \t\r\n")
-	for {
-		switch {
-		case strings.HasPrefix(s, "--"), strings.HasPrefix(s, "#"):
-			if i := strings.IndexByte(s, '\n'); i >= 0 {
-				s = strings.TrimLeft(s[i+1:], " \t\r\n")
-			} else {
-				return ""
-			}
-		case strings.HasPrefix(s, "/*"):
-			if i := strings.Index(s[2:], "*/"); i >= 0 {
-				s = strings.TrimLeft(s[2+i+2:], " \t\r\n")
-			} else {
-				return ""
-			}
-		default:
-			return s
-		}
-	}
-}
-
-// transformRow converts ClickHouse-specific types to JSON-friendly values.
-func transformRow(row map[string]any) map[string]any {
-	for k, v := range row {
-		switch val := v.(type) {
-		case uuid.UUID:
-			row[k] = val.String()
-		case [16]byte:
-			row[k] = uuid.UUID(val).String()
-		case time.Time:
-			row[k] = val.UTC().Format(time.RFC3339Nano)
-		}
-	}
-	return row
+	_, _ = w.Write(chResp.Data)
 }

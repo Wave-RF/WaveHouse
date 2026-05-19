@@ -129,9 +129,11 @@ func TestQuery_DeleteReturnsEmptyArray(t *testing.T) {
 		return err == nil && count == 2
 	}, 30*time.Second, 500*time.Millisecond, "both inserts should land before DELETE")
 
+	// /v1/admin/query proxies to ClickHouse's HTTP interface, which uses
+	// {name:Type} named-param syntax rather than positional `?`. Inline
+	// the literal here — the dropID is a test-controlled known-safe string.
 	deleteBody, _ := json.Marshal(map[string]any{
-		"sql":    fmt.Sprintf("DELETE FROM `%s` WHERE id = ?", table),
-		"params": []any{dropID},
+		"sql": fmt.Sprintf("DELETE FROM `%s` WHERE id = '%s'", table, dropID),
 	})
 	qResp, err := http.Post(
 		e.server.URL+"/v1/admin/query",

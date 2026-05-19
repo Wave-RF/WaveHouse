@@ -182,9 +182,9 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ### `POST /v1/admin/query` — Query ClickHouse
 
-Executes a SQL statement directly against ClickHouse. Read queries (`SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`/`EXISTS`) return a JSON array of result rows; mutation/DDL statements (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`DROP`/`ALTER`/`CREATE`/`RENAME`/`OPTIMIZE`/`REPLACE`/…) return HTTP 200 with `[]` on success. UUID and DateTime columns are converted to string representations in read responses.
+Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including multi-statement input (`SELECT 1; TRUNCATE t`), arbitrary DDL/DML/SYSTEM verbs, and inline FORMAT directives. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting; other types are returned as ClickHouse renders them under `FORMAT JSON`.
 
-This endpoint **does not cache and does not singleflight** — every request goes straight to ClickHouse, mutation or read. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/tables/{table}/query`](#post-v1tablestablequery--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
+This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/tables/{table}/query`](#post-v1tablestablequery--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
 > **Admin / service only.** The route is mounted under `/v1/admin/*`, which sits behind a `RequireRole("admin","service")` gate: callers whose JWT resolves to either role may use it (or any caller when `auth.enabled` is false, the dev/test posture). Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story — but the role set matches the rest of `/v1/admin/*` rather than carving out a separate tighter gate, because service tokens already hold admin-scoped powers across that whole tree (policy CRUD, pipes CRUD, log-level) and the inconsistency would be a footgun without a real authorization win. The normal surfaces for non-admin callers are `POST /v1/ingest/{table}` for writes, `POST /v1/tables/{table}/query` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 
@@ -194,15 +194,15 @@ This endpoint **does not cache and does not singleflight** — every request goe
 
 ```json
 {
-  "sql": "SELECT * FROM clicks LIMIT 10",
-  "params": []
+  "sql": "SELECT * FROM clicks LIMIT 10"
 }
 ```
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `sql` | string | Yes | SQL query executed directly against ClickHouse. |
-| `params` | array | No | Query parameters (bound positionally). |
+| `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
+
+> **No positional `?` param binding.** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't, because ClickHouse's HTTP interface has a different (named) param model. Inline literals into the SQL, or use ClickHouse's native `{name:Type}` syntax (e.g. `WHERE id = {id:UInt32}`) — admins who need server-evaluated binding can extend the request with custom query-string params later, but for now the contract is "send the SQL, get rows back." For safe binding from user-supplied inputs, use the structured query endpoint (`POST /v1/tables/{table}/query`) — that's its job.
 
 **Response:**
 
@@ -225,7 +225,8 @@ This endpoint **does not cache and does not singleflight** — every request goe
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
 | 401 | `{"error":"unauthorized"}` | `auth.enabled=true` and the request carries no role claim |
 | 403 | `{"error":"forbidden"}` | Caller's role is not `admin` or `service` |
-| 500 | `{"error":"..."}` | ClickHouse query error |
+| 500 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement. The body carries ClickHouse's own error text (e.g. `Code: 60. DB::Exception: Table x doesn't exist.`). ClickHouse's HTTP interface returns these with a 4xx status; the proxy maps them to 500 to keep response-shape uniform — distinguishing caller-fault from server-fault would require ClickHouse error-code parsing, out of scope for the escape hatch. |
+| 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, etc.) |
 
 **curl example:**
 
