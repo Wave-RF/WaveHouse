@@ -33,5 +33,12 @@
   },
   "engines": {
     "node": ">=22.0"
+  },
+  "pnpm": {
+    "peerDependencyRules": {
+      "allowedVersions": {
+        "@astrojs/check>typescript": ">=5.0.0"
+      }
+    }
   }
 }
