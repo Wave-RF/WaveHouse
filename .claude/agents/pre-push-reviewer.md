@@ -49,7 +49,7 @@ The diff source here is the local working state, computed as `git diff main...HE
 
 8. End with a verdict per the styleguide (`Ship it` / `Iterate` / `Block`), **followed immediately by the parseable verdict line** on its own line:
 
-   ```
+   ```text
    VERDICT: ship_it
    ```
 
@@ -57,7 +57,7 @@ The diff source here is the local working state, computed as `git diff main...HE
 
 ## Output format
 
-```
+```markdown
 ## Pre-push review — <branch> vs main
 
 (Optional: brief paragraph on PR scope + linked issues if applicable.)

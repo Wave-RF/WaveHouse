@@ -39,7 +39,10 @@
 
       "Read(./.env)",
       "Read(./.env.*)",
-      "Read(./secrets/**)"
+      "Read(./secrets/**)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(secrets/**)"
     ]
   },
 

@@ -1,6 +1,6 @@
 ---
 description: Render coverage HTML for a suite and surface drops below threshold
-argument-hint: [unit|integration|e2e|sdk|all] (default: merge whatever exists)
+argument-hint: [unit|integration|e2e|sdk|merge|all] (default: merge whatever exists)
 ---
 
 Generate the coverage report and surface anything below threshold from `.testcoverage.yml`.

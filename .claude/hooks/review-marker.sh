@@ -26,13 +26,15 @@ response=$(printf '%s' "$input" | jq -r '.tool_response // empty' 2>/dev/null)
 
 # Parse the parseable verdict line. Format (per .claude/agents/pre-push-reviewer.md):
 #   VERDICT: ship_it    | VERDICT: iterate    | VERDICT: block
-# We take the LAST such line in the response (in case the agent quoted the
-# enum earlier in its body). Case-insensitive on the value.
+# Anchored to line start so an inline mention like "do not write VERDICT: ship_it"
+# inside prose won't accidentally produce ship_it. We take the LAST matching
+# line in the response (in case the agent emits the parseable line more than
+# once for any reason). Case-insensitive on the keyword and value.
 verdict=$(printf '%s\n' "$response" \
-  | grep -oiE 'VERDICT:[[:space:]]*(ship_it|iterate|block)\b' \
+  | grep -iE '^[[:space:]]*VERDICT:[[:space:]]*(ship_it|iterate|block)[[:space:]]*$' \
   | tail -1 \
-  | sed -E 's/.*:[[:space:]]*([a-zA-Z_]+).*/\1/' \
-  | tr '[:upper:]' '[:lower:]')
+  | tr '[:upper:]' '[:lower:]' \
+  | sed -E 's/^[[:space:]]*verdict:[[:space:]]*([a-z_]+)[[:space:]]*$/\1/')
 
 [ "$verdict" = "ship_it" ] || exit 0
 

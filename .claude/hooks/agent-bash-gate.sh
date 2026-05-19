@@ -26,8 +26,32 @@
 
 set -uo pipefail
 
+# --- Helper: block with a structured reason ---------------------------------
+# Declared early because the parse step below may need it.
+block() {
+  local reason="$1"
+  cat >&2 <<EOF
+
+🛑 Claude PR discipline gate: ${reason}
+
+See AGENTS.md §"Agent PR Discipline" for the full ruleset. If you genuinely
+need to bypass, ask the human user to run the command themselves.
+EOF
+  exit 2
+}
+
+# Fail-closed on missing jq or malformed JSON — silently exiting 0 here would
+# disable every discipline check below, which is exactly what this hook is
+# supposed to prevent. A valid Bash PreToolUse payload always has
+# .tool_input.command, so a parse failure means something is wrong, not benign.
+if ! command -v jq >/dev/null 2>&1; then
+  block "jq is required for the PR discipline gate but is not installed. Install jq (brew install jq) or remove the PreToolUse hook from .claude/settings.json."
+fi
+
 input=$(cat)
-cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
+if ! cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null); then
+  block "Could not parse hook payload as JSON; refusing to fail open."
+fi
 [ -z "$cmd" ] && exit 0
 
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
@@ -41,24 +65,19 @@ cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 # constructing such commands are doing something weird.
 stripped=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
 
-# --- Helper: block with a structured reason ---------------------------------
-block() {
-  local reason="$1"
-  cat >&2 <<EOF
-
-🛑 Claude PR discipline gate: ${reason}
-
-See AGENTS.md §"Agent PR Discipline" for the full ruleset. If you genuinely
-need to bypass, ask the human user to run the command themselves.
-EOF
-  exit 2
-}
-
 # Boundary helper: detects a `git <subcommand>` invocation anywhere in the
 # (quote-stripped) command (including after && / ; / | / cd ... &&). Used
 # by multiple checks.
 git_subcmd() {
   printf '%s\n' "$stripped" | grep -qE "(^|[[:space:];|&]+)git[[:space:]]+$1\b"
+}
+
+# True if `git <subcommand>` is followed by -h / --help anywhere before a
+# separator (so `git push --help`, `git push origin main --help`, `git push -h`
+# all return true). Help invocations don't actually run the subcommand, so
+# discipline gates should skip them.
+git_subcmd_is_help() {
+  printf '%s\n' "$stripped" | grep -qE "(^|[[:space:];|&]+)git[[:space:]]+$1([[:space:]]+[^;|&]*)?[[:space:]]+(-h|--help)([[:space:]]|\$|[;|&])"
 }
 
 # --- 1. --no-verify on git push/commit --------------------------------------
@@ -112,7 +131,7 @@ fi
 
 # --- 7. git push: check markers ---------------------------------------------
 # Only on actual `git push` invocations (not `git push --help`, not `gh pr push`).
-if git_subcmd 'push'; then
+if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
   head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
   if [ -n "$head_sha" ]; then
     short_sha="${head_sha:0:8}"

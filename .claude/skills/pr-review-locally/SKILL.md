@@ -34,7 +34,7 @@ gh pr view --json number,state,headRefName --jq .   # confirm we're on PR 120's 
 
 Use the `Agent` tool:
 
-```
+```js
 Agent({
   subagent_type: "pre-push-reviewer",
   description: "Review PR <N> locally",
