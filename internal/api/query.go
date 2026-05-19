@@ -290,6 +290,19 @@ func containsMutationVerbAtTopLevel(s string) bool {
 					return true
 				}
 			}
+		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
+			i += 2
+			for i+1 < len(s) {
+				if s[i] == '*' && s[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
 		default:
 			i++
 		}

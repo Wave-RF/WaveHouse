@@ -209,12 +209,6 @@ func TestIsMutation(t *testing.T) {
 		{"hash line comment then mutation", "# audit\nDROP TABLE t", true},
 		{"block comment then mutation", "/* admin */ ALTER TABLE t ADD COLUMN c Int", true},
 		{"mixed comments then select", "-- foo\n# bar\n/* baz */ SELECT 1", false},
-
-		// WITH-prefix forms. ClickHouse accepts `WITH cte AS (...) <statement>`
-		// for both reads and mutations — `INSERT INTO x WITH y AS (...) SELECT
-		// * FROM y` and `WITH y AS (...) INSERT INTO x SELECT * FROM y` are
-		// documented as equivalent. The classifier must look past the CTE list
-		// to the real statement verb so WITH-mutations bypass cache+singleflight.
 		{"with insert", "WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte", true},
 		{"with insert lower", "with cte as (select 1) insert into t select * from cte", true},
 		{"with delete", "WITH cte AS (SELECT id FROM x) DELETE FROM t WHERE id IN (SELECT id FROM cte)", true},
@@ -227,6 +221,11 @@ func TestIsMutation(t *testing.T) {
 		{"with recursive select", "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT * FROM x) SELECT * FROM x", false},
 		{"with nested select", "WITH x AS (SELECT 1) SELECT * FROM (SELECT * FROM x)", false},
 		{"with scalar insert", "WITH '/path' AS p INSERT INTO files VALUES (p)", true},
+		{"with line comment containing DELETE then select", "WITH cte AS (SELECT 1) -- old DELETE approach\nSELECT * FROM cte", false},
+		{"with hash comment containing TRUNCATE then select", "WITH cte AS (SELECT 1) # was TRUNCATE\nSELECT * FROM cte", false},
+		{"with block comment containing INSERT then select", "WITH cte AS (SELECT 1) /* INSERT reminder */ SELECT * FROM cte", false},
+		{"with comment then real mutation", "WITH cte AS (SELECT 1) -- explanatory\nINSERT INTO t SELECT * FROM cte", true},
+		{"with unclosed block comment", "WITH cte AS (SELECT 1) /* unterminated comment DELETE", false},
 
 		{"empty", "", false},
 		{"comment only", "-- just a comment", false},
