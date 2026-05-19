@@ -182,7 +182,7 @@ Every review comment gets a substantive reply, and every thread gets resolved be
    Without the mention, the bot never sees the reply and the dialog silently terminates.
 4. **Fix in this PR** if the suggestion is right and in scope. Out-of-scope but valid: link a tracking issue before resolving.
 5. **Resolve the thread** once the reply addresses the concern and no counter-reply is pending. Bot threads are safe to resolve after a substantive reply (bots only re-engage on mention); human threads — wait for them.
-6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via a re-request button (Copilot).
+6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Gemini), via PR-comment mention (Claude), or via a re-request button (Copilot).
 
 ### What not to do
 
@@ -193,7 +193,7 @@ Every review comment gets a substantive reply, and every thread gets resolved be
 
 | Reviewer | How it runs | Re-runs on new commits | Blocks merge |
 | -------- | ----------- | ---------------------- | ------------ |
-| Claude (`.github/workflows/claude-review.yml`) | Our workflow, fires on every PR push (open/sync/reopen/ready). Manual re-trigger via `@claude` / `/review` in a PR comment, or `gh workflow run "Claude PR review" -f pr_number=<N>` | Yes — posts inline review comments plus a sticky verdict-summary comment that edits in place | Yes for inline comments — `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
+| Claude (`.github/workflows/claude-review.yml`) | Manual-only. Comment `@claude` or `/review` on the PR (trusted reviewers), or run `gh workflow run "Claude PR review" -f pr_number=<N>`. Findings post as inline review comments plus a sticky verdict-summary comment that edits in place | No — re-trigger by mention after pushing new commits | Yes for inline comments — `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
 | Gemini Code Assist | Marketplace App at repo level | Yes on synchronize. **Silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — Gemini rarely sees infra PRs | No (advisory) |
 | Copilot | GitHub-native, requires a reviewer with Copilot Pro | Yes if enabled | No (advisory) |
 | Human admins | Review requested from a non-author admin by `housekeeping.yml` on PR open / ready-for-review (not on every push). Selection picks the other admin if the author is one, otherwise round-robins. The composite also sets `assignees`. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request. | Yes — `admin-approval.yml` is a required status check that fails unless an admin has approved. Dependabot patch/minor bypasses (auto-merge handles those); major bumps fall through to admin review. |
@@ -400,7 +400,7 @@ docs/                   → Project documentation
 - **Issue triage** (`triage.yml`): GitHub Models classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels.
 - **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate):
   - **Gemini Code Assist App** configured via `.gemini/styleguide.md`.
-  - **Claude PR review** (`claude-review.yml`) runs on every PR open or push, gated on the HEAD commit's author or committer having ≥read permission. Dependabot is filtered at workflow level. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Manual re-trigger via `@claude` / `/review` from a trusted commenter or via `workflow_dispatch`. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
+  - **Claude PR review** (`claude-review.yml`) runs only on manual trigger: `@claude` or `/review` from a trusted commenter on a PR, or `workflow_dispatch`. Gated on the HEAD commit's author or committer having ≥read permission so a comment on a fork PR can't run untrusted code with write tokens. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
 - **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Patch/minor bypass `Admin approval` (the workflow + CI passing is the trust model); major bumps fall through to admin review like any human PR — this closed a hole where a bot's APPROVED review (e.g. CodeRabbit) could merge a major bump without admin involvement (see #130).
 
 ## Governance Files
