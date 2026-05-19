@@ -263,7 +263,7 @@ The orchestrator agent cannot override the subagent's system prompt (it's the fi
 
 - `git push --no-verify` and `git commit --no-verify` are blocked at the `.claude/hooks/agent-bash-gate.sh` PreToolUse layer for agents. Humans retain `--no-verify` for explicit intentional bypass (see §"Local-First Validation").
 - The obvious tool-level writes to `tmp/ci-passed-*` or `tmp/review-passed-*` are denied at the `.claude/settings.json` permission layer (`Bash(touch tmp/ci-passed:*)`, `Write(tmp/ci-passed-*)`, `Edit(tmp/ci-passed-*)`, and the review-passed equivalents).
-- **Markers are written exclusively by `make ci` (ci-passed) and the `pre-push-reviewer` PostToolUse hook (review-passed). You do not write a marker file by any other means — period.** Bash can write a file by a dozen paths and the deny list does not enumerate all of them; this is an honest-agent rule, not an adversarial gate. If you ever feel tempted to write a marker, stop: the marker is wrong-shaped if you're the one writing it. Run `make ci`, invoke the subagent, get the verdict — that's the path.
+- **Markers are written exclusively by `make ci` (ci-passed) and the `pre-push-reviewer` SubagentStop hook (review-passed). You do not write a marker file by any other means — period.** Bash can write a file by a dozen paths and the deny list does not enumerate all of them; this is an honest-agent rule, not an adversarial gate. If you ever feel tempted to write a marker, stop: the marker is wrong-shaped if you're the one writing it. Run `make ci`, invoke the subagent, get the verdict — that's the path.
 
 ### Reviewing someone else's PR locally
 

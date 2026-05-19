@@ -187,7 +187,7 @@ Invoke the pre-push-reviewer subagent in fresh context before pushing:
     asking it to review the current branch's full diff vs main, the latest
     commit, open PR comments, and CI status.
 
-When the agent's response ends with "VERDICT: ship_it", a PostToolUse hook
+When the agent's response ends with "VERDICT: ship_it", a SubagentStop hook
 auto-writes tmp/review-passed-${short_sha} and this push will succeed.
 
 If the agent returns VERDICT: iterate or VERDICT: block, address the findings
