@@ -32,6 +32,15 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
 
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 
+# Strip single- and double-quoted segments before matching, so legitimate
+# commands that *mention* a blocked pattern inside a string (e.g.
+# `gh pr comment -b "we will git push after CI"`, `echo "use --no-verify"`)
+# don't false-positive. Same intent as commit 6c79315 (which fixed the
+# no-verify regex specifically), generalized to every check below. Doesn't
+# cover escaped quotes or heredocs — accept the corner case; agents
+# constructing such commands are doing something weird.
+stripped=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
+
 # --- Helper: block with a structured reason ---------------------------------
 block() {
   local reason="$1"
@@ -46,38 +55,36 @@ EOF
 }
 
 # Boundary helper: detects a `git <subcommand>` invocation anywhere in the
-# command (including after && / ; / | / cd ... &&). Used by multiple checks.
+# (quote-stripped) command (including after && / ; / | / cd ... &&). Used
+# by multiple checks.
 git_subcmd() {
-  printf '%s\n' "$cmd" | grep -qE "(^|[[:space:];|&]+)git[[:space:]]+$1\b"
+  printf '%s\n' "$stripped" | grep -qE "(^|[[:space:];|&]+)git[[:space:]]+$1\b"
 }
 
 # --- 1. --no-verify on git push/commit --------------------------------------
-# Match --no-verify only when it appears in the args of `git push|commit`
-# BEFORE any quote (" or '), command substitution ($), or heredoc marker (<).
-# That excludes false positives where the literal string sits inside a quoted
-# commit message body (e.g., when documenting the rule). Honest-agent defense,
-# not adversarial — eval / sh -c wrappers around `git push --no-verify` could
+# Quote-stripping above already excludes false positives where the literal
+# string sits inside a quoted commit-message body. Honest-agent defense, not
+# adversarial — eval / sh -c wrappers around `git push --no-verify` could
 # still bypass; AGENTS.md §"Agent PR Discipline" makes the rule explicit.
-no_verify_re='(^|[[:space:];|&])git[[:space:]]+(push|commit)\b[^"'\''$<]*[[:space:]]--no-verify\b'
-if printf '%s\n' "$cmd" | grep -qE "$no_verify_re"; then
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&])git[[:space:]]+(push|commit)\b[[:space:]][^&|;]*--no-verify\b'; then
   block "git push/commit with --no-verify is not permitted for agents. Run the gates."
 fi
 
 # --- 2. gh pr create without --draft ----------------------------------------
-if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+create\b'; then
-  if ! printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])(--draft|-d)\b'; then
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+create\b'; then
+  if ! printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])(--draft|-d)\b'; then
     block "Agent-opened PRs must be created with --draft. Only humans publish ready-for-review PRs."
   fi
 fi
 
 # --- 3. gh pr ready ---------------------------------------------------------
-if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b'; then
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b'; then
   block "Only humans transition PRs from draft to ready-for-review. Ask the user to do this manually when the PR is ready."
 fi
 
 # --- 4. gh pr edit with reviewer/assignee changes ---------------------------
-if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b'; then
-  if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b'; then
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b'; then
+  if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b'; then
     block "Adding/removing reviewers or assignees is humans-only. To re-trigger bot reviewers, post a PR comment mentioning them (@coderabbitai review, @gemini-code-assist /gemini review, @claude / /review)."
   fi
 fi
@@ -86,19 +93,19 @@ fi
 # Both POST (add) and PUT (replace) on /pulls/<n>/requested_reviewers are
 # reviewer-write operations. Neither has a legitimate agent use case — bot
 # reviewers are re-triggered via PR comments. Match any reviewer-write idiom.
-if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' && \
-   printf '%s\n' "$cmd" | grep -qE 'requested_reviewers'; then
-  if printf '%s\n' "$cmd" | grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)'; then
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+api\b' && \
+   printf '%s\n' "$stripped" | grep -qE 'requested_reviewers'; then
+  if printf '%s\n' "$stripped" | grep -qE '(-X[[:space:]]*(POST|PUT|PATCH)|--method[[:space:]]*(POST|PUT|PATCH)|[[:space:]]-f[[:space:]]+reviewers=|[[:space:]]-F[[:space:]]+reviewers=)'; then
     block "Write requests to /requested_reviewers are the API form of --add-reviewer; humans-only. For bot reviewers, post a PR comment mentioning them."
   fi
 fi
 
 # --- 6. gh pr review --approve / --request-changes --------------------------
-if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+review\b'; then
-  if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])(--approve|-a)\b'; then
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+review\b'; then
+  if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])(--approve|-a)\b'; then
     block "Only humans approve PRs (--approve)."
   fi
-  if printf '%s\n' "$cmd" | grep -qE '(^|[[:space:]])(--request-changes|-r)\b'; then
+  if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])(--request-changes|-r)\b'; then
     block "Agents don't use --request-changes. Post inline review comments via the GitHub inline-comment MCP tool, or use gh pr comment for top-level comments."
   fi
 fi

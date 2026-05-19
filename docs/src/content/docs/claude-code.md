@@ -21,15 +21,14 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 
 ## How enforcement is layered
 
-The team has two distinct gate layers, plus optional Claude-Code-only ergonomics:
-
 | Layer | Lives in | Applies to | Purpose |
 | ----- | -------- | ---------- | ------- |
 | **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
-| **Claude Code hook** | `.claude/hooks/gofumpt-on-save.sh` (wired in `.claude/settings.json`) | Claude only | UX: auto-format on file edits (humans get this from their IDE) |
+| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Enforces [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes |
+| **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (PostToolUse Agent) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: writes `tmp/review-passed-<HEAD-sha>` on `VERDICT: ship_it` |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
 
-Git hooks are the source of truth for "must pass before merge." Claude Code config layers on agentic affordances; it doesn't substitute for the gates.
+Git hooks are the source of truth for "must pass before merge." `.claude/` layers agent-specific gates and ergonomic hooks on top; it doesn't substitute for the universal gates.
 
 ## Git hooks (`.githooks/`)
 
