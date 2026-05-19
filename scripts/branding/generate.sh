@@ -34,9 +34,13 @@ COLOR_TOUCH_BG='#0A0B0E'
 COLOR_TOUCH_FG='#06B0BF'
 # OG card mark color — must match the brightest accent the template uses.
 COLOR_OG='#06B0BF'
+# OG card wordmark color — off-white for contrast against the mark accent.
+# Picked to match the tagline / wordmark color elsewhere in the OG template.
+COLOR_OG_WM='#F1F3F7'
 
 # --- Source + output paths ----------------------------------------------------
 MARK_SRC="$HERE/mark.svg"
+LOCKUP_SRC="$HERE/lockup.svg"
 OG_TEMPLATE="$HERE/og.template.svg"
 OUT_PUBLIC="$ROOT/docs/public"
 OUT_BRANDING="$ROOT/docs/src/assets/branding"
@@ -55,23 +59,44 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 
-# --- Parse the master mark ----------------------------------------------------
+# --- Parse the master mark + lockup -------------------------------------------
 # Pull viewBox and the inner SVG content (everything between <svg ...> and
-# </svg>) out of mark.svg. We keep mark.svg on a single line so a one-pass
-# sed extraction works — if you reformat it across lines, fix this parser.
+# </svg>) out of each source file. Both are kept on a single line so a one-pass
+# sed extraction works — if you reformat them across lines, fix this parser.
+#
+# mark.svg is the standalone bug (used in favicon, apple-touch-icon, Starlight
+# nav). lockup.svg is the horizontal mark+wordmark unit (used in the OG card
+# so the wordmark's font metrics + mark scale + gap are all designed-in instead
+# of laid out ad-hoc inside og.template.svg).
 MARK_VIEWBOX=$(grep -oE 'viewBox="[^"]+"' "$MARK_SRC" | head -1 | sed 's/^viewBox="//;s/"$//')
 MARK_INNER=$(sed -E 's|^.*<svg[^>]*>||; s|</svg>.*$||' "$MARK_SRC")
+LOCKUP_INNER=$(sed -E 's|^.*<svg[^>]*>||; s|</svg>.*$||' "$LOCKUP_SRC")
 
 if [ -z "$MARK_INNER" ] || [ -z "$MARK_VIEWBOX" ]; then
   printf '%serror:%s could not extract inner content or viewBox from %s\n' "$RED" "$RESET" "$MARK_SRC" >&2
   exit 1
 fi
+if [ -z "$LOCKUP_INNER" ]; then
+  printf '%serror:%s could not extract inner content from %s\n' "$RED" "$RESET" "$LOCKUP_SRC" >&2
+  exit 1
+fi
 
-# Helper: print the inner content with currentColor swapped for a hex string.
-# Avoids forking a subshell per output by going through a function.
+# Helpers: print mark/lockup inner content with color placeholders swapped for
+# real hex strings. Avoids forking a subshell per output.
+#
+# The lockup is intentionally two-color: `currentColor` is the mark stroke/fill
+# (the "WaveHouse" pun-mark) and `__WM_FILL__` is the wordmark text. On
+# light/dark single-color renders we pass the same hex for both so the lockup
+# reads as one unit; on the OG card we pass an accent for the mark + white for
+# the wordmark, which preserves the visual hierarchy of "logo + headline".
 mark_with_color() {
   local color=$1
   printf '%s' "$MARK_INNER" | sed "s|currentColor|$color|g"
+}
+lockup_with_colors() {
+  local mark_color=$1
+  local wm_color=$2
+  printf '%s' "$LOCKUP_INNER" | sed "s|currentColor|$mark_color|g; s|__WM_FILL__|$wm_color|g"
 }
 
 printf '%s==> Generating branding from %s%s\n' "$CYAN" "${MARK_SRC#"$ROOT/"}" "$RESET"
@@ -113,13 +138,13 @@ EOF
 rsvg-convert -w 180 -h 180 "$TMP/touch.svg" -o "$OUT_PUBLIC/apple-touch-icon.png"
 
 # --- 5. og.png (1200x630 social card) -----------------------------------------
-# og.template.svg has the composition (gradient, wordmark, tagline, wave
-# texture) baked in — we splice the mark's inner content into its
-# __MARK_GROUP__ slot, recolored for the dark background.
+# og.template.svg has the composition (gradient, accent grid, glow, tagline,
+# footer row) baked in — we splice the canonical lockup (mark + wordmark unit)
+# into its __LOCKUP_GROUP__ slot, recolored for the dark background.
 # Escape `&` (special on the sed replacement side) but nothing else: SVG path
 # data + attributes never contain `|`, so we can use `|` as the s delimiter.
-mark_og_escaped=$(mark_with_color "$COLOR_OG" | sed 's/&/\\&/g')
-sed "s|__MARK_GROUP__|$mark_og_escaped|" "$OG_TEMPLATE" > "$TMP/og.svg"
+lockup_og_escaped=$(lockup_with_colors "$COLOR_OG" "$COLOR_OG_WM" | sed 's/&/\\&/g')
+sed "s|__LOCKUP_GROUP__|$lockup_og_escaped|" "$OG_TEMPLATE" > "$TMP/og.svg"
 rsvg-convert -w 1200 -h 630 "$TMP/og.svg" -o "$OUT_PUBLIC/og.png"
 
 # --- Report -------------------------------------------------------------------
