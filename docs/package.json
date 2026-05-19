@@ -14,6 +14,10 @@
   "dependencies": {
     "@astrojs/check": "^0.9.4",
     "@astrojs/starlight": "^0.38.3",
+    "@astrojs/starlight-tailwind": "^5.0.0",
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@tailwindcss/vite": "^4.3.0",
     "astro": "^6.1.5",
     "cloudflare-md-router": "github:Wave-RF/cloudflare-md-router",
     "katex": "^0.16.11",
@@ -22,7 +26,9 @@
     "remark-math": "^6.0.0",
     "sharp": "^0.34.2",
     "starlight-image-zoom": "^0.14.1",
+    "starlight-links-validator": "^0.24.0",
     "starlight-llm-tools": "github:Wave-RF/starlight-llm-tools",
+    "tailwindcss": "^4.3.0",
     "typescript": "^5.6.0"
   },
   "devDependencies": {

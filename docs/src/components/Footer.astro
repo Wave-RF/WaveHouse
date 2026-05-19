@@ -1,0 +1,166 @@
+---
+const year = new Date().getFullYear();
+---
+
+<footer class="wh-footer not-content">
+  <div class="wh-footer__inner">
+    <div class="wh-footer__brand">
+      <span class="wh-footer__mark" aria-hidden="true">
+        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+          <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round">
+            <path d="M10 14 Q18 32 10 50 T10 86"/>
+            <path d="M30 14 Q38 32 30 50 T30 86"/>
+            <path d="M50 14 Q58 32 50 50 T50 86"/>
+            <path d="M70 14 Q78 32 70 50 T70 86"/>
+          </g>
+          <rect x="84" y="44" width="12" height="12" fill="currentColor"/>
+        </svg>
+      </span>
+      <div>
+        <strong>WaveHouse</strong>
+        <span class="wh-footer__sub">
+          A <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">Wave RF</a> open-source project ·
+          <a href="https://github.com/Wave-RF/WaveHouse" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </span>
+      </div>
+    </div>
+
+    <div class="wh-footer__cols">
+      <div class="wh-footer__col">
+        <span class="wh-footer__label">Docs</span>
+        <a href="/getting-started">Getting Started</a>
+        <a href="/architecture">Architecture</a>
+        <a href="/api">API Reference</a>
+        <a href="/sdk">TypeScript SDK</a>
+      </div>
+      <div class="wh-footer__col">
+        <span class="wh-footer__label">Operations</span>
+        <a href="/configuration">Configuration</a>
+        <a href="/deployment">Deployment</a>
+        <a href="/development">Development</a>
+      </div>
+      <div class="wh-footer__col">
+        <span class="wh-footer__label">Project</span>
+        <a href="https://github.com/Wave-RF/WaveHouse" target="_blank" rel="noopener noreferrer">Source</a>
+        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Changelog</a>
+        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">Contributing</a>
+        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
+      </div>
+    </div>
+
+    <div class="wh-footer__sign">
+      <span>© {year} Wave RF</span>
+      <span aria-hidden="true">·</span>
+      <span class="wh-footer__motto">No cell service? No problem.</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .wh-footer {
+    margin-top: 6rem;
+    padding: 3rem 1.5rem 2rem;
+    border-top: 1px solid var(--wh-border);
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      color-mix(in oklab, var(--wh-surface) 60%, transparent) 100%
+    );
+  }
+  .wh-footer__inner {
+    max-width: 70rem;
+    margin: 0 auto;
+    display: grid;
+    gap: 2.5rem;
+  }
+  .wh-footer__brand {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .wh-footer__mark {
+    width: 2.25rem;
+    height: 2.25rem;
+    color: var(--wh-accent-hi);
+    display: grid;
+    place-items: center;
+  }
+  .wh-footer__mark svg {
+    width: 100%;
+    height: 100%;
+  }
+  .wh-footer__brand strong {
+    display: block;
+    font-size: 1rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    color: var(--wh-ink);
+  }
+  .wh-footer__sub {
+    display: block;
+    color: var(--wh-ink-muted);
+    font-size: 0.875rem;
+    margin-top: 0.125rem;
+  }
+  .wh-footer__sub a {
+    color: var(--wh-ink-muted);
+    text-decoration: none;
+    transition: color 0.12s ease;
+  }
+  .wh-footer__sub a:hover {
+    color: var(--wh-accent-hi);
+  }
+
+  .wh-footer__cols {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem;
+  }
+  .wh-footer__col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+  }
+  .wh-footer__col a {
+    color: var(--wh-ink-muted);
+    text-decoration: none;
+    transition: color 0.12s ease;
+  }
+  .wh-footer__col a:hover {
+    color: var(--wh-accent-hi);
+  }
+  .wh-footer__label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--wh-ink-subtle);
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+  }
+
+  .wh-footer__sign {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--wh-border);
+    font-size: 0.8125rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-footer__motto {
+    font-style: italic;
+    color: var(--wh-ink-muted);
+  }
+
+  @media (max-width: 50rem) {
+    .wh-footer__cols {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 30rem) {
+    .wh-footer__cols {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

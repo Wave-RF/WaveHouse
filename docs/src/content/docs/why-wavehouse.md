@@ -282,6 +282,6 @@ The pitch in one sentence: **ClickHouse is a great database and a poor API**. Ev
 
 Read next:
 
-- **[Architecture](architecture.md)** — the internal package map and how each of these capabilities is implemented.
-- **[Getting Started](getting-started.md)** — five minutes to `200 OK`.
-- **[API Reference](api.md)** — every endpoint and the schema-validation contract.
+- **[Architecture](/architecture)** — the internal package map and how each of these capabilities is implemented.
+- **[Getting Started](/getting-started)** — five minutes to `200 OK`.
+- **[API Reference](/api)** — every endpoint and the schema-validation contract.

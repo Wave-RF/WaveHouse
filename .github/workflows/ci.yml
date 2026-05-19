@@ -43,8 +43,8 @@ jobs:
 
       # Saves run on every branch, gated on `*-cache-hit != 'true'` so a
       # same-key re-push is a no-op. PRs inherit main's cache scope, so a
-      # main-push save warms every PR. Three saves mirror three restores
-      # in setup-env — keep paths and keys in sync.
+      # main-push save warms every PR. Saves mirror restores in setup-env
+      # — keep paths and keys in sync.
       - name: Save Go module + build cache
         if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -77,6 +77,20 @@ jobs:
         with:
           path: ${{ steps.setup.outputs.pnpm-store-path }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
+
+      - name: Save Playwright browser cache
+        if: steps.setup.outputs.playwright-cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml') }}
+
+      - name: Save Astro content cache
+        if: steps.setup.outputs.astro-cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: docs/.astro
+          key: astro-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml', 'docs/astro.config.mjs') }}
 
       # Coverage in the job-summary panel. See #133 for post-launch
       # reporting decisions.
