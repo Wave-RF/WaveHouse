@@ -130,9 +130,10 @@ Tooling notes:
   auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via
   `make tools`). Not in `go.mod` — its dependency tree conflicts with the
   main module.
-- `pnpm` (>= 10.33) and `Node.js` (>= 20) must be on your PATH; the SDK and
-  E2E test harnesses both shell out to `pnpm`. `make tools` runs
-  `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
+- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo
+  root, matches CI) must be on your PATH; the SDK and E2E test harnesses
+  both shell out to `pnpm`. `make tools` runs `pnpm install
+  --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD
   Make 3.81 which will not parse the Makefile. See `docs/development.md` §
   Prerequisites for the full setup checklist.

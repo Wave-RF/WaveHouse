@@ -2,7 +2,7 @@
   "name": "@wavehouse/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for WaveHouse — schema-aware real-time API gateway for ClickHouse",
-  "packageManager": "pnpm@10.33.0",
+  "packageManager": "pnpm@11.1.3",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -48,10 +48,5 @@
     "sse",
     "query-builder",
     "typescript"
-  ],
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
-  }
+  ]
 }
