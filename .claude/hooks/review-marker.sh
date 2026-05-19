@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
-# PostToolUse Agent hook — writes the pre-push review marker.
+# SubagentStop hook — writes the pre-push review marker.
 #
-# When the pre-push-reviewer subagent finishes its review and ends its response
-# with `VERDICT: ship_it`, this hook writes tmp/review-passed-<HEAD-sha>. The
-# pre-push gate (in .claude/hooks/agent-bash-gate.sh) reads that marker to allow
-# the subsequent `git push`.
+# When the pre-push-reviewer subagent finishes its review and its last assistant
+# message ends with `VERDICT: ship_it`, this hook writes
+# tmp/review-passed-<HEAD-sha>. The pre-push gate (in
+# .claude/hooks/agent-bash-gate.sh) reads that marker to allow the subsequent
+# `git push`.
 #
-# Why this hook exists: the orchestrator agent is denied direct writes to
-# tmp/(ci|review)-passed-* (permission deny list + agent-bash-gate). Hooks run at
-# Claude Code privilege level, NOT subject to the permission system, so this
-# is the only path to creating the marker. The subagent's verdict is the gate;
-# the orchestrator can't fake it because the subagent runs in fresh context
-# with the canonical system prompt from .claude/agents/pre-push-reviewer.md.
+# Why SubagentStop (not PostToolUse:Agent): the PostToolUse:Agent payload puts
+# the subagent's final text in `.tool_response.content[].text` (array of
+# content blocks), which is brittle to parse and to schema changes.
+# SubagentStop exposes `.last_assistant_message` as a flat string, which is
+# both stable and what we actually need. Both events do fire on subagent
+# completion; we just use the one with the friendlier schema.
+#
+# Why this hook exists at all: the orchestrator agent is denied direct writes
+# to tmp/(ci|review)-passed-* (permission deny list + agent-bash-gate). Hooks
+# run at Claude Code privilege level, NOT subject to the permission system, so
+# this is the only path to creating the marker. The subagent's verdict is the
+# gate; the orchestrator can't fake it because the subagent runs in fresh
+# context with the canonical system prompt from
+# .claude/agents/pre-push-reviewer.md.
 
 set -uo pipefail
 
 input=$(cat)
-agent_type=$(printf '%s' "$input" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null)
 
-# Only act on pre-push-reviewer completions
+# SubagentStop fires for every subagent completion (no matcher support per
+# Claude Code docs), so we filter by `agent_type` in-script.
+agent_type=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)
 [ "$agent_type" = "pre-push-reviewer" ] || exit 0
 
-response=$(printf '%s' "$input" | jq -r '.tool_response // empty' 2>/dev/null)
+response=$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null)
 [ -z "$response" ] && exit 0
 
 # Parse the parseable verdict line. Format (per .claude/agents/pre-push-reviewer.md):

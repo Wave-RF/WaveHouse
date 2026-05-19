@@ -36,6 +36,8 @@
       "Write(tmp/review-passed-*)",
       "Edit(tmp/ci-passed-*)",
       "Edit(tmp/review-passed-*)",
+      "MultiEdit(tmp/ci-passed-*)",
+      "MultiEdit(tmp/review-passed-*)",
 
       "Read(./.env)",
       "Read(./.env.*)",
@@ -80,9 +82,10 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gofumpt-on-save.sh"
           }
         ]
-      },
+      }
+    ],
+    "SubagentStop": [
       {
-        "matcher": "Agent",
         "hooks": [
           {
             "type": "command",

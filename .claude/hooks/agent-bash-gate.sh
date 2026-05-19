@@ -159,7 +159,22 @@ EOF
     # 7b. review-passed required when HEAD branch has an open PR.
     branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
     if [ -n "$branch" ] && [ "$branch" != "main" ]; then
-      pr_state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
+      if ! command -v gh >/dev/null 2>&1; then
+        block "gh CLI is required to determine PR state for branch '${branch}' (needed to enforce pre-push review on PR branches). Install gh or push from main."
+      fi
+      # gh pr view exits 1 for both "no PR for this branch" (benign — no review-marker
+      # enforcement needed) and "auth/network error" (NOT benign — would silently bypass
+      # the review gate). Differentiate by capturing stderr and grepping for the
+      # well-known "no pull requests found" message; anything else is treated as a
+      # real failure and blocks.
+      pr_state=""
+      if pr_view_out=$(gh pr view "$branch" --json state --jq .state 2>&1); then
+        pr_state="$pr_view_out"
+      elif printf '%s' "$pr_view_out" | grep -qiE 'no (open )?pull request'; then
+        pr_state=""
+      else
+        block "Could not determine PR state for branch '${branch}': ${pr_view_out}. Refusing to silently skip review-marker enforcement. Run 'gh auth status', 'gh auth login', or retry."
+      fi
       if [ "$pr_state" = "OPEN" ]; then
         if [ ! -f "$review_marker" ]; then
           cat >&2 <<EOF

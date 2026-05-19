@@ -25,7 +25,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 | ----- | -------- | ---------- | ------- |
 | **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
 | **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Enforces [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes |
-| **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (PostToolUse Agent) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: writes `tmp/review-passed-<HEAD-sha>` on `VERDICT: ship_it` |
+| **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: writes `tmp/review-passed-<HEAD-sha>` on `VERDICT: ship_it` |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
 
 Git hooks are the source of truth for "must pass before merge." `.claude/` layers agent-specific gates and ergonomic hooks on top; it doesn't substitute for the universal gates.
@@ -50,7 +50,7 @@ The marker invalidates on every commit (HEAD SHA changes), so `make ci` re-runs 
 | `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, --no-verify, the obvious marker-write idioms, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all three hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: enforces Agent PR Discipline (drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes) |
-| `.claude/hooks/review-marker.sh` | PostToolUse Agent: writes `tmp/review-passed-<HEAD-sha>` when `pre-push-reviewer` returns `VERDICT: ship_it` |
+| `.claude/hooks/review-marker.sh` | SubagentStop: writes `tmp/review-passed-<HEAD-sha>` when `pre-push-reviewer` returns `VERDICT: ship_it`. Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |
 | `.claude/agents/pre-push-reviewer.md` | `pre-push-reviewer` subagent — canonical pre-push review, also used for auditing others' PRs locally |
 | `.claude/skills/pr-sync-with-main/SKILL.md` | "Fix this stale PR" workflow — merge origin/main, never rebase or force-push |
