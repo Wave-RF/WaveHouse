@@ -69,8 +69,10 @@ cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 head_sha=$(git rev-parse HEAD 2>/dev/null)
 [ -z "$head_sha" ] && exit 0
 
-mkdir -p tmp
-touch "tmp/review-passed-${head_sha}"
-echo "📝 Pre-push review marker written: tmp/review-passed-${head_sha:0:8}" >&2
+if mkdir -p tmp && touch "tmp/review-passed-${head_sha}"; then
+  echo "📝 Pre-push review marker written: tmp/review-passed-${head_sha:0:8}" >&2
+else
+  echo "review-marker: failed to write tmp/review-passed-${head_sha:0:8} — no marker written." >&2
+fi
 
 exit 0
