@@ -116,7 +116,7 @@ WaveHouse is built as an application, not a library — `internal/` packages are
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11+** on your PATH — see [docs/development.md § Prerequisites](docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
+You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11.1+** on your PATH — see [docs/development.md § Prerequisites](docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
 
 For building and testing WaveHouse locally with hot-reload:
 
