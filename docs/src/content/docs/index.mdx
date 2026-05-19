@@ -15,7 +15,7 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard, Code } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 <div class="wh-stats not-content">
   <div class="wh-stat">
@@ -75,7 +75,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 ## Up in five minutes
 
-One container — ClickHouse and WaveHouse both — and you have an ingest endpoint, a query endpoint, and a live event stream:
+One compose file — ClickHouse + WaveHouse — and you have an ingest endpoint, a query endpoint, and a live event stream:
 
 ```bash
 # Boot ClickHouse + WaveHouse with one compose file
@@ -84,12 +84,12 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Ingest an event
-curl -X POST http://localhost:8088/v1/events \
+curl -X POST http://localhost:8088/v1/ingest/events \
   -H 'content-type: application/json' \
   -d '{"event_type":"page_view","user_id":"u_42","ts":"2026-05-15T12:00:00Z"}'
 
 # Subscribe to the live stream
-curl -N http://localhost:8088/v1/stream/events
+curl -N http://localhost:8088/v1/stream/sse
 ```
 
 Five minutes from `git clone` to a live event stream. See the [Getting Started](/getting-started) walkthrough for the full guided tour.

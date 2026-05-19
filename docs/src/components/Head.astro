@@ -4,6 +4,30 @@ import { ClientRouter } from "astro:transitions";
 ---
 
 <Default><slot /></Default>
-<meta name="theme-color" content="#0A0B0E" media="(prefers-color-scheme: dark)" />
-<meta name="theme-color" content="#FAFAF9" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0A0B0E" />
 <ClientRouter fallback="swap" />
+
+<script is:inline>
+  // Keep the browser chrome (mobile address bar, PWA splash) in sync with
+  // Starlight's data-theme attribute rather than the OS prefers-color-scheme.
+  // A user on a dark-mode OS who clicks the light toggle should see the light
+  // chrome immediately, and vice versa.
+  (() => {
+    const DARK = "#0A0B0E";
+    const LIGHT = "#FAFAF9";
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) return;
+    const resolve = () => {
+      const t = document.documentElement.dataset.theme;
+      // Starlight resolves `auto` to the OS preference and stamps either
+      // "dark" or "light" on documentElement before paint, so we just mirror.
+      meta.setAttribute("content", t === "light" ? LIGHT : DARK);
+    };
+    resolve();
+    new MutationObserver(resolve).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    document.addEventListener("astro:after-swap", resolve);
+  })();
+</script>

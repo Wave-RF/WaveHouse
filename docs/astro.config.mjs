@@ -90,8 +90,8 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         // @ts-expect-error — plugin types target an older Starlight; runtime is fine.
         starlightLlmTools(),
         starlightLinksValidator({
-          errorOnInvalidHashes: false,
-          errorOnRelativeLinks: false,
+          errorOnInvalidHashes: true,
+          errorOnRelativeLinks: true,
         }),
       ],
     }),

@@ -745,4 +745,4 @@ make test-e2e-dev      # Watch mode for iterative development
 
 Test files: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
 
-See [Development Guide — E2E Tests via SDK](development.md#e2e-tests-via-sdk) for architecture details and workflow tips.
+See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

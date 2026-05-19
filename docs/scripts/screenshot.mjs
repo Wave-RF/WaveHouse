@@ -33,9 +33,12 @@ try {
         document.documentElement.setAttribute("data-theme", t);
         try { localStorage.setItem("starlight-theme", t); } catch {}
       }, theme);
-      // Ensure web fonts load + wait past entrance animations.
+      // Ensure web fonts load + wait past entrance animations. The hero
+      // terminal staggers nine lines at 0.42s each, so the last line lands
+      // around 3.8s after mount — wait a bit past that so the capture is
+      // a fully-rendered frame, not a half-typed terminal.
       await page.evaluate(() => document.fonts.ready);
-      await page.waitForTimeout(1800);
+      await page.waitForTimeout(4500);
       const filename = `${p.name}-${theme}.png`;
       await page.screenshot({
         path: resolve(OUT, filename),

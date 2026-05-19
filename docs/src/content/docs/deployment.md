@@ -103,7 +103,7 @@ git push origin v0.1.0
 
 ## Environment Variables
 
-All configuration can be set via environment variables. This is the recommended approach for container deployments. See [Configuration Reference](configuration.md) for the full list.
+All configuration can be set via environment variables. This is the recommended approach for container deployments. See [Configuration Reference](/configuration) for the full list.
 
 Key variables for production:
 

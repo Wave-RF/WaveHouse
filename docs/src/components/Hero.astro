@@ -62,42 +62,51 @@ const terminalLines: TerminalLine[] = [
 
       {actions.length > 0 && (
         <div class="wh-hero__actions" data-stagger="3">
-          {actions.map((action) => (
-            <a
-              href={action.link}
-              class:list={[
-                "wh-hero__action",
-                `wh-hero__action--${action.variant ?? "primary"}`,
-              ]}
-              target={action.attrs?.target as string | undefined}
-              rel={action.attrs?.rel as string | undefined}
-            >
-              <span>{action.text}</span>
-              {action.variant === "primary" && (
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M5 12h14m-6-6 6 6-6 6"
-                    stroke="currentColor"
-                    stroke-width="2.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  ></path>
-                </svg>
-              )}
-            </a>
-          ))}
+          {actions.map((action) => {
+            const attrs = { ...(action.attrs ?? {}) };
+            if (attrs.target === "_blank") {
+              const existing = String(attrs.rel ?? "").split(/\s+/).filter(Boolean);
+              for (const token of ["noopener", "noreferrer"]) {
+                if (!existing.includes(token)) existing.push(token);
+              }
+              attrs.rel = existing.join(" ");
+            }
+            return (
+              <a
+                href={action.link}
+                class:list={[
+                  "wh-hero__action",
+                  `wh-hero__action--${action.variant ?? "primary"}`,
+                ]}
+                {...attrs}
+              >
+                <span>{action.text}</span>
+                {action.variant === "primary" && (
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M5 12h14m-6-6 6 6-6 6"
+                      stroke="currentColor"
+                      stroke-width="2.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    ></path>
+                  </svg>
+                )}
+              </a>
+            );
+          })}
         </div>
       )}
 
       <div class="wh-hero__meta" data-stagger="4">
         <span class="wh-hero__meta-item">
-          <kbd>npm install</kbd>
+          <kbd>pnpm add</kbd>
           <span>@wavehouse/sdk</span>
         </span>
       </div>
