@@ -248,7 +248,7 @@ flowchart TB
     classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:2px
     classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
 
-    Q["Client<br/>POST /v1/admin/query"]:::client
+    Q["Client<br/>POST /v1/tables/{table}/query"]:::client
     Q --> L1["Ristretto cache<br/>(in-process)"]:::wh
     L1 -. "miss + singleflight" .-> CH[("ClickHouse")]:::store
     L1 -. "hit: ~0.5ms" .-> Q
