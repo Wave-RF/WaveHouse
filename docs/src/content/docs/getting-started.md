@@ -71,7 +71,7 @@ curl -s -X POST http://localhost:8080/v1/query \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
 
-Prefer a type-safe query builder over raw SQL? See the [structured query endpoint](api.md#post-v1tablestablequery--structured-query) or the [TypeScript SDK](sdk.md).
+Prefer a type-safe query builder over raw SQL? See the [structured query endpoint](/api#post-v1tablestablequery--structured-query) or the [TypeScript SDK](/sdk).
 
 ## 5. Subscribe to real-time updates
 
@@ -85,18 +85,18 @@ curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
-To consume multiple tables on a single connection, use the WebSocket endpoint (`/v1/stream/ws`) with in-band `subscribe` commands — see the [API reference](api.md) for the envelope format.
+To consume multiple tables on a single connection, use the WebSocket endpoint (`/v1/stream/ws`) with in-band `subscribe` commands — see the [API reference](/api) for the envelope format.
 
 ## Next steps
 
-- **[Architecture](architecture.md)** — how ingest, query, cache, and streaming fit together.
-- **[API Reference](api.md)** — every endpoint, request/response shape, and error code.
-- **[TypeScript SDK](sdk.md)** — zero-dependency client with query builder, live queries, and codegen.
-- **[Configuration](configuration.md)** — full YAML + environment variable reference.
-- **[Deployment](deployment.md)** — Docker images, releases, health checks.
-- **[Development](development.md)** — building from source, running tests, hot-reload workflow.
+- **[Architecture](/architecture)** — how ingest, query, cache, and streaming fit together.
+- **[API Reference](/api)** — every endpoint, request/response shape, and error code.
+- **[TypeScript SDK](/sdk)** — zero-dependency client with query builder, live queries, and codegen.
+- **[Configuration](/configuration)** — full YAML + environment variable reference.
+- **[Deployment](/deployment)** — Docker images, releases, health checks.
+- **[Development](/development)** — building from source, running tests, hot-reload workflow.
 
 ## Going further
 
-- **Enable JWT auth**: set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=<secret>` — see [API Reference — Authentication](api.md#authentication).
-- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](configuration.md#deduplication).
+- **Enable JWT auth**: set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=<secret>` — see [API Reference — Authentication](/api#authentication).
+- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](/configuration#deduplication).

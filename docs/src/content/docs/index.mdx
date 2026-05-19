@@ -17,7 +17,30 @@ hero:
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Why WaveHouse?
+<div class="wh-stats not-content">
+  <div class="wh-stat">
+    <span class="wh-stat__value">1</span>
+    <span class="wh-stat__unit">binary</span>
+    <span class="wh-stat__label">API · worker · NATS · dedup</span>
+  </div>
+  <div class="wh-stat">
+    <span class="wh-stat__value">&lt; 100</span>
+    <span class="wh-stat__unit">ms</span>
+    <span class="wh-stat__label">warm-cache query path, local bench</span>
+  </div>
+  <div class="wh-stat">
+    <span class="wh-stat__value">SSE</span>
+    <span class="wh-stat__unit">+ WS</span>
+    <span class="wh-stat__label">real-time push, gap-filled</span>
+  </div>
+  <div class="wh-stat">
+    <span class="wh-stat__value">MIT</span>
+    <span class="wh-stat__unit">open</span>
+    <span class="wh-stat__label">no vendor lock, no SaaS tier</span>
+  </div>
+</div>
+
+## Why WaveHouse exists
 
 ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it comes with sharp edges: custom APIs, Kafka queues to avoid "too many parts" errors, replacing-merge logic for deduplication. WaveHouse abstracts all of that into a single, deployable binary so you stop interacting with ClickHouse directly.
 
@@ -50,13 +73,34 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 	</Card>
 </CardGrid>
 
+## Up in five minutes
+
+One compose file — ClickHouse + WaveHouse — and you have an ingest endpoint, a query endpoint, and a live event stream:
+
+```bash
+# Boot ClickHouse + WaveHouse with one compose file
+git clone https://github.com/Wave-RF/WaveHouse.git
+cd WaveHouse
+docker compose -f deployments/compose/standalone.yaml up -d
+
+# Ingest an event
+curl -X POST http://localhost:8080/v1/ingest/events \
+  -H 'content-type: application/json' \
+  -d '{"event_type":"page_view","user_id":"u_42","ts":"2026-05-15T12:00:00Z"}'
+
+# Subscribe to the live stream
+curl -N "http://localhost:8080/v1/stream/sse?table=events"
+```
+
+Five minutes from `git clone` to a live event stream. See the [Getting Started](/getting-started) walkthrough for the full guided tour.
+
 ## How it ships
 
-<Card title="Single binary" icon="seti:config">
+<Card title="A single binary, one dependency" icon="seti:config">
 	One `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
 </Card>
 
-## Start here
+## Where to next
 
 <CardGrid>
 	<LinkCard

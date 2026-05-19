@@ -1,38 +1,58 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0d2429"/>
-      <stop offset="1" stop-color="#152e35"/>
+      <stop offset="0" stop-color="#0A0B0E"/>
+      <stop offset="1" stop-color="#14171C"/>
     </linearGradient>
+    <radialGradient id="glow" cx="0.9" cy="0.1" r="0.5">
+      <stop offset="0" stop-color="#06B0BF" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#06B0BF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Accent-tinted scaffolding grid. Visible enough to read as structure
+         without competing with the wordmark / tagline. -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#06B0BF" stroke-width="0.75" stroke-opacity="0.16"/>
+    </pattern>
   </defs>
 
-  <!-- background -->
+  <!-- Background stack: gradient → grid → corner glow. -->
   <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
 
-  <!-- subtle horizontal waves at the bottom -->
-  <g fill="none" stroke="#5bbfcf" stroke-width="3" stroke-linecap="round" opacity="0.10">
-    <path d="M-20 560 C 120 500, 220 620, 360 560 S 600 500, 740 560 S 980 620, 1220 560"/>
-    <path d="M-20 595 C 120 535, 220 655, 360 595 S 600 535, 740 595 S 980 655, 1220 595"/>
+  <!-- Canonical lockup — mark + wordmark as a single 480×100 design unit from
+       scripts/branding/lockup.svg. Heights / weights / gap are designed-in,
+       so the OG just picks an x/y/scale and the rest comes out balanced.
+       scale 1.85 → visual height ≈ 144 px, visual width ≈ 825 px.
+       translate (115 135) places the lockup so its visible content starts
+       ~6 px in from x=115 (left padding ≈ 121) and the visual center sits
+       around y=215, matching the design's intended vertical anchor. -->
+  <g transform="translate(115 135) scale(1.85)">
+    __LOCKUP_GROUP__
   </g>
 
-  <!-- Mark — the contents of scripts/branding/mark.svg are spliced in here
-       by scripts/branding/generate.sh, with currentColor substituted for the
-       OG-card mark color. Scaled 2.5x so the (64-unit) mark renders 160 px,
-       sized to read alongside the 140 px wordmark rather than overpower it. -->
-  <g transform="translate(220 190) scale(2.5)">
-    __MARK_GROUP__
-  </g>
-
-  <text x="400" y="320" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="140" font-weight="700" fill="#f8f9fa" letter-spacing="-3">WaveHouse</text>
-
-  <text x="600" y="450" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="36" font-weight="400" fill="#c2c9d1" text-anchor="middle">
-    The open-source real-time API gateway for ClickHouse
+  <!-- Two-line tagline. Matches the landing-page hero's two-sentence cadence:
+       value-prop sentence + capability roll-up. SVG <text> doesn't auto-wrap;
+       lines are pre-broken via tspan dy. ClickHouse is highlighted in the
+       dark-mode accent to echo the for-ClickHouse relationship visually.
+       Font 34 px sized so the longer second line ends ≈90 px from the right
+       edge of the 1200-px canvas — visibly breathable without pushing the
+       wrap point so far in that the line breaks before "streaming." -->
+  <text x="120" y="400" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="34" font-weight="400" fill="#9CA3AF">
+    <tspan x="120" dy="0">The open-source real-time API gateway for <tspan fill="#06B0BF" font-weight="500">ClickHouse</tspan>.</tspan>
+    <tspan x="120" dy="52">Schema-aware ingest, async batching, real-time streaming.</tspan>
   </text>
 
-  <text x="600" y="520" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="24" font-weight="500" fill="#5bbfcf" text-anchor="middle" letter-spacing="2">
-    SCHEMA-AWARE INGEST  ·  ASYNC BATCHING  ·  REAL-TIME STREAMING  ·  TIERED CACHING
-  </text>
+  <!-- Footer row — identity attribution left, URL right. Sized BELOW the
+       tagline so the visual hierarchy reads wordmark → tagline → footer
+       (largest → smallest). 28 px is the legibility floor for a 1200×630 OG
+       that gets downscaled to ~500 px wide in Twitter / Slack / LinkedIn
+       previews; smaller than that and the row turns into fine print. Color
+       split (tagline gray left / accent cyan right) gives the URL CTA-weight
+       without enlarging it. -->
+  <text x="120" y="585" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="28" font-weight="400" fill="#9CA3AF">A Wave RF open-source project</text>
+  <text x="1080" y="585" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="28" font-weight="500" fill="#06B0BF" text-anchor="end">wavehouse.dev</text>
 </svg>
