@@ -12,6 +12,10 @@ import { ClientRouter } from "astro:transitions";
   // Starlight's data-theme attribute rather than the OS prefers-color-scheme.
   // A user on a dark-mode OS who clicks the light toggle should see the light
   // chrome immediately, and vice versa.
+  //
+  // `is:inline` scripts re-run on every Astro View Transition, so we
+  // sentinel-guard the listener/observer registration to avoid stacking
+  // MutationObservers and astro:after-swap listeners across navigations.
   (() => {
     const DARK = "#0A0B0E";
     const LIGHT = "#FAFAF9";
@@ -24,6 +28,8 @@ import { ClientRouter } from "astro:transitions";
       meta.setAttribute("content", t === "light" ? LIGHT : DARK);
     };
     resolve();
+    if (window.__whThemeColorBound) return;
+    window.__whThemeColorBound = true;
     new MutationObserver(resolve).observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["data-theme"],

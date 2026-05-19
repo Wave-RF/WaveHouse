@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`).
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). The `docs/` install also runs `pnpm exec playwright install chromium --with-deps` (~130 MB Chromium download) — required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. On Linux the `--with-deps` flag invokes `apt-get install` for Chromium's system libraries (`libnspr4`, `libnss3`, etc.), so `make tools` needs `sudo`/apt access there; CI runners on minimal base images must have apt available.
 
 ### Verify your setup
 
