@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The worker accepts an envelope when `action == "insert"` OR `action` is absent/empty; any other value (`delete`, `update`, `truncate`, anything else) is `DoubleAck`'d and dropped. Absent is accepted because the wire format `EventMessage` doesn't carry an `action` field — `internal/api/ingest.go` builds the envelope as `{table_name, received_timestamp, data}`, so every envelope produced by the HTTP API arrives at the worker with the field unset. The only producers that set `action` explicitly are external NATS publishers; explicit `"insert"` and absent are equivalent. Non-insert mutations must go through `POST /v1/query` under an admin-equivalent role — see the Query Path section below. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/query` under an admin-equivalent role — see the Query Path section below; they're rejected at the API layer, not at this consumer. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -154,15 +154,15 @@ Client POST /v1/ingest/{table}
 Bento ingest pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
   → Validate table name against safeIdentifierRe
-  → Enforce insert-only contract on the envelope's `action` field:
-    accept when `action == "insert"` OR `action` is absent/empty (the wire
-    format `EventMessage` has no `action` field, so HTTP-API envelopes
-    always arrive with it unset); reject anything else (`delete`, `update`,
-    `truncate`, …) by DoubleAck-and-drop — DELETE/UPDATE/TRUNCATE/DROP/etc.
-    must go through POST /v1/query
+  → Validate payload presence (reject envelopes with empty `data`)
   → Batch events per table, bulk INSERT to ClickHouse
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
+
+  (Insert-only pipeline. The wire format `EventMessage` carries only
+  {table_name, received_timestamp, data}; non-insert mutations
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/query and are
+  rejected at the API layer, not at this consumer.)
 
 Active Sweeper (async goroutine, every 60s):
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)

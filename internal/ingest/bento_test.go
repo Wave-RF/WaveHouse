@@ -681,7 +681,7 @@ func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	t.Parallel()
 
 	// Message missing the "data" payload completely. Should be rejected.
-	badData := []byte(`{"table_name": "events", "action": "insert"}`)
+	badData := []byte(`{"table_name": "events"}`)
 	badMsg := &bentoMockMsg{data: badData}
 
 	// Good message so the Read loop has something to successfully return
@@ -703,87 +703,4 @@ func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	payload, err := msg.AsBytes()
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id": 1}`, string(payload))
-}
-
-// TestJsInput_Read_AbsentActionAcceptedAsInsert pins the absent-action
-// half of the insert-only contract: an envelope with no `action` field
-// (or `action: ""`) is treated as insert, not rejected. This is structural,
-// not backward-compat: EventMessage in types.go has no Action field, and
-// internal/api/ingest.go builds envelopes via EventMessage{...} with no
-// action set. Rejecting absent here would break the only legitimate
-// producer we have. Tightening the contract to require explicit "insert"
-// would be a wire-format change (add Action to EventMessage, set it in the
-// API handler, update fixtures) — out of scope for the insert-only lock.
-func TestJsInput_Read_AbsentActionAcceptedAsInsert(t *testing.T) {
-	t.Parallel()
-
-	// Both shapes — field absent entirely, and field present but empty —
-	// must be accepted equivalently.
-	cases := []struct {
-		name string
-		data string
-	}{
-		{"action field absent", `{"table_name":"clicks","data":{"id":1}}`},
-		{"action field empty", `{"table_name":"clicks","action":"","data":{"id":1}}`},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			natsMsg := &bentoMockMsg{data: []byte(tt.data)}
-			iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
-			iter.msgs <- natsMsg
-
-			input := &jsInput{iter: iter}
-			msg, ackFn, err := input.Read(context.Background())
-			require.NoError(t, err)
-			require.NotNil(t, msg, "envelope with %s must be accepted as insert", tt.name)
-
-			table, _ := msg.MetaGet("table_name")
-			assert.Equal(t, "clicks", table)
-			assert.False(t, natsMsg.doubleAcked, "absent/empty action must NOT be DoubleAck'd by the rejection path — it goes through the insert pipeline")
-
-			// Ack with no error should DoubleAck via the insert ackFn — same
-			// path the explicit-insert test takes.
-			require.NoError(t, ackFn(context.Background(), nil))
-			assert.True(t, natsMsg.doubleAcked, "DoubleAck must come from the insert ackFn, not the rejection branch")
-		})
-	}
-}
-
-// TestJsInput_Read_NonInsertActionRejected pins the insert-only contract:
-// the worker accepts only `action: "insert"` (or empty/absent — see
-// TestJsInput_Read_AbsentActionAcceptedAsInsert) and DoubleAcks any other
-// action verb without further side-effects. `delete` was a real verb
-// before the insert-only lock; the rest are forward-looking sentinels so
-// nobody can reintroduce a pipelined mutation path without an explicit
-// test failure. All non-insert mutations now go through POST /v1/query.
-func TestJsInput_Read_NonInsertActionRejected(t *testing.T) {
-	t.Parallel()
-
-	for _, action := range []string{"delete", "update", "upsert", "truncate", "drop", "alter", "replace"} {
-		t.Run(action, func(t *testing.T) {
-			t.Parallel()
-
-			badData := []byte(`{"table_name": "events", "action": "` + action + `", "data": {"id": 1}}`)
-			badMsg := &bentoMockMsg{data: badData}
-
-			goodData := []byte(`{"table_name": "events", "action": "insert", "data": {"id": 2}}`)
-			goodMsg := &bentoMockMsg{data: goodData}
-
-			iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-			iter.msgs <- badMsg
-			iter.msgs <- goodMsg
-
-			input := &jsInput{iter: iter}
-			msg, _, err := input.Read(context.Background())
-			require.NoError(t, err)
-
-			assert.True(t, badMsg.doubleAcked, "non-insert action %q must be DoubleAck'd and dropped", action)
-			assert.False(t, badMsg.naked, "non-insert action %q must not be Nak'd — would loop", action)
-
-			payload, err := msg.AsBytes()
-			require.NoError(t, err)
-			assert.JSONEq(t, `{"id": 2}`, string(payload), "Read should advance to the next insert after rejecting %q", action)
-		})
-	}
 }
