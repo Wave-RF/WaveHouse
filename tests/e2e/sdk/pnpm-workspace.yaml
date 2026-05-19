@@ -1,0 +1,7 @@
+# See clients/ts/pnpm-workspace.yaml for full rationale. Kept in sync
+# across all three WaveHouse pnpm projects manually.
+
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAge: 10080

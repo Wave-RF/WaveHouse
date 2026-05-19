@@ -17,8 +17,8 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/` and `tests/e2e/compose.yaml`; integration tests boot a ClickHouse testcontainer | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
-| **Node.js** | 20+ | Runtime for pnpm and the Vitest suites | [nodejs.org](https://nodejs.org/) or `nvm`/`fnm`/`volta` |
-| **pnpm** | 10.33+ (pinned via `packageManager` in `clients/ts/package.json`, `tests/e2e/sdk/package.json`, and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site; `make build-sdk`, `make test-sdk`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@10.33.0 --activate` (recommended), or `npm i -g pnpm` |
+| **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
+| **pnpm** | 11.1+ (pinned via `packageManager` in `clients/ts/package.json`, `tests/e2e/sdk/package.json`, and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site; `make build-sdk`, `make test-sdk`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -36,8 +36,8 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 go version          # go1.26+
 make --version      # GNU Make 4.x
 docker compose version
-node --version      # v20+
-pnpm --version      # 10.33+
+node --version      # v22.x (matches .nvmrc and CI)
+pnpm --version      # 11.1+
 ```
 
 If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-sdk`).
@@ -103,14 +103,11 @@ curl -s -X POST http://localhost:8080/v1/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
-# Open an SSE stream for all tables (Ctrl+C to stop)
-curl -N http://localhost:8080/v1/stream/sse
-
-# Open an SSE stream for a specific table
-curl -N "http://localhost:8080/v1/stream/sse?topic=ingest.clicks"
+# Open an SSE stream for a specific table (Ctrl+C to stop)
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 
 # With gap-fill (replays events since the given timestamp, then switches to live)
-curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 
 # Health check (no auth required)
 curl http://localhost:8080/health

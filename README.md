@@ -75,8 +75,8 @@ curl -s -X POST http://localhost:8080/v1/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
-# Open a real-time SSE stream (Ctrl+C to stop)
-curl -N http://localhost:8080/v1/stream/sse
+# Open a real-time SSE stream for a specific table (Ctrl+C to stop)
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 ```
 
 WaveHouse is now accepting API requests on `http://localhost:8080`.
@@ -116,7 +116,7 @@ WaveHouse is built as an application, not a library — `internal/` packages are
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 20+, and pnpm 10+** on your PATH — see [docs/development.md § Prerequisites](docs/src/content/docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
+You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11.1+** on your PATH — see [docs/development.md § Prerequisites](docs/src/content/docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
 
 For building and testing WaveHouse locally with hot-reload:
 
