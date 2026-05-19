@@ -85,7 +85,7 @@ curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
-To consume multiple tables on a single connection, use the WebSocket endpoint (`/v1/stream/ws`) with in-band `subscribe` commands — see the [API reference](api.md) for the envelope format.
+To consume multiple tables on a single connection, use the WebSocket endpoint (`/v1/stream/ws`) with in-band `subscribe` commands — see the [API reference](/api) for the envelope format.
 
 ## Next steps
 

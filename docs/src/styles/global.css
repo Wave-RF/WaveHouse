@@ -289,11 +289,13 @@
   padding-left: calc(var(--sl-sidebar-item-padding-inline) - 2px);
 }
 
-/* Top nav — translucent glass over content (only when scrolled past 0) */
+/* Top nav — translucent glass over content (only when scrolled past 0).
+   Inherits the same opacity as --sl-color-bg-nav so the design-system token
+   stays the single source of truth (avoids the prior 72%/78% drift). */
 header.header {
   backdrop-filter: blur(12px) saturate(140%);
   -webkit-backdrop-filter: blur(12px) saturate(140%);
-  background: color-mix(in oklab, var(--wh-bg) 72%, transparent);
+  background: var(--sl-color-bg-nav);
   border-bottom: 1px solid var(--wh-border);
 }
 
@@ -527,11 +529,15 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   .wh-stat__value { font-size: 1.875rem; }
 }
 
-/* Reduced motion guard for the hero animations */
+/* Reduced-motion guard. Matches the Hero's own `animation: none !important`
+   pattern (component-scoped Astro styles can't fully cover descendants from
+   plugins, hence this site-wide floor). Using `animation: none` rather than
+   `animation-duration: 0.001ms` actually removes the animation rather than
+   running it in one imperceptible frame — the latter is a stale pattern from
+   when browsers needed `animationend` to fire reliably, no longer required. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
+    animation: none !important;
+    transition: none !important;
   }
 }

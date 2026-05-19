@@ -12,7 +12,23 @@ type HeroData = {
   actions?: HeroAction[];
 };
 
-const { data } = Astro.locals.starlightRoute.entry;
+// Starlight's stable Hero contract passes props directly to component
+// overrides; older Starlight (pre-0.30) exposed the same data via
+// Astro.locals.starlightRoute.entry. Prefer props; fall back to locals so a
+// minor-version bump that drops one or the other surfaces as a real error
+// (entry undefined) rather than a silently-blank hero.
+const heroProps = (Astro.props ?? {}) as {
+  data?: { title?: string; hero?: HeroData };
+  entry?: { data?: { title?: string; hero?: HeroData } };
+};
+const route = Astro.locals?.starlightRoute as
+  | { entry?: { data?: { title?: string; hero?: HeroData } } }
+  | undefined;
+const data =
+  heroProps.data ??
+  heroProps.entry?.data ??
+  route?.entry?.data ??
+  {};
 const heroData = (data.hero ?? {}) as HeroData;
 const heroTitle = heroData.title || data.title || "";
 const tagline = heroData.tagline;
@@ -26,10 +42,10 @@ type TerminalLine =
   | { kind: "cursor" };
 
 const terminalLines: TerminalLine[] = [
-  { kind: "command", cmd: "docker run -p 8088:8088 ghcr.io/wave-rf/wavehouse" },
+  { kind: "command", cmd: "docker run -p 8080:8080 ghcr.io/wave-rf/wavehouse" },
   { kind: "ok", text: "NATS JetStream embedded — ready" },
   { kind: "ok", text: "ClickHouse schema discovered ", dim: "(4 tables)" },
-  { kind: "ok", text: "Listening on ", accent: "http://localhost:8088" },
+  { kind: "ok", text: "Listening on ", accent: "http://localhost:8080" },
   { kind: "command", cmd: "wave subscribe events --live" },
   { kind: "arrow", text: "events_v1 ", dim: "[SSE 200]" },
   { kind: "json", text: '{"id":"evt_01","kind":"click",...}' },
@@ -187,7 +203,7 @@ const terminalLines: TerminalLine[] = [
       </svg>
       </div>
 
-      <div class="wh-terminal" role="img" aria-label="Example terminal session with the WaveHouse CLI">
+      <div class="wh-terminal" aria-hidden="true">
         <div class="wh-terminal__chrome">
           <span class="wh-terminal__dot wh-terminal__dot--red"></span>
           <span class="wh-terminal__dot wh-terminal__dot--amber"></span>
@@ -358,8 +374,10 @@ const terminalLines: TerminalLine[] = [
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    white-space: nowrap;
-    overflow: visible;
+    /* Allow word-wrap below 30rem so longer titles don't horizontal-scroll;
+       text-wrap: balance keeps the line breaks visually centered. */
+    text-wrap: balance;
+    overflow-wrap: break-word;
   }
   .wh-hero__title-line {
     display: inline;

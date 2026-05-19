@@ -34,6 +34,11 @@ export default defineConfig({
 posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https://us.i.posthog.com',defaults:'2026-01-30'});`,
         },
         // /favicon.ico legacy fallback handled by browsers auto-probing /.
+        // Explicit 32×32 favicon entry so browsers don't downscale a too-large
+        // SVG / pick the wrong size — the SVG itself stays as the higher-DPI
+        // primary; this is the tabs-style fallback most Chromium builds use.
+        { tag: "link", attrs: { rel: "icon", type: "image/svg+xml", href: "/favicon.svg", sizes: "any" } },
+        { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "32x32", href: "/favicon.ico" } },
         { tag: "link", attrs: { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" } },
         // Open Graph
         { tag: "meta", attrs: { property: "og:image", content: "https://wavehouse.dev/og.png" } },
