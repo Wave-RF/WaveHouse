@@ -110,19 +110,21 @@ go run github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@v0.1.0
 ```
 
-You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/configuration.md).
+You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/src/content/docs/configuration.md).
 
-WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/sdk.md) is the supported integration surface.
+WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/src/content/docs/sdk.md) is the supported integration surface.
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11.1+** on your PATH — see [docs/development.md § Prerequisites](docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
+You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11.1+** on your PATH — see [docs/development.md § Prerequisites](docs/src/content/docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
 
 For building and testing WaveHouse locally with hot-reload:
 
 ```bash
 # One-time bootstrap: installs golangci-lint into .bin/, downloads Go modules,
-# and runs pnpm install for the SDK + E2E harness.
+# runs pnpm install for the SDK + E2E harness, and configures git hooks
+# (.githooks/pre-commit runs `make verify`; .githooks/pre-push enforces that
+# `make ci` has passed for HEAD before publishing).
 make tools
 
 # Start ClickHouse
@@ -133,6 +135,10 @@ make dev
 ```
 
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
+
+## 🤖 Working with Claude Code
+
+The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / a subagent, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
 ## 🤝 Contributing
 

@@ -502,6 +502,10 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
+	@# Marker file for the pre-push git hook: confirms `make ci` passed for the
+	@# exact HEAD being pushed. tmp/ is gitignored. New commits invalidate the
+	@# marker (different SHA), so `make ci` must re-run before the next push.
+	@mkdir -p tmp && touch "tmp/ci-passed-$$(git rev-parse HEAD)"
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
@@ -604,8 +608,13 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, and pnpm deps
-	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, pnpm deps, and git hooks
+	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
+	@# `make tools` repeatedly just re-asserts the config. The .githooks/
+	@# directory is committed; this line plumbs git to it. Users can opt out
+	@# locally by unsetting the config (`git config --unset core.hooksPath`).
+	@git config core.hooksPath .githooks
+	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed; git hooks active (.githooks/)$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
 # File-target rules: only run when the versioned binary is missing. Bumping

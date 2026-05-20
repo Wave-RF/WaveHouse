@@ -1,0 +1,21 @@
+# Worktrunk project config — committed, applies to all team members.
+# Personal overrides go in ~/.config/worktrunk/config.toml (gitignored upstream).
+# See https://worktrunk.dev/config/ for full schema.
+
+[post-start]
+# Bootstrap a fresh worktree: install golangci-lint, air, Go modules, and the
+# three pnpm projects (SDK, E2E harness, docs). Matches `make tools` — the
+# same target a new clone runs once.
+tools = "make tools"
+
+[pre-merge]
+# Fast pre-merge gate: tidy + fmt + vulncheck + lint. Mirrors CI's `make ci`
+# Phase 1 (parallel checks). Full `make ci` (integration + e2e, ~5-10min) is
+# left for explicit runs before risky merges — too slow as a default gate.
+verify = "make verify"
+
+[pre-remove]
+# Surface uncommitted work before tearing down a worktree. Informational —
+# users can still force-remove. If status output is non-empty, worktrunk
+# prompts (or blocks, depending on its policy).
+status = "git status --short"
