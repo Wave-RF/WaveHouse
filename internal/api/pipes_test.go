@@ -115,6 +115,7 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		{"multi-role allowlist, matching", []string{"admin", "editor"}, "editor", true, false},
 		{"multi-role allowlist, non-matching", []string{"admin", "editor"}, "viewer", true, true},
 		{"non-admin allowlist, no role in context", []string{"service"}, "", false, true},
+		{"empty allowlist entry, empty role", []string{""}, "", true, true},
 	}
 
 	for _, tc := range cases {

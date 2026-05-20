@@ -308,7 +308,7 @@ Same format as `/v1/query` with `X-Cache` header.
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
-| 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` |
+| 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles`. Fails closed: when `allowed_roles` is set, a request with no role (auth disabled, or a JWT missing `auth.role_claim`) is denied unless the list includes `"*"`. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
 
 ---
@@ -551,6 +551,8 @@ Returns a specific named pipe definition.
   "allowed_roles": ["viewer", "admin"]
 }
 ```
+
+**`allowed_roles`** restricts execution: the caller's role must be in the list, or the list must contain `"*"`. An empty or omitted list leaves the pipe open to all roles. A non-empty list fails closed — a request with no role is denied, and empty-string entries are ignored.
 
 #### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 

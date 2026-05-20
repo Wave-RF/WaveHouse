@@ -83,21 +83,21 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check role permissions.
+	// Restricted pipes fail closed: an empty/absent role (auth disabled, or a
+	// JWT without the role claim) matches nothing and is denied. Empty allowlist
+	// entries are skipped so a stray "" can't authorize an empty role.
 	if len(q.AllowedRoles) > 0 {
 		role := RoleFromContext(r.Context())
-		if role != "" {
-			allowed := false
-			for _, ar := range q.AllowedRoles {
-				if ar == role || ar == "*" {
-					allowed = true
-					break
-				}
+		allowed := false
+		for _, ar := range q.AllowedRoles {
+			if ar == "*" || (ar != "" && ar == role) {
+				allowed = true
+				break
 			}
-			if !allowed {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
+		}
+		if !allowed {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
 		}
 	}
 
