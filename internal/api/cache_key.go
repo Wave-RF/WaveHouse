@@ -14,15 +14,22 @@ import (
 // (`GET/POST /v1/pipes/{name}`) handlers do — they share this helper so a
 // key change in one place propagates to every cached read path.
 //
-// Each param is framed as (8-byte length prefix, JSON payload carrying both
-// Go type and value). Length-prefixing prevents two distinct inputs from
-// hashing the same — e.g. `["foo\x00bar"]` versus `["foo", "bar"]` would
-// have collided under a `"\x00%v"`-separated format because `\x00` is a
-// legal byte inside a string param. Type-tagging additionally separates
-// `"42"` (string) from `42` (int) so the cache can't serve a string-typed
-// row to an int-typed lookup.
+// Every section is framed with a 1-byte type marker (0x01 for sql, 0x00 for
+// param) plus an 8-byte big-endian length, then the payload. Without
+// length-prefixing the sql itself, a SQL string crafted to end with the
+// exact bytes of a param frame (`\x00` + 8 length bytes + payload) would
+// hash identically to a shorter SQL plus a real param — distinct
+// `(sql, params)` tuples, same digest. Per-param framing also kept its
+// own length prefix so embedded `\x00` inside a string param can't be
+// confused for a frame boundary, and the JSON `{type, value}` payload
+// shape additionally separates `"42"` (string) from `42` (int) so the
+// cache can't serve a string-typed row to an int-typed lookup.
 func queryCacheKey(sql string, params []any) string {
 	h := sha256.New()
+	var sqlLen [8]byte
+	binary.BigEndian.PutUint64(sqlLen[:], uint64(len(sql)))
+	_, _ = h.Write([]byte{1}) // sql frame marker
+	_, _ = h.Write(sqlLen[:])
 	_, _ = h.Write([]byte(sql))
 	for _, p := range params {
 		payload, err := json.Marshal(struct {
@@ -42,7 +49,7 @@ func queryCacheKey(sql string, params []any) string {
 		}
 		var n [8]byte
 		binary.BigEndian.PutUint64(n[:], uint64(len(payload)))
-		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte{0}) // param frame marker
 		_, _ = h.Write(n[:])
 		_, _ = h.Write(payload)
 	}

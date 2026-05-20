@@ -309,7 +309,7 @@ while (result.hasMore && result.next) {
 
 ## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. Requires admin/service role when access control policy is active.
+Execute a raw SQL query. When authentication is enabled (`auth.enabled=true`), the caller's JWT must resolve to the `admin` or `service` role. With `auth.enabled=false` or `auth.dev_mode=true` (both dev/test postures), the endpoint is open.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');

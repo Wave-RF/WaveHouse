@@ -182,7 +182,8 @@ Client POST /v1/admin/query
     authorize predicates), so the role gate is the entire authorization
     story. /v1/admin/query is the only sanctioned surface for non-SELECT
     statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…); non-admin callers
-    use the structured query endpoint or named pipes instead.
+    use `POST /v1/ingest/{table}` for writes and the structured query
+    endpoint or named pipes for reads.
   → Decode {"sql": "..."} from the request body.
   → POST the SQL verbatim to ClickHouse's HTTP interface at
     <scheme>://<host>:<httpport>/?default_format=JSON

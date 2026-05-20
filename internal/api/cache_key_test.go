@@ -69,6 +69,24 @@ func TestQueryCacheKey(t *testing.T) {
 			paramsB:     []any{},
 			expectEqual: true,
 		},
+		{
+			// Constructed as an actual collision pair under the old
+			// "raw sql + framed params" format. The param frame for
+			// `"y"` is 0x00 + 8-byte BE length (0x1D = 29) +
+			// `{"type":"string","value":"y"}` (29 bytes), so the byte
+			// stream `("X", ["y"])` produces under the old framing is
+			// `"X" + 0x00 + 0x00…0x1D + {"type":"string","value":"y"}`.
+			// Setting sqlA to exactly those bytes and paramsA to nil
+			// reproduces that stream — under the old framing the two
+			// inputs hashed identically. The new 0x01-marker + 8-byte
+			// length prefix on sql forces them apart.
+			name:        "sql crafted to mimic a param-frame stream does not collide with shorter sql + real param",
+			sqlA:        "X\x00\x00\x00\x00\x00\x00\x00\x00\x1d{\"type\":\"string\",\"value\":\"y\"}",
+			paramsA:     nil,
+			sqlB:        "X",
+			paramsB:     []any{"y"},
+			expectEqual: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
