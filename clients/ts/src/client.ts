@@ -72,13 +72,28 @@ export class WaveHouseClient<DB extends Database = Database> {
     );
   }
 
-  /** Execute a raw SQL query against ClickHouse. Requires admin/service role when policy is active. */
+  /**
+   * Execute a raw SQL query against ClickHouse. Requires admin/service role
+   * when auth is active. The endpoint proxies straight to ClickHouse's HTTP
+   * interface so any ClickHouse-accepted SQL works; positional `?` param
+   * binding is NOT supported — inline literals or use the structured query
+   * builder for safe binding. See sql.ts for details.
+   */
   sql<Row = Record<string, unknown>>(
     query: string,
-    params?: unknown[],
     opts?: { signal?: AbortSignal },
   ): Promise<Result<Row[]>> {
-    return sql<Row>(this._ctx, query, params, opts);
+    // Migration guard: the second argument used to be a positional-`?`
+    // params array. TS callers get a compile-time error from the type
+    // signature, but JS callers (or `any`-typed callsites) would silently
+    // pass an array as `opts` and only discover the break via downstream
+    // SQL errors. Throw a clear runtime error pointing at the migration.
+    if (Array.isArray(opts)) {
+      throw new Error(
+        '[WaveHouse SDK] client.sql(sql, params) was removed. The /v1/admin/query endpoint does not accept positional `?` params. Inline literals into the SQL, or use the structured query builder (wh.from(table)…) for safe binding from user input.',
+      );
+    }
+    return sql<Row>(this._ctx, query, opts);
   }
 
   /** @internal Create a stream for the given table. */

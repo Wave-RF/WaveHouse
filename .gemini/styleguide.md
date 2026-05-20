@@ -34,7 +34,7 @@ End every review with a one-line verdict: **`Ship it`** (no MUSTs, few/no SHOULD
 Walk every diff against:
 
 - **SQL injection** in ClickHouse paths (`BindParams`, dynamic table names, user-supplied filters). The `safeIdentifierRe` regex exists for a reason; flag any SQL built without it.
-- **Broken auth / authz**: JWT claim handling, role extraction (`auth.role_claim`), policy templating (`{{ jwt.path }}`), raw-SQL access without `raw_sql: true`.
+- **Broken auth / authz**: JWT claim handling, role extraction (`auth.role_claim`), policy templating (`{{ jwt.path }}`). When authentication is enabled, `/v1/admin/query` requires the `admin` or `service` role; with `auth.enabled=false` (or `auth.dev_mode=true`) the endpoint is intentionally open, so flag bypasses only in the auth-enabled path.
 - **Sensitive data exposure**: secrets in logs, full error messages to clients, credentials or JWT payload echoed into responses.
 - **Security misconfiguration**: CORS allowlist bypass, TLS downgrade, default credentials, permissive-by-default flags.
 - **Input validation gaps**: unvalidated JSON reaching ClickHouse, unbounded request sizes, missing rate limits.

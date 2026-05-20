@@ -134,8 +134,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
-		qh := &QueryHandler{CHConn: h.CHConn}
-		rows, err := qh.executeQuery(queryCtx, result.SQL, result.Params)
+		rows, err := executeCHQuery(queryCtx, h.CHConn, result.SQL, result.Params)
 		if err != nil {
 			return nil, err
 		}
