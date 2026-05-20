@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # pre-push: enforces AGENTS.md §Local-First Validation — `make ci` must have
-# passed locally for the exact HEAD being pushed. Checked via marker file
-# `tmp/ci-passed-<HEAD-sha>` which is written by the `ci` Makefile target.
+# passed locally for the tree state being pushed. Checked via marker file
+# `tmp/ci-passed-tree-<TREE-sha>` which is written by the `ci` Makefile target.
+#
+# Marker is keyed by **tree SHA** (the content snapshot CI validated), not the
+# commit SHA. This way `make ci → git add → git commit → git push` doesn't
+# spuriously block: the post-commit tree matches what CI just validated, so
+# the marker still applies. Re-edit the tree → re-run ci.
 #
 # Bypass: `git push --no-verify` (per AGENTS.md, only when explicitly intentional —
 # e.g., draft PR push where you'll iterate; CI will still gate the merge).
@@ -12,15 +17,23 @@ set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
 # Git invokes pre-push with refspec lines on stdin: `<local_ref> <local_sha> <remote_ref> <remote_sha>`.
-# Validate the marker for each commit actually being pushed (which may not be HEAD
-# if the user is pushing a non-current branch like `git push origin other-branch`).
-# Deletion pushes (local_sha = 40 zeros) and missing-SHA lines are skipped.
+# Validate the marker for the tree of each commit actually being pushed (which
+# may not be HEAD if the user is pushing a non-current branch like
+# `git push origin other-branch`). Deletion pushes (local_sha = 40 zeros) and
+# missing-SHA lines are skipped.
 missing_sha=""
+missing_tree=""
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
-  if [ ! -f "tmp/ci-passed-${local_sha}" ]; then
+  tree_sha=$(git rev-parse "${local_sha}^{tree}" 2>/dev/null) || {
     missing_sha="$local_sha"
+    missing_tree=""
+    break
+  }
+  if [ ! -f "tmp/ci-passed-tree-${tree_sha}" ]; then
+    missing_sha="$local_sha"
+    missing_tree="$tree_sha"
     break
   fi
 done
@@ -30,21 +43,21 @@ if [ -z "$missing_sha" ]; then
   exit 0
 fi
 
-head_sha="$missing_sha"
-short_sha=${head_sha:0:8}
+short_sha=${missing_sha:0:8}
+short_tree=${missing_tree:0:8}
 
 cat >&2 <<EOF
 
-🛑 pre-push: 'make ci' has not been run for HEAD (${short_sha}).
+🛑 pre-push: 'make ci' has not been run for the tree at ${short_sha} (tree ${short_tree}).
 
 Per AGENTS.md §"Local-First Validation", every push must have passing local
-CI for the exact commit being published. Run:
+CI for the exact tree being published. Run:
 
     make ci
 
 …then push again. (\`make ci\` takes ~2min warm, ~5-8min cold.)
 
-Bypass: for an intentional WIP / draft push, use `git push --no-verify`
+Bypass: for an intentional WIP / draft push, use \`git push --no-verify\`
 (humans only — agents are blocked from --no-verify by
 .claude/hooks/agent-bash-gate.sh).
 EOF

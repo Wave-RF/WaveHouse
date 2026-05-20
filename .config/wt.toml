@@ -3,10 +3,18 @@
 # See https://worktrunk.dev/config/ for full schema.
 
 [post-start]
-# Bootstrap a fresh worktree: install golangci-lint, air, Go modules, and the
-# three pnpm projects (SDK, E2E harness, docs). Matches `make tools` — the
-# same target a new clone runs once.
-tools = "make tools"
+# Order matters — these run sequentially on `wt switch --create <branch>`. First
+# we copy gitignored state (node_modules across the three pnpm projects, .bin/
+# tools, build outputs, docs/dist, docs/.astro, the schema-coverage covdata
+# corpus, etc.) from the main worktree — a fresh checkout would otherwise need
+# `pnpm install --frozen-lockfile` × 3 + a golangci-lint download. Then
+# `make tools` reconciles anything `copy-ignored` couldn't (sets
+# `core.hooksPath` for the new worktree, re-runs `pnpm install` if lockfiles
+# differ from what was copied, verifies module download). `make tools` is
+# idempotent, so the second pass is a fast no-op when copy-ignored brought
+# everything across cleanly.
+copy-caches = "wt step copy-ignored"
+tools       = "make tools"
 
 [pre-merge]
 # Fast pre-merge gate: tidy + fmt + vulncheck + lint. Mirrors CI's `make ci`
@@ -19,3 +27,27 @@ verify = "make verify"
 # users can still force-remove. If status output is non-empty, worktrunk
 # prompts (or blocks, depending on its policy).
 status = "git status --short"
+
+[step.copy-ignored]
+# Excludes for `wt step copy-ignored` (applied on top of worktrunk's built-in
+# excludes for VCS / tool-state dirs like .worktrees/ and .conductor/). The
+# point of these excludes is "this dir is per-worktree runtime state, not
+# something worth seeding":
+#
+#   tmp/            Test outputs, NATS state, the ci-passed-tree-* markers
+#                   themselves. Copying ci-passed markers is technically
+#                   harmless under tree-keying (a new worktree branched off
+#                   main has main's tree, so the marker matches), but copying
+#                   the wavehouse-cov.log / coverage scratch isn't useful and
+#                   carrying stale data/ between worktrees creates confusion.
+#   data/           ClickHouse / runtime data volume. Should never travel.
+#   coverage/       Vitest's default coverage dir under clients/ts/ — per-run
+#                   artifact, not worth seeding.
+#   .DS_Store       macOS noise.
+exclude = [
+  "tmp/",
+  "data/",
+  "coverage/",
+  "clients/ts/coverage/",
+  ".DS_Store",
+]

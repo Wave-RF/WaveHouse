@@ -133,9 +133,16 @@ fi
 # Only on actual `git push` invocations (not `git push --help`, not `gh pr push`).
 if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
   head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-  if [ -n "$head_sha" ]; then
+  head_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null || echo "")
+  if [ -n "$head_sha" ] && [ -n "$head_tree" ]; then
     short_sha="${head_sha:0:8}"
-    ci_marker="tmp/ci-passed-${head_sha}"
+    short_tree="${head_tree:0:8}"
+    # ci-passed marker is keyed by TREE sha (the content snapshot CI validated),
+    # not commit sha — see Makefile `ci` target and `.githooks/pre-push`.
+    # Tree-keying lets `make ci → git add → git commit → git push` work without
+    # a spurious re-run when the post-commit tree matches what CI validated.
+    # review-passed stays commit-keyed: a new commit is a new code review.
+    ci_marker="tmp/ci-passed-tree-${head_tree}"
     review_marker="tmp/review-passed-${head_sha}"
 
     # 7a. ci-passed required for every push (mirrors the universal git pre-push hook;
@@ -143,15 +150,15 @@ if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
     if [ ! -f "$ci_marker" ]; then
       cat >&2 <<EOF
 
-🛑 Claude PR discipline gate: 'make ci' has not been run for HEAD (${short_sha}).
+🛑 Claude PR discipline gate: 'make ci' has not been run for the tree at HEAD (${short_sha}, tree ${short_tree}).
 
 Per AGENTS.md §"Local-First Validation", every push must have passing local CI
-for the exact HEAD being published. Run:
+for the tree being published. Run:
 
     make ci
 
-The 'ci' Makefile target writes tmp/ci-passed-${short_sha} on success. Then retry
-'git push'.
+The 'ci' Makefile target writes tmp/ci-passed-tree-${short_tree} on success.
+Then retry 'git push'.
 EOF
       exit 2
     fi
