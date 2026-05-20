@@ -126,12 +126,48 @@ func isMutation(sql string) bool {
 	return containsMutationVerbAtTopLevel(s[end:])
 }
 
-// containsMutationVerbAtTopLevel scans s for a mutation verb at paren-depth 0,
-// stepping over SQL string literals (`'…'` with `”` escape), quoted
-// identifiers (`"…"` and “ `…` “), and parenthesized CTE subqueries so that
-// keywords inside a CTE body never count. Non-mutation tokens (CTE names,
-// AS / MATERIALIZED / RECURSIVE, SELECT, …) are skipped silently; the absence
-// of a mutation verb at top level means the WITH statement is a read.
+// nonMutationVerbs is the read/metadata-statement counterpart to
+// mutationVerbs. Together they cover every ClickHouse statement-introducing
+// keyword that can legally follow a CTE list. The CTE-aware scanner in
+// containsMutationVerbAtTopLevel needs the union to identify *which* token
+// is the statement keyword — without it, ordinary identifiers in the CTE
+// list (table names, database names like the ClickHouse-built-in `system`)
+// can collide with mutation-verb names and false-positive the classifier.
+var nonMutationVerbs = map[string]struct{}{
+	"SELECT":   {},
+	"SHOW":     {},
+	"DESCRIBE": {},
+	"DESC":     {},
+	"EXPLAIN":  {},
+	"EXISTS":   {},
+	"CHECK":    {},
+}
+
+// containsMutationVerbAtTopLevel scans s for the statement-introducing
+// keyword at paren-depth 0, stepping over SQL string literals (`'…'` with
+// `”` escape), quoted identifiers (`"…"` and “ `…` “), parenthesized CTE
+// subqueries, and SQL comments. The CTE list contains ordinary identifiers
+// (CTE names, table/database names) that must not be matched as mutation
+// verbs — `system` would otherwise pattern-match `SYSTEM` and route a
+// `WITH … SELECT * FROM system.tables` read through `Exec` (silent empty-
+// array result instead of the actual rows). Two-part fix:
+//
+//  1. Skip identifiers whose next non-whitespace, non-comment token is
+//     `AS` (case-insensitive) or `(` — those are CTE definition names
+//     (with optional column list before AS). This catches the harder
+//     class where the CTE alias is itself a mutation-verb name
+//     (`WITH set AS (…) SELECT …`, `WITH alter AS (…) …`, etc.).
+//  2. Among the remaining identifiers, stop on the FIRST that's a
+//     known statement keyword (mutation OR read-class), and decide
+//     based on mutationVerbs membership.
+//
+// Tokens that aren't CTE names and aren't statement keywords (RECURSIVE,
+// MATERIALIZED, scalar CTE aliases, etc.) are skipped silently. Returns
+// false if no statement keyword is found — the SQL is syntactically
+// incomplete or unrecognised; safer to treat as non-mutation than to
+// silently route an unknown verb through Exec (an Exec'd SELECT returns
+// `[]` with no error; a Query'd unrecognised statement surfaces a clear
+// error).
 func containsMutationVerbAtTopLevel(s string) bool {
 	depth := 0
 	i := 0
@@ -178,8 +214,21 @@ func containsMutationVerbAtTopLevel(s string) bool {
 				i++
 			}
 			if depth == 0 {
-				if _, ok := mutationVerbs[strings.ToUpper(s[start:i])]; ok {
+				// CTE name suppression: an identifier followed by AS or
+				// `(` is a CTE definition name (with optional column
+				// list before AS), not a statement keyword. Skip without
+				// checking the keyword sets — protects against CTE
+				// aliases that share a spelling with a mutation verb
+				// (`WITH set AS (...)`, `WITH alter AS (...)`, etc.).
+				if isCTENameLookahead(s, i) {
+					continue
+				}
+				kw := strings.ToUpper(s[start:i])
+				if _, ok := mutationVerbs[kw]; ok {
 					return true
+				}
+				if _, ok := nonMutationVerbs[kw]; ok {
+					return false
 				}
 			}
 		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#':
@@ -197,6 +246,51 @@ func containsMutationVerbAtTopLevel(s string) bool {
 			}
 		default:
 			i++
+		}
+	}
+	return false
+}
+
+// isCTENameLookahead returns true if the next non-whitespace, non-comment
+// token at or after pos is `AS` (case-insensitive, word-boundary terminated)
+// or `(` — signaling that whatever identifier just ended at pos is a CTE
+// definition name (with optional column list before AS). Walks past space /
+// tab / newline / `--` line comments / `#` line comments / `/* … */` block
+// comments. Returns false on EOF or any other token.
+func isCTENameLookahead(s string, pos int) bool {
+	i := pos
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\r' || c == '\n':
+			i++
+		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
+			i += 2
+			for i+1 < len(s) {
+				if s[i] == '*' && s[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+		case c == '(':
+			return true
+		case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+			end := i
+			for end < len(s) {
+				c2 := s[end]
+				if (c2 < 'A' || c2 > 'Z') && (c2 < 'a' || c2 > 'z') && (c2 < '0' || c2 > '9') && c2 != '_' {
+					break
+				}
+				end++
+			}
+			return strings.EqualFold(s[i:end], "AS")
+		default:
+			return false
 		}
 	}
 	return false
