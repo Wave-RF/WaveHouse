@@ -94,7 +94,69 @@ func TestPipesHandler_Execute_NotFound(t *testing.T) {
 	assertJSONErrorResponse(t, w)
 }
 
-func TestPipesHandler_Execute_RoleForbidden(t *testing.T) {
+func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		allowedRoles  []string
+		role          string // role placed in context when setRole is true
+		setRole       bool   // false → no ContextKeyRole in context at all
+		wantForbidden bool
+	}{
+		{"open pipe, no role", nil, "", false, false},
+		{"open pipe, empty role", nil, "", true, false},
+		{"open pipe, any role", nil, "random_role", true, false},
+		{"restricted pipe, matching role", []string{"admin"}, "admin", true, false},
+		{"restricted pipe, non-matching role", []string{"admin"}, "viewer", true, true},
+		{"restricted pipe, no role in context", []string{"admin"}, "", false, true},
+		{"restricted pipe, empty role in context", []string{"admin"}, "", true, true},
+		{"wildcard, any role", []string{"*"}, "viewer", true, false},
+		{"wildcard, no role", []string{"*"}, "", false, false}, // wildcard is intentionally public
+		{"multi-role allowlist, matching", []string{"admin", "editor"}, "editor", true, false},
+		{"multi-role allowlist, non-matching", []string{"admin", "editor"}, "viewer", true, true},
+		{"non-admin allowlist, no role in context", []string{"service"}, "", false, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := pipes.NewMemoryStore(
+				&pipes.NamedQuery{
+					Name:         "report",
+					SQL:          "SELECT * FROM clicks",
+					AllowedRoles: tc.allowedRoles,
+				},
+			)
+			h := NewPipesHandler(store, nil, nil, 0)
+
+			w := httptest.NewRecorder()
+			r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
+			if tc.setRole {
+				ctx := context.WithValue(r.Context(), ContextKeyRole, tc.role)
+				ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+				r = r.WithContext(ctx)
+			}
+
+			// safeHandle recovers the nil-Conn panic on the allowed path so a
+			// served request surfaces as a clean non-403 (default 200) rather
+			// than crashing the parallel test binary. A forbidden request is
+			// rejected before executeQuery, so it returns a real 403.
+			safeHandle(h.Execute, w, r)
+
+			if tc.wantForbidden {
+				assert.Equal(t, http.StatusForbidden, w.Code,
+					"pipe restricted to %v must reject role=%q (set=%v)", tc.allowedRoles, tc.role, tc.setRole)
+				assertJSONErrorResponse(t, w)
+			} else {
+				assert.NotEqual(t, http.StatusForbidden, w.Code,
+					"pipe with AllowedRoles=%v must allow role=%q (set=%v)", tc.allowedRoles, tc.role, tc.setRole)
+				assert.NotEqual(t, http.StatusNotFound, w.Code)
+			}
+		})
+	}
+}
+
+func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{
@@ -106,63 +168,14 @@ func TestPipesHandler_Execute_RoleForbidden(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, 0)
 
 	w := httptest.NewRecorder()
+	// No ContextKeyRole set which simulates auth-disabled or a JWT without the role claim.
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/admin_report/execute", "admin_report", nil)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
-	r = r.WithContext(ctx)
 
-	h.Execute(w, r)
+	safeHandle(h.Execute, w, r)
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "forbidden")
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"pipe restricted to %v must reject a request with no role in context", []string{"admin"})
 	assertJSONErrorResponse(t, w)
-}
-
-func TestPipesHandler_Execute_RoleAllowed(t *testing.T) {
-	t.Parallel()
-	store := pipes.NewMemoryStore(
-		&pipes.NamedQuery{
-			Name:         "admin_report",
-			SQL:          "SELECT * FROM clicks",
-			AllowedRoles: []string{"admin"},
-		},
-	)
-	h := NewPipesHandler(store, nil, nil, 0)
-
-	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPost, "/v1/pipes/admin_report/execute", "admin_report", nil)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "admin")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
-	r = r.WithContext(ctx)
-
-	safeHandle(h.Execute, w, r)
-
-	// Won't be 403/404 — will fail later at executeQuery (nil conn).
-	assert.NotEqual(t, http.StatusForbidden, w.Code)
-	assert.NotEqual(t, http.StatusNotFound, w.Code)
-}
-
-func TestPipesHandler_Execute_WildcardRole(t *testing.T) {
-	t.Parallel()
-	store := pipes.NewMemoryStore(
-		&pipes.NamedQuery{
-			Name:         "public_pipe",
-			SQL:          "SELECT count(*) FROM clicks",
-			AllowedRoles: []string{"*"},
-		},
-	)
-	h := NewPipesHandler(store, nil, nil, 0)
-
-	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPost, "/v1/pipes/public_pipe/execute", "public_pipe", nil)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	r = r.WithContext(ctx)
-
-	safeHandle(h.Execute, w, r)
-
-	// Should pass the role check.
-	assert.NotEqual(t, http.StatusForbidden, w.Code)
-	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
 func TestPipesHandler_Execute_MissingParam(t *testing.T) {
@@ -303,27 +316,5 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 
 	// Should pass param binding — will fail at executeQuery (nil conn).
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
-	assert.NotEqual(t, http.StatusNotFound, w.Code)
-}
-
-func TestPipesHandler_Execute_NoRolesAllowsAll(t *testing.T) {
-	t.Parallel()
-	store := pipes.NewMemoryStore(
-		&pipes.NamedQuery{
-			Name: "open_pipe",
-			SQL:  "SELECT count(*) FROM clicks",
-			// AllowedRoles is nil — open to everyone.
-		},
-	)
-	h := NewPipesHandler(store, nil, nil, 0)
-
-	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open_pipe/execute", "open_pipe", nil)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "random_role")
-	r = r.WithContext(ctx)
-
-	safeHandle(h.Execute, w, r)
-
-	assert.NotEqual(t, http.StatusForbidden, w.Code)
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
