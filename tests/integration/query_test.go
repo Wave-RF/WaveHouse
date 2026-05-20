@@ -17,154 +17,132 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// `/v1/admin/query` is the only sanctioned surface for non-insert mutations,
-// and a mutation must return HTTP 200 with an empty JSON array (`[]`)
-// — not HTTP 500. We insert a row, observe it land, TRUNCATE through
-// `/v1/admin/query`, and then observe the row gone.
+// TestQuery_MutationsReturnEmptyArray pins the response-shape contract for
+// non-insert mutations through `/v1/admin/query`: HTTP 200 with body `[]`,
+// never HTTP 500 or `null`. The endpoint proxies SQL to ClickHouse's HTTP
+// interface, which returns no body for mutations; WaveHouse normalises that
+// to the JSON empty-array shape callers can do `result.length` on.
 //
-// Before the fix `executeQuery` routed every statement through
-// `driver.Query`, which on a TRUNCATE surfaced as "internal driver error"
-// → HTTP 500. The handler now classifies by the leading SQL verb and
-// routes mutations through `driver.Exec`, marshalling `[]` on success.
-func TestQuery_TruncateReturnsEmptyArray(t *testing.T) {
-	e := env(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	table := createTable(t,
-		"id String, page String",
-		"ORDER BY id",
-	)
-	const rowID = "row-to-truncate"
-
-	// Land one row so we can prove TRUNCATE actually emptied the table —
-	// otherwise a no-op "TRUNCATE on empty table returns []" assertion
-	// would also pass and we'd be hiding the bug.
-	body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, rowID)
-	resp, err := http.Post(
-		e.server.URL+"/v1/ingest/"+table,
-		"application/json",
-		strings.NewReader(body),
-	)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	require.Eventually(t, func() bool {
-		var count uint64
-		err := e.chConn.QueryRow(ctx,
-			fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
-			rowID,
-		).Scan(&count)
-		return err == nil && count == 1
-	}, 30*time.Second, 500*time.Millisecond, "insert should land before TRUNCATE")
-
-	// Now TRUNCATE through /v1/admin/query. Before, this would have
-	// returned 500; now it must return 200 with `[]`.
-	truncateBody, _ := json.Marshal(map[string]string{
-		"sql": fmt.Sprintf("TRUNCATE TABLE `%s`", table),
-	})
-	qResp, err := http.Post(
-		e.server.URL+"/v1/admin/query",
-		"application/json",
-		bytes.NewReader(truncateBody),
-	)
-	require.NoError(t, err)
-	defer qResp.Body.Close()
-
-	respBytes, err := io.ReadAll(qResp.Body)
-	require.NoError(t, err)
-
-	require.Equal(t, http.StatusOK, qResp.StatusCode,
-		"mutations through /v1/admin/query must return 200, not 500; body: %s", respBytes)
-	assert.JSONEq(t, "[]", string(respBytes),
-		"mutations through /v1/admin/query must marshal to [] (empty result set), not null or {}")
-
-	// And confirm TRUNCATE was actually executed — not just that the
-	// handler swallowed the statement and returned [] from nowhere.
-	require.Eventually(t, func() bool {
-		var count uint64
-		err := e.chConn.QueryRow(ctx,
-			fmt.Sprintf("SELECT count() FROM `%s`", table),
-		).Scan(&count)
-		return err == nil && count == 0
-	}, 10*time.Second, 200*time.Millisecond, "TRUNCATE must remove the row from ClickHouse")
-}
-
-// TestQuery_DeleteReturnsEmptyArray covers the predicate-driven DELETE case
-// — the canonical example of why we routed non-insert mutations through
-// `/v1/admin/query` instead of trying to teach the policy engine to authorize
-// WHERE predicates. The response shape contract is the same as TRUNCATE:
-// HTTP 200 with `[]`. ClickHouse lightweight DELETE marks the matching
-// rows invisible synchronously, so we can poll for the row to disappear.
-func TestQuery_DeleteReturnsEmptyArray(t *testing.T) {
-	e := env(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	table := createTable(t,
-		"id String, page String",
-		"ORDER BY id",
-	)
-	const keepID = "row-to-keep"
-	const dropID = "row-to-drop"
-
-	for _, id := range []string{keepID, dropID} {
-		body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, id)
-		resp, err := http.Post(
-			e.server.URL+"/v1/ingest/"+table,
-			"application/json",
-			strings.NewReader(body),
-		)
-		require.NoError(t, err)
-		resp.Body.Close()
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+// Table-driven because every new sanctioned mutation form (TRUNCATE, DELETE,
+// future ALTER/UPDATE/...) ought to be a row, not a duplicated test. Each
+// case provides its own row preset, mutation SQL, and post-condition check
+// that confirms the mutation actually ran in ClickHouse (not just that
+// WaveHouse swallowed the statement and returned `[]` from nowhere).
+func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
+	tests := []struct {
+		name        string
+		rowIDs      []string                                                          // IDs to seed via /v1/ingest/{table} before the mutation
+		mutationSQL func(table string) string                                         // SQL to POST to /v1/admin/query
+		postCheck   func(t *testing.T, ctx context.Context, e *testEnv, table string) // verify the mutation actually ran
+	}{
+		{
+			name:   "TRUNCATE empties the table",
+			rowIDs: []string{"row-to-truncate"},
+			mutationSQL: func(table string) string {
+				return fmt.Sprintf("TRUNCATE TABLE `%s`", table)
+			},
+			postCheck: func(t *testing.T, ctx context.Context, e *testEnv, table string) {
+				require.Eventually(t, func() bool {
+					var count uint64
+					err := e.chConn.QueryRow(ctx,
+						fmt.Sprintf("SELECT count() FROM `%s`", table),
+					).Scan(&count)
+					return err == nil && count == 0
+				}, 10*time.Second, 200*time.Millisecond, "TRUNCATE must remove the row from ClickHouse")
+			},
+		},
+		{
+			// Predicate-driven DELETE — the canonical example of why
+			// non-insert mutations route through /v1/admin/query rather
+			// than the policy-authorized ingest path: we can't prove a
+			// WHERE predicate matches only rows the caller is allowed
+			// to touch. ClickHouse lightweight DELETE marks matching
+			// rows invisible synchronously, so the post-check can poll
+			// for the row to disappear.
+			//
+			// /v1/admin/query proxies to ClickHouse's HTTP interface
+			// (named-param syntax, not positional `?`), so the dropID
+			// is inlined into the SQL literal — test-controlled, safe.
+			name:   "DELETE removes only the targeted row",
+			rowIDs: []string{"row-to-keep", "row-to-drop"},
+			mutationSQL: func(table string) string {
+				return fmt.Sprintf("DELETE FROM `%s` WHERE id = 'row-to-drop'", table)
+			},
+			postCheck: func(t *testing.T, ctx context.Context, e *testEnv, table string) {
+				require.Eventually(t, func() bool {
+					var kept, dropped uint64
+					if err := e.chConn.QueryRow(ctx,
+						fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
+						"row-to-keep",
+					).Scan(&kept); err != nil {
+						return false
+					}
+					if err := e.chConn.QueryRow(ctx,
+						fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
+						"row-to-drop",
+					).Scan(&dropped); err != nil {
+						return false
+					}
+					return kept == 1 && dropped == 0
+				}, 30*time.Second, 500*time.Millisecond,
+					"DELETE through /v1/admin/query must mutate only the targeted row")
+			},
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := env(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
 
-	require.Eventually(t, func() bool {
-		var count uint64
-		err := e.chConn.QueryRow(ctx,
-			fmt.Sprintf("SELECT count() FROM `%s`", table),
-		).Scan(&count)
-		return err == nil && count == 2
-	}, 30*time.Second, 500*time.Millisecond, "both inserts should land before DELETE")
+			table := createTable(t,
+				"id String, page String",
+				"ORDER BY id",
+			)
 
-	// /v1/admin/query proxies to ClickHouse's HTTP interface, which uses
-	// {name:Type} named-param syntax rather than positional `?`. Inline
-	// the literal here — the dropID is a test-controlled known-safe string.
-	deleteBody, _ := json.Marshal(map[string]any{
-		"sql": fmt.Sprintf("DELETE FROM `%s` WHERE id = '%s'", table, dropID),
-	})
-	qResp, err := http.Post(
-		e.server.URL+"/v1/admin/query",
-		"application/json",
-		bytes.NewReader(deleteBody),
-	)
-	require.NoError(t, err)
-	defer qResp.Body.Close()
+			// Seed the table via /v1/ingest/{table}. We seed at least one
+			// row so the post-check can prove the mutation actually ran —
+			// otherwise a no-op "mutation on empty table returns []"
+			// assertion would also pass against a regression that swallows
+			// the statement.
+			for _, id := range tt.rowIDs {
+				body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, id)
+				resp, err := http.Post(
+					e.server.URL+"/v1/ingest/"+table,
+					"application/json",
+					strings.NewReader(body),
+				)
+				require.NoError(t, err)
+				resp.Body.Close()
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+			}
 
-	respBytes, err := io.ReadAll(qResp.Body)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, qResp.StatusCode, "body: %s", respBytes)
-	assert.JSONEq(t, "[]", string(respBytes))
+			wantSeeded := uint64(len(tt.rowIDs))
+			require.Eventually(t, func() bool {
+				var count uint64
+				err := e.chConn.QueryRow(ctx,
+					fmt.Sprintf("SELECT count() FROM `%s`", table),
+				).Scan(&count)
+				return err == nil && count == wantSeeded
+			}, 30*time.Second, 500*time.Millisecond, "all seed inserts should land before the mutation")
 
-	// The DELETE through /v1/admin/query targets only the row whose id
-	// was inlined into the SQL literal; the other row stays.
-	require.Eventually(t, func() bool {
-		var kept, dropped uint64
-		if err := e.chConn.QueryRow(ctx,
-			fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
-			keepID,
-		).Scan(&kept); err != nil {
-			return false
-		}
-		if err := e.chConn.QueryRow(ctx,
-			fmt.Sprintf("SELECT count() FROM `%s` WHERE id = ?", table),
-			dropID,
-		).Scan(&dropped); err != nil {
-			return false
-		}
-		return kept == 1 && dropped == 0
-	}, 30*time.Second, 500*time.Millisecond,
-		"DELETE through /v1/admin/query must mutate only the targeted row")
+			mutationBody, _ := json.Marshal(map[string]string{"sql": tt.mutationSQL(table)})
+			qResp, err := http.Post(
+				e.server.URL+"/v1/admin/query",
+				"application/json",
+				bytes.NewReader(mutationBody),
+			)
+			require.NoError(t, err)
+			defer qResp.Body.Close()
+
+			respBytes, err := io.ReadAll(qResp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, qResp.StatusCode,
+				"mutations through /v1/admin/query must return 200, not 500; body: %s", respBytes)
+			assert.JSONEq(t, "[]", string(respBytes),
+				"mutations through /v1/admin/query must marshal to [] (empty result set), not null or {}")
+
+			tt.postCheck(t, ctx, e, table)
+		})
+	}
 }
