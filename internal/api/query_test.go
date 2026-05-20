@@ -469,7 +469,16 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 		t.Fatal("upstream was not reached before cancellation — handler did not propagate request context to the upstream call")
 	}
 	cancel()
-	<-done
+	// Symmetric bound on the post-cancel wait: if the handler ever
+	// deadlocks instead of returning when the request context cancels
+	// (e.g. a future refactor drops the context.WithTimeout in
+	// query.go), this fails fast with a clear message instead of
+	// hanging until the suite timeout.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after request cancellation — context propagation likely broken")
+	}
 
 	// Either 502 (proxy reported the upstream cancellation as a transport
 	// failure) or 500 (cancellation surfaced from the read path) is fine —
