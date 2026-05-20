@@ -206,7 +206,7 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 | ----- | ---- | -------- | ----------- |
 | `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
 
-> **No positional `?` param binding.** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't, because ClickHouse's HTTP interface has a different (named) param model. Inline literals into the SQL, or use ClickHouse's native `{name:Type}` syntax (e.g. `WHERE id = {id:UInt32}`) — admins who need server-evaluated binding can extend the request with custom query-string params later, but for now the contract is "send the SQL, get rows back." For safe binding from user-supplied inputs, use the structured query endpoint (`POST /v1/tables/{table}/query`) — that's its job.
+> **No parameter binding on this endpoint (yet).** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/tables/{table}/query`) — that's its job.
 
 **Response:**
 

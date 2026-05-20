@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
 // safeHandle calls a handler and recovers from panics.
@@ -58,8 +60,7 @@ func TestQueryHandler_MissingSQL(t *testing.T) {
 	body, _ := json.Marshal(queryRequest{SQL: ""})
 	w := postQuery(h, body)
 
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "missing sql")
+	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "missing sql"})
 	assertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }
@@ -71,8 +72,7 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(`{bad}`)))
 	h.Handle(w, r)
 
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "invalid json")
+	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 	assertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }
@@ -89,8 +89,7 @@ func TestQueryHandler_TrailingJSONRejected(t *testing.T) {
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
 	h.Handle(w, r)
 
-	assert.Equal(t, http.StatusBadRequest, w.Code, "trailing JSON tokens must 400, not silently drop the second envelope")
-	assert.Contains(t, w.Body.String(), "invalid json")
+	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 	assertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }

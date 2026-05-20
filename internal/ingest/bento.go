@@ -75,6 +75,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
+			Action            string          `json:"action"`
 			TableName         string          `json:"table_name"`
 			Payload           json.RawMessage `json:"data"`
 			ReceivedTimestamp string          `json:"received_timestamp"`
@@ -110,9 +111,25 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		// has only TableName / ReceivedTimestamp / Data; the worker only
 		// validates and writes inserts. Non-insert mutations
 		// (DELETE/UPDATE/TRUNCATE/…) must go through POST /v1/admin/query
-		// under the admin/service role (the same gate as the rest of
-		// /v1/admin/*) — they're rejected at the API layer there, not at
-		// this consumer.
+		// under the admin/service role.
+		//
+		// `EventMessage` carries no `action` field, so the legitimate
+		// producer (the in-process `/v1/ingest/{table}` HTTP handler)
+		// never sets one. Defense-in-depth: an explicit non-empty
+		// non-`"insert"` `action` on an envelope reaching this consumer
+		// can only come from stale pre-deploy NATS messages (the field
+		// existed on the wire format in earlier releases) or future
+		// in-process producers that haven't been updated yet. Reject
+		// those rather than silently treating them as inserts of
+		// whatever's in `data`. Absent / empty `action` stays valid
+		// (that's how the current producer encodes inserts).
+		if raw.Action != "" && raw.Action != "insert" {
+			slog.WarnContext(msgCtx, "rejecting non-insert envelope: ingest pipeline is insert-only", "action", raw.Action, "table", raw.TableName)
+			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
+				slog.WarnContext(msgCtx, "double ack failed for rejected non-insert envelope", "error", doubleAckErr)
+			}
+			continue
+		}
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")

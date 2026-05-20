@@ -226,6 +226,43 @@ func TestJsInput_Read_InsertNack(t *testing.T) {
 	assert.True(t, natsMsg.naked)
 }
 
+// TestJsInput_Read_NonInsertActionDropped pins the consumer-side defense
+// against explicit non-insert envelopes. `EventMessage` (the current wire
+// format) carries no `action` field, so the in-process /v1/ingest/{table}
+// handler never sets one — but a stale pre-deploy message or a future
+// in-process producer that hasn't been updated could land an envelope
+// like `{"action":"delete","table_name":"safe","data":{...}}` on an
+// ingest subject. Without this check it would be silently INSERTed as
+// the contents of `data`. The worker now rejects (DoubleAck-drops)
+// any explicit non-empty action that isn't "insert".
+func TestJsInput_Read_NonInsertActionDropped(t *testing.T) {
+	t.Parallel()
+	delEnvelope := map[string]any{
+		"action":             "delete",
+		"table_name":         "safe_table",
+		"received_timestamp": "2026-05-20T00:00:00Z",
+		"data":               map[string]any{"id": "1"},
+	}
+	delData, _ := json.Marshal(delEnvelope)
+	delMsg := &bentoMockMsg{data: delData}
+
+	good := EventMessage{TableName: "safe_table", Data: map[string]any{"id": "2"}}
+	goodData, _ := json.Marshal(good)
+	goodMsg := &bentoMockMsg{data: goodData}
+
+	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
+	iter.msgs <- delMsg
+	iter.msgs <- goodMsg
+
+	input := &jsInput{iter: iter}
+	msg, _, err := input.Read(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, delMsg.doubleAcked, "explicit non-insert envelope must be DoubleAcked and dropped")
+	table, _ := msg.MetaGet("table_name")
+	assert.Equal(t, "safe_table", table, "the legitimate insert message that followed should be returned")
+}
+
 func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
 	t.Parallel()
 	bad := EventMessage{TableName: "; DROP TABLE users", Data: map[string]any{}}

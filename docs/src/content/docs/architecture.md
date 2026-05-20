@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; they're rejected at the API layer, not at this consumer. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; the `/v1/admin/*` middleware enforces that role check at the API layer, so non-admin callers never reach the proxy. As defense in depth, the worker also DoubleAck-drops any envelope on an `ingest.>` subject that carries an explicit `action` field set to anything other than `"insert"` (stale pre-deploy messages, or future in-process producers that haven't been updated). Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
 - **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -161,8 +161,10 @@ Bento ingest pipeline (StartIngestWorker):
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, received_timestamp, data}; non-insert mutations
-  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query and are
-  rejected at the API layer, not at this consumer.)
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query — the
+  /v1/admin/* role gate rejects non-admin callers at the API layer. As
+  defense in depth, the worker also DoubleAck-drops any envelope that
+  carries an explicit non-`insert` `action`.)
 
 Active Sweeper (async goroutine, every 60s):
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)
