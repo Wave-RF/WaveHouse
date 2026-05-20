@@ -105,7 +105,7 @@ describe('WaveHouseClient.pipe()', () => {
 });
 
 describe('WaveHouseClient.sql()', () => {
-  it('delegates to sql() and POSTs to /v1/query', async () => {
+  it('delegates to sql() and POSTs to /v1/admin/query', async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify([{ count: 42 }]), { status: 200 }),
     );
@@ -114,7 +114,24 @@ describe('WaveHouseClient.sql()', () => {
     const result = await client.sql('SELECT count() FROM clicks');
 
     expect(result.data).toEqual([{ count: 42 }]);
-    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/query');
+    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/admin/query');
+  });
+
+  it('throws a migration-clear error when called with a legacy params array', () => {
+    // The second argument used to be a positional-`?` params array.
+    // TS callers get a compile-time error; JS callers (or `any`-typed
+    // call sites) would silently pass the array as `opts` and get
+    // confusing downstream SQL errors. The runtime guard catches
+    // that case and points at the migration.
+    const client = createClient({ baseURL: 'http://localhost:8080' });
+    // Force-cast so the test compiles under strict TS.
+    const callWithLegacyParams = () =>
+      (client.sql as unknown as (q: string, p: unknown) => unknown)(
+        'SELECT * FROM clicks WHERE id = ?',
+        ['some-id'],
+      );
+
+    expect(callWithLegacyParams).toThrow(/client\.sql\(sql, params\) was removed/);
   });
 });
 

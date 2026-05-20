@@ -74,7 +74,7 @@ async function bootstrapTestPolicy(): Promise<void> {
   const rolePerms = (extra?: Record<string, unknown>) => ({
     "*": { allow_columns: ["*"], ...extra },
     viewer: { allow_columns: ["*"], ...extra },
-    admin: { allow_columns: ["*"], raw_sql: true, ...extra },
+    admin: { allow_columns: ["*"], ...extra },
   });
   const policy = {
     tables: {

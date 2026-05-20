@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -280,7 +281,6 @@ func run() int {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		chConn,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.HTTPScheme,
@@ -332,8 +332,20 @@ func run() int {
 		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
-	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
-	queryHandler.PolicyStore = policyStore
+	// TODO: is this really the best/right way to do this?
+	// /v1/admin/query proxies straight to ClickHouse over HTTP — no native
+	// driver involvement. Construct the base URL from the same fields the
+	// ingest worker uses, defaulting the scheme to http if blank.
+	queryHost, _, err := net.SplitHostPort(cfg.ClickHouse.Addr)
+	if err != nil {
+		queryHost = cfg.ClickHouse.Addr
+	}
+	queryScheme := cfg.ClickHouse.HTTPScheme
+	if queryScheme == "" {
+		queryScheme = "http"
+	}
+	queryEndpoint := fmt.Sprintf("%s://%s", queryScheme, net.JoinHostPort(queryHost, cfg.ClickHouse.HTTPPort))
+	queryHandler := api.NewQueryHandler(queryEndpoint, cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database)
 
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState

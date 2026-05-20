@@ -307,19 +307,15 @@ while (result.hasMore && result.next) {
 
 ---
 
-## Raw SQL — `wh.sql(query, params?, opts?)`
+## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. Requires admin/service role when access control policy is active.
+Execute a raw SQL query. When authentication is enabled (`auth.enabled=true`), the caller's JWT must resolve to the `admin` or `service` role. With `auth.enabled=false` or `auth.dev_mode=true` (both dev/test postures), the endpoint is open.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
-
-// With positional parameters
-const { data } = await wh.sql(
-  'SELECT * FROM clicks WHERE page = ? LIMIT ?',
-  ['/home', 100],
-);
 ```
+
+> **No parameter binding through the SDK.** Positional `?` substitution is not supported, and the SDK has no way to forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and `wh.sql()` doesn't expose a hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder (`wh.from(table)…`).
 
 ---
 
@@ -663,7 +659,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .get(name) → Promise<Result<Pipe>>
 │   ├── .set(name, def) → Promise<Result<void>>
 │   └── .delete(name) → Promise<Result<void>>
-├── .sql(query, params?) → Promise<Result<Row[]>>
+├── .sql(query, opts?) → Promise<Result<Row[]>>
 ├── .schema
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>

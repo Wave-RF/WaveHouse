@@ -120,6 +120,10 @@ Accepts a flat JSON object, validates it against the ClickHouse schema for `{tab
 
 The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
+> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse). When authentication is enabled, that endpoint is restricted to the `admin` / `service` role (the same gate as the rest of `/v1/admin/*`); with `auth.enabled=false` or `auth.dev_mode=true` (the dev/test postures) it is intentionally open.
+>
+> The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
+
 **Request:**
 
 ```json
@@ -176,23 +180,33 @@ curl -X POST http://localhost:8080/v1/ingest/clicks \
 
 ---
 
-### `POST /v1/query` — Query ClickHouse
+### `POST /v1/admin/query` — Query ClickHouse
 
-Executes a SQL query directly against ClickHouse. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in the response.
+Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. Multi-statement input (`SELECT 1; TRUNCATE t`) also works on recent ClickHouse versions where multi-query is enabled by default; older or restrictively-configured servers may reject the second statement with a clear error. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting; other types are returned as ClickHouse renders them under `FORMAT JSON`.
+
+> **Inline `FORMAT` overrides the JSON envelope.** ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON` setting. When the SQL contains an explicit `FORMAT`, the proxy forwards ClickHouse's raw response body (CSV, Pretty, TSV, …) and passes through the upstream `Content-Type` header — `text/csv`, `text/tab-separated-values`, etc. — so consumers see the right MIME type. The "extract the `data` array" behavior only applies when ClickHouse returned the `FORMAT JSON` envelope, which is the default.
+>
+> **64 MiB response cap.** The proxy buffers the upstream response in memory before forwarding (no row-streaming yet), so a `SELECT *` from a large table can pin RAM on the API server. To avoid an admin OOMing themselves, responses larger than 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Narrow the query with `LIMIT`, or use a streaming client outside WaveHouse that talks to ClickHouse directly (the standard escape hatch — the same admin credentials work).
+
+This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/tables/{table}/query`](#post-v1tablestablequery--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
+
+> **Admin / service only.** The route is mounted under `/v1/admin/*`, which sits behind a `RequireRole("admin","service")` gate: callers whose JWT resolves to either role may use it (or any caller when `auth.enabled=false` or `auth.dev_mode=true`, the dev/test postures). Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story — but the role set matches the rest of `/v1/admin/*` rather than carving out a separate tighter gate, because service tokens already hold admin-scoped powers across that whole tree (policy CRUD, pipes CRUD, log-level) and the inconsistency would be a footgun without a real authorization win. The normal surfaces for non-admin callers are `POST /v1/ingest/{table}` for writes, `POST /v1/tables/{table}/query` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+
+`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate as `admin` / `service`. (The endpoint moved here from `/v1/query` as part of the admin-lockdown change — the `policy.RolePermissions.raw_sql` field has been removed and `/v1/query` now returns 404.)
 
 **Request:**
 
 ```json
 {
-  "sql": "SELECT * FROM clicks LIMIT 10",
-  "params": []
+  "sql": "SELECT * FROM clicks LIMIT 10"
 }
 ```
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `sql` | string | Yes | SQL query executed directly against ClickHouse. |
-| `params` | array | No | Query parameters (bound positionally). |
+| `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
+
+> **No parameter binding on this endpoint (yet).** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/tables/{table}/query`) — that's its job.
 
 **Response:**
 
@@ -207,23 +221,23 @@ Executes a SQL query directly against ClickHouse. Results are cached in-process 
 ]
 ```
 
-The response includes a cache header:
-
-- `X-Cache: HIT` — served from cache
-- `X-Cache: MISS` — fetched from ClickHouse
-
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
-| 500 | `{"error":"..."}` | ClickHouse query error |
+| 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement with a 4xx (bad SQL, missing table, type error, …). The body carries ClickHouse's own error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.`. The proxy maps any ClickHouse 4xx to HTTP 400 — caller-fault, the request itself is what's wrong. |
+| 401 | `{"error":"unauthorized"}` | `auth.enabled=true` and the request carries no role claim |
+| 403 | `{"error":"forbidden"}` | Caller's role is not `admin` or `service` |
+| 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
+| 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
+| 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
 
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/query \
+curl -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
@@ -270,7 +284,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 
 **Response:**
 
-Same format as `/v1/query` with `X-Cache` header.
+JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
 
 **Error responses:**
 
@@ -286,7 +300,7 @@ Same format as `/v1/query` with `X-Cache` header.
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/admin/query`.
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -301,7 +315,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-Same format as `/v1/query` with `X-Cache` header.
+JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
 
 **Error responses:**
 
@@ -598,7 +612,7 @@ Same as the wire format — events are passed through directly:
 
 ## Dead Letter Queue (DLQ)
 
-When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection.
+When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ payload is the inner data object that failed to insert (`{"id":"abc","field":...}`).
 
 Use `GET /v1/dlq/stats` to monitor DLQ depth.
 

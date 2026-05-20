@@ -2,66 +2,168 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"reflect"
+	"net/url"
+	"strings"
 	"time"
-
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/Wave-RF/WaveHouse/internal/cache"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
-// QueryHandler handles POST /v1/query.
+// QueryHandler handles POST /v1/admin/query.
+//
+// Authorization is enforced at the router (the /v1/admin/* RequireRole gate
+// in NewRouter). The handler trusts any caller that reaches it. See
+// internal/api/router.go for the role-gate rationale.
+//
+// Implementation: a thin proxy to ClickHouse's HTTP interface. The SQL
+// string is forwarded verbatim with `default_format=JSON`, ClickHouse
+// returns either a `{"meta":..., "data":[...], ...}` JSON object for read
+// queries or an empty body for mutations, and the handler emits just the
+// `data` array (or `[]` for mutations) back to the caller.
+//
+// Why a proxy instead of clickhouse-go's native Query/Exec:
+//   - ClickHouse classifies statements natively, so any single statement
+//     (arbitrary DDL/DML verbs, current and future) and inline FORMAT
+//     directives all just work without WaveHouse-side parsing.
+//     Multi-statement input (`SELECT 1; TRUNCATE t`) also works when
+//     the upstream ClickHouse has multi-query enabled, which is the
+//     default in recent versions; older or restrictively-configured
+//     servers may reject the second statement with a clear error.
+//   - There is no isMutation heuristic to maintain — no leading-verb table,
+//     no comment stripper, no CTE-aware paren scanner, no class of bug
+//     where a future ClickHouse verb routes the wrong way.
+//   - ClickHouse's own error messages reach the admin verbatim, which is
+//     exactly what they want from an escape hatch.
+//   - The cache (TieredCache + singleflight) was already removed in an
+//     earlier commit; this completes the simplification.
 type QueryHandler struct {
-	CHConn      driver.Conn
-	Cache       *cache.TieredCache
-	DefaultTTL  time.Duration
-	PolicyStore *policy.Store
-	sf          singleflight.Group
+	HTTPClient *http.Client
+	// Endpoint is the ClickHouse HTTP base URL (e.g.
+	// `http://localhost:8123`). The handler appends query-string params
+	// (`default_format`, `database`, `date_time_output_format`) per request
+	// and POSTs the SQL as the request body.
+	Endpoint string
+	Username string
+	Password string
+	Database string
+	// maxResponseBytes optionally overrides the default upstream response
+	// buffer cap (maxCHResponseBytes). When 0, the default applies. Exists
+	// so same-package tests can pin the cap-overflow path without
+	// allocating tens of MiB per run; not a production tuning knob, hence
+	// unexported.
+	maxResponseBytes int64
+	// maxRequestBytes optionally overrides the default inbound request
+	// body cap (maxRequestBodyBytes). When 0, the default applies. Same
+	// test-only purpose as maxResponseBytes.
+	maxRequestBytes int64
 }
 
-func NewQueryHandler(conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *QueryHandler {
-	return &QueryHandler{CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
+const (
+	// maxCHResponseBytes caps how much of the ClickHouse response the proxy
+	// will buffer in memory. 64 MiB is generous for any reasonable admin
+	// query (a SELECT returning ~64 MiB of JSON is itself a smell — admins
+	// should be using FORMAT JSONEachRow + streaming clients for
+	// genuinely-large results, or the structured query endpoint with its
+	// DefaultMaxRows cap). The cap is here as a safety net against a
+	// runaway SELECT exhausting the API server's RAM; admin-only doesn't
+	// mean operators won't accidentally OOM themselves.
+	maxCHResponseBytes = 64 << 20 // 64 MiB
+
+	// maxRequestBodyBytes caps the inbound SQL request body. 16 MiB is well
+	// above any plausible query (production SQL strings are typically
+	// < 1 KiB); the bound exists to keep a misbehaving admin script from
+	// forcing the handler to buffer arbitrarily large input before the
+	// upstream forward. Symmetry with maxCHResponseBytes on the response
+	// side.
+	maxRequestBodyBytes = 16 << 20 // 16 MiB
+)
+
+// NewQueryHandler builds a handler that proxies to ClickHouse over HTTP.
+// endpoint should be the base URL (`http://host:8123`); username/password
+// are forwarded via ClickHouse's `X-ClickHouse-User` / `X-ClickHouse-Key`
+// headers (matching the ingest worker's convention in internal/ingest).
+// database is set as the `?database=` query-string parameter when non-empty.
+//
+// The HTTP client itself has no Timeout — every request gets a 30s deadline
+// from a context derived from the inbound request (see Handle), which
+// bounds the whole exchange including body read. Setting `Timeout` here
+// too would just duplicate that bound (and silently truncate any
+// inbound context longer than 30s).
+func NewQueryHandler(endpoint, username, password, database string) *QueryHandler {
+	return &QueryHandler{
+		HTTPClient: &http.Client{
+			// ClickHouse's HTTP interface doesn't 3xx in normal operation,
+			// and h.Endpoint is operator-controlled config (not user
+			// input). Don't chase redirects — if an operator misconfigures
+			// the endpoint to point at something that 3xx's, surface the
+			// 3xx response as-is. Our status-mapping below classifies
+			// anything outside 2xx/4xx as 502.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		Endpoint: endpoint,
+		Username: username,
+		Password: password,
+		Database: database,
+	}
 }
 
 type queryRequest struct {
-	SQL    string `json:"sql"`
-	Params []any  `json:"params,omitempty"`
+	SQL string `json:"sql"`
 }
 
 func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	// Raw SQL is restricted when a policy store is configured.
-	if h.PolicyStore != nil {
-		role := RoleFromContext(r.Context())
-		if role != "" && role != "admin" && role != "service" {
-			// Check if the role has raw_sql permission on any table.
-			p := h.PolicyStore.Get()
-			if p != nil {
-				claims, _ := ClaimsFromContext(r.Context())
-				allowed := false
-				for table := range p.Tables {
-					perms := policy.Evaluate(p, role, table, "select", claims)
-					if perms.RawSQL {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					writeJSONError(w, http.StatusForbidden, "raw SQL queries require admin role")
-					return
-				}
-			}
-		}
-	}
+	// Every response from this handler is non-cacheable — admins expect
+	// every request to hit ClickHouse, and downstream caches (CDN, browser,
+	// corp proxy) re-introduce the staleness class of bug the in-process
+	// cache strip already removed. Set it once up top so error responses
+	// carry the header too, not only the 200 path.
+	w.Header().Set("Cache-Control", "no-store")
+	// Tell browsers not to MIME-sniff the body. Admins can ask ClickHouse
+	// for arbitrary FORMATs via inline `FORMAT …`, and the proxy passes
+	// the upstream Content-Type through verbatim (e.g. text/html for
+	// `FORMAT HTML`). nosniff defangs the browser-as-renderer concern;
+	// matches writeJSONError's posture on the error path.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 
+	reqCap := int64(maxRequestBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 	var req queryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	// Reject unknown top-level fields so clients still sending the
+	// dropped `params` array (or any other deprecated/typo'd field)
+	// get a clear 400 instead of silently having the field ignored.
+	// The pre-proxy /v1/query handler accepted positional `?` params
+	// via a `params` array; the new /v1/admin/query HTTP proxy doesn't
+	// forward query-string params at all, so a request that still ships
+	// `params` is broken at the contract level — fail loudly.
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeded %d bytes", reqCap))
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	// Reject trailing top-level JSON tokens. The single Decode above stops
+	// after the first complete value, so `{"sql":"a"}{"sql":"b"}` would
+	// otherwise silently take the first envelope and drop the second
+	// (a real risk if a buggy client double-encodes). A second Decode that
+	// doesn't return io.EOF means there was more JSON the client sent
+	// expecting us to act on — treat it as malformed input.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeded %d bytes", reqCap))
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -70,97 +172,139 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := queryCacheKey(req.SQL, req.Params)
+	u, err := url.Parse(h.Endpoint)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "invalid clickhouse endpoint: "+err.Error())
+		return
+	}
+	q := u.Query()
+	q.Set("default_format", "JSON")
+	// Format DateTime/DateTime64 as ISO-8601 so JSON consumers don't have to
+	// re-parse ClickHouse's default `YYYY-MM-DD HH:MM:SS`. Matches the prior
+	// handler's RFC3339Nano output close enough for downstream callers.
+	q.Set("date_time_output_format", "iso")
+	if h.Database != "" {
+		q.Set("database", h.Database)
+	}
+	u.RawQuery = q.Encode()
 
-	// Try cache.
-	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data)
-			return
-		}
+	// Bound the upstream call with a deadline derived from the inbound
+	// request context — client disconnect cancels the ClickHouse call too.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Defensive: NewQueryHandler always sets HTTPClient, but a zero-value
+	// QueryHandler{} (used in routing-only tests that never reach the
+	// handler body) would panic here. Surface as a 500 with a clear
+	// diagnostic instead of relying on the chi recoverer.
+	if h.HTTPClient == nil {
+		writeJSONError(w, http.StatusInternalServerError, "query handler not configured: HTTPClient is nil")
+		return
 	}
 
-	// Execute query with singleflight to protect ClickHouse from thundering herds.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		result, err := h.executeQuery(queryCtx, req.SQL, req.Params)
-		if err != nil {
-			return nil, err
-		}
-
-		data, err := json.Marshal(result)
-		if err != nil {
-			return nil, err
-		}
-
-		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
-		}
-		return data, nil
-	})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(req.SQL))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	httpReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if h.Username != "" {
+		httpReq.Header.Set("X-ClickHouse-User", h.Username)
+	}
+	if h.Password != "" {
+		httpReq.Header.Set("X-ClickHouse-Key", h.Password)
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Cache", "MISS")
-	_, _ = w.Write(v.([]byte))
-}
-
-func (h *QueryHandler) executeQuery(ctx context.Context, sql string, params []any) ([]map[string]any, error) {
-	rows, err := h.CHConn.Query(ctx, sql, params...)
+	resp, err := h.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, err
+		writeJSONError(w, http.StatusBadGateway, "clickhouse request failed: "+err.Error())
+		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() { _ = resp.Body.Close() }()
 
-	columns := rows.ColumnTypes()
-	// Initialize as empty (not nil) so a zero-row result marshals to `[]`,
-	// not `null`. The SDK does `data!.length` on the response; a `null`
-	// crashes the client on every empty fetch.
-	results := []map[string]any{}
-
-	for rows.Next() {
-		valPtrs := make([]any, len(columns))
-		for i, col := range columns {
-			valPtrs[i] = reflect.New(col.ScanType()).Interface()
-		}
-		if err := rows.Scan(valPtrs...); err != nil {
-			return nil, err
-		}
-		row := make(map[string]any)
-		for i, col := range columns {
-			row[col.Name()] = reflect.ValueOf(valPtrs[i]).Elem().Interface()
-		}
-		results = append(results, transformRow(row))
+	// Cap the upstream body at the configured response limit. Read +1 so we
+	// can detect "exactly cap or more" without a second read.
+	respCap := int64(maxCHResponseBytes)
+	if h.maxResponseBytes > 0 {
+		respCap = h.maxResponseBytes
 	}
-	return results, nil
-}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "read clickhouse response: "+err.Error())
+		return
+	}
+	if int64(len(body)) > respCap {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", respCap))
+		return
+	}
 
-// transformRow converts ClickHouse-specific types to JSON-friendly values.
-func transformRow(row map[string]any) map[string]any {
-	for k, v := range row {
-		switch val := v.(type) {
-		case uuid.UUID:
-			row[k] = val.String()
-		case [16]byte:
-			row[k] = uuid.UUID(val).String()
-		case time.Time:
-			row[k] = val.UTC().Format(time.RFC3339Nano)
+	if resp.StatusCode != http.StatusOK {
+		// ClickHouse returns plain-text error messages with non-200 status.
+		// Forward the trimmed message as a JSON error, and map the upstream
+		// status into one of two buckets so admin tooling can tell
+		// caller-fault from upstream-fault:
+		//   4xx (bad SQL, missing table, type error, …) → 400 — the
+		//                                                  request itself
+		//                                                  was bad.
+		//   5xx, anything else                          → 502 — we're a
+		//                                                  gateway and the
+		//                                                  upstream
+		//                                                  service had a
+		//                                                  problem.
+		// Distinguishing ClickHouse's specific error codes (Code: 60 for
+		// "table doesn't exist" etc.) would need a parser and is out of
+		// scope here. The body carries ClickHouse's exact message so the
+		// admin still sees the diagnostic verbatim.
+		status := http.StatusBadGateway
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			status = http.StatusBadRequest
 		}
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("clickhouse returned status %d", resp.StatusCode)
+		}
+		writeJSONError(w, status, msg)
+		return
 	}
-	return row
-}
 
-func queryCacheKey(sql string, params []any) string {
-	h := sha256.New()
-	h.Write([]byte(sql))
-	for _, p := range params {
-		_, _ = fmt.Fprintf(h, "\x00%v", p)
+	// ClickHouse returns an empty body for mutations (TRUNCATE/INSERT/
+	// DELETE/etc. with no result set). Marshal those to `[]` so clients
+	// don't have to special-case "empty success body".
+	if len(body) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+		return
 	}
-	return "query:" + hex.EncodeToString(h.Sum(nil))
+
+	// Read-statement response shape under default_format=JSON:
+	//   {"meta":[{"name":"x","type":"..."}, ...],
+	//    "data":[{"x": ...}, ...],
+	//    "rows":N,
+	//    "statistics":{...}}
+	// Forward just `data` so a caller's `result.length` works regardless of
+	// whether the SQL was a read or a mutation, matching the pre-proxy
+	// response shape.
+	var chResp struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &chResp); err == nil && chResp.Data != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(chResp.Data)
+		return
+	}
+
+	// Unexpected shape — happens when the SQL contains an explicit FORMAT
+	// directive that overrides default_format=JSON (verified empirically:
+	// `SELECT 1 FORMAT CSV` returns raw `1\n` with Content-Type:
+	// text/csv, regardless of default_format on the URL). Forward the
+	// upstream Content-Type so consumers don't get a CSV body labelled as
+	// JSON. Fall back to application/octet-stream only if ClickHouse
+	// returned no Content-Type (shouldn't happen, but better than the
+	// previous lie of stamping application/json).
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	_, _ = w.Write(body)
 }

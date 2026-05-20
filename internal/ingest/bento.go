@@ -14,10 +14,8 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -55,9 +53,6 @@ var (
 type jsInput struct {
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
-	chConn   driver.Conn
-	js       jetstream.JetStream
-	inFlight atomic.Int32
 }
 
 func (j *jsInput) Connect(ctx context.Context) error {
@@ -80,9 +75,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
-			Action            string          `json:"action"`
 			TableName         string          `json:"table_name"`
-			ID                string          `json:"id"`
 			Payload           json.RawMessage `json:"data"`
 			ReceivedTimestamp string          `json:"received_timestamp"`
 		}
@@ -112,142 +105,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			}
 			continue
 		}
-
-		// Delete case
-		if raw.Action == "delete" {
-			tracer := otel.Tracer("wavehouse-worker")
-			spanCtx, span := tracer.Start(msgCtx, "clickhouse_delete") // Use the extracted msgCtx
-
-			slog.InfoContext(spanCtx, "delete received, waiting for in-flight inserts to drain", "table", raw.TableName)
-
-			// Wait for in-flight insert messages to be finalized by Bento's pipeline.
-			// The inFlight counter is decremented in the ackFn callback once the
-			// message batch is fully processed (either successfully committed to
-			// ClickHouse or routed to the DLQ). This drain ensures that pending
-			// writes are finished before executing a delete operation.
-			if j.inFlight.Load() > 0 {
-				// NOTE: The effective drain window is min(60s, global_shutdown_timeout).
-				// If the main context (ctx) is cancelled, the drain terminates immediately.
-				flushCtx, flushCancel := context.WithTimeout(ctx, 60*time.Second)
-				ticker := time.NewTicker(10 * time.Millisecond)
-
-				for j.inFlight.Load() > 0 {
-					select {
-					case <-ctx.Done(): // Main context cancelled (shutdown)
-						ticker.Stop()
-						span.End()
-						flushCancel() // Explicit cancel
-						return nil, nil, ctx.Err()
-
-					case <-flushCtx.Done(): // 60-second drain timeout hit or context cancelled
-						ticker.Stop()
-						span.End()
-						flushCancel()
-
-						if ctx.Err() != nil {
-							return nil, nil, ctx.Err() // Return canonical cancellation
-						}
-
-						// Real 60-second timeout
-						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
-							"table", raw.TableName,
-							"id", raw.ID,
-						)
-						// Only Nak if we aren't shutting down; otherwise, let NATS handle redelivery
-						if nakErr := m.Nak(); nakErr != nil {
-							slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
-						}
-
-						// Use ErrNotConnected to trigger a Bento reconnect/retry rather than a fatal exit.
-						return nil, nil, service.ErrNotConnected
-
-					case <-ticker.C:
-						// Keep waiting
-					}
-				}
-				ticker.Stop()
-				flushCancel() // Explicit cancel on successful drain
-			}
-
-			delQuery := fmt.Sprintf("DELETE FROM `%s` WHERE id = ?", raw.TableName)
-
-			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
-				span.RecordError(err)
-				// Phase 1 (issue #91): treat every delete Exec error as permanent
-				// to break the infinite-Nak retry loop that a bad query (syntax
-				// error, missing table, etc.) would otherwise produce. Route the
-				// original NATS envelope to dlq.<table> and DoubleAck so the
-				// message is removed from the main queue.
-				//
-				// TODO(#91, Phase 2): classify transient (network/timeout) vs
-				// permanent errors and Nak the transient ones so they get retried.
-				// Until that lands, a ClickHouse blip during a delete drops the
-				// message to DLQ instead of retrying — accepted trade-off, see #91.
-				slog.ErrorContext(spanCtx, "clickhouse delete failed — routing to DLQ",
-					"table", raw.TableName,
-					"id", raw.ID,
-					"error", err,
-				)
-
-				// DLQ shape contract: `dlq.<table>` carries two structurally different
-				// payloads — insert-failure inner-data via dlqOutput.WriteBatch, and
-				// delete-failure full envelopes via this branch
-				// (`{"action":"delete","table_name":...,"id":...}`). Consumers must NOT
-				// branch on a JSON field to tell them apart: under BYOS a user row can
-				// carry any key, including `action`. We instead set a non-user-controlled
-				// NATS header here (`Wave-DLQ-Type: delete-envelope`) so consumers can
-				// detect the shape via header presence. The insert path has no header
-				// today; absence means insert-payload. Phase 2 (issue #91) will add
-				// `Wave-DLQ-Type: insert-payload` on the insert path and may normalize
-				// the shapes. observability.InjectNATS also propagates the
-				// `clickhouse_delete` span into the message so a Phase 2 consumer can
-				// stitch its own trace to the worker's.
-				dlqSubject := "dlq." + raw.TableName
-				dlqMsg := &nats.Msg{
-					Subject: dlqSubject,
-					Data:    m.Data(),
-					Header:  nats.Header{"Wave-DLQ-Type": []string{"delete-envelope"}},
-				}
-				observability.InjectNATS(spanCtx, dlqMsg)
-				if _, pubErr := j.js.PublishMsg(spanCtx, dlqMsg); pubErr != nil {
-					slog.ErrorContext(spanCtx, "DLQ publish failed for permanent delete error — message dropped",
-						"subject", dlqSubject,
-						"error", pubErr,
-					)
-					bentoDLQDropped.Add(spanCtx, 1, metric.WithAttributes(attribute.String("table", raw.TableName)))
-				} else {
-					slog.WarnContext(spanCtx, "sent failed delete to DLQ", "subject", dlqSubject)
-				}
-
-				if doubleAckErr := m.DoubleAck(spanCtx); doubleAckErr != nil {
-					slog.WarnContext(spanCtx, "double ack failed after permanent delete error", "error", doubleAckErr)
-				}
-
-				span.End()
-				continue
-			}
-			// Log the success with all context
-			slog.InfoContext(spanCtx, "successfully deleted record",
-				"table", raw.TableName,
-				"id", raw.ID,
-			)
-			if doubleAckErr := m.DoubleAck(spanCtx); doubleAckErr != nil {
-				slog.WarnContext(spanCtx, "double ack failed for processed delete message", "error", doubleAckErr)
-			}
-
-			span.End()
-			continue
-		} else if raw.Action != "insert" && raw.Action != "" {
-			// ACTION SAFETY: Reject unrecognized actions (e.g., "update", "upsert")
-			// to prevent them from accidentally falling through to the insert path.
-			slog.WarnContext(msgCtx, "rejecting message: unknown action type", "action", raw.Action)
-			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
-				slog.WarnContext(msgCtx, "double ack failed for rejected message", "error", doubleAckErr)
-			}
-			continue
-		}
-
-		// Insert case
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
@@ -272,11 +129,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		msg.MetaSet("bento_start_time", fmt.Sprintf("%d", publishedTime.UnixMilli()))
 
-		j.inFlight.Add(1)
-
 		ackFn := func(ackCtx context.Context, err error) error {
-			defer j.inFlight.Add(-1)
-
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
 				// Log the Nak failure but return nil to Bento so it doesn't treat the Nak-error as a crash
@@ -495,7 +348,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -525,8 +378,6 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 			func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
 				return &jsInput{
 					consumer: cons,
-					chConn:   chConn,
-					js:       js,
 				}, nil
 			},
 		); err != nil {

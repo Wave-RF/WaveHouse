@@ -22,7 +22,7 @@ describe("Admin", () => {
             select: {
               "*": { allow_columns: ["*"] },
               viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"], raw_sql: true },
+              admin: { allow_columns: ["*"] },
             },
             insert: {
               "*": { allow_columns: ["*"] },
@@ -34,7 +34,7 @@ describe("Admin", () => {
             select: {
               "*": { allow_columns: ["*"] },
               viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"], raw_sql: true },
+              admin: { allow_columns: ["*"] },
             },
             insert: {
               "*": { allow_columns: ["*"] },
@@ -46,7 +46,7 @@ describe("Admin", () => {
             select: {
               "*": { allow_columns: ["*"] },
               viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"], raw_sql: true },
+              admin: { allow_columns: ["*"] },
             },
             insert: {
               "*": { allow_columns: ["*"] },
@@ -110,7 +110,6 @@ describe("Admin", () => {
             },
             admin: {
               allow_columns: ["*"] as string[],
-              raw_sql: true,
             },
           },
           insert: {
