@@ -137,6 +137,14 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 	var req queryRequest
 	dec := json.NewDecoder(r.Body)
+	// Reject unknown top-level fields so clients still sending the
+	// dropped `params` array (or any other deprecated/typo'd field)
+	// get a clear 400 instead of silently having the field ignored.
+	// The pre-proxy /v1/query handler accepted positional `?` params
+	// via a `params` array; the new /v1/admin/query HTTP proxy doesn't
+	// forward query-string params at all, so a request that still ships
+	// `params` is broken at the contract level — fail loudly.
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeded %d bytes", reqCap))

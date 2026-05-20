@@ -78,6 +78,27 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	assertSecurityHeaders(t, w)
 }
 
+// TestQueryHandler_UnknownFieldRejected pins that the decoder rejects
+// requests with fields not declared on queryRequest. The pre-proxy
+// /v1/query handler accepted a `params` array bound to positional `?`
+// placeholders; the new /v1/admin/query HTTP proxy doesn't forward any
+// query-string params, so a client that still ships `params` is broken
+// at the contract level. Silently ignoring the field would let those
+// clients run for months without noticing — return 400 instead so the
+// failure is loud.
+func TestQueryHandler_UnknownFieldRejected(t *testing.T) {
+	t.Parallel()
+	h := NewQueryHandler("http://unused.invalid", "", "", "")
+	w := httptest.NewRecorder()
+	body := []byte(`{"sql":"SELECT 1","params":[1,2,3]}`)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
+	h.Handle(w, r)
+
+	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	assertJSONErrorResponse(t, w)
+	assertSecurityHeaders(t, w)
+}
+
 // TestQueryHandler_TrailingJSONRejected pins that the decoder doesn't silently
 // accept a second top-level value after the first. A buggy client that
 // double-encodes (`{"sql":"a"}{"sql":"b"}`) would otherwise have its second
