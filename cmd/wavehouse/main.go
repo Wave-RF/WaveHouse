@@ -332,6 +332,7 @@ func run() int {
 		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
+	// TODO: is this really the best/right way to do this?
 	// /v1/admin/query proxies straight to ClickHouse over HTTP — no native
 	// driver involvement. Construct the base URL from the same fields the
 	// ingest worker uses, defaulting the scheme to http if blank.
