@@ -54,6 +54,7 @@ node_modules/
 # Claude Code local state (per-user; not for committing)
 .claude/settings.local.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Local git worktrees
 .worktrees/
