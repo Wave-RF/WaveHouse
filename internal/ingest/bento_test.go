@@ -261,6 +261,13 @@ func TestJsInput_Read_NonInsertActionDropped(t *testing.T) {
 	assert.True(t, delMsg.doubleAcked, "explicit non-insert envelope must be DoubleAcked and dropped")
 	table, _ := msg.MetaGet("table_name")
 	assert.Equal(t, "safe_table", table, "the legitimate insert message that followed should be returned")
+	// Both test envelopes target "safe_table", so the table_name
+	// assertion alone can't prove which envelope was returned. Check
+	// the payload too — it must be the {"id":"2"} insert, not the
+	// dropped delete envelope (which would have {"id":"1"} as data).
+	payload, err := msg.AsBytes()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id":"2"}`, string(payload), "returned message must be the legitimate insert, not the dropped envelope")
 }
 
 func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {

@@ -107,6 +107,8 @@ func TestIsMutation(t *testing.T) {
 		{"with CTE alias named update then real update", "WITH update AS (SELECT id FROM x) ALTER TABLE other UPDATE c=1 WHERE id IN (SELECT id FROM update)", true},
 		{"with CTE name with column list (read)", "WITH cte (a, b) AS (SELECT 1, 2) SELECT * FROM cte", false},
 		{"with multi-CTE both with verb-name aliases (read)", "WITH set AS (SELECT 1), kill AS (SELECT 2) SELECT * FROM set JOIN kill", false},
+		{"with parenthesized SELECT then system table (CTE-lookahead ordering regression)", "WITH x AS (SELECT 1) SELECT (1) FROM system.tables", false},
+		{"with tuple-shape SELECT then system table", "WITH x AS (SELECT 1) SELECT (a, b) FROM system.parts", false},
 
 		{"empty", "", false},
 		{"comment only", "-- just a comment", false},

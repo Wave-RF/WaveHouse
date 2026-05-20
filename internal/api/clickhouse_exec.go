@@ -214,21 +214,27 @@ func containsMutationVerbAtTopLevel(s string) bool {
 				i++
 			}
 			if depth == 0 {
-				// CTE name suppression: an identifier followed by AS or
-				// `(` is a CTE definition name (with optional column
-				// list before AS), not a statement keyword. Skip without
-				// checking the keyword sets — protects against CTE
-				// aliases that share a spelling with a mutation verb
-				// (`WITH set AS (...)`, `WITH alter AS (...)`, etc.).
+				kw := strings.ToUpper(s[start:i])
+				// Check non-mutation statement keywords (SELECT, SHOW,
+				// DESCRIBE, …) FIRST — these can legitimately be followed
+				// by `(` (e.g. `SELECT (1) FROM …`, `SELECT (a, b) FROM …`
+				// for tuple syntax), so we must not let the CTE-name
+				// lookahead below misclassify them as CTE aliases.
+				if _, ok := nonMutationVerbs[kw]; ok {
+					return false
+				}
+				// CTE name suppression: an identifier that ISN'T a
+				// non-mutation statement keyword and is followed by `AS`
+				// or `(` is a CTE definition name (with optional column
+				// list before AS). Skip without checking mutationVerbs
+				// — protects against CTE aliases that share a spelling
+				// with a mutation verb (`WITH set AS (...)`,
+				// `WITH alter AS (...)`, etc.).
 				if isCTENameLookahead(s, i) {
 					continue
 				}
-				kw := strings.ToUpper(s[start:i])
 				if _, ok := mutationVerbs[kw]; ok {
 					return true
-				}
-				if _, ok := nonMutationVerbs[kw]; ok {
-					return false
 				}
 			}
 		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#':
