@@ -92,8 +92,6 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := env(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
 
 			table := createTable(t,
 				"id String, page String",
@@ -117,10 +115,17 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 				require.Equal(t, http.StatusOK, resp.StatusCode)
 			}
 
+			// Separate timeout contexts per Eventually phase. A single
+			// shared 60s ctx would let a slow seed-ingest convergence
+			// burn the budget and cause the post-mutation Eventually to
+			// fail on `context deadline exceeded` rather than the
+			// behavior under test — non-deterministic, hard to diagnose.
 			wantSeeded := uint64(len(tt.rowIDs))
+			seedCtx, seedCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer seedCancel()
 			require.Eventually(t, func() bool {
 				var count uint64
-				err := e.chConn.QueryRow(ctx,
+				err := e.chConn.QueryRow(seedCtx,
 					fmt.Sprintf("SELECT count() FROM `%s`", table),
 				).Scan(&count)
 				return err == nil && count == wantSeeded
@@ -142,7 +147,9 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			assert.JSONEq(t, "[]", string(respBytes),
 				"mutations through /v1/admin/query must marshal to [] (empty result set), not null or {}")
 
-			tt.postCheck(t, ctx, e, table)
+			postCtx, postCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer postCancel()
+			tt.postCheck(t, postCtx, e, table)
 		})
 	}
 }
