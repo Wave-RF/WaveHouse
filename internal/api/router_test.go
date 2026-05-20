@@ -331,10 +331,15 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	t.Run("auth disabled passthrough for no role", func(t *testing.T) {
 		t.Parallel()
 		// Auth disabled = role middleware passes through (dev/test posture).
-		// The endpoint is still reachable so the handler can decide.
+		// The endpoint is still reachable so the handler can decide. Pin
+		// negative assertions for the three statuses that would indicate
+		// a routing/auth regression: 404 (route missing), 403 (role gate
+		// firing despite auth being off), 401 (auth middleware rejecting
+		// despite auth being off).
 		rec := post(build(false), "")
 		assert.NotEqual(t, http.StatusNotFound, rec.Code)
 		assert.NotEqual(t, http.StatusForbidden, rec.Code)
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
 	})
 
 	t.Run("auth enabled rejects no role with 401", func(t *testing.T) {

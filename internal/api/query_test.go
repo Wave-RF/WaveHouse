@@ -77,6 +77,24 @@ func TestQueryHandler_InvalidJSON(t *testing.T) {
 	assertSecurityHeaders(t, w)
 }
 
+// TestQueryHandler_TrailingJSONRejected pins that the decoder doesn't silently
+// accept a second top-level value after the first. A buggy client that
+// double-encodes (`{"sql":"a"}{"sql":"b"}`) would otherwise have its second
+// envelope dropped on the floor — invisible to the caller, hard to diagnose.
+func TestQueryHandler_TrailingJSONRejected(t *testing.T) {
+	t.Parallel()
+	h := NewQueryHandler("http://unused.invalid", "", "", "")
+	w := httptest.NewRecorder()
+	body := []byte(`{"sql":"SELECT 1"}{"sql":"SELECT 2"}`)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
+	h.Handle(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, "trailing JSON tokens must 400, not silently drop the second envelope")
+	assert.Contains(t, w.Body.String(), "invalid json")
+	assertJSONErrorResponse(t, w)
+	assertSecurityHeaders(t, w)
+}
+
 // TestQueryHandler_ForwardsSQLToClickHouse pins the proxy contract:
 //   - Request SQL is sent as the HTTP body verbatim.
 //   - default_format=JSON and date_time_output_format=iso are set so the

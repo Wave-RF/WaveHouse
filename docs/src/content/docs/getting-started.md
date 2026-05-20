@@ -62,7 +62,7 @@ WaveHouse validates the body against the ClickHouse schema before acknowledging.
 
 ## 4. Query
 
-Queries are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once.
+Queries are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. Note that `/v1/admin/query` is the exception: it's an admin escape hatch that never caches and emits `Cache-Control: no-store`, so every request goes straight to ClickHouse. The cached read paths are `POST /v1/tables/{table}/query` and `GET/POST /v1/pipes/{name}`.
 
 ```bash
 # Wait ~5 seconds for the batch flush to ClickHouse, then:

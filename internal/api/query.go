@@ -136,7 +136,22 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 	var req queryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeded %d bytes", reqCap))
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	// Reject trailing top-level JSON tokens. The single Decode above stops
+	// after the first complete value, so `{"sql":"a"}{"sql":"b"}` would
+	// otherwise silently take the first envelope and drop the second
+	// (a real risk if a buggy client double-encodes). A second Decode that
+	// doesn't return io.EOF means there was more JSON the client sent
+	// expecting us to act on — treat it as malformed input.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeded %d bytes", reqCap))
 			return

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -24,14 +25,14 @@ import (
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
 	if isMutation(sql) {
 		if err := conn.Exec(ctx, sql, params...); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("clickhouse exec: %w", err)
 		}
 		return []map[string]any{}, nil
 	}
 
 	rows, err := conn.Query(ctx, sql, params...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("clickhouse query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -47,13 +48,20 @@ func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []
 			valPtrs[i] = reflect.New(col.ScanType()).Interface()
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan clickhouse row: %w", err)
 		}
 		row := make(map[string]any)
 		for i, col := range columns {
 			row[col.Name()] = reflect.ValueOf(valPtrs[i]).Elem().Interface()
 		}
 		results = append(results, transformRow(row))
+	}
+	// rows.Next() returns false both when iteration completes successfully
+	// AND when the driver hits an error mid-stream (network drop, decode
+	// failure on a row past the first). Without this check, a partial
+	// result set silently masquerades as a complete one.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate clickhouse rows: %w", err)
 	}
 	return results, nil
 }

@@ -40,10 +40,13 @@ describe('sql', () => {
   // ClickHouse verbatim and trigger a parse error there — the admin's
   // responsibility).
   it('never sends a params field', async () => {
-    await sql(makeCtx(), 'SELECT 1');
+    // Use SQL that actually contains `?` so the test exercises what its
+    // comment claims — that the SDK passes the `?` through to ClickHouse
+    // verbatim instead of trying to bind it to a missing params array.
+    await sql(makeCtx(), 'SELECT ?');
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body).toEqual({ sql: 'SELECT 1' });
+    expect(body).toEqual({ sql: 'SELECT ?' });
     expect(body.params).toBeUndefined();
   });
 
