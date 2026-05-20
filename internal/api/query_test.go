@@ -54,64 +54,85 @@ func assertSecurityHeaders(t *testing.T, w *httptest.ResponseRecorder) {
 		"X-Content-Type-Options: nosniff must be set on every response")
 }
 
-func TestQueryHandler_MissingSQL(t *testing.T) {
+// TestQueryHandler_RejectsMalformedRequests pins every contract-rejection
+// path on /v1/admin/query: the handler must surface a 400 with a JSON
+// error envelope, the standard security headers, AND a specific error
+// message that lets clients tell the failure modes apart. None of these
+// cases involve an upstream call — the handler should reject before the
+// proxy.
+//
+// Each case documents WHY it matters at the test site rather than in a
+// separate top-level test, so future contract additions drop in as a
+// new row instead of a new function.
+func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 	t.Parallel()
-	// No upstream call expected — handler should reject before the proxy.
-	h := NewQueryHandler("http://unused.invalid", "", "", "")
-	body, _ := json.Marshal(queryRequest{SQL: ""})
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			// Empty sql field shouldn't reach ClickHouse.
+			name:    "missing sql",
+			body:    `{"sql":""}`,
+			wantErr: "missing sql",
+		},
+		{
+			// Malformed JSON at the top level.
+			name:    "invalid json",
+			body:    `{bad}`,
+			wantErr: "invalid json",
+		},
+		{
+			// The pre-proxy /v1/query handler accepted a `params` array
+			// bound to positional `?` placeholders. The new HTTP proxy
+			// dropped that and DisallowUnknownFields rejects it loudly
+			// — silently ignoring the field would let old clients run
+			// for months thinking their bound params took effect.
+			name:    "unknown field — dropped `params` array",
+			body:    `{"sql":"SELECT 1","params":[1,2,3]}`,
+			wantErr: "invalid json",
+		},
+		{
+			// A buggy client that double-encodes
+			// (`{"sql":"a"}{"sql":"b"}`) would otherwise have its
+			// second envelope dropped on the floor — invisible to the
+			// caller, hard to diagnose. The trailing-Decode check
+			// catches it.
+			name:    "trailing JSON tokens after first envelope",
+			body:    `{"sql":"SELECT 1"}{"sql":"SELECT 2"}`,
+			wantErr: "invalid json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := NewQueryHandler("http://unused.invalid", "", "", "")
+			w := httptest.NewRecorder()
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(tt.body)))
+			h.Handle(w, r)
+
+			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": tt.wantErr})
+			assertJSONErrorResponse(t, w)
+			assertSecurityHeaders(t, w)
+		})
+	}
+}
+
+// TestQueryHandler_NilHTTPClientReturnsError pins the defensive nil-check
+// CR flagged: a zero-value QueryHandler{} (constructed without
+// NewQueryHandler) would panic when Handle reached HTTPClient.Do. The
+// router-only routing tests use that shape to verify the role gate
+// fires BEFORE the handler runs — but a future routing test that
+// accidentally reaches the handler should get a clean 500, not a panic
+// that surfaces via the chi recoverer.
+func TestQueryHandler_NilHTTPClientReturnsError(t *testing.T) {
+	t.Parallel()
+	h := &QueryHandler{Endpoint: "http://unused.invalid"} // no HTTPClient
+	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := postQuery(h, body)
 
-	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "missing sql"})
-	assertJSONErrorResponse(t, w)
-	assertSecurityHeaders(t, w)
-}
-
-func TestQueryHandler_InvalidJSON(t *testing.T) {
-	t.Parallel()
-	h := NewQueryHandler("http://unused.invalid", "", "", "")
-	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(`{bad}`)))
-	h.Handle(w, r)
-
-	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
-	assertJSONErrorResponse(t, w)
-	assertSecurityHeaders(t, w)
-}
-
-// TestQueryHandler_UnknownFieldRejected pins that the decoder rejects
-// requests with fields not declared on queryRequest. The pre-proxy
-// /v1/query handler accepted a `params` array bound to positional `?`
-// placeholders; the new /v1/admin/query HTTP proxy doesn't forward any
-// query-string params, so a client that still ships `params` is broken
-// at the contract level. Silently ignoring the field would let those
-// clients run for months without noticing — return 400 instead so the
-// failure is loud.
-func TestQueryHandler_UnknownFieldRejected(t *testing.T) {
-	t.Parallel()
-	h := NewQueryHandler("http://unused.invalid", "", "", "")
-	w := httptest.NewRecorder()
-	body := []byte(`{"sql":"SELECT 1","params":[1,2,3]}`)
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
-	h.Handle(w, r)
-
-	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
-	assertJSONErrorResponse(t, w)
-	assertSecurityHeaders(t, w)
-}
-
-// TestQueryHandler_TrailingJSONRejected pins that the decoder doesn't silently
-// accept a second top-level value after the first. A buggy client that
-// double-encodes (`{"sql":"a"}{"sql":"b"}`) would otherwise have its second
-// envelope dropped on the floor — invisible to the caller, hard to diagnose.
-func TestQueryHandler_TrailingJSONRejected(t *testing.T) {
-	t.Parallel()
-	h := NewQueryHandler("http://unused.invalid", "", "", "")
-	w := httptest.NewRecorder()
-	body := []byte(`{"sql":"SELECT 1"}{"sql":"SELECT 2"}`)
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
-	h.Handle(w, r)
-
-	testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	testutil.AssertJSONContains(t, w, http.StatusInternalServerError, map[string]any{"error": "query handler not configured: HTTPClient is nil"})
 	assertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }

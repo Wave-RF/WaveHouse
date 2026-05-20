@@ -83,6 +83,16 @@ export class WaveHouseClient<DB extends Database = Database> {
     query: string,
     opts?: { signal?: AbortSignal },
   ): Promise<Result<Row[]>> {
+    // Migration guard: the second argument used to be a positional-`?`
+    // params array. TS callers get a compile-time error from the type
+    // signature, but JS callers (or `any`-typed callsites) would silently
+    // pass an array as `opts` and only discover the break via downstream
+    // SQL errors. Throw a clear runtime error pointing at the migration.
+    if (Array.isArray(opts)) {
+      throw new Error(
+        '[WaveHouse SDK] client.sql(sql, params) was removed. The /v1/admin/query endpoint does not accept positional `?` params. Inline literals into the SQL, or use the structured query builder (wh.from(table)…) for safe binding from user input.',
+      );
+    }
     return sql<Row>(this._ctx, query, opts);
   }
 

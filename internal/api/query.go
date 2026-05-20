@@ -193,6 +193,15 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// Defensive: NewQueryHandler always sets HTTPClient, but a zero-value
+	// QueryHandler{} (used in routing-only tests that never reach the
+	// handler body) would panic here. Surface as a 500 with a clear
+	// diagnostic instead of relying on the chi recoverer.
+	if h.HTTPClient == nil {
+		writeJSONError(w, http.StatusInternalServerError, "query handler not configured: HTTPClient is nil")
+		return
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(req.SQL))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
