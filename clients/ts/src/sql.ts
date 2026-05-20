@@ -16,6 +16,16 @@ import { ok, err } from './errors.js';
  * so any ClickHouse-accepted statement works — including multi-statement
  * input (`SELECT 1; TRUNCATE t`) and arbitrary DDL/DML/SYSTEM verbs.
  *
+ * **JSON-row contract.** This helper returns `Result<Row[]>` and assumes the
+ * response is the standard `FORMAT JSON` envelope (or an empty body for
+ * no-result mutations — coerced to `[]`). Inline non-JSON `FORMAT` overrides
+ * (`SELECT 1 FORMAT CSV` / `FORMAT TSV` / `FORMAT Pretty` / etc.) are NOT
+ * compatible with `sql()` — the proxy passes the upstream Content-Type
+ * through, and the SDK's JSON decoder throws on a non-JSON body, which the
+ * retry layer surfaces as a `NETWORK_ERROR` result (not a structured
+ * format-mismatch error). For CSV/TSV exports, hit `/v1/admin/query`
+ * directly with `fetch()` and read the body as text.
+ *
  * **No parameter binding.** Positional `?` substitution is not supported.
  * The SDK has no way to forward ClickHouse-style named params
  * (`WHERE id = {id:UInt32}` with `param_id=42` on the query string) —

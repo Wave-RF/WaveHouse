@@ -306,6 +306,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		assert.NotEqual(t, http.StatusNotFound, rec.Code, "admin must reach the handler")
 		assert.NotEqual(t, http.StatusForbidden, rec.Code, "admin must not be 403'd")
 		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "admin must not be 401'd")
+		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "admin path must remain POST-mounted")
 	})
 
 	t.Run("service reaches handler", func(t *testing.T) {
@@ -319,6 +320,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		assert.NotEqual(t, http.StatusNotFound, rec.Code)
 		assert.NotEqual(t, http.StatusForbidden, rec.Code)
 		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code)
 	})
 
 	t.Run("viewer is 403", func(t *testing.T) {
@@ -332,14 +334,15 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		t.Parallel()
 		// Auth disabled = role middleware passes through (dev/test posture).
 		// The endpoint is still reachable so the handler can decide. Pin
-		// negative assertions for the three statuses that would indicate
+		// negative assertions for the four statuses that would indicate
 		// a routing/auth regression: 404 (route missing), 403 (role gate
 		// firing despite auth being off), 401 (auth middleware rejecting
-		// despite auth being off).
+		// despite auth being off), 405 (POST no longer mounted on this path).
 		rec := post(build(false), "")
 		assert.NotEqual(t, http.StatusNotFound, rec.Code)
 		assert.NotEqual(t, http.StatusForbidden, rec.Code)
 		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code)
 	})
 
 	t.Run("auth enabled rejects no role with 401", func(t *testing.T) {
