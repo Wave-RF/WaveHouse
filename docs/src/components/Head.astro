@@ -1,0 +1,60 @@
+---
+import Default from "@astrojs/starlight/components/Head.astro";
+import { ClientRouter } from "astro:transitions";
+---
+
+<Default><slot /></Default>
+{/*
+  Two media-scoped theme-color tags so the browser chrome (mobile address bar,
+  PWA splash) matches the OS preference at first paint — no JS needed. The
+  script below adds an unconditional override tag only when Starlight's manual
+  light/dark toggle disagrees with the OS, so the no-JS first-paint case stays
+  correct for everyone who hasn't explicitly toggled.
+*/}
+<meta name="theme-color" content="#FAFAF9" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0A0B0E" media="(prefers-color-scheme: dark)" />
+<ClientRouter fallback="swap" />
+
+<script is:inline>
+  (() => {
+    const DARK = "#0A0B0E";
+    const LIGHT = "#FAFAF9";
+    const OVERRIDE_ATTR = "data-wh-theme-color-override";
+    const head = document.head;
+    if (!head) return;
+
+    const resolve = () => {
+      const t = document.documentElement.dataset.theme;
+      const osDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const osTheme = osDark ? "dark" : "light";
+      let override = document.querySelector(`meta[${OVERRIDE_ATTR}]`);
+      if (t && t !== osTheme) {
+        // User toggled away from OS default — inject an unscoped override
+        // tag, which (lacking `media`) wins over the OS-preference pair.
+        if (!override) {
+          override = document.createElement("meta");
+          override.setAttribute("name", "theme-color");
+          override.setAttribute(OVERRIDE_ATTR, "");
+          head.appendChild(override);
+        }
+        override.setAttribute("content", t === "light" ? LIGHT : DARK);
+      } else if (override) {
+        // Back on OS default — drop the override so media-scoped tags resume.
+        override.remove();
+      }
+    };
+    resolve();
+
+    // `is:inline` scripts re-run on every Astro View Transition, so
+    // sentinel-guard the listener/observer registration to avoid stacking
+    // MutationObservers and astro:after-swap listeners across navigations.
+    if (window.__whThemeColorBound) return;
+    window.__whThemeColorBound = true;
+    new MutationObserver(resolve).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", resolve);
+    document.addEventListener("astro:after-swap", resolve);
+  })();
+</script>

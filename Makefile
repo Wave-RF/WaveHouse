@@ -195,11 +195,18 @@ dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on 
 # to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
 # `make dev` on :8080.
 .PHONY: dev-docs
-dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
+dev-docs: install-docs-playwright ## Hot-reload docs site dev server (Astro on :4321)
 	@cd $(DOCS_DIR) && $(PNPM) dev
 
 .PHONY: preview-docs
-preview-docs: build-docs ## Preview the production docs build locally
+preview-docs: install-docs-playwright ## Preview the production docs build locally (auto-builds if dist/ is missing)
+	@# Skip the build if `dist/` already exists — running `make build-docs`
+	@# and then `make preview-docs` should serve the existing artifact, not
+	@# rebuild from scratch. Re-run `make build-docs` explicitly to refresh.
+	@if [ ! -d $(DOCS_DIR)/dist ]; then \
+	  echo "$(CYAN)==> No dist/ — building docs first...$(RESET)"; \
+	  cd $(DOCS_DIR) && $(PNPM) build; \
+	fi
 	@cd $(DOCS_DIR) && $(PNPM) preview
 
 # `up -d --wait` blocks until the compose healthcheck transitions to
@@ -364,6 +371,17 @@ install-sdk:
 install-docs:
 	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
 
+# Playwright Chromium (~130 MB) is required by `rehype-mermaid` (build-time
+# diagram SSR) and `starlight-links-validator`. Kept out of `install-docs` so
+# the top-level `make tools` bootstrap doesn't force every Go-only contributor
+# to download Chromium. Wired into `build-docs` / `dev-docs` instead. The
+# `--with-deps` apt step is $CI-gated since it needs sudo on Linux laptops;
+# CI runners on minimal base images need it. Both steps are idempotent. See
+# docs/src/content/docs/development.md for the full Linux-dev-machine story.
+.PHONY: install-docs-playwright
+install-docs-playwright: install-docs
+	@cd $(DOCS_DIR) && $(PNPM) exec playwright install chromium $${CI:+--with-deps} >/dev/null
+
 .PHONY: install-e2e-sdk
 install-e2e-sdk:
 	@cd $(E2E_SDK_DIR) && $(PNPM) install --frozen-lockfile
@@ -376,7 +394,7 @@ build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by
 # Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
 # Starlight content collection itself — no separate convert step.
 .PHONY: build-docs
-build-docs: install-docs ## Build docs site for production → docs/dist/
+build-docs: install-docs-playwright ## Build docs site for production → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@cd $(DOCS_DIR) && $(PNPM) build
 
@@ -484,6 +502,10 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
+	@# Marker file for the pre-push git hook: confirms `make ci` passed for the
+	@# exact HEAD being pushed. tmp/ is gitignored. New commits invalidate the
+	@# marker (different SHA), so `make ci` must re-run before the next push.
+	@mkdir -p tmp && touch "tmp/ci-passed-$$(git rev-parse HEAD)"
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
@@ -586,8 +608,13 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, and pnpm deps
-	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, pnpm deps, and git hooks
+	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
+	@# `make tools` repeatedly just re-asserts the config. The .githooks/
+	@# directory is committed; this line plumbs git to it. Users can opt out
+	@# locally by unsetting the config (`git config --unset core.hooksPath`).
+	@git config core.hooksPath .githooks
+	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed; git hooks active (.githooks/)$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
 # File-target rules: only run when the versioned binary is missing. Bumping

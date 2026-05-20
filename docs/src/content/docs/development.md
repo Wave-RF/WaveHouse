@@ -5,7 +5,7 @@ sidebar:
   order: 9
 ---
 
-Everything you need to build, test, lint, and contribute to WaveHouse — from first-clone to hot-reload dev server to full end-to-end SDK tests. If you're only trying the product, start with the [Getting Started](getting-started.md) guide instead.
+Everything you need to build, test, lint, and contribute to WaveHouse — from first-clone to hot-reload dev server to full end-to-end SDK tests. If you're only trying the product, start with the [Getting Started](/getting-started) guide instead.
 
 ## Prerequisites
 
@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`).
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the `install-docs-playwright` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually.
 
 ### Verify your setup
 
@@ -41,6 +41,13 @@ pnpm --version      # 11.1+
 ```
 
 If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-sdk`).
+
+### Optional but recommended
+
+| Tool | Why | Install |
+| ---- | --- | ------- |
+| **[Claude Code](https://claude.com/claude-code)** | The repo ships team-wide configuration in `.claude/` — slash commands, subagents, hooks, status line. See [Claude Code & AI agents](/claude-code) for setup. | `brew install --cask claude-code` (macOS) or follow [official install](https://code.claude.com/docs/en/quickstart) |
+| **[worktrunk](https://worktrunk.dev)** | Wraps `git worktree` for parallel-agent workflows. Project hooks live in `.config/wt.toml` (auto-runs `make tools` on new worktrees, `make verify` on pre-merge). | `brew install worktrunk && wt config shell install` |
 
 ## Quick Start
 

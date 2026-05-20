@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -441,7 +442,11 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 		close(done)
 	}()
 
-	<-upstreamReached
+	select {
+	case <-upstreamReached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream was not reached before cancellation — handler did not propagate request context to the upstream call")
+	}
 	cancel()
 	<-done
 

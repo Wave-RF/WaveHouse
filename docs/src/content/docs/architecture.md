@@ -90,7 +90,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `config/` — Configuration
 
-- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](configuration.md).
+- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](/configuration).
 
 ### `dedupe/` — Deduplication (Optional)
 

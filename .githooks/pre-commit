@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# pre-commit: runs `make verify` (blocks on failure), then surfaces doc-sync
+# and sdk-sync nudges (informational, doesn't block).
+#
+# Bypass: `git commit --no-verify` (per AGENTS.md, only when explicitly intentional).
+# Installed by `make tools` via `git config core.hooksPath .githooks`.
+
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# --- Block: make verify ------------------------------------------------------
+# tidy + fmt + vulncheck + lint. Fast enough (~30s) for every commit.
+if ! make verify; then
+  echo "" >&2
+  echo "🛑 pre-commit: 'make verify' failed." >&2
+  echo "   Fix the reported issues and re-stage, or bypass intentionally with" >&2
+  echo "   'git commit --no-verify' (only for WIP / draft commits)." >&2
+  exit 1
+fi
+
+# --- Nudge: doc-sync + sdk-sync ---------------------------------------------
+# Informational stderr only. Commit proceeds. AGENTS.md §Documentation Sync
+# and §SDK Sync are the source-of-truth tables; this hook applies the most
+# common rules deterministically against staged files.
+staged=$(git diff --cached --name-only 2>/dev/null)
+[ -z "$staged" ] && exit 0
+
+has() { echo "$staged" | grep -qE "$1"; }
+nudges=()
+
+# Non-test files in internal/api/ → docs/api.md + SDK
+if echo "$staged" | grep -E '^internal/api/.*\.go$' | grep -qvE '_test\.go$'; then
+  has '^docs/src/content/docs/api\.md$' \
+    || nudges+=("API handler/router staged but docs/src/content/docs/api.md is not (AGENTS.md §Documentation Sync)")
+  has '^clients/ts/src/' \
+    || nudges+=("API handler/router staged but clients/ts/src/ is not — SDK may need a corresponding method (AGENTS.md §SDK Sync)")
+fi
+
+# Config struct → configuration.md + config.yaml + compose env blocks
+if has '^internal/config/config\.go$'; then
+  has '^docs/src/content/docs/configuration\.md$' \
+    || nudges+=("internal/config/config.go staged but docs/src/content/docs/configuration.md is not")
+  has '^config\.yaml$' \
+    || nudges+=("internal/config/config.go staged but config.yaml is not")
+  echo "$staged" | grep -qE '^deployments/compose/' \
+    || nudges+=("internal/config/config.go staged but no deployments/compose/* file — env blocks may need update")
+fi
+
+# EventMessage / ingest types → api.md (event format) + SDK types
+if has '^internal/ingest/types\.go$'; then
+  has '^docs/src/content/docs/api\.md$' \
+    || nudges+=("internal/ingest/types.go staged but docs/src/content/docs/api.md (event format section) is not")
+  has '^clients/ts/src/' \
+    || nudges+=("internal/ingest/types.go staged but clients/ts/src/ is not — SDK payload types may need update")
+fi
+
+# Any non-test code change → CHANGELOG.md [Unreleased]
+if echo "$staged" | grep -E '^(internal|cmd|clients/ts/src)/' | grep -qvE '_test\.(go|ts)$'; then
+  has '^CHANGELOG\.md$' \
+    || nudges+=("Code changed but CHANGELOG.md is not staged — add an [Unreleased] entry")
+fi
+
+if [ ${#nudges[@]} -gt 0 ]; then
+  echo "" >&2
+  echo "📋 AGENTS.md sync nudges (informational — commit allowed):" >&2
+  for n in "${nudges[@]}"; do echo "  • $n" >&2; done
+  echo "" >&2
+  echo "   If these are real misses, address before pushing. If false positives" >&2
+  echo "   (internal-only refactor, intentional multi-commit split, etc.), proceed." >&2
+fi
+
+exit 0

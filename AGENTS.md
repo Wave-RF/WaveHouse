@@ -12,7 +12,7 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Twelve internal packages under `internal/`:
+Eleven internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/WS/schema/DLQ/policy/pipes handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
@@ -57,12 +57,11 @@ Twelve internal packages under `internal/`:
 
 ## Build & Test Commands
 
-`make help` is the source of truth — run it to see every target with its
-one-line description. Common targets, grouped:
+`make help` is the source of truth — run it to see every target with its one-line description. Common targets, grouped:
 
 ```bash
 # Setup
-make tools             # Install pinned tools, Go modules, and pnpm deps
+make tools             # Install pinned tools, Go modules, pnpm deps, and git hooks
 make help              # Show all targets with descriptions
 
 # Static checks (parallel-safe: `make -j verify`)
@@ -122,21 +121,10 @@ Build tags: `make build TAGS="foo bar"`.
 
 Tooling notes:
 
-- Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`,
-  `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via
-  native `tool` directives and invoked with `go tool <name>` — no manual
-  install needed.
-- `golangci-lint` is pinned in the Makefile (currently v2.11.4) and
-  auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via
-  `make tools`). Not in `go.mod` — its dependency tree conflicts with the
-  main module.
-- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo
-  root, matches CI) must be on your PATH; the SDK and E2E test harnesses
-  both shell out to `pnpm`. `make tools` runs `pnpm install
-  --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
-- `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD
-  Make 3.81 which will not parse the Makefile. See `docs/development.md` §
-  Prerequisites for the full setup checklist.
+- Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
+- `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
+- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK and E2E test harnesses both shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
+- `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 
 ## Testing Conventions
 
@@ -163,6 +151,15 @@ make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then
 
 If `make ci` passes locally, your commit has crossed the same gates CI will run. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
 
+### Enforced via git hooks
+
+`make tools` installs team-wide git hooks via `git config core.hooksPath .githooks`. They apply to humans and Claude Code alike:
+
+- **`.githooks/pre-commit`** runs `make verify` (~30s) on every commit; blocks on failure. Also emits informational nudges for likely doc-sync / SDK-sync misses (see §Documentation Sync, §SDK Sync).
+- **`.githooks/pre-push`** checks for a `tmp/ci-passed-<HEAD-sha>` marker — written by `make ci` on success. Blocks the push if `make ci` hasn't been run for the exact HEAD being pushed.
+
+Bypass with `git commit --no-verify` / `git push --no-verify` only when explicitly intentional (WIP / draft pushes where you accept the consequences). Don't disable the hooks globally; that defeats the gate.
+
 ### If local passes but CI fails
 
 Treat as environment mismatch first, test bug second. Reproduce the failure locally (`go test -race -run TestFoo ./...`); if it passes, try concurrent copies to simulate runner contention; only then look at the runner itself. Masking environment issues with longer timeouts compounds — today's 5s bump becomes tomorrow's 30s bump.
@@ -185,7 +182,7 @@ Every review comment gets a substantive reply, and every thread gets resolved be
    Without the mention, the bot never sees the reply and the dialog silently terminates.
 4. **Fix in this PR** if the suggestion is right and in scope. Out-of-scope but valid: link a tracking issue before resolving.
 5. **Resolve the thread** once the reply addresses the concern and no counter-reply is pending. Bot threads are safe to resolve after a substantive reply (bots only re-engage on mention); human threads — wait for them.
-6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Claude, Gemini) or via a re-request button (Copilot).
+6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Gemini), via PR-comment mention (Claude), or via a re-request button (Copilot).
 
 ### What not to do
 
@@ -196,12 +193,93 @@ Every review comment gets a substantive reply, and every thread gets resolved be
 
 | Reviewer | How it runs | Re-runs on new commits | Blocks merge |
 | -------- | ----------- | ---------------------- | ------------ |
-| Claude (`.github/workflows/claude-review.yml`) | Our workflow, fires on every PR push (open/sync/reopen/ready). Manual re-trigger via `@claude` / `/review` in a PR comment, or `gh workflow run "Claude PR review" -f pr_number=<N>` | Yes — posts inline review comments plus a sticky verdict-summary comment that edits in place | Yes for inline comments — `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
+| Claude (`.github/workflows/claude-review.yml`) | Manual-only. Comment `@claude` or `/review` on the PR (trusted reviewers), or run `gh workflow run "Claude PR review" -f pr_number=<N>`. Findings post as inline review comments plus a sticky verdict-summary comment that edits in place | No — re-trigger by mention after pushing new commits | Yes for inline comments — `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
 | Gemini Code Assist | Marketplace App at repo level | Yes on synchronize. **Silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — Gemini rarely sees infra PRs | No (advisory) |
 | Copilot | GitHub-native, requires a reviewer with Copilot Pro | Yes if enabled | No (advisory) |
 | Human admins | Review requested from a non-author admin by `housekeeping.yml` on PR open / ready-for-review (not on every push). Selection picks the other admin if the author is one, otherwise round-robins. The composite also sets `assignees`. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request. | Yes — `admin-approval.yml` is a required status check that fails unless an admin has approved. Dependabot patch/minor bypasses (auto-merge handles those); major bumps fall through to admin review. |
 
 > **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
+
+## Branch Maintenance
+
+### Syncing a PR branch with main
+
+When the GitHub UI shows "This branch is out-of-date with the base branch" — or a feature branch needs to absorb upstream `main` commits — **merge, don't rebase**:
+
+```bash
+git fetch origin main
+git merge origin/main --no-edit
+git push
+```
+
+Force-pushes (`--force`, `--force-with-lease`) are blocked by `.claude/settings.json`'s `deny` rules and would lose inline review-thread anchors. Rebase changes commit SHAs and requires force-push, so it's wrong for the same reason. Long-lived WaveHouse branches have historically lost `pull_request` event firing (symptom: only `pull_request_target` checks appear) — the recovery is `git merge origin/main`, not close+reopen, not empty commits, not toggling draft/ready.
+
+The `pre-push` hook will block until `make ci` re-runs after the merge (HEAD changed). That's the point — the merge commit itself needs CI to have passed locally.
+
+If merge introduces conflicts: surface them to a human reviewer. Don't auto-resolve — collisions in `internal/api/router.go`, `internal/config/config.go`, or `internal/ingest/types.go` can look mechanically resolvable but break runtime behavior.
+
+See also: `.claude/skills/pr-sync-with-main/SKILL.md` for the same workflow in Claude-Code-skill form.
+
+## Agent PR Discipline
+
+These rules apply to AI agents (Claude Code etc.) working on WaveHouse PRs. Humans keep the standard git/gh affordances; agents have additional gating, enforced by `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) plus deny rules in `.claude/settings.json`.
+
+### Drafts only
+
+Agents must create PRs with `gh pr create --draft`. Only humans transition draft → ready-for-review (`gh pr ready` is blocked for agents). Only humans approve or request changes (`gh pr review --approve` / `--request-changes` are blocked).
+
+### Human reviewer assignment is humans-only
+
+Adding/removing human reviewers (`gh pr edit --add-reviewer <login>`, `gh pr edit --add-assignee <login>`, or `POST /repos/.../pulls/<N>/requested_reviewers`) is blocked for agents. The `housekeeping.yml` workflow auto-assigns the non-author admin on PR open / ready-for-review; humans handle anything else.
+
+### Bot reviewer re-triggers go through PR comments
+
+Agents CAN re-request bot reviewers by mentioning them in PR comments (`gh pr comment` is allowed). This bypasses the reviewer-assignment API entirely:
+
+| Bot | Re-trigger via PR comment |
+| --- | -------------------------- |
+| Claude review | `@claude` or `/review` |
+| Gemini Code Assist | `@gemini-code-assist` or `/gemini review` |
+| CodeRabbit | `@coderabbitai review` |
+| Copilot Pull Request Reviewer | No comment-mention; humans use the GitHub UI's re-request button |
+
+### Pre-push self-review is mandatory on PR branches
+
+Before pushing to any branch with an open PR, agents must invoke the `pre-push-reviewer` subagent in fresh context. The subagent reviews:
+
+- The full PR diff against `main` (merge-base)
+- The latest commit specifically
+- All open PR comments and reviews (top-level + inline)
+- CI status / failing checks
+- Linked issues' acceptance criteria
+
+The subagent's verdict is one of `ship_it`, `iterate`, or `block`. **`ship_it` requires zero findings at any severity** (`[MUST]`, `[SHOULD]`, `[MAY]` sections all empty). Anything in the findings list — including `[MAY]` — forces `iterate`. The rule is: if there's anything left to do, the PR isn't shippable. "Ship it, just do this one thing first" is iteration, not shipping.
+
+When the subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes `tmp/review-passed-<HEAD-sha>` and the next `git push` succeeds. On `VERDICT: iterate` or `VERDICT: block`, no marker — the orchestrator agent **loops**: address every finding, commit, re-invoke `pre-push-reviewer` in fresh context, repeat until `ship_it`. Never push with open findings.
+
+The orchestrator agent cannot override the subagent's system prompt (it's the fixed file content of `.claude/agents/pre-push-reviewer.md`), and the subagent runs in a clean conversation context, so it doesn't share the orchestrator's bias toward its own work.
+
+### No bypass for agents
+
+- `git push --no-verify` and `git commit --no-verify` are blocked at the `.claude/hooks/agent-bash-gate.sh` PreToolUse layer for agents. Humans retain `--no-verify` for explicit intentional bypass (see §"Local-First Validation").
+- The obvious tool-level writes to `tmp/ci-passed-*` or `tmp/review-passed-*` are denied at the `.claude/settings.json` permission layer (`Bash(touch tmp/ci-passed:*)`, `Write(tmp/ci-passed-*)`, `Edit(tmp/ci-passed-*)`, and the review-passed equivalents).
+- **Markers are written exclusively by `make ci` (ci-passed) and the `pre-push-reviewer` SubagentStop hook (review-passed). You do not write a marker file by any other means — period.** Bash can write a file by a dozen paths and the deny list does not enumerate all of them; this is an honest-agent rule, not an adversarial gate. If you ever feel tempted to write a marker, stop: the marker is wrong-shaped if you're the one writing it. Run `make ci`, invoke the subagent, get the verdict — that's the path.
+
+### Reviewing someone else's PR locally
+
+For "review PR <N>" workflows, use `.claude/skills/pr-review-locally/SKILL.md`. Procedure:
+
+```bash
+wt switch pr:<N>                # worktrunk + gh CLI; or `gh pr checkout <N>` fallback
+```
+
+Then invoke `pre-push-reviewer`. Findings stay local — agents must not post comments on the PR manually. To make the bot comment on the PR remotely, fire the CI workflow:
+
+```bash
+gh workflow run "Claude PR review" -f pr_number=<N>
+```
+
+That's the canonical path (also reachable via `@claude` / `/review` in a PR comment).
 
 ## Documentation Sync
 
@@ -209,22 +287,41 @@ Every code change should update the corresponding docs in the same PR. A code ch
 
 | Change | Files to update |
 | ------ | --------------- |
-| Add/modify API endpoint | `docs/api.md`, `README.md` (if user-facing) |
-| Add/modify config option | `docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/deployment.md` |
-| Change architecture / add a package | `docs/architecture.md`, `AGENTS.md` |
-| Change ingest / event format | `docs/api.md`, `docs/deployment.md` (CH schema) |
-| Change deployment / Docker | `docs/deployment.md`, compose files |
-| Change build / test process | `docs/development.md`, `Makefile` |
+| Add/modify API endpoint | `docs/src/content/docs/api.md`, `README.md` (if user-facing) |
+| Add/modify config option | `docs/src/content/docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
+| Change architecture / add a package | `docs/src/content/docs/architecture.md`, `AGENTS.md` |
+| Change ingest / event format | `docs/src/content/docs/api.md`, `docs/src/content/docs/deployment.md` (CH schema) |
+| Change deployment / Docker | `docs/src/content/docs/deployment.md`, compose files |
+| Change build / test process | `docs/src/content/docs/development.md`, `Makefile` |
 | Any notable change | `CHANGELOG.md` under `[Unreleased]` |
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔ `docs/configuration.md`, `config.yaml`, compose env blocks
-- `EventMessage` JSON tags ↔ `docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
-- Route registrations in `router.go` ↔ `docs/api.md` endpoint list
-- Handler error responses ↔ `docs/api.md` error tables
+- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.md`, `config.yaml`, compose env blocks
+- `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
+- Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
+- Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
+
+## SDK Sync
+
+The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) is the canonical client and ships from this repo. When backend changes alter the public API surface, the SDK needs corresponding updates. The `pre-commit` git hook flags likely misses informationally; consult this table when deciding what to update.
+
+| Backend change | SDK considerations |
+| -------------- | ------------------ |
+| New user-facing API endpoint | Add a typed client method (in `clients/ts/src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`, etc.); update `docs/src/content/docs/sdk.md` |
+| Change to JWT auth / role extraction | Update auth handling in `clients/ts/src/http.ts` and types in `clients/ts/src/client.ts` |
+| Change to `EventMessage` / ingest event format | Update payload types in `clients/ts/src/` (some are codegen-regenerated — re-run the SDK codegen CLI) |
+| New / changed structured query AST | Update `clients/ts/src/query-builder.ts` types + builder methods |
+| Change to live-query aggregation classification | Update live-query helpers in `clients/ts/src/stream/` |
+| Named pipes API change | Update `clients/ts/src/pipes.ts` |
+| Policy / access-control change | Update `clients/ts/src/policy.ts` |
+| ClickHouse schema-driven type changes | Re-run the SDK codegen CLI; commit regenerated types |
+
+Internal-only backend changes (middleware refactors, observability internals, dedup implementation, sweeper logic, NATS plumbing) generally don't need SDK updates. The `pre-commit` hook can't tell internal-only from public-surface from staged paths alone, so it'll nudge on anything in `internal/api/`. Ignore the nudge for internal-only changes; act on it for anything user-visible.
+
+**The decision test**: would a `@wavehouse/sdk` user's *code* need to change to take advantage of (or be compatible with) this change? If yes, SDK update needed. If no (purely internal optimization), no.
 
 ## Common Tasks
 
@@ -233,24 +330,23 @@ Before finishing a task, grep for the identifiers you touched (field names, env 
 1. Create or modify a handler in `internal/api/` (follow existing patterns like `ingest.go`).
 2. Register the route in `internal/api/router.go`.
 3. If it needs new dependencies, add to the `Dependencies` struct in `router.go`.
-4. Wire dependencies in the relevant `cmd/*/main.go` file(s).
+4. Wire dependencies in `cmd/wavehouse/main.go`.
 5. Add tests.
-6. Document in `docs/api.md`.
+6. Document in `docs/src/content/docs/api.md`.
 
 ### Adding a new config option
 
 1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
-2. Use the new config value in the relevant `cmd/*/main.go` or internal package.
-3. Document in `docs/configuration.md`.
+2. Use the new config value in `cmd/wavehouse/main.go` or the relevant internal package.
+3. Document in `docs/src/content/docs/configuration.md`.
 
 ### Adding a new internal package
 
 1. Create the package under `internal/`.
 2. Define an interface if there will be multiple implementations.
-3. Wire it into the appropriate `cmd/*/main.go`.
-4. Document in `docs/architecture.md`.
-5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it.
-6. **Update the area enumeration** in `.github/workflows/triage.yml` (the `system-prompt:` block lists every legal area the LLM is allowed to return). Without this, the triager can't categorize issues about the new package.
+3. Wire it into `cmd/wavehouse/main.go`.
+4. Document in `docs/src/content/docs/architecture.md`.
+5. **Add a matching `area/<pkg>` repo label** (e.g. `area/foo` for `internal/foo/`) so the issue triage workflow can route issues to it. `triage.yml` discovers `area/*` labels at runtime via `gh label list`, so the new label is picked up automatically — no workflow edit needed.
 
 ### Writing tests
 
@@ -280,8 +376,8 @@ internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
-tests/fixtures/         → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/              → E2E test stack
+tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
 tests/e2e/compose.yaml  → Docker Compose with profiles (ClickHouse always; WaveHouse via --profile app)
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
 deployments/compose/    → Docker Compose files
@@ -304,7 +400,7 @@ docs/                   → Project documentation
 - **Issue triage** (`triage.yml`): GitHub Models classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels.
 - **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate):
   - **Gemini Code Assist App** configured via `.gemini/styleguide.md`.
-  - **Claude PR review** (`claude-review.yml`) runs on every PR open or push, gated on the HEAD commit's author or committer having ≥read permission. Dependabot is filtered at workflow level. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Manual re-trigger via `@claude` / `/review` from a trusted commenter or via `workflow_dispatch`. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
+  - **Claude PR review** (`claude-review.yml`) runs only on manual trigger: `@claude` or `/review` from a trusted commenter on a PR, or `workflow_dispatch`. Gated on the HEAD commit's author or committer having ≥read permission so a comment on a fork PR can't run untrusted code with write tokens. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
 - **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Patch/minor bypass `Admin approval` (the workflow + CI passing is the trust model); major bumps fall through to admin review like any human PR — this closed a hole where a bot's APPROVED review (e.g. CodeRabbit) could merge a major bump without admin involvement (see #130).
 
 ## Governance Files
