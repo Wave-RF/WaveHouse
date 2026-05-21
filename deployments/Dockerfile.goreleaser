@@ -44,8 +44,13 @@ LABEL org.opencontainers.image.title="WaveHouse"
 LABEL org.opencontainers.image.description="Schema-aware real-time API gateway for ClickHouse"
 LABEL org.opencontainers.image.url="https://github.com/Wave-RF/WaveHouse"
 LABEL org.opencontainers.image.source="https://github.com/Wave-RF/WaveHouse"
+LABEL org.opencontainers.image.logo="https://raw.githubusercontent.com/Wave-RF/WaveHouse/refs/heads/main/docs/public/apple-touch-icon.png"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.vendor="Wave RF"
+
+# more custom labels for the WaveHouse project, not part of the OCI spec
+LABEL dev.orbstack.icon="https://raw.githubusercontent.com/Wave-RF/WaveHouse/refs/heads/main/docs/public/apple-touch-icon.png"
+LABEL com.docker.extension.icon="https://raw.githubusercontent.com/Wave-RF/WaveHouse/refs/heads/main/docs/public/apple-touch-icon.png"
 
 # Declares /app/data as a managed mount point. If the operator runs the
 # container without an explicit volume or bind mount, Docker creates an
