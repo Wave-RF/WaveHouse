@@ -271,78 +271,88 @@ func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 	assert.Equal(t, "1-2", result)
 }
 
-func TestValidate_NilPolicy(t *testing.T) {
+func TestValidate(t *testing.T) {
 	t.Parallel()
-	err := Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nil")
-}
-
-func TestValidate_ValidPolicy(t *testing.T) {
-	t.Parallel()
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {AllowColumns: []string{"page"}, MaxRows: 100},
+	tests := []struct {
+		name    string
+		policy  *Policy
+		wantErr bool
+		wantMsg string
+	}{
+		{
+			name:    "nil policy",
+			policy:  nil,
+			wantErr: true,
+			wantMsg: "nil",
+		},
+		{
+			name: "valid policy",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {AllowColumns: []string{"page"}, MaxRows: 100},
+						},
+					},
 				},
 			},
+			wantErr: false,
 		},
-	}
-	assert.NoError(t, Validate(p))
-}
-
-func TestValidate_NegativeMaxRows(t *testing.T) {
-	t.Parallel()
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				Select: map[string]RolePermissions{
-					"viewer": {MaxRows: -1},
+		{
+			name: "negative max_rows",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {MaxRows: -1},
+						},
+					},
 				},
 			},
+			wantErr: true,
+			wantMsg: "max_rows",
 		},
-	}
-	err := Validate(p)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "max_rows")
-}
-
-func TestValidate_NegativeMaxExecutionTime(t *testing.T) {
-	t.Parallel()
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				Insert: map[string]RolePermissions{
-					"user": {MaxExecutionTimeMs: -500},
+		{
+			name: "negative max_execution_time",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Insert: map[string]RolePermissions{
+							"user": {MaxExecutionTimeMs: -500},
+						},
+					},
 				},
 			},
+			wantErr: true,
+			wantMsg: "max_execution_time_ms",
 		},
-	}
-	err := Validate(p)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "max_execution_time_ms")
-}
-
-// TestValidate_RejectsEmptyRoleKey pins that a policy granting permissions to
-// an empty-string role is rejected at write/bootstrap time. An empty role key
-// would otherwise authorize roleless requests (auth off, or a JWT missing the
-// role claim) — the policy-side twin of the empty-AllowedRoles-entry footgun
-// #159 closed for pipes. "*" is the supported way to grant all roles.
-func TestValidate_RejectsEmptyRoleKey(t *testing.T) {
-	t.Parallel()
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				Select: map[string]RolePermissions{
-					"": {AllowColumns: []string{"page"}},
+		{
+			name: "empty role key rejected",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"": {AllowColumns: []string{"page"}},
+						},
+					},
 				},
 			},
+			wantErr: true,
+			wantMsg: "empty role",
 		},
 	}
-	err := Validate(p)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty role")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := Validate(tt.policy)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestEvaluate_NilRolePermsMap_AdminAllowed(t *testing.T) {
