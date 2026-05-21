@@ -9,7 +9,7 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema intro
 
 ## Authentication
 
-Authentication is **optional** and controlled by `auth.enabled` (env: `WH_AUTH_ENABLED`). When disabled (default), all `/v1/*` endpoints are open. When enabled, every request to `/v1/*` must include a valid JWT Bearer token:
+Authentication is **optional** and controlled by `auth.enabled` (env: `WH_AUTH_ENABLED`). When disabled (default), all `/v1/*` endpoints are open — **except** a named pipe with a non-empty `allowed_roles` list, which always [fails closed](#getpost-v1pipesname--execute-named-pipe): with auth off every request has an empty role, which matches no allowlist entry, so the pipe returns `403` unless its list includes `"*"`. When enabled, every request to `/v1/*` must include a valid JWT Bearer token:
 
 ```text
 Authorization: Bearer <token>
@@ -25,7 +25,7 @@ GET /v1/stream/ws?token=<jwt>
 
 The `Authorization` header takes precedence when both are provided. The `token` query parameter is stripped from the URL after extraction.
 
-When `auth.dev_mode` is enabled, all requests are treated as admin with no JWT validation — useful for development.
+When `auth.dev_mode` is enabled, all requests are treated as admin with no JWT validation — useful for development. Unlike `auth.enabled=false`, dev mode gives every request `role=admin`, so it is the posture to use when you need to exercise pipes restricted to `admin` (or `"*"`) locally; a pipe whose `allowed_roles` excludes `admin` is still unreachable under dev mode.
 
 ### Roles & Access Control
 

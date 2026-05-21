@@ -88,7 +88,15 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		return &ResolvedPermissions{Allowed: false}
 	}
 
-	perms, ok := rolePerms[role]
+	// An empty/absent role must never match a direct allowlist entry — only an
+	// explicit "*" wildcard (or the built-in admin/service roles) may grant it.
+	// Otherwise a stray "" role key in a policy would authorize roleless
+	// requests: the policy-side twin of the empty-AllowedRoles-entry footgun
+	// closed for pipes in #159.
+	perms, ok := RolePermissions{}, false
+	if role != "" {
+		perms, ok = rolePerms[role]
+	}
 	if !ok {
 		// Try wildcard role.
 		perms, ok = rolePerms["*"]
@@ -274,6 +282,9 @@ func Validate(p *Policy) error {
 }
 
 func validateRolePerms(table, op, role string, perms RolePermissions) error {
+	if strings.TrimSpace(role) == "" {
+		return fmt.Errorf("table %q, op %q: empty role name is not allowed (use %q to grant all roles)", table, op, "*")
+	}
 	if perms.MaxRows < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_rows must be non-negative", table, op, role)
 	}

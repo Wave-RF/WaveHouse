@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -96,65 +97,30 @@ func TestPipesHandler_Execute_NotFound(t *testing.T) {
 
 func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name          string
-		allowedRoles  []string
-		role          string // role placed in context when setRole is true
-		setRole       bool   // false → no ContextKeyRole in context at all
-		wantForbidden bool
-	}{
-		{"open pipe, no role", nil, "", false, false},
-		{"open pipe, empty role", nil, "", true, false},
-		{"open pipe, any role", nil, "random_role", true, false},
-		{"restricted pipe, matching role", []string{"admin"}, "admin", true, false},
-		{"restricted pipe, non-matching role", []string{"admin"}, "viewer", true, true},
-		{"restricted pipe, no role in context", []string{"admin"}, "", false, true},
-		{"restricted pipe, empty role in context", []string{"admin"}, "", true, true},
-		{"wildcard, any role", []string{"*"}, "viewer", true, false},
-		{"wildcard, no role", []string{"*"}, "", false, false}, // wildcard is intentionally public
-		{"multi-role allowlist, matching", []string{"admin", "editor"}, "editor", true, false},
-		{"multi-role allowlist, non-matching", []string{"admin", "editor"}, "viewer", true, true},
-		{"non-admin allowlist, no role in context", []string{"service"}, "", false, true},
-		{"empty allowlist entry, empty role", []string{""}, "", true, true},
-	}
+	testutil.RunRoleMatrix(t, testutil.StandardRoleMatrix(), func(t *testing.T, tc testutil.RoleCase) *httptest.ResponseRecorder {
+		store := pipes.NewMemoryStore(
+			&pipes.NamedQuery{
+				Name:         "report",
+				SQL:          "SELECT * FROM clicks",
+				AllowedRoles: tc.AllowedRoles,
+			},
+		)
+		h := NewPipesHandler(store, nil, nil, 0)
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := pipes.NewMemoryStore(
-				&pipes.NamedQuery{
-					Name:         "report",
-					SQL:          "SELECT * FROM clicks",
-					AllowedRoles: tc.allowedRoles,
-				},
-			)
-			h := NewPipesHandler(store, nil, nil, 0)
+		w := httptest.NewRecorder()
+		r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
+		if tc.SetRole {
+			ctx := context.WithValue(r.Context(), ContextKeyRole, tc.Role)
+			ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+			r = r.WithContext(ctx)
+		}
 
-			w := httptest.NewRecorder()
-			r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
-			if tc.setRole {
-				ctx := context.WithValue(r.Context(), ContextKeyRole, tc.role)
-				ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
-				r = r.WithContext(ctx)
-			}
-
-			// safeHandle recovers the nil-Conn panic on the allowed path so a
-			// served request surfaces as a clean non-403 (default 200) rather
-			// than crashing the parallel test binary. A forbidden request is
-			// rejected before executeQuery, so it returns a real 403.
-			safeHandle(h.Execute, w, r)
-
-			if tc.wantForbidden {
-				assert.Equal(t, http.StatusForbidden, w.Code,
-					"pipe restricted to %v must reject role=%q (set=%v)", tc.allowedRoles, tc.role, tc.setRole)
-				assertJSONErrorResponse(t, w)
-			} else {
-				assert.NotEqual(t, http.StatusForbidden, w.Code,
-					"pipe with AllowedRoles=%v must allow role=%q (set=%v)", tc.allowedRoles, tc.role, tc.setRole)
-				assert.NotEqual(t, http.StatusNotFound, w.Code)
-			}
-		})
-	}
+		// safeHandle recovers the nil-backend panic on the allowed path so a
+		// served request surfaces as a clean non-403 rather than crashing the
+		// parallel test binary; a forbidden request returns a real 403 first.
+		safeHandle(h.Execute, w, r)
+		return w
+	})
 }
 
 func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {

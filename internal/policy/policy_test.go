@@ -324,6 +324,27 @@ func TestValidate_NegativeMaxExecutionTime(t *testing.T) {
 	assert.Contains(t, err.Error(), "max_execution_time_ms")
 }
 
+// TestValidate_RejectsEmptyRoleKey pins that a policy granting permissions to
+// an empty-string role is rejected at write/bootstrap time. An empty role key
+// would otherwise authorize roleless requests (auth off, or a JWT missing the
+// role claim) — the policy-side twin of the empty-AllowedRoles-entry footgun
+// #159 closed for pipes. "*" is the supported way to grant all roles.
+func TestValidate_RejectsEmptyRoleKey(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	err := Validate(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty role")
+}
+
 func TestEvaluate_NilRolePermsMap_AdminAllowed(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
@@ -351,6 +372,45 @@ func TestEvaluate_ServiceRoleTreatedLikeAdmin(t *testing.T) {
 	p := &Policy{Tables: map[string]TablePolicy{}}
 	perms := Evaluate(p, "service", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
+}
+
+// TestEvaluate_EmptyRoleDoesNotMatchEmptyKey is the evaluation-time guard that
+// pairs with TestValidate_RejectsEmptyRoleKey: even if a policy with an
+// empty-string role key reaches the engine (e.g. loaded from KV, written
+// before the validation existed), an empty/absent role must NOT match it and
+// must fail closed. Only "*" or admin/service may authorize a roleless request.
+func TestEvaluate_EmptyRoleDoesNotMatchEmptyKey(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "", "clicks", "select", nil)
+	assert.False(t, perms.Allowed, "an empty role must not match an empty-string role key")
+}
+
+// TestEvaluate_EmptyRoleAllowedViaWildcard pins the one intended way to grant a
+// roleless request: an explicit "*" entry. This keeps the empty-role guard from
+// over-reaching — a wildcard is a deliberate "any role, including none" grant.
+func TestEvaluate_EmptyRoleAllowedViaWildcard(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"*": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "", "clicks", "select", nil)
+	assert.True(t, perms.Allowed, "an explicit \"*\" wildcard intentionally grants a roleless request")
+	assert.Equal(t, []string{"page"}, perms.AllowColumns)
 }
 
 func TestResolveFilters_MultipleOperators(t *testing.T) {
