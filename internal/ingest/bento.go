@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -25,15 +24,13 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"go.opentelemetry.io/otel"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// safeIdentifierRe matches safe SQL identifiers to prevent injection.
-var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
 	bentoMeter              = otel.Meter("wavehouse-bento")
@@ -96,15 +93,6 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			continue
 		}
 
-		// Validate table name to prevent SQL injection.
-		if !safeIdentifierRe.MatchString(raw.TableName) {
-			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
-			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
-				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
-			}
-			continue
-		}
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
@@ -174,7 +162,7 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 		subject := "dlq.unknown"
 		if exists && tableName != "" {
-			subject = "dlq." + tableName
+			subject = "dlq." + query.EncodeTable(tableName)
 		}
 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
@@ -210,10 +198,6 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	tableName, ok := firstMsg.MetaGet("table_name")
 	if !ok || tableName == "" {
 		return fmt.Errorf("missing table_name in message metadata")
-	}
-
-	if !safeIdentifierRe.MatchString(tableName) {
-		return fmt.Errorf("invalid table name: %q", tableName)
 	}
 
 	bentoStartTime := time.Now()
@@ -304,7 +288,9 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	q := url.Values{}
 	q.Set("database", c.db)
 
-	q.Set("query", fmt.Sprintf("INSERT INTO `%s` FORMAT JSONEachRow", tableName))
+	q.Set("param_target_table", tableName)
+
+	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
 	q.Set("input_format_skip_unknown_fields", "1")
 	q.Set("date_time_input_format", "best_effort")
 

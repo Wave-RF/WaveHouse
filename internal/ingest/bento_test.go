@@ -85,42 +85,6 @@ func (m *bentoMockIter) Next(_ ...jetstream.NextOpt) (jetstream.Msg, error) {
 func (m *bentoMockIter) Stop() {}
 
 // ---------------------------------------------------------------------------
-// safeIdentifierRe tests
-// ---------------------------------------------------------------------------
-
-func TestSafeIdentifierRe(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		input string
-		valid bool
-	}{
-		{"simple", "clicks", true},
-		{"underscore prefix", "_private", true},
-		{"mixed case", "Table123", true},
-		{"underscore in middle", "user_events", true},
-		{"single char", "x", true},
-		{"digits after letter", "a1b2", true},
-		{"empty string", "", false},
-		{"starts with digit", "123start", false},
-		{"contains dash", "table-name", false},
-		{"contains dot", "schema.table", false},
-		{"contains space", "my table", false},
-		{"SQL injection", "; DROP TABLE users", false},
-		{"semicolon", "table;", false},
-		{"parens", "table()", false},
-		{"star", "table*", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := safeIdentifierRe.MatchString(tt.input)
-			assert.Equal(t, tt.valid, got)
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // dlqOutput.WriteBatch tests
 // ---------------------------------------------------------------------------
 
@@ -140,6 +104,22 @@ func TestDLQOutput_WriteBatch_WithTableName(t *testing.T) {
 	assert.Equal(t, []byte(`{"data": "test"}`), js.published[0].Data)
 }
 
+func TestDLQOutput_WriteBatch_WithEmptyTableName(t *testing.T) {
+	t.Parallel()
+	js := &bentoMockJS{}
+	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	msg := service.NewMessage([]byte(`{"data": "test"}`))
+	msg.MetaSet("table_name", "")
+
+	err := d.WriteBatch(context.Background(), service.MessageBatch{msg})
+	require.NoError(t, err)
+
+	require.Len(t, js.published, 1)
+	assert.Equal(t, "dlq.unknown", js.published[0].Subject)
+	assert.Equal(t, []byte(`{"data": "test"}`), js.published[0].Data)
+}
+
 func TestDLQOutput_WriteBatch_MissingTableName(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJS{}
@@ -153,6 +133,7 @@ func TestDLQOutput_WriteBatch_MissingTableName(t *testing.T) {
 
 	require.Len(t, js.published, 1)
 	assert.Equal(t, "dlq.unknown", js.published[0].Subject)
+	assert.Equal(t, []byte(`{"data": "orphan"}`), js.published[0].Data)
 }
 
 func TestDLQOutput_WriteBatch_MultipleMessages(t *testing.T) {
@@ -228,7 +209,7 @@ func TestJsInput_Read_InsertNack(t *testing.T) {
 
 func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
 	t.Parallel()
-	bad := EventMessage{TableName: "; DROP TABLE users", Data: map[string]any{}}
+	bad := EventMessage{TableName: "; DROP TABLE users", Data: map[string]any{"x": 1}}
 	badData, _ := json.Marshal(bad)
 	badMsg := &bentoMockMsg{data: badData}
 
@@ -241,14 +222,21 @@ func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
 	iter.msgs <- goodMsg
 
 	input := &jsInput{iter: iter}
-	msg, _, err := input.Read(context.Background())
+	ctx := context.Background()
+
+	msg1, _, err := input.Read(ctx)
 	require.NoError(t, err)
 
-	assert.True(t, badMsg.doubleAcked, "unsafe message should be double-acked and dropped")
+	assert.False(t, badMsg.doubleAcked, "malicious message should NOT be dropped")
+	table1, _ := msg1.MetaGet("table_name")
+	assert.Equal(t, "; DROP TABLE users", table1)
 
-	// Returned message should be the safe one.
-	table, _ := msg.MetaGet("table_name")
-	assert.Equal(t, "safe_table", table)
+	msg2, _, err := input.Read(ctx)
+	require.NoError(t, err)
+
+	assert.False(t, goodMsg.doubleAcked, "safe message should NOT be dropped")
+	table2, _ := msg2.MetaGet("table_name")
+	assert.Equal(t, "safe_table", table2)
 }
 
 func TestJsInput_Read_IteratorError(t *testing.T) {
@@ -445,14 +433,39 @@ func TestClickhouseOutput_WriteBatch_MissingTableName(t *testing.T) {
 	assert.ErrorContains(t, err, "missing table_name in message metadata")
 }
 
-func TestClickhouseOutput_WriteBatch_UnsafeTableName(t *testing.T) {
+func TestClickhouseOutput_WriteBatch_SafelyParametersTableName(t *testing.T) {
 	t.Parallel()
-	c := &clickhouseOutput{}
+
+	maliciousName := "users; DROP TABLE users;"
+
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			// Verify the SQL query itself is 100% static and immune to injection
+			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", req.URL.Query().Get("query"))
+
+			// Verify the malicious payload was safely tucked into the out-of-band parameter
+			assert.Equal(t, maliciousName, req.URL.Query().Get("param_target_table"))
+
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(bytes.NewBufferString("OK")),
+			}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
+		host:       "localhost",
+		port:       "8123",
+		db:         "test_db",
+	}
+
 	msg := service.NewMessage([]byte(`{"x": 1}`))
-	msg.MetaSet("table_name", "users; DROP TABLE users;") // Malicious table name
+	msg.MetaSet("table_name", maliciousName)
 
 	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
-	assert.ErrorContains(t, err, "invalid table name")
+	assert.NoError(t, err)
 }
 
 func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
@@ -465,8 +478,11 @@ func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 			assert.Equal(t, "POST", req.Method)
 			assert.Equal(t, "test_db", req.URL.Query().Get("database"))
 
-			// Use Query().Get() to verify the un-encoded SQL string safely
-			assert.Equal(t, "INSERT INTO `test_table` FORMAT JSONEachRow", req.URL.Query().Get("query"))
+			// Verify the query is now using the static parameter syntax
+			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", req.URL.Query().Get("query"))
+
+			// Verify the actual table name is passed safely as a param
+			assert.Equal(t, "test_table", req.URL.Query().Get("param_target_table"))
 
 			// Verify headers
 			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))

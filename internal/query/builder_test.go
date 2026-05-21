@@ -28,7 +28,7 @@ func TestBuild_SimpleSelect(t *testing.T) {
 	sq := &StructuredQuery{Columns: []string{"page", "count"}, Limit: 10}
 	result, err := Build("clicks", sq, testSchema(), 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT page, count FROM clicks LIMIT 10", result.SQL)
+	assert.Equal(t, "SELECT page, count FROM `clicks` LIMIT 10", result.SQL)
 	assert.Empty(t, result.Params)
 }
 
@@ -36,7 +36,7 @@ func TestBuild_SelectStar(t *testing.T) {
 	t.Parallel()
 	result, err := Build("clicks", &StructuredQuery{}, testSchema(), 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM clicks LIMIT 10000", result.SQL)
+	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", result.SQL)
 }
 
 func TestBuild_WithAggregation(t *testing.T) {
@@ -131,7 +131,7 @@ func TestBuild_TimeRange(t *testing.T) {
 
 func TestInjectPermissionFilters_WithWhere(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks WHERE page = ?", Params: []any{"/home"}}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` WHERE page = ?", Params: []any{"/home"}}
 	InjectPermissionFilters(result, "org_id = ?", []any{"org-1"})
 	assert.Contains(t, result.SQL, "(org_id = ?)")
 	assert.Equal(t, []any{"org-1", "/home"}, result.Params)
@@ -139,7 +139,7 @@ func TestInjectPermissionFilters_WithWhere(t *testing.T) {
 
 func TestInjectPermissionFilters_WithoutWhere(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks ORDER BY page"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` ORDER BY page"}
 	InjectPermissionFilters(result, "org_id = ?", []any{"org-1"})
 	assert.Contains(t, result.SQL, "WHERE org_id = ?")
 	assert.Contains(t, result.SQL, "ORDER BY page")
@@ -147,35 +147,35 @@ func TestInjectPermissionFilters_WithoutWhere(t *testing.T) {
 
 func TestInjectPermissionFilters_Empty(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
 	InjectPermissionFilters(result, "", nil)
-	assert.Equal(t, "SELECT * FROM clicks", result.SQL)
+	assert.Equal(t, "SELECT * FROM `clicks`", result.SQL)
 }
 
 func TestApplyMaxRows_NoLimit(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
 	ApplyMaxRows(result, 100)
 	assert.Contains(t, result.SQL, "LIMIT 100")
 }
 
 func TestApplyMaxRows_HigherExisting(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks LIMIT 500"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` LIMIT 500"}
 	ApplyMaxRows(result, 100)
 	assert.Contains(t, result.SQL, "LIMIT 100")
 }
 
 func TestApplyMaxRows_LowerExisting(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks LIMIT 50"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` LIMIT 50"}
 	ApplyMaxRows(result, 100)
 	assert.Contains(t, result.SQL, "LIMIT 50")
 }
 
 func TestApplyMaxRows_Zero(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
 	ApplyMaxRows(result, 0)
 	assert.NotContains(t, result.SQL, "LIMIT")
 }

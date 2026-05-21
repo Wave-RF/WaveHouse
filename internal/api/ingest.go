@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 
 	"go.opentelemetry.io/otel"
@@ -35,6 +37,9 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *Ing
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	table := chi.URLParam(r, "table")
+	if unescaped, err := url.PathUnescape(table); err == nil {
+		table = unescaped
+	}
 
 	// Force the use of the GLOBAL provider
 	tracer := otel.GetTracerProvider().Tracer("internal/api")
@@ -147,7 +152,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject := "ingest." + table
+	subject := "ingest." + query.EncodeTable(table)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
 			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)

@@ -152,7 +152,8 @@ func run() error {
 		"WH_AUTH_JWT_SECRET=sdk-dev-secret",
 		"WH_AUTH_DEV_MODE=false",
 		"WH_AUTH_ROLE_CLAIM=role",
-		"WH_DEDUPE_ENABLED=false",
+		"WH_DEDUPE_ENABLED=true",
+		"WH_DEDUPE_ID_FIELD=event_id",
 		"WH_SCHEMA_REFRESH_INTERVAL=5",
 		"WH_DLQ_ENABLED=true",
 		"WH_SERVER_CORS_ALLOWED_ORIGINS=*",
@@ -258,7 +259,7 @@ func pickFreePort(ctx context.Context) (int, error) {
 // dumpLogTail prints the last N lines of `path` to stderr so a CI
 // failure is debuggable without re-running with V=1.
 func dumpLogTail(path, banner string) {
-	const lines = 80
+	const lines = 120
 	f, err := os.Open(path) // #nosec G304 — path is the orchestrator's own log file.
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  (could not read %s: %v)\n", path, err)

@@ -192,13 +192,6 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 		errBody string
 	}{
 		{"missing", "", "missing required query parameter: table"},
-		{"nats greater wildcard", ">", "invalid table name"},
-		{"nats star wildcard", "*", "invalid table name"},
-		{"dot separator", "ingest.clicks", "invalid table name"},
-		{"nested wildcard", "ingest.>", "invalid table name"},
-		{"trailing wildcard", "clicks.>", "invalid table name"},
-		{"space", "click s", "invalid table name"},
-		{"leading digit", "1clicks", "invalid table name"},
 		{"empty after url decode", "", "missing required query parameter: table"},
 	}
 	for _, tc := range cases {
@@ -237,7 +230,7 @@ func TestWS_RejectsInvalidTableOnQuery(t *testing.T) {
 	t.Parallel()
 	h := &WSHandler{Hub: NewHub()}
 
-	cases := []string{">", "*", "ingest.>", "clicks ", "clicks.subpath"}
+	cases := []string{""}
 	for _, tbl := range cases {
 		t.Run(tbl, func(t *testing.T) {
 			t.Parallel()
@@ -252,29 +245,21 @@ func TestWS_RejectsInvalidTableOnQuery(t *testing.T) {
 	}
 }
 
-func TestValidTableNameRe(t *testing.T) {
+func TestWS_AcceptsUnsafeTableOnQuery(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"clicks", true},
-		{"page_views", true},
-		{"_internal", true},
-		{"events_v2", true},
-		{">", false},
-		{"*", false},
-		{"ingest.>", false},
-		{"clicks.subpath", false},
-		{"clicks ", false},
-		{"clicks*", false},
-		{"1clicks", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
+	h := &WSHandler{Hub: NewHub()}
+
+	cases := []string{">", "*", "ingest.>", "clicks ", "clicks.subpath"}
+	for _, tbl := range cases {
+		t.Run(tbl, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, validTableNameRe.MatchString(tc.in))
+			target := "/v1/stream/ws?table=" + url.QueryEscape(tbl)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+			// Validation runs before websocket.Accept, so we get a plain 426 and not a 400
+			// (an upgrade-attempt error)
+			testutil.AssertBodyContains(t, w, http.StatusUpgradeRequired, "WebSocket protocol violation")
 		})
 	}
 }

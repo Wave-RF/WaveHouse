@@ -424,7 +424,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
 	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="$(TAGS)" -cover -race ./internal/... ./cmd/... $(ARGS) \
+		-tags="$(TAGS)" -cover -race -timeout 15s ./internal/... ./cmd/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
 	@go run ./scripts/cov render unit
 
@@ -640,4 +640,3 @@ $(AIR):
 	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
-

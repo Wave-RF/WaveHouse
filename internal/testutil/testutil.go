@@ -51,3 +51,19 @@ func AssertJSONContains(t *testing.T, rec *httptest.ResponseRecorder, expectedSt
 		assert.Equal(t, v, got[k], "key %q mismatch", k)
 	}
 }
+
+// AssertBodyContains checks that rec has the expected status code and that
+// the response body contains the expected substring.
+func AssertBodyContains(t *testing.T, rec *httptest.ResponseRecorder, expectedStatus int, expectedSubstring string) {
+	t.Helper()
+	assert.Equal(t, expectedStatus, rec.Code, "unexpected status code")
+	assert.Contains(t, rec.Body.String(), expectedSubstring, "response body does not contain expected substring")
+}
+
+// AssertBodyEquals checks that rec has the expected status code and that
+// the response body equals the expected string.
+func AssertBodyEquals(t *testing.T, rec *httptest.ResponseRecorder, expectedStatus int, expectedBody string) {
+	t.Helper()
+	assert.Equal(t, expectedStatus, rec.Code, "unexpected status code")
+	assert.Equal(t, expectedBody, rec.Body.String(), "response body does not equal expected")
+}

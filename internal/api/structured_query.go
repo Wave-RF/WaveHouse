@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -47,6 +48,9 @@ func NewStructuredQueryHandler(
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	table := chi.URLParam(r, "table")
+	if unescaped, err := url.PathUnescape(table); err == nil {
+		table = unescaped
+	}
 	if table == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return

@@ -79,7 +79,9 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, buck
 		selectParts = []string{"*"}
 	}
 
-	sql := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectParts, ", "), table)
+	// Double-backtick escaping is the Go SQL driver standard for identifiers
+	escapedTable := strings.ReplaceAll(table, "`", "``")
+	sql := fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(selectParts, ", "), escapedTable)
 
 	// WHERE clause.
 	whereParts, whereParams := buildWhere(q.Filters, q.TimeRange, bucketSeconds)

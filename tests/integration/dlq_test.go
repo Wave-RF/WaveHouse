@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,7 +59,7 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+table, payload)
+	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.EncodeTable(table), payload)
 	require.NoError(t, err)
 
 	// Bento batches every 5s; 30s upper bound gives generous slack on a

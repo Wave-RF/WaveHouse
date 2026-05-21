@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,13 @@ func (h *SchemaHandler) List(w http.ResponseWriter, _ *http.Request) {
 // Get returns the schema for a single table.
 func (h *SchemaHandler) Get(w http.ResponseWriter, r *http.Request) {
 	table := chi.URLParam(r, "table")
+	if unescaped, err := url.PathUnescape(table); err == nil {
+		table = unescaped
+	}
+	if table == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing table")
+		return
+	}
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		writeJSONError(w, http.StatusNotFound, "table not found")
