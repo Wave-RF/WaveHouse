@@ -334,3 +334,11 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
 	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
 }
+
+func TestBuild_TableNameWithBacktick(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{Columns: []string{"page"}, Limit: 10}
+	result, err := Build("my`table", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT page FROM `my``table` LIMIT 10", result.SQL)
+}

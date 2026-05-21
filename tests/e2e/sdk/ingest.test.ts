@@ -277,7 +277,7 @@ describe("Ingest", () => {
   });
 
   it("rejects invalid JSON payloads", async () => {
-    const res = await fetch(`${WH_URL}/v1/ingest/clicks`, {
+    const res = await fetch(`${WH_URL}/v1/ingest?table=clicks`, {
       method: "POST",
       headers: { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` },
       body: "{ bad json",
@@ -341,7 +341,7 @@ describe("Ingest", () => {
   });
 
   it("rejects invalid JSON queries", async () => {
-    const res = await fetch(`${WH_URL}/v1/tables/clicks/query`, {
+    const res = await fetch(`${WH_URL}/v1/query?table=clicks`, {
       method: "POST",
       headers: { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` },
       body: "{ bad json",

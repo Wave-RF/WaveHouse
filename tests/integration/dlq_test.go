@@ -85,3 +85,60 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 		return present
 	}, 30*time.Second, 500*time.Millisecond, "DLQ should receive failed events within timeout")
 }
+
+func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a NATS subject. This tests that Bento's DLQ can handle subjects that are not valid NATS subjects.
+	// Per-test suffix keeps tests independent if more DLQ tests get added later.
+
+	table := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
+
+	evt := map[string]any{
+		"table_name":         table,
+		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"data":               map[string]any{"key": "value"},
+	}
+	payload, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.EncodeTable(table), payload)
+	require.NoError(t, err)
+
+	dlqSubject := "dlq." + table
+
+	// Bento batches every 5s; 30s upper bound gives generous slack on a
+	// loaded CI runner. The condition polls the API rather than the
+	// stream so this also exercises the read path.
+	assert.Eventually(t, func() bool {
+		resp, err := http.Get(e.server.URL + "/v1/dlq/stats")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return false
+		}
+		tables, ok := body["tables"].(map[string]any)
+		if !ok {
+			return false
+		}
+		// iterate over all table names to try query.DecodeTable()
+		for k := range tables {
+			rawTable, err := query.DecodeTable(k)
+			if err == nil && rawTable == dlqSubject {
+				return true
+			} else {
+				if err != nil {
+					t.Logf("Failed to decode table name %q: %v", k, err)
+				} else {
+					t.Logf("Decoded table name %q does not match expected %q", rawTable, dlqSubject)
+				}
+			}
+		}
+		return false
+	}, 30*time.Second, 500*time.Millisecond, "DLQ should receive failed events within timeout")
+}

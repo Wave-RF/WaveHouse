@@ -16,7 +16,7 @@ import (
 )
 
 // TestIngest_FlowsToClickHouseWithoutDLQ exercises the happy path: POST
-// /v1/ingest/{table} is acknowledged synchronously, Bento batches the event
+// /v1/ingest?table={table} is acknowledged synchronously, Bento batches the event
 // to ClickHouse, and the DLQ stays empty for that table.
 func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	e := env(t)
@@ -29,7 +29,7 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 
 	body := `{"user_id":"alice","event_type":"click","value":42.5}`
 	resp, err := http.Post(
-		e.server.URL+"/v1/ingest/"+table,
+		e.server.URL+"/v1/ingest?table="+table,
 		"application/json",
 		strings.NewReader(body),
 	)

@@ -205,6 +205,7 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.Handle(w, req)
 			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": tc.errBody})
+			testutil.AssertJSONErrorResponse(t, w)
 		})
 	}
 }
@@ -241,6 +242,7 @@ func TestWS_RejectsInvalidTableOnQuery(t *testing.T) {
 			// Validation runs before websocket.Accept, so we get a plain 400
 			// rather than an upgrade-attempt error.
 			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid table name"})
+			testutil.AssertJSONErrorResponse(t, w)
 		})
 	}
 }

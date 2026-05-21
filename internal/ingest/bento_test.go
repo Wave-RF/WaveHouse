@@ -207,7 +207,7 @@ func TestJsInput_Read_InsertNack(t *testing.T) {
 	assert.True(t, natsMsg.naked)
 }
 
-func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
+func TestJsInput_Read_UnsafeTableNameAllowed(t *testing.T) {
 	t.Parallel()
 	bad := EventMessage{TableName: "; DROP TABLE users", Data: map[string]any{"x": 1}}
 	badData, _ := json.Marshal(bad)
@@ -426,11 +426,17 @@ func TestClickhouseOutput_WriteBatch_EmptyBatch(t *testing.T) {
 func TestClickhouseOutput_WriteBatch_MissingTableName(t *testing.T) {
 	t.Parallel()
 	c := &clickhouseOutput{}
-	msg := service.NewMessage([]byte(`{"x": 1}`))
+	msg1 := service.NewMessage([]byte(`{"x": 1}`))
 	// Intentionally omitting table_name metadata
 
-	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
-	assert.ErrorContains(t, err, "missing table_name in message metadata")
+	err1 := c.WriteBatch(context.Background(), service.MessageBatch{msg1})
+	assert.ErrorContains(t, err1, "missing table_name in message metadata")
+
+	msg2 := service.NewMessage([]byte(`{"x": 1}`))
+	msg2.MetaSet("table_name", "")
+
+	err2 := c.WriteBatch(context.Background(), service.MessageBatch{msg2})
+	assert.ErrorContains(t, err2, "missing table_name in message metadata")
 }
 
 func TestClickhouseOutput_WriteBatch_SafelyParametersTableName(t *testing.T) {

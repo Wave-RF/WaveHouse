@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,7 +85,7 @@ func TestPolicyHandler_Validate_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPolicyHandler_Put_InvalidJSON(t *testing.T) {
@@ -98,7 +99,7 @@ func TestPolicyHandler_Put_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPolicyHandler_Validate_InvalidPolicy(t *testing.T) {
@@ -122,5 +123,5 @@ func TestPolicyHandler_Validate_InvalidPolicy(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "max_rows")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }

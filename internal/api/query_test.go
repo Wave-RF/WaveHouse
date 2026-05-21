@@ -113,7 +113,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 			h.Handle(w, r)
 
 			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": tt.wantErr})
-			assertJSONErrorResponse(t, w)
+			testutil.AssertJSONErrorResponse(t, w)
 			assertSecurityHeaders(t, w)
 		})
 	}
@@ -133,7 +133,7 @@ func TestQueryHandler_NilHTTPClientReturnsError(t *testing.T) {
 	w := postQuery(h, body)
 
 	testutil.AssertJSONContains(t, w, http.StatusInternalServerError, map[string]any{"error": "query handler not configured: HTTPClient is nil"})
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }
 
@@ -304,7 +304,7 @@ func TestQueryHandler_ForwardsCHError(t *testing.T) {
 			require.Equal(t, tt.wantStatus, w.Code)
 			assert.Contains(t, w.Body.String(), tt.wantMsg, "ClickHouse's error message must reach the admin verbatim")
 			assertSecurityHeaders(t, w)
-			assertJSONErrorResponse(t, w)
+			testutil.AssertJSONErrorResponse(t, w)
 		})
 	}
 }
@@ -415,7 +415,7 @@ func TestQueryHandler_ResponseSizeCap(t *testing.T) {
 
 	require.Equal(t, http.StatusBadGateway, w.Code, "oversized response must 502, not OOM")
 	assert.Contains(t, w.Body.String(), "exceeded")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }
 
@@ -440,7 +440,7 @@ func TestQueryHandler_RequestBodyCap(t *testing.T) {
 
 	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized request must 413, not 400")
 	assert.Contains(t, w.Body.String(), "request body exceeded")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 	assertSecurityHeaders(t, w)
 }
 

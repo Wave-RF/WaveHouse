@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -77,7 +78,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_NotFound(t *testing.T) {
@@ -91,7 +92,7 @@ func TestPipesHandler_Execute_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_RoleForbidden(t *testing.T) {
@@ -115,7 +116,7 @@ func TestPipesHandler_Execute_RoleForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_RoleAllowed(t *testing.T) {
@@ -186,7 +187,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing required parameter")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {

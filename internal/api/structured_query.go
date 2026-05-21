@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -13,11 +12,10 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
-	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
 
-// StructuredQueryHandler handles POST /v1/tables/{table}/query.
+// StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
 	CHConn      driver.Conn
 	Cache       *cache.TieredCache
@@ -47,10 +45,7 @@ func NewStructuredQueryHandler(
 }
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	table := chi.URLParam(r, "table")
-	if unescaped, err := url.PathUnescape(table); err == nil {
-		table = unescaped
-	}
+	table := r.URL.Query().Get("table")
 	if table == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return

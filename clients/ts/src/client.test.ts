@@ -86,7 +86,7 @@ describe('WaveHouseClient.from()', () => {
 
     // Wait for the fetch to be called
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
-    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/tables/events');
+    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/query?table=events');
   });
 });
 

@@ -132,7 +132,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
     const { data, error } = await request<Row[]>(this._ctx, {
       method: 'POST',
-      path: `/v1/tables/${encodeURIComponent(this._state.table)}/query`,
+      path: `/v1/query?table=${encodeURIComponent(this._state.table)}`,
       body: ast,
       signal: opts?.signal,
     });

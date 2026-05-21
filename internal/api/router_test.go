@@ -39,7 +39,7 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
@@ -240,7 +240,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
 		{http.MethodGet, "/v1/schema", http.StatusOK},
-		{http.MethodGet, "/v1/schema/events", http.StatusOK},
+		{http.MethodGet, "/v1/schema?table=events", http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -327,7 +327,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		t.Parallel()
 		rec := post(build(true), "viewer")
 		assert.Equal(t, http.StatusForbidden, rec.Code)
-		assertJSONErrorResponse(t, rec)
+		testutil.AssertJSONErrorResponse(t, rec)
 	})
 
 	t.Run("auth disabled passthrough for no role", func(t *testing.T) {
@@ -349,7 +349,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		t.Parallel()
 		rec := post(build(true), "")
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
-		assertJSONErrorResponse(t, rec)
+		testutil.AssertJSONErrorResponse(t, rec)
 	})
 }
 
@@ -418,7 +418,7 @@ func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), "unauthorized")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
@@ -443,7 +443,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
@@ -469,7 +469,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
@@ -484,7 +484,7 @@ func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Contains(t, rec.Body.String(), "internal server error")
 }
 
