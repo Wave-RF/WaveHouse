@@ -9,17 +9,19 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store      *pipes.Store
-	CHConn     driver.Conn
-	Cache      *cache.TieredCache
-	DefaultTTL time.Duration
-	sf         singleflight.Group
+	Store       *pipes.Store
+	PolicyStore *policy.Store // resolves empty role to default_role; may be nil
+	CHConn      driver.Conn
+	Cache       *cache.TieredCache
+	DefaultTTL  time.Duration
+	sf          singleflight.Group
 }
 
 func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *PipesHandler {
@@ -83,20 +85,32 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restricted pipes fail closed: an empty/absent role (auth disabled, or a
-	// JWT without the role claim) matches nothing and is denied. Empty allowlist
-	// entries are skipped so a stray "" can't authorize an empty role.
-	if len(q.AllowedRoles) > 0 {
-		role := RoleFromContext(r.Context())
+	// Authorization is allowlist membership: the caller's role — a tokenless or
+	// roleless request first mapped to the configured default_role — must appear
+	// in allowed_roles. Matching is exact (there is no "*" any-role wildcard) and
+	// empty allowlist entries are skipped, so a stray "" can't authorize an empty
+	// role. A pipe with no allowed_roles therefore authorizes nobody but the
+	// admin/service bypass below — an absent allowlist grants no one (fails closed).
+	role := RoleFromContext(r.Context())
+	if role == "" && h.PolicyStore != nil {
+		if p := h.PolicyStore.Get(); p != nil {
+			role = policy.ResolveRole(p, role)
+		}
+	}
+	// admin/service bypass every pipe's allowlist, listed or not — by design, not
+	// an oversight: they author pipes and can run arbitrary SQL via /v1/admin/query,
+	// so allowed_roles is never a confidentiality boundary against them. Mirrors
+	// policy.Evaluate's built-in admin/service bypass.
+	if role != "admin" && role != "service" {
 		allowed := false
 		for _, ar := range q.AllowedRoles {
-			if ar == "*" || (ar != "" && ar == role) {
+			if ar != "" && ar == role {
 				allowed = true
 				break
 			}
 		}
 		if !allowed {
-			writeJSONError(w, http.StatusForbidden, "forbidden")
+			writeJSONError(w, http.StatusForbidden, forbiddenForRole(role))
 			return
 		}
 	}

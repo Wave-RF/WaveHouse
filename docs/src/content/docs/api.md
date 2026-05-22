@@ -9,7 +9,7 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema intro
 
 ## Authentication
 
-Authentication is **optional** and controlled by `auth.enabled` (env: `WH_AUTH_ENABLED`). When disabled (default), all `/v1/*` endpoints are open — **except** a named pipe with a non-empty `allowed_roles` list, which always [fails closed](#getpost-v1pipesname--execute-named-pipe): with auth off every request has an empty role, which matches no allowlist entry, so the pipe returns `403` unless its list includes `"*"`. When enabled, every request to `/v1/*` must include a valid JWT Bearer token:
+Authentication is **optional** and controlled by `auth.enabled` (env: `WH_AUTH_ENABLED`). When disabled (default), most `/v1/*` endpoints are open — **except named pipes**, which always [fail closed](#getpost-v1pipesname--execute-named-pipe): with auth off every request has an empty role (resolved to `default_role` if one is configured), so a pipe runs only if that role is listed in its `allowed_roles` or is the built-in `admin`/`service`; otherwise it returns `403`. When enabled, every request to `/v1/*` must include a valid JWT Bearer token:
 
 ```text
 Authorization: Bearer <token>
@@ -25,7 +25,9 @@ GET /v1/stream/ws?token=<jwt>
 
 The `Authorization` header takes precedence when both are provided. The `token` query parameter is stripped from the URL after extraction.
 
-When `auth.dev_mode` is enabled, all requests are treated as admin with no JWT validation — useful for development. Unlike `auth.enabled=false`, dev mode gives every request `role=admin`, so it is the posture to use when you need to exercise pipes restricted to `admin` (or `"*"`) locally; a pipe whose `allowed_roles` excludes `admin` is still unreachable under dev mode.
+When `auth.dev_mode` is enabled, all requests are treated as admin with no JWT validation — useful for development. Unlike `auth.enabled=false`, dev mode gives every request `role=admin`, and the built-in `admin` role bypasses every pipe's `allowed_roles`, so dev mode can exercise any pipe locally regardless of its allowlist.
+
+**Public (unauthenticated) access is driven by the policy, not a flag.** When `auth.enabled` is true, a request with **no token** is rejected with `401` *unless* the access-control policy defines a usable (non-`admin`/`service`) `default_role`. If it does, no-token requests are admitted with an empty role that resolves to that `default_role`, so unauthenticated users can reach whatever the `default_role` is granted (see [Roles & Access Control](#roles--access-control)). Setting a `default_role` is what opens public access; removing it closes it. A **present-but-invalid** token (bad signature, expired) is always rejected with `401`. Everything else stays closed: `/v1/admin/*` and the schema/DLQ endpoints remain token-gated, and a pipe with **no `allowed_roles` authorizes nobody but `admin`/`service`** (pipe access is allowlist membership — it never opens to the public).
 
 ### Roles & Access Control
 
@@ -322,7 +324,7 @@ JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whe
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
-| 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles`. Fails closed: when `allowed_roles` is set, a request with no role (auth disabled, or a JWT missing `auth.role_claim`) is denied unless the list includes `"*"`. |
+| 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the built-in `admin`/`service`). Fails closed: a request with no role (auth disabled, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but `admin`/`service`. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
 
 ---
@@ -540,6 +542,8 @@ Replaces the entire access control policy. Validated before saving.
 }
 ```
 
+The `default_role` field (optional) is the role assigned to any request that reaches the policy engine **without** a role — an authenticated token carrying no role claim, or a request with no token at all. **Setting it also enables unauthenticated access:** when `auth.enabled` is true, a no-token request is `401`'d *unless* a usable `default_role` exists, in which case it's admitted and evaluated as that role. Such requests receive exactly its permissions (or are denied if it grants none on the table/operation). If `default_role` is unset, a roleless or tokenless request is denied. It may **not** be `admin` or `service` — those privileged built-ins are rejected at validation.
+
 #### `POST /v1/admin/policy/validate` — Validate Policy (Dry Run)
 
 Validates a policy without saving it. Returns `{"valid": true}` or an error.
@@ -566,7 +570,7 @@ Returns a specific named pipe definition.
 }
 ```
 
-**`allowed_roles`** restricts execution: the caller's role must be in the list, or the list must contain `"*"`. An empty or omitted list leaves the pipe open to all roles. A non-empty list fails closed — a request with no role is denied, and empty-string entries are ignored.
+**`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The built-in `admin`/`service` roles always pass. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but `admin`/`service`**, and a request whose role is absent or unlisted is denied (fails closed).
 
 #### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 

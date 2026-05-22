@@ -44,22 +44,6 @@ func TestEvaluate_ExactRoleMatch(t *testing.T) {
 	assert.Equal(t, []string{"page", "count"}, perms.AllowColumns)
 }
 
-func TestEvaluate_WildcardFallback(t *testing.T) {
-	t.Parallel()
-	p := &Policy{
-		Tables: map[string]TablePolicy{
-			"clicks": {
-				Select: map[string]RolePermissions{
-					"*": {AllowColumns: []string{"page"}},
-				},
-			},
-		},
-	}
-	perms := Evaluate(p, "anyrole", "clicks", "select", nil)
-	assert.True(t, perms.Allowed)
-	assert.Equal(t, []string{"page"}, perms.AllowColumns)
-}
-
 func TestEvaluate_NoMatchingRole_NonAdminDenied(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
@@ -404,10 +388,12 @@ func TestEvaluate_EmptyRoleDoesNotMatchEmptyKey(t *testing.T) {
 	assert.False(t, perms.Allowed, "an empty role must not match an empty-string role key")
 }
 
-// TestEvaluate_EmptyRoleAllowedViaWildcard pins the one intended way to grant a
-// roleless request: an explicit "*" entry. This keeps the empty-role guard from
-// over-reaching — a wildcard is a deliberate "any role, including none" grant.
-func TestEvaluate_EmptyRoleAllowedViaWildcard(t *testing.T) {
+// TestEvaluate_WildcardRoleKeyDoesNotGrant pins the removal of the "*" any-role
+// wildcard: a "*" role key is now an ordinary (unreachable) literal, so neither a
+// real role that doesn't equal it nor a roleless request gets access from it.
+// Broad grants must list each role explicitly; roleless access comes only from a
+// concrete default_role.
+func TestEvaluate_WildcardRoleKeyDoesNotGrant(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
 		Tables: map[string]TablePolicy{
@@ -418,9 +404,10 @@ func TestEvaluate_EmptyRoleAllowedViaWildcard(t *testing.T) {
 			},
 		},
 	}
-	perms := Evaluate(p, "", "clicks", "select", nil)
-	assert.True(t, perms.Allowed, "an explicit \"*\" wildcard intentionally grants a roleless request")
-	assert.Equal(t, []string{"page"}, perms.AllowColumns)
+	assert.False(t, Evaluate(p, "viewer", "clicks", "select", nil).Allowed,
+		"a \"*\" role key must not grant a non-matching role")
+	assert.False(t, Evaluate(p, "", "clicks", "select", nil).Allowed,
+		"a \"*\" role key must not grant a roleless request")
 }
 
 func TestResolveFilters_MultipleOperators(t *testing.T) {

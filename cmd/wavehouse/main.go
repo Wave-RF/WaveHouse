@@ -259,6 +259,11 @@ func run() int {
 		return 1
 	}
 
+	// When auth is on, a no-token request is admitted only if a usable
+	// default_role is configured (see allowAnon below); hold the policy cache
+	// fail-closed so a runtime KV delete can't nil it into Evaluate's allow-all.
+	policyStore.SetFailClosed(cfg.Auth.Enabled)
+
 	// Pipes store (NATS KV + optional SQL file directory).
 	pipesStore, err := pipes.NewStore(ctx, embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
 	if err != nil {
@@ -356,6 +361,12 @@ func run() int {
 	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
 	wsHandler.PolicyStore = policyStore
 
+	// allowAnon reports whether a no-token request should be admitted: true iff
+	// the org has configured a usable (non-privileged) default_role — that is
+	// the single switch for public access. Read live so a policy PUT/delete
+	// flips it without a restart.
+	allowAnon := func() bool { return policy.ResolveRole(policyStore.Get(), "") != "" }
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -368,17 +379,22 @@ func run() int {
 		Pipes:           api.NewPipesHandler(pipesStore, chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second, registry, policyStore, cfg.Cache.TimestampBucketSeconds),
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
-			Enabled:   cfg.Auth.Enabled,
-			JWTSecret: cfg.Auth.JWTSecret,
-			JWKSURL:   cfg.Auth.JWKSURL,
-			RoleClaim: cfg.Auth.RoleClaim,
-			DevMode:   cfg.Auth.DevMode,
+			Enabled:        cfg.Auth.Enabled,
+			JWTSecret:      cfg.Auth.JWTSecret,
+			JWKSURL:        cfg.Auth.JWKSURL,
+			RoleClaim:      cfg.Auth.RoleClaim,
+			DevMode:        cfg.Auth.DevMode,
+			AllowAnonymous: allowAnon,
 		}),
 		AuthEnabled: cfg.Auth.Enabled,
 		JS:          js,
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,
 	}
+
+	// Pipes resolves an empty role to the policy default_role; give it the
+	// store (mirrors the ingest/SSE/WS handlers above).
+	deps.Pipes.PolicyStore = policyStore
 
 	// Prometheus /metrics routing: same-port → mount on API router,
 	// dedicated port → spin a sidecar HTTP server below.

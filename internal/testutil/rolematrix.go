@@ -22,25 +22,30 @@ type RoleCase struct {
 }
 
 // StandardRoleMatrix is the canonical set of (AllowedRoles, observed-role) cases
-// every AllowedRoles-style gate must cover. The empty/absent-role rows are the
-// ones that fail open when a gate only enforces its allowlist for a non-empty
-// role — the class of bug behind #159. Keeping them in one shared place means a
-// handler that takes AllowedRoles without running this matrix looks obviously
-// under-tested in review.
+// every AllowedRoles-style gate must cover. Authorization is allowlist
+// membership: the observed role must appear in AllowedRoles, the privileged
+// built-in roles (admin, service) always pass, and an empty/absent role matches
+// nothing — so a resource with no AllowedRoles authorizes nobody but
+// admin/service. The empty/absent-role rows are the ones that fail open when a
+// gate only enforces its allowlist for a non-empty role — the class of bug
+// behind #159. Keeping them in one shared place means a handler that takes
+// AllowedRoles without running this matrix looks obviously under-tested in review.
 func StandardRoleMatrix() []RoleCase {
 	return []RoleCase{
-		{Name: "open resource, no role", AllowedRoles: nil, SetRole: false, WantForbidden: false},
-		{Name: "open resource, empty role", AllowedRoles: nil, Role: "", SetRole: true, WantForbidden: false},
-		{Name: "open resource, any role", AllowedRoles: nil, Role: "random_role", SetRole: true, WantForbidden: false},
-		{Name: "restricted, matching role", AllowedRoles: []string{"admin"}, Role: "admin", SetRole: true, WantForbidden: false},
-		{Name: "restricted, non-matching role", AllowedRoles: []string{"admin"}, Role: "viewer", SetRole: true, WantForbidden: true},
-		{Name: "restricted, no role in context", AllowedRoles: []string{"admin"}, SetRole: false, WantForbidden: true},
-		{Name: "restricted, empty role in context", AllowedRoles: []string{"admin"}, Role: "", SetRole: true, WantForbidden: true},
-		{Name: "wildcard, any role", AllowedRoles: []string{"*"}, Role: "viewer", SetRole: true, WantForbidden: false},
-		{Name: "wildcard, no role", AllowedRoles: []string{"*"}, SetRole: false, WantForbidden: false},
-		{Name: "multi-role, matching", AllowedRoles: []string{"admin", "editor"}, Role: "editor", SetRole: true, WantForbidden: false},
-		{Name: "multi-role, non-matching", AllowedRoles: []string{"admin", "editor"}, Role: "viewer", SetRole: true, WantForbidden: true},
-		{Name: "non-admin allowlist, no role in context", AllowedRoles: []string{"service"}, SetRole: false, WantForbidden: true},
+		// No allowlist: authorizes nobody but the privileged built-ins.
+		{Name: "no allowlist, no role", AllowedRoles: nil, SetRole: false, WantForbidden: true},
+		{Name: "no allowlist, empty role", AllowedRoles: nil, Role: "", SetRole: true, WantForbidden: true},
+		{Name: "no allowlist, ordinary role", AllowedRoles: nil, Role: "viewer", SetRole: true, WantForbidden: true},
+		{Name: "no allowlist, admin allowed", AllowedRoles: nil, Role: "admin", SetRole: true, WantForbidden: false},
+		{Name: "no allowlist, service allowed", AllowedRoles: nil, Role: "service", SetRole: true, WantForbidden: false},
+		// Restricted: exact membership; the privileged built-ins bypass the list.
+		{Name: "restricted, matching role", AllowedRoles: []string{"editor"}, Role: "editor", SetRole: true, WantForbidden: false},
+		{Name: "restricted, non-matching role", AllowedRoles: []string{"editor"}, Role: "viewer", SetRole: true, WantForbidden: true},
+		{Name: "restricted, admin bypass", AllowedRoles: []string{"editor"}, Role: "admin", SetRole: true, WantForbidden: false},
+		{Name: "restricted, no role in context", AllowedRoles: []string{"editor"}, SetRole: false, WantForbidden: true},
+		{Name: "restricted, empty role in context", AllowedRoles: []string{"editor"}, Role: "", SetRole: true, WantForbidden: true},
+		{Name: "multi-role, matching", AllowedRoles: []string{"editor", "analyst"}, Role: "analyst", SetRole: true, WantForbidden: false},
+		{Name: "multi-role, non-matching", AllowedRoles: []string{"editor", "analyst"}, Role: "viewer", SetRole: true, WantForbidden: true},
 		{Name: "empty allowlist entry, empty role", AllowedRoles: []string{""}, Role: "", SetRole: true, WantForbidden: true},
 	}
 }

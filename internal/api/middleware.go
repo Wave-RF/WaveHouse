@@ -38,6 +38,12 @@ type AuthConfig struct {
 	JWKSURL   string
 	RoleClaim string // dot-separated claim path, e.g. "role" or "app_metadata.role"
 	DevMode   bool
+	// AllowAnonymous, when non-nil and it returns true, lets a request with NO
+	// token through with an empty role instead of 401 (downstream policy /
+	// allowed_roles gates then decide). It's wired to "is a usable default_role
+	// configured?". Only an absent token is admitted — invalid/expired tokens
+	// still 401.
+	AllowAnonymous func() bool
 }
 
 // JWTAuthMiddleware validates Bearer tokens.
@@ -91,6 +97,15 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				params.Del("token")
 				r.URL.RawQuery = params.Encode()
 			} else {
+				// No token presented. Proceed as a roleless request
+				// (RoleFromContext == "") only if anonymous access is configured
+				// — i.e. a usable default_role exists; otherwise fail closed with
+				// 401. This covers only an ABSENT token; a present-but-invalid
+				// token still 401s in the parse path below.
+				if cfg.AllowAnonymous != nil && cfg.AllowAnonymous() {
+					next.ServeHTTP(w, r)
+					return
+				}
 				writeJSONError(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}

@@ -89,6 +89,8 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
 | `auth.dev_mode` | `WH_AUTH_DEV_MODE` | `false` | When `true`, skips JWT validation and treats all requests as admin. **For development only.** |
 
+**Public (unauthenticated) access is not a config flag** — it's driven by the access-control policy. When `auth.enabled` is true, a request with **no token** is rejected with `401` *unless* the policy defines a usable (non-`admin`/`service`) `default_role`; if it does, no-token requests are admitted and evaluated as that role. So setting a `default_role` opens public access and removing it closes it. Invalid/expired tokens are always rejected, `/v1/admin/*` and the schema/DLQ endpoints stay token-gated, and a pipe with no `allowed_roles` authorizes nobody but `admin`/`service`. See [API — Authentication](/api#authentication).
+
 ### Dead Letter Queue (DLQ)
 
 | YAML Key | Env Var | Default | Description |

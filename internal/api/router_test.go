@@ -8,6 +8,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -538,4 +539,68 @@ func TestJSONRecoverer_PanicAfterPartialWriteDoesNotCorrupt(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "status already committed before panic must not be overwritten")
 	assert.Equal(t, "text/plain", rec.Header().Get("Content-Type"), "headers already flushed must not be rewritten")
 	assert.Equal(t, "partial body", rec.Body.String(), "JSON 500 body must not be appended after a partial write")
+}
+
+func TestRequireAuthenticated(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		authEnabled bool
+		setClaims   bool
+		wantCode    int
+	}{
+		{"auth on, no token -> 401", true, false, http.StatusUnauthorized},
+		{"auth on, token present -> pass", true, true, http.StatusOK},
+		{"auth off -> passthrough", false, false, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handler := RequireAuthenticated(tc.authEnabled)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			ctx := context.Background()
+			if tc.setClaims {
+				ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+			}
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			assert.Equal(t, tc.wantCode, w.Code)
+		})
+	}
+}
+
+// TestNewRouter_SchemaGatedUnderAuth confirms the infra routes carry the
+// RequireAuthenticated gate: a tokenless request (AuthMW passes it through with
+// no claims, as public access would) must still 401 at /v1/schema, so
+// enabling public access never exposes schema discovery to tokenless callers.
+func TestNewRouter_SchemaGatedUnderAuth(t *testing.T) {
+	t.Parallel()
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+
+	router := NewRouter(Dependencies{
+		Ingest:      NewIngestHandler(reg, pub),
+		Query:       &QueryHandler{},
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
+		Health:      &HealthHandler{},
+		Schema:      NewSchemaHandler(reg),
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		AuthEnabled: true,
+	})
+
+	for _, path := range []string{"/v1/schema", "/v1/schema/events"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code,
+				"tokenless request to %s must 401 under auth (RequireAuthenticated gate)", path)
+			assertJSONErrorResponse(t, rec)
+		})
+	}
 }

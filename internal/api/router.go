@@ -107,14 +107,19 @@ func NewRouter(deps Dependencies) http.Handler {
 		// middleware once keeps the role-string list from drifting.
 		adminOrService := RequireRole(deps.AuthEnabled, "admin", "service")
 
+		// authd gates endpoints that have no policy/allowed_roles check of
+		// their own (schema discovery, DLQ stats) behind a valid token, so
+		// admitting tokenless requests (public access) does not expose them.
+		authd := RequireAuthenticated(deps.AuthEnabled)
+
 		r.Post("/ingest/{table}", deps.Ingest.Handle)
 		r.Get("/stream/sse", deps.SSE.Handle)
 		r.Get("/stream/ws", deps.WS.Handle)
 
-		// Schema discovery.
-		r.Get("/schema", deps.Schema.List)
-		r.Get("/schema/{table}", deps.Schema.Get)
-		r.Post("/schema/refresh", deps.Schema.Refresh)
+		// Schema discovery — token-gated (no policy gate of its own).
+		r.With(authd).Get("/schema", deps.Schema.List)
+		r.With(authd).Get("/schema/{table}", deps.Schema.Get)
+		r.With(authd).Post("/schema/refresh", deps.Schema.Refresh)
 
 		// Structured query endpoint.
 		if deps.StructuredQuery != nil {
@@ -127,9 +132,9 @@ func NewRouter(deps Dependencies) http.Handler {
 			r.Post("/pipes/{name}", deps.Pipes.Execute)
 		}
 
-		// DLQ stats.
+		// DLQ stats — token-gated (no policy gate of its own).
 		if deps.DLQ != nil {
-			r.Get("/dlq/stats", deps.DLQ.Stats)
+			r.With(authd).Get("/dlq/stats", deps.DLQ.Stats)
 		}
 
 		// Admin routes. The adminOrService gate covers the whole tree;
@@ -251,6 +256,26 @@ func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Hand
 				}
 			}
 			writeJSONError(w, http.StatusForbidden, "forbidden")
+		})
+	}
+}
+
+// RequireAuthenticated requires a valid token when auth is enabled (any role,
+// or none), returning 401 otherwise. It exists for endpoints that have no
+// policy/allowed_roles gate of their own: when public access is on, a tokenless
+// request reaches the router with no claims, and this keeps such endpoints
+// (schema discovery, DLQ stats) behind a token. When auth is disabled it is a
+// pass-through, matching the dev/test posture of the rest of the router.
+func RequireAuthenticated(authEnabled bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if authEnabled {
+				if _, ok := ClaimsFromContext(r.Context()); !ok {
+					writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }

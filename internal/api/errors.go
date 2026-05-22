@@ -19,3 +19,16 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
+
+// forbiddenForRole returns the 403 message for a policy/allowed_roles denial.
+// When the effective role is empty — a request with no token, or a token
+// without a role claim, and no default_role that permits the resource — it
+// says so, since that's the common public-access denial and "forbidden" alone
+// is opaque. For an ordinary mismatch (the caller has a role, just not a
+// permitted one) it stays terse.
+func forbiddenForRole(role string) string {
+	if role == "" {
+		return "forbidden: request has no role and no default_role permits this resource"
+	}
+	return "forbidden"
+}

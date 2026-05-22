@@ -89,7 +89,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		perms := policy.Evaluate(p, role, table, "insert", claims)
 		if !perms.Allowed {
 			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			writeJSONError(w, http.StatusForbidden, "forbidden")
+			writeJSONError(w, http.StatusForbidden, forbiddenForRole(role))
 			return
 		}
 		// Check column permissions — reject disallowed columns.

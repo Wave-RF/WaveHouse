@@ -56,11 +56,31 @@ type ResolvedPermissions struct {
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
 var claimTemplateRe = regexp.MustCompile(`\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}`)
 
+// ResolveRole maps an empty/absent role to the policy's default_role, so a
+// request with no role — a token without a role claim, or no token at all
+// when public access is enabled — is evaluated as the configured default. A default_role of "admin"/"service" is refused here
+// (returns "") so the privileged built-in bypass in Evaluate can never be
+// reached via the default; Validate also rejects saving such a policy.
+func ResolveRole(p *Policy, role string) string {
+	if role != "" || p == nil {
+		return role
+	}
+	switch strings.ToLower(strings.TrimSpace(p.DefaultRole)) {
+	case "", "admin", "service":
+		return "" // fail closed: no default, or a privileged default we refuse
+	default:
+		return p.DefaultRole
+	}
+}
+
 // Evaluate resolves a policy for a given role, table, and operation against JWT claims.
 func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *ResolvedPermissions {
 	if p == nil {
 		return &ResolvedPermissions{Allowed: true}
 	}
+
+	// Map an empty/absent role to the configured default_role (no-op if none).
+	role = ResolveRole(p, role)
 
 	tp, ok := p.Tables[table]
 	if !ok {
@@ -88,24 +108,21 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		return &ResolvedPermissions{Allowed: false}
 	}
 
-	// An empty/absent role must never match a direct allowlist entry — only an
-	// explicit "*" wildcard (or the built-in admin/service roles) may grant it.
-	// Otherwise a stray "" role key in a policy would authorize roleless
-	// requests: the policy-side twin of the empty-AllowedRoles-entry footgun
-	// closed for pipes in #159.
+	// An empty/absent role must never match a role entry — a roleless request is
+	// authorized only after ResolveRole maps it to a concrete default_role above,
+	// or via the built-in admin/service roles. A stray "" role key in a policy
+	// therefore grants nothing: the policy-side twin of the empty-AllowedRoles-
+	// entry footgun closed for pipes in #159. Matching is exact — there is no
+	// "*" any-role wildcard.
 	perms, ok := RolePermissions{}, false
 	if role != "" {
 		perms, ok = rolePerms[role]
 	}
 	if !ok {
-		// Try wildcard role.
-		perms, ok = rolePerms["*"]
-		if !ok {
-			if role == "admin" || role == "service" {
-				return &ResolvedPermissions{Allowed: true}
-			}
-			return &ResolvedPermissions{Allowed: false}
+		if role == "admin" || role == "service" {
+			return &ResolvedPermissions{Allowed: true}
 		}
+		return &ResolvedPermissions{Allowed: false}
 	}
 
 	resolved := &ResolvedPermissions{
@@ -266,6 +283,10 @@ func Validate(p *Policy) error {
 	if p == nil {
 		return fmt.Errorf("policy is nil")
 	}
+	switch strings.ToLower(strings.TrimSpace(p.DefaultRole)) {
+	case "admin", "service":
+		return fmt.Errorf("default_role %q is not allowed: admin/service are privileged built-in roles and would grant every roleless request full access", p.DefaultRole)
+	}
 	for tableName, tp := range p.Tables {
 		for role, perms := range tp.Select {
 			if err := validateRolePerms(tableName, "select", role, perms); err != nil {
@@ -283,7 +304,7 @@ func Validate(p *Policy) error {
 
 func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if strings.TrimSpace(role) == "" {
-		return fmt.Errorf("table %q, op %q: empty role name is not allowed (use %q to grant all roles)", table, op, "*")
+		return fmt.Errorf("table %q, op %q: empty role name is not allowed", table, op)
 	}
 	if perms.MaxRows < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_rows must be non-negative", table, op, role)

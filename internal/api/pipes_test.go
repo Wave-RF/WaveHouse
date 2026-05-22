@@ -203,6 +203,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 	w := httptest.NewRecorder()
 	// No query params or body — missing "page".
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/by_page/execute", "by_page", nil)
+	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
 
 	h.Execute(w, r)
 
@@ -229,6 +230,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("name", "by_page")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
 
 	safeHandle(h.Execute, w, r)
 
@@ -320,6 +322,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 	w := httptest.NewRecorder()
 	body := map[string]any{"page": "/about"}
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", body)
+	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
 
 	safeHandle(h.Execute, w, r)
 
@@ -328,61 +331,46 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
-// TestPipesHandler_Execute_UnrestrictedPipe_PublicAccess_TokenlessDenied: under
-// public access, a pipe with no allowed_roles is NOT public — it still requires a
-// token, so public access is opt-in only (via "*" or a default_role grant).
-func TestPipesHandler_Execute_UnrestrictedPipe_PublicAccess_TokenlessDenied(t *testing.T) {
+// TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied: a pipe with no
+// allowed_roles authorizes nobody but the privileged built-ins. An ordinary
+// authenticated caller (claims present, role "viewer") is rejected because the
+// empty allowlist matches no role.
+func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"}, // no AllowedRoles
 	)
 	h := NewPipesHandler(store, nil, nil, 0)
-	h.AllowAnonymous = func() bool { return true }
 
 	w := httptest.NewRecorder()
-	// No claims in context = tokenless under public access.
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
+	ctx := context.WithValue(r.Context(), ContextKeyClaims, jwt.MapClaims{})
+	ctx = context.WithValue(ctx, ContextKeyRole, "viewer")
+	r = r.WithContext(ctx)
 
 	safeHandle(h.Execute, w, r)
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
-		"an unrestricted pipe must reject tokenless requests when public access is on")
+		"a pipe with no allowed_roles must reject a non-admin role")
 	assertJSONErrorResponse(t, w)
 }
 
-func TestPipesHandler_Execute_UnrestrictedPipe_PublicAccess_AuthenticatedAllowed(t *testing.T) {
+// TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed: the privileged built-in
+// roles bypass the allowlist, so admin can run a pipe with no allowed_roles.
+func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
 	)
 	h := NewPipesHandler(store, nil, nil, 0)
-	h.AllowAnonymous = func() bool { return true }
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
-	// Authenticated: claims present (even with no role claim).
-	r = r.WithContext(context.WithValue(r.Context(), ContextKeyClaims, jwt.MapClaims{}))
+	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
 
 	safeHandle(h.Execute, w, r)
 
 	assert.NotEqual(t, http.StatusForbidden, w.Code,
-		"an authenticated caller may run an unrestricted pipe")
-	assert.NotEqual(t, http.StatusNotFound, w.Code)
-}
-
-func TestPipesHandler_Execute_UnrestrictedPipe_PublicAccessOff_Unchanged(t *testing.T) {
-	t.Parallel()
-	store := pipes.NewMemoryStore(
-		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
-	)
-	h := NewPipesHandler(store, nil, nil, 0) // AllowAnonymous nil = public access off
-
-	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
-
-	safeHandle(h.Execute, w, r)
-
-	assert.NotEqual(t, http.StatusForbidden, w.Code,
-		"with public access off, an unrestricted pipe is reachable as before")
+		"admin bypasses the allowlist on a pipe with no allowed_roles")
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }

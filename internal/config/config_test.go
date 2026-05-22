@@ -490,3 +490,14 @@ func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clickhouse.http_scheme must be 'http' or 'https'")
 }
+
+func TestValidate_AuthEnabledWithSecret_OK(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		Schema:     Schema{RefreshInterval: 60},
+		Auth:       Auth{Enabled: true, JWTSecret: "secret"},
+	}
+	assert.NoError(t, cfg.Validate())
+}

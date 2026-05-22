@@ -70,7 +70,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	p := h.PolicyStore.Get()
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		writeJSONError(w, http.StatusForbidden, "forbidden")
+		writeJSONError(w, http.StatusForbidden, forbiddenForRole(role))
 		return
 	}
 
