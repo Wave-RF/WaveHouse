@@ -24,7 +24,7 @@ type NamedQuery struct {
 	SQL          string     `json:"sql"`
 	Parameters   []ParamDef `json:"parameters,omitempty"`
 	Description  string     `json:"description,omitempty"`
-	AllowedRoles []string   `json:"allowed_roles,omitempty"` // empty = all roles
+	AllowedRoles []string   `json:"allowed_roles,omitempty"` // empty = admin/service only (fails closed)
 }
 
 // ParamDef describes a query parameter.
