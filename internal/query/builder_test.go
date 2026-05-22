@@ -342,3 +342,73 @@ func TestBuild_TableNameWithBacktick(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT page FROM `my``table` LIMIT 10", result.SQL)
 }
+
+func TestBuild_InvalidAggregationColumn(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Aggregations: []Aggregation{{Fn: "sum", Column: "nonexistent", Alias: "total"}},
+	}
+	_, err := Build("clicks", sq, testSchema(), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown column")
+}
+
+func TestBuild_InvalidOrderByColumn(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		// Aliases are allowed, but they must still be valid identifiers
+		OrderBy: []OrderClause{{Column: "invalid;--", Dir: "asc"}},
+	}
+	_, err := Build("clicks", sq, testSchema(), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid order column")
+}
+
+func TestBuild_InvalidTimeRangeColumn(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns:   []string{"page"},
+		TimeRange: &TimeRange{Column: "nonexistent", Since: "2024-01-01T00:00:00Z"},
+	}
+	_, err := Build("clicks", sq, testSchema(), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown column")
+}
+
+func TestBuild_TimeRange_SinceOnly(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns:   []string{"page"},
+		TimeRange: &TimeRange{Column: "ts", Since: "2024-01-01T00:00:00Z", Until: ""},
+	}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Contains(t, result.SQL, "ts >= ?")
+	assert.NotContains(t, result.SQL, "ts <= ?")
+}
+
+func TestBuild_FilterUnsupportedOp(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		// Unsupported operations should gracefully be ignored by filterToSQL
+		Filters: []Filter{{Column: "page", Op: "magic", Value: "val"}},
+	}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	// Query should build, but WHERE clause shouldn't contain this filter
+	assert.NotContains(t, result.SQL, "WHERE")
+}
+
+func TestBuild_FilterInOp_InvalidValueType(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		// 'in' operator requires an array ([]any) value. A scalar string shouldn't panic.
+		Filters: []Filter{{Column: "page", Op: "in", Value: "not-an-array"}},
+	}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.NotContains(t, result.SQL, "WHERE")
+}

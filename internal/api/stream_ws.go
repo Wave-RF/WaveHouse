@@ -51,13 +51,6 @@ type wsCommand struct {
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	// Validate ?table= before upgrading. Empty is OK — the client can
-	// still subscribe via in-band commands after connect.
-	if t := r.URL.Query().Get("table"); t == "" {
-		writeJSONError(w, http.StatusBadRequest, "invalid table name")
-		return
-	}
-
 	origins := h.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"*"}

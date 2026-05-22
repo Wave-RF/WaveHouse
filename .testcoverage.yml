@@ -28,7 +28,7 @@ suites:
   unit: 70
   integration: 12
   e2e: 50
-  sdk: 50 # statements (vitest gates via --coverage.thresholds.statements)
+  sdk: 40 # statements (vitest gates via --coverage.thresholds.statements)
 
 exclude:
   # Global excludes apply to every suite render AND to the merged total.

@@ -259,7 +259,7 @@ func pickFreePort(ctx context.Context) (int, error) {
 // dumpLogTail prints the last N lines of `path` to stderr so a CI
 // failure is debuggable without re-running with V=1.
 func dumpLogTail(path, banner string) {
-	const lines = 120
+	const lines = 80
 	f, err := os.Open(path) // #nosec G304 — path is the orchestrator's own log file.
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  (could not read %s: %v)\n", path, err)

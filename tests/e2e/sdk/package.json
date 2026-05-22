@@ -11,6 +11,7 @@
     "@wavehouse/sdk": "file:../../../clients/ts"
   },
   "devDependencies": {
+    "@types/node": "^25.8.0",
     "eventsource": "^4.1.0",
     "typescript": "^5.5.0",
     "vitest": "^3.0.0"

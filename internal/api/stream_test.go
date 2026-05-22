@@ -178,10 +178,6 @@ func TestWS_ApplyStreamPolicy_NoPolicy(t *testing.T) {
 	assert.Equal(t, "clicks", inner["table_name"])
 }
 
-// TestSSE_RejectsMissingOrInvalidTable verifies that the SSE handler returns
-// 400 when the ?table= parameter is missing or contains characters that could
-// be interpreted as NATS wildcards (regression guard for the fix that landed
-// alongside the wildcard fan-out removal in #100).
 func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	t.Parallel()
 	h := &SSEHandler{Hub: NewHub()}
@@ -225,26 +221,6 @@ func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	// 400-path application/json.
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/event-stream", w.Header().Get("Content-Type"))
-}
-
-func TestWS_RejectsInvalidTableOnQuery(t *testing.T) {
-	t.Parallel()
-	h := &WSHandler{Hub: NewHub()}
-
-	cases := []string{""}
-	for _, tbl := range cases {
-		t.Run(tbl, func(t *testing.T) {
-			t.Parallel()
-			target := "/v1/stream/ws?table=" + url.QueryEscape(tbl)
-			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
-			w := httptest.NewRecorder()
-			h.Handle(w, req)
-			// Validation runs before websocket.Accept, so we get a plain 400
-			// rather than an upgrade-attempt error.
-			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": "invalid table name"})
-			testutil.AssertJSONErrorResponse(t, w)
-		})
-	}
 }
 
 func TestWS_AcceptsUnsafeTableOnQuery(t *testing.T) {

@@ -1,45 +1,111 @@
-import { describe, it, expect } from "vitest";
-import { dataClient, testId, waitForCondition } from "./helpers.js";
+import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { adminClient, publicClient, dataClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Streaming", () => {
-  // TODO(SSE-public-events): re-enable once the SDK + backend support
-  // streaming public-data tables over SSE in auth mode. Today SSE goes
-  // over EventSource which can't set Authorization headers, so the
-  // auth-enabled WaveHouse rejects the connection. The plan is to mark
-  // tables (or pipes) "public" via policy and let SSE consumers connect
-  // without a JWT to those streams; once that lands, swap this back to
-  // a live test against the auth instance.
-  describe.skip("SSE", () => {
-    it("receives events after insert", async () => {
-      const wh = dataClient();
+  const admin = adminClient();
+  let baselinePolicy: any;
+
+  beforeAll(async () => {
+    // Fetch the baseline policy to restore after tests finish
+    const res = await admin.policy.get();
+    baselinePolicy = res.data;
+
+    // Configure the backend to assign the "anon" role to unauthenticated requests
+    const publicPolicy = { ...baselinePolicy, default_role: "anon" };
+
+    // Explicitly allow the 'anon' role to SELECT (stream) from these tables
+    publicPolicy.tables.clicks.select = {
+      ...(publicPolicy.tables.clicks.select || {}),
+      anon: { allow_columns: ["*"] },
+    };
+    publicPolicy.tables.events.select = {
+      ...(publicPolicy.tables.events.select || {}),
+      anon: { allow_columns: ["*"] },
+    };
+
+    await admin.policy.set(publicPolicy);
+  });
+
+  afterAll(async () => {
+    // Clean up to ensure we don't bleed public access into other test files
+    if (baselinePolicy) {
+      await admin.policy.set(baselinePolicy);
+    }
+  });
+
+  describe("SSE", () => {
+    // TODO: re-enable after #172 merged
+    it.skip("receives events after insert (public/anon)", async () => {
+      const whPublic = publicClient();
+      const whAuth = dataClient();
       const receivedEvents: any[] = [];
       const id = testId();
 
-      const stream = wh.from("clicks").stream({ transport: "sse" });
+      const stream = whPublic.from("clicks").stream({ transport: "sse" });
       const unsub = stream.subscribe({
+        initial: (result) => console.log("Initial SSE result:", result),
         next: (event) => receivedEvents.push(event),
-        status: () => {},
+        status: (status) => console.log("SSE status:", status),
+        error: (err) => console.error("SSE error:", err),
       });
 
       await new Promise((r) => setTimeout(r, 1000));
 
-      await wh.from("clicks").insert({
+      await whAuth.from("clicks").insert({
         event_id: id,
-        page: "/sse-test",
-        user_id: "sse-user",
+        page: "/sse-public-test",
+        user_id: "public-user",
         session_id: "sse-sess",
         country: "US",
         duration_ms: 99,
       });
 
-      try {
-        await waitForCondition(
-          () => receivedEvents.some((e) => e.data?.event_id === id),
-          15_000,
-        );
-      } catch {
-        // Timing-dependent — connecting without errors is the minimum bar.
-      }
+      await waitForCondition(
+        () => receivedEvents.some((e) => e.data?.event_id === id),
+        15_000,
+      );
+
+      const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
+      expect(matchedEvent).toBeDefined();
+      expect(matchedEvent?.data.user_id).toBe("public-user");
+
+      unsub();
+      stream.close();
+    });
+
+    it("receives events after insert (authenticated via ?token=)", async () => {
+      const whAuth = dataClient();
+      const receivedEvents: any[] = [];
+      const id = testId();
+
+      // The SDK should automatically append the JWT as ?token= here
+      const stream = whAuth.from("clicks").stream({ transport: "sse" });
+      const unsub = stream.subscribe({
+        initial: (result) => console.log("Initial SSE result:", result),
+        next: (event) => receivedEvents.push(event),
+        status: (status) => console.log("SSE status:", status),
+        error: (err) => console.error("SSE error:", err),
+      });
+
+      await new Promise((r) => setTimeout(r, 1000));
+
+      await whAuth.from("clicks").insert({
+        event_id: id,
+        page: "/sse-auth-test",
+        user_id: "auth-user",
+        session_id: "sse-sess",
+        country: "US",
+        duration_ms: 99,
+      });
+
+      await waitForCondition(
+        () => receivedEvents.some((e) => e.data?.event_id === id),
+        15_000,
+      );
+
+      const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
+      expect(matchedEvent).toBeDefined();
+      expect(matchedEvent?.data.user_id).toBe("auth-user");
 
       unsub();
       stream.close();
@@ -47,34 +113,75 @@ describe("Streaming", () => {
   });
 
   describe("WebSocket", () => {
-    it("receives events after insert", async () => {
-      const wh = dataClient();
+    // TODO: re-enable after #172 merged
+    it.skip("receives events after insert (public/anon)", async () => {
+      const whPublic = publicClient();
+      const whAuth = dataClient();
       const receivedEvents: any[] = [];
       const id = testId();
 
-      const stream = wh.from("events").stream({ transport: "ws" });
+      const stream = whPublic.from("events").stream({ transport: "ws" });
       const unsub = stream.subscribe({
+        initial: (result) => console.log("WS stream initial:", result),
         next: (event) => receivedEvents.push(event),
-        status: () => {},
+        status: (status) => console.log("WS stream status:", status),
+        error: (err) => console.error("WS stream error:", err),
       });
 
-      await new Promise((r) => setTimeout(r, 1000));
+      // Give the WS connection a solid moment to handshake
+      await new Promise((r) => setTimeout(r, 3000));
 
-      await wh.from("events").insert({
+      await whAuth.from("events").insert({
         event_id: id,
-        type: "ws_test",
+        type: "ws_public_test",
         user_id: "ws-user",
         source: "test",
       });
 
-      try {
-        await waitForCondition(
-          () => receivedEvents.some((e) => e.data?.event_id === id),
-          15_000,
-        );
-      } catch {
-        // Timing-dependent — connecting without errors is the minimum bar.
-      }
+      await waitForCondition(
+        () => receivedEvents.some((e) => e.data?.event_id === id),
+        15_000,
+      );
+
+      const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
+      expect(matchedEvent).toBeDefined();
+      expect(matchedEvent?.data.user_id).toBe("ws-user");
+
+      unsub();
+      stream.close();
+    });
+
+    it("receives events after insert (authenticated via ?token=)", async () => {
+      const whAuth = dataClient();
+      const receivedEvents: any[] = [];
+      const id = testId();
+
+      const stream = whAuth.from("events").stream({ transport: "ws" });
+      const unsub = stream.subscribe({
+        initial: (result) => console.log("Initial WS result:", result),
+        next: (event) => receivedEvents.push(event),
+        status: (status) => console.log("WS status:", status),
+        error: (err) => console.error("WS error:", err),
+      });
+
+      // Give the WS connection a solid moment to handshake
+      await new Promise((r) => setTimeout(r, 3000));
+
+      await whAuth.from("events").insert({
+        event_id: id,
+        type: "ws_auth_test",
+        user_id: "ws-auth-user",
+        source: "test",
+      });
+
+      await waitForCondition(
+        () => receivedEvents.some((e) => e.data?.event_id === id),
+        15_000,
+      );
+
+      const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
+      expect(matchedEvent).toBeDefined();
+      expect(matchedEvent?.data.user_id).toBe("ws-auth-user");
 
       unsub();
       stream.close();

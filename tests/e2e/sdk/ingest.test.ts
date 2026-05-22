@@ -297,16 +297,23 @@ describe("Ingest", () => {
         clicks: {
           ...((currentPolicyRes.data as any).tables.clicks || {}),
           insert: {
+            // We MUST override the `*` wildcard policy as well because WaveHouse
+            // grants access if ANY matching role allows it, and the setup script
+            // defaults `*` to allow everything.
+            "*": {
+              allow_columns: ["*"],
+              check: { country: { _eq: "US" } }
+            },
             viewer: {
               allow_columns: ["*"],
-              check: { country: "US" }
+              check: { country: { _eq: "US" } }
             }
           }
         }
       }
     });
 
-    // 1. Should reject if we explicitly send country=GB
+    // Reject if we explicitly send country=GB
     const badRes = await wh.from("clicks").insert({
       page: "/policy-check",
       user_id: "u-policy",
@@ -314,11 +321,8 @@ describe("Ingest", () => {
       event_id: testId(),
       country: "GB"
     });
-    // TODO: would expect this to fail I think, but its succeeding, need to re-enable test and investigate
-    console.error(badRes);
-    // expect(badRes.error).not.toBeNull();
-    // log the error for debugging
-    // expect(badRes.error!.status).toBe(403);
+    expect(badRes.error).not.toBeNull();
+    expect(badRes.error!.status).toBe(403);
 
     // 2. Should auto-inject country=US if we omit it entirely
     const autoId = testId();

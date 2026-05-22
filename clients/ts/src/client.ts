@@ -170,6 +170,7 @@ export class WaveHouseClient<DB extends Database = Database> {
       baseURL: this._ctx.baseURL,
       table,
       since: opts?.since,
+      auth: this._ctx.auth
     });
     const controller = new StreamController<T>(transport);
     if (opts?.signal) controller.attachSignal(opts.signal);
