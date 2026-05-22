@@ -372,7 +372,8 @@ func TestEvaluate_ServiceRoleTreatedLikeAdmin(t *testing.T) {
 // pairs with TestValidate_RejectsEmptyRoleKey: even if a policy with an
 // empty-string role key reaches the engine (e.g. loaded from KV, written
 // before the validation existed), an empty/absent role must NOT match it and
-// must fail closed. Only "*" or admin/service may authorize a roleless request.
+// must fail closed. Only admin/service or a configured default_role may
+// authorize a roleless request — the "*" any-role wildcard was removed.
 func TestEvaluate_EmptyRoleDoesNotMatchEmptyKey(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
