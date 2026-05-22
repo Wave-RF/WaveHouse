@@ -166,3 +166,18 @@ func TestStore_MemoryStore_Basics(t *testing.T) {
 	store := NewMemoryStore(p)
 	assert.Equal(t, p, store.Get())
 }
+
+func TestStore_HandleDelete_DefaultNils(t *testing.T) {
+	t.Parallel()
+	s := NewMemoryStore(simplePolicy())
+	s.handleDelete()
+	assert.Nil(t, s.Get(), "without failClosed, a KV delete nils the cache")
+}
+
+func TestStore_HandleDelete_FailClosedRetains(t *testing.T) {
+	t.Parallel()
+	s := NewMemoryStore(simplePolicy())
+	s.SetFailClosed(true)
+	s.handleDelete()
+	assert.NotNil(t, s.Get(), "failClosed must retain the last-known policy on a KV delete")
+}

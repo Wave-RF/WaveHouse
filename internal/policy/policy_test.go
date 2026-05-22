@@ -447,3 +447,126 @@ func TestResolveFilters_LtOperator(t *testing.T) {
 	assert.Contains(t, clauses[0], "price < ?")
 	assert.Equal(t, "100", params[0])
 }
+
+func TestResolveRole(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		defaultRole string
+		role        string
+		want        string
+	}{
+		{"non-empty role unchanged", "viewer", "editor", "editor"},
+		{"empty role -> default", "viewer", "", "viewer"},
+		{"empty role, no default -> empty", "", "", ""},
+		{"empty role, admin default refused", "admin", "", ""},
+		{"empty role, service default refused", "service", "", ""},
+		{"empty role, ADMIN (case) refused", "ADMIN", "", ""},
+		{"empty role, padded admin refused", "  admin  ", "", ""},
+		{"non-empty role ignores admin default", "admin", "viewer", "viewer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, ResolveRole(&Policy{DefaultRole: tt.defaultRole}, tt.role))
+		})
+	}
+}
+
+func TestResolveRole_NilPolicy(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "editor", ResolveRole(nil, "editor"))
+	assert.Equal(t, "", ResolveRole(nil, ""))
+}
+
+// TestEvaluate_DefaultRoleSubstitution: a roleless request is evaluated as the
+// configured default_role and gets that role's permissions.
+func TestEvaluate_DefaultRoleSubstitution(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		DefaultRole: "viewer",
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "", "clicks", "select", nil)
+	assert.True(t, perms.Allowed, "empty role should resolve to default_role viewer")
+	assert.Equal(t, []string{"page"}, perms.AllowColumns)
+}
+
+// TestEvaluate_DefaultRoleUnset_RolelessDenied: with no default_role a roleless
+// request still fails closed (preserves the #159/#172 guarantee).
+func TestEvaluate_DefaultRoleUnset_RolelessDenied(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "", "clicks", "select", nil)
+	assert.False(t, perms.Allowed, "no default_role → roleless request denied")
+}
+
+// TestEvaluate_DefaultRole_DoesNotClobberRealRole: a non-empty role is used as
+// itself, never replaced by default_role.
+func TestEvaluate_DefaultRole_DoesNotClobberRealRole(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		DefaultRole: "viewer",
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}},
+					"editor": {AllowColumns: []string{"page", "secret"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "editor", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+	assert.Equal(t, []string{"page", "secret"}, perms.AllowColumns, "editor keeps its own perms")
+}
+
+// TestEvaluate_DefaultRoleAdmin_NotEscalated: even if a policy with a privileged
+// default_role reaches the engine (e.g. hand-edited in KV), ResolveRole refuses
+// it so a roleless request can't become admin.
+func TestEvaluate_DefaultRoleAdmin_NotEscalated(t *testing.T) {
+	t.Parallel()
+	p := &Policy{
+		DefaultRole: "admin",
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "", "clicks", "select", nil)
+	assert.False(t, perms.Allowed, "default_role=admin must not escalate a roleless request")
+}
+
+func TestValidate_RejectsPrivilegedDefaultRole(t *testing.T) {
+	t.Parallel()
+	for _, dr := range []string{"admin", "service", "ADMIN", "Service", "  admin  "} {
+		t.Run(dr, func(t *testing.T) {
+			t.Parallel()
+			err := Validate(&Policy{DefaultRole: dr, Tables: map[string]TablePolicy{}})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "default_role")
+		})
+	}
+}
+
+func TestValidate_AllowsNormalDefaultRole(t *testing.T) {
+	t.Parallel()
+	assert.NoError(t, Validate(&Policy{DefaultRole: "viewer", Tables: map[string]TablePolicy{}}))
+}

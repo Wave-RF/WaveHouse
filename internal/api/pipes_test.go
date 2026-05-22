@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
@@ -142,6 +143,47 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"pipe restricted to %v must reject a request with no role in context", []string{"admin"})
+	assertJSONErrorResponse(t, w)
+}
+
+// TestPipesHandler_Execute_DefaultRoleGrantsAccess: a tokenless request (no role
+// in context) resolves to the policy default_role, which is in AllowedRoles.
+func TestPipesHandler_Execute_DefaultRoleGrantsAccess(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"viewer"}},
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{DefaultRole: "viewer"})
+
+	w := httptest.NewRecorder()
+	// No role in context (tokenless / JWT without role claim).
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
+
+	safeHandle(h.Execute, w, r)
+
+	assert.NotEqual(t, http.StatusForbidden, w.Code,
+		"empty role should resolve to default_role 'viewer', which is in AllowedRoles")
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+// TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied: the default_role
+// is still gated by AllowedRoles — a default that isn't listed is denied.
+func TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "admin_report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"admin"}},
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{DefaultRole: "viewer"})
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/admin_report/execute", "admin_report", nil)
+
+	safeHandle(h.Execute, w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"default_role 'viewer' is not in AllowedRoles [admin] → denied")
 	assertJSONErrorResponse(t, w)
 }
 
@@ -283,5 +325,64 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 
 	// Should pass param binding — will fail at executeQuery (nil conn).
 	assert.NotEqual(t, http.StatusBadRequest, w.Code)
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+// TestPipesHandler_Execute_UnrestrictedPipe_PublicAccess_TokenlessDenied: under
+// public access, a pipe with no allowed_roles is NOT public — it still requires a
+// token, so public access is opt-in only (via "*" or a default_role grant).
+func TestPipesHandler_Execute_UnrestrictedPipe_PublicAccess_TokenlessDenied(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"}, // no AllowedRoles
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+	h.AllowAnonymous = func() bool { return true }
+
+	w := httptest.NewRecorder()
+	// No claims in context = tokenless under public access.
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
+
+	safeHandle(h.Execute, w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"an unrestricted pipe must reject tokenless requests when public access is on")
+	assertJSONErrorResponse(t, w)
+}
+
+func TestPipesHandler_Execute_UnrestrictedPipe_PublicAccess_AuthenticatedAllowed(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
+	)
+	h := NewPipesHandler(store, nil, nil, 0)
+	h.AllowAnonymous = func() bool { return true }
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
+	// Authenticated: claims present (even with no role claim).
+	r = r.WithContext(context.WithValue(r.Context(), ContextKeyClaims, jwt.MapClaims{}))
+
+	safeHandle(h.Execute, w, r)
+
+	assert.NotEqual(t, http.StatusForbidden, w.Code,
+		"an authenticated caller may run an unrestricted pipe")
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+func TestPipesHandler_Execute_UnrestrictedPipe_PublicAccessOff_Unchanged(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
+	)
+	h := NewPipesHandler(store, nil, nil, 0) // AllowAnonymous nil = public access off
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
+
+	safeHandle(h.Execute, w, r)
+
+	assert.NotEqual(t, http.StatusForbidden, w.Code,
+		"with public access off, an unrestricted pipe is reachable as before")
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }

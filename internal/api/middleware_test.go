@@ -396,3 +396,90 @@ func TestJWTAuthMiddleware_NoHeader(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Contains(t, rec.Body.String(), "missing authorization")
 }
+
+func TestJWTAuthMiddleware_PublicAccess_MissingTokenPassesThrough(t *testing.T) {
+	t.Parallel()
+	var called bool
+	var capturedRole string
+	mw := JWTAuthMiddleware(AuthConfig{
+		Enabled:        true,
+		JWTSecret:      testutil.TestJWTSecret,
+		AllowAnonymous: func() bool { return true },
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		capturedRole = RoleFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called, "tokenless request should reach the handler under PublicAccess")
+	assert.Empty(t, capturedRole, "tokenless request should carry no role")
+}
+
+// TestJWTAuthMiddleware_PublicAccess_InvalidTokenStill401 pins the anti-downgrade
+// property: PublicAccess only lets an ABSENT token through. A present-but-invalid
+// token must still 401, so an attacker can't become "public" with garbage.
+func TestJWTAuthMiddleware_PublicAccess_InvalidTokenStill401(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		set  func(t *testing.T, r *http.Request)
+	}{
+		{"garbage bearer", func(_ *testing.T, r *http.Request) {
+			r.Header.Set("Authorization", "Bearer not.a.jwt")
+		}},
+		{"expired", func(t *testing.T, r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+testutil.MakeExpiredJWT(t, map[string]any{"role": "viewer"}))
+		}},
+		{"garbage query param", func(_ *testing.T, r *http.Request) {
+			r.URL.RawQuery = "token=not.a.jwt"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			mw := JWTAuthMiddleware(AuthConfig{Enabled: true, JWTSecret: testutil.TestJWTSecret, AllowAnonymous: func() bool { return true }})
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+			tc.set(t, req)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, "invalid token must 401 even under PublicAccess")
+			assert.False(t, called, "handler must not be reached for an invalid token")
+		})
+	}
+}
+
+func TestJWTAuthMiddleware_PublicAccess_ValidTokenStillResolvesRole(t *testing.T) {
+	t.Parallel()
+	token := testutil.MakeJWT(t, map[string]any{"role": "editor"})
+	var capturedRole string
+	mw := JWTAuthMiddleware(AuthConfig{
+		Enabled:        true,
+		JWTSecret:      testutil.TestJWTSecret,
+		RoleClaim:      "role",
+		AllowAnonymous: func() bool { return true },
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRole = RoleFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "editor", capturedRole, "a valid token still resolves its role under PublicAccess")
+}
