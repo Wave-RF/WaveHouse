@@ -346,14 +346,16 @@ func TestBuild_TableNameWithBacktick(t *testing.T) {
 func TestBuild_InvalidColumns(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		sq   *StructuredQuery
+		name    string
+		sq      *StructuredQuery
+		wantErr string
 	}{
 		{
 			name: "invalid aggregation column",
 			sq: &StructuredQuery{
 				Aggregations: []Aggregation{{Fn: "sum", Column: "nonexistent", Alias: "total"}},
 			},
+			wantErr: "unknown column",
 		},
 		{
 			name: "invalid order by column",
@@ -362,6 +364,7 @@ func TestBuild_InvalidColumns(t *testing.T) {
 				// Aliases are allowed, but they must still be valid identifiers
 				OrderBy: []OrderClause{{Column: "invalid;--", Dir: "asc"}},
 			},
+			wantErr: "invalid order column",
 		},
 		{
 			name: "invalid time range column",
@@ -369,6 +372,7 @@ func TestBuild_InvalidColumns(t *testing.T) {
 				Columns:   []string{"page"},
 				TimeRange: &TimeRange{Column: "nonexistent", Since: "2024-01-01T00:00:00Z"},
 			},
+			wantErr: "unknown column",
 		},
 	}
 	for _, tt := range tests {
@@ -377,6 +381,7 @@ func TestBuild_InvalidColumns(t *testing.T) {
 			t.Parallel()
 			_, err := Build("clicks", tt.sq, testSchema(), 0)
 			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }
