@@ -33,8 +33,8 @@ func (vm *VersionManager) GetCacheKey(queryHash, table, scope string) string {
 // Returns 0 if it has never been set.
 func (vm *VersionManager) GetVersion(versionKey string) uint64 {
 	vm.mu.RLock()
+	defer vm.mu.RUnlock()
 	version := vm.versions[versionKey] // Go maps safely return the zero-value (0) if the key doesn't exist
-	vm.mu.RUnlock()
 
 	return version
 }
@@ -43,6 +43,6 @@ func (vm *VersionManager) GetVersion(versionKey string) uint64 {
 func (vm *VersionManager) IncrementVersion(versionKey string) {
 	// TODO: NATS Core broadcasting to keep keys in sync? Or just use L2 instead (just means round trip flights for versions w/o pipelines etc)
 	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	vm.versions[versionKey]++
-	vm.mu.Unlock()
 }

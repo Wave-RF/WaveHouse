@@ -347,7 +347,7 @@ func run() int {
 		queryScheme = "http"
 	}
 	queryEndpoint := fmt.Sprintf("%s://%s", queryScheme, net.JoinHostPort(queryHost, cfg.ClickHouse.HTTPPort))
-	queryHandler := api.NewQueryHandler(queryEndpoint, cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database)
+	queryHandler := api.NewQueryHandler(queryEndpoint, cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database, cfg.ClickHouse.QueryTimeout)
 
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
@@ -367,8 +367,8 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, chConn, cache, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, time.Duration(cfg.Cache.DefaultTTL)*time.Second, registry, policyStore, cfg.Cache.TimestampBucketSeconds),
+		Pipes:           api.NewPipesHandler(pipesStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
 			Enabled:   cfg.Auth.Enabled,
 			JWTSecret: cfg.Auth.JWTSecret,

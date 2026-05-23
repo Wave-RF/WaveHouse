@@ -17,30 +17,30 @@ import (
 
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
-	CHConn      driver.Conn
-	Cache       cache.Cache
-	DefaultTTL  time.Duration
-	Registry    *discovery.SchemaRegistry
-	PolicyStore *policy.Store
-	BucketSecs  int
-	sf          singleflight.Group
+	CHConn          driver.Conn
+	Cache           cache.Cache
+	Registry        *discovery.SchemaRegistry
+	PolicyStore     *policy.Store
+	BucketSecs      int
+	sf              singleflight.Group
+	maxQueryTimeout time.Duration
 }
 
 func NewStructuredQueryHandler(
 	conn driver.Conn,
 	c cache.Cache,
-	defaultTTL time.Duration,
 	registry *discovery.SchemaRegistry,
 	policyStore *policy.Store,
 	bucketSecs int,
+	queryTimeout time.Duration,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
-		CHConn:      conn,
-		Cache:       c,
-		DefaultTTL:  defaultTTL,
-		Registry:    registry,
-		PolicyStore: policyStore,
-		BucketSecs:  bucketSecs,
+		CHConn:          conn,
+		Cache:           c,
+		Registry:        registry,
+		PolicyStore:     policyStore,
+		BucketSecs:      bucketSecs,
+		maxQueryTimeout: queryTimeout,
 	}
 }
 
@@ -108,10 +108,6 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// Cache key.
 	cacheKey := queryCacheKey(result.SQL, result.Params)
-	ttl := h.DefaultTTL
-	if sq.CacheTTL != nil && *sq.CacheTTL > 0 {
-		ttl = time.Duration(*sq.CacheTTL) * time.Second
-	}
 
 	// TODO: impl scope
 	scope := ""
@@ -129,23 +125,30 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		timeout := 30 * time.Second
+		timeout := h.maxQueryTimeout
 		if perms.MaxExecutionTimeMs > 0 {
-			timeout = time.Duration(perms.MaxExecutionTimeMs) * time.Millisecond
+			timeout = min(time.Duration(perms.MaxExecutionTimeMs)*time.Millisecond, timeout)
 		}
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
+		start := time.Now()
+
 		rows, err := executeCHQuery(queryCtx, h.CHConn, result.SQL, result.Params)
+		queryDuration := time.Since(start)
 		if err != nil {
+			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
 
 		data, err := json.Marshal(rows)
 		if err != nil {
+			// TODO: eventually we want CSV support etc
 			return nil, err
 		}
+
+		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
 			_ = h.Cache.Set(r.Context(), cacheKey, safeTableName, scope, data, ttl)

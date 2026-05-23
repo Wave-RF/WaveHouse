@@ -16,15 +16,15 @@ import (
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store      *pipes.Store
-	CHConn     driver.Conn
-	Cache      cache.Cache
-	DefaultTTL time.Duration
-	sf         singleflight.Group
+	Store           *pipes.Store
+	CHConn          driver.Conn
+	Cache           cache.Cache
+	sf              singleflight.Group
+	maxQueryTimeout time.Duration
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, defaultTTL time.Duration) *PipesHandler {
-	return &PipesHandler{Store: store, CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
+func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
+	return &PipesHandler{Store: store, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
 }
 
 // List returns all named queries (admin endpoint).
@@ -141,21 +141,28 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 		defer cancel()
 
+		start := time.Now()
+
 		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
+		queryDuration := time.Since(start)
 		if err != nil {
+			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
 
 		data, err := json.Marshal(rows)
 		if err != nil {
+			// TODO: eventually we want CSV support etc
 			return nil, err
 		}
 
+		ttl := cache.QueryTimeToTTL(queryDuration)
+
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, h.DefaultTTL)
+			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, ttl)
 		}
 		return data, nil
 	})

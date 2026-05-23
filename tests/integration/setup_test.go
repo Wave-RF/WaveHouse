@@ -316,7 +316,7 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		// /v1/admin/query proxies straight to ClickHouse's HTTP interface,
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
-		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase),
+		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
 		SSE:    api.NewSSEHandler(hub, js),
 		WS:     api.NewWSHandler(hub, js, nil),
 		Health: api.NewHealthHandler(ch.conn),

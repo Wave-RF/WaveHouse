@@ -38,8 +38,20 @@ func QueryTimeToTTL(queryTime time.Duration) time.Duration {
 	// need more real-world data/metrics in order to better refine this, and likely an override option for easy local testing per-deployment
 	// for now its just a made up equation
 
-	// if we want 50ms --> 5 minutes, we multiply by 6000
-	return queryTime * 6000
+	// Base multiplier: 1000x (e.g., 50ms -> 50s; 1s -> ~16 mins)
+	ttl := queryTime * 1000
+
+	const minTTL = 10 * time.Second
+	const maxTTL = 1 * time.Hour
+
+	if ttl < minTTL {
+		return minTTL
+	}
+	if ttl > maxTTL {
+		return maxTTL
+	}
+
+	return ttl
 }
 
 func generateInvalidationKeys(table string, scopes map[string]struct{}) []string {
