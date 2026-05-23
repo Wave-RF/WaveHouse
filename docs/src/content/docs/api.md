@@ -265,8 +265,7 @@ Executes a type-safe structured query against a table. The query AST is validate
     "column": "received_timestamp",
     "since": "1h",
     "until": ""
-  },
-  "cache_ttl": 60
+  }
 }
 ```
 
@@ -279,7 +278,6 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
-| `cache_ttl` | int | No | Override default cache TTL (seconds). |
 
 **Response:**
 

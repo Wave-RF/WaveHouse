@@ -9,6 +9,7 @@ import (
 
 // VersionManager handles the safe tracking of table + scope versioning.
 // It uses a standard map because versions must NEVER be evicted under memory pressure.
+// TODO: this potentially could be bad/dangerous with a low amount of RAM available/high memory pressure AND a TON of tables/scopes per table... will need to work out eventually
 type VersionManager struct {
 	mu       sync.RWMutex
 	versions map[string]uint64

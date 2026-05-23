@@ -31,10 +31,10 @@ func (l *LocalCache) Get(_ context.Context, key string, namespace string, scope 
 	cacheKey := l.versionManager.GetCacheKey(key, namespace, scope)
 
 	val, foundVal := l.cache.Get(cacheKey)
-	remaining, foundRemaining := l.cache.GetTTL(cacheKey)
-	if !foundVal || !foundRemaining {
+	if !foundVal {
 		return nil, 0, nil
 	}
+	remaining, _ := l.cache.GetTTL(cacheKey)
 
 	return val, remaining, nil
 }

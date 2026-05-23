@@ -59,6 +59,9 @@ func generateInvalidationKeys(table string, scopes map[string]struct{}) []string
 
 	keys = append(keys, table) // always include the global table as invalidated
 	for scope := range scopes {
+		if scope == "" {
+			continue // we already manually add this case, so skip it here so we don't double invalidate
+		}
 		keys = append(keys, generateVersionKey(table, scope))
 	}
 	return keys

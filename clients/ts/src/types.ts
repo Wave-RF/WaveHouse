@@ -77,7 +77,6 @@ export interface StructuredQuery {
   order_by?: OrderClause[];
   limit?: number;
   time_range?: TimeRange;
-  cache_ttl?: number;
 }
 
 export interface Aggregation {

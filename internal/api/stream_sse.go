@@ -40,11 +40,17 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
 		return
 	}
-	topic := "ingest." + query.SafeEncodeNATS(table)
 
 	// Resolve stream permissions for this request.
 	role := RoleFromContext(r.Context())
 	claims, _ := ClaimsFromContext(r.Context())
+
+	// TODO: impl scope
+	scope := ""
+	topic := "ingest." + query.SafeEncodeNATS(table)
+	if scope != "" {
+		topic += query.SafeEncodeNATS(scope)
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

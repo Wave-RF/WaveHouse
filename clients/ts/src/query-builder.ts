@@ -213,7 +213,6 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     }
     if (effectiveLimit != null) ast.limit = effectiveLimit;
     if (this._state.timeRange) ast.time_range = this._state.timeRange;
-    if (this._state.cacheTTL != null) ast.cache_ttl = this._state.cacheTTL;
     return ast;
   }
 
