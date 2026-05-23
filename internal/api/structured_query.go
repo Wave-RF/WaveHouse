@@ -18,7 +18,7 @@ import (
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
 	CHConn      driver.Conn
-	Cache       *cache.TieredCache
+	Cache       cache.Cache
 	DefaultTTL  time.Duration
 	Registry    *discovery.SchemaRegistry
 	PolicyStore *policy.Store
@@ -28,7 +28,7 @@ type StructuredQueryHandler struct {
 
 func NewStructuredQueryHandler(
 	conn driver.Conn,
-	c *cache.TieredCache,
+	c cache.Cache,
 	defaultTTL time.Duration,
 	registry *discovery.SchemaRegistry,
 	policyStore *policy.Store,
@@ -113,12 +113,16 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		ttl = time.Duration(*sq.CacheTTL) * time.Second
 	}
 
+	// TODO: impl scope
+	scope := ""
+	safeTableName := query.SafeEncodeNATS(table)
+
 	// Try cache.
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
+		if data, _, err := h.Cache.GetQuery(r.Context(), cacheKey, safeTableName, scope); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data)
+			_, _ = w.Write(data) //nolint:gosec // G705 XSS only JSON
 			return
 		}
 	}
@@ -144,7 +148,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, ttl)
+			_ = h.Cache.SetQuery(r.Context(), cacheKey, safeTableName, scope, data, ttl)
 		}
 		return data, nil
 	})

@@ -32,6 +32,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -161,9 +162,15 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
+	cache, err := cache.NewLocal(1 << 30) // 1 GB
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cache initialization failed: %v\n", err)
+	}
+
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
+		cache,
 		ch.nativeAddr(),
 		ch.httpPort,
 		"http",

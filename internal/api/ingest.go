@@ -128,9 +128,13 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
+	scope := ""
+
 	now := time.Now().UTC()
 	evt := ingest.EventMessage{
 		TableName:         table,
+		Scope:             scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
 		Data:              data,
 	}
@@ -141,7 +145,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject := "ingest." + query.EncodeTable(table)
+	subject := "ingest." + query.SafeEncodeNATS(table)
+	if scope != "" {
+		subject += "." + query.SafeEncodeNATS(scope)
+	}
+
+	slog.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
 			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)

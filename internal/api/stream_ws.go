@@ -88,7 +88,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		ch := make(chan []byte, 64)
 		subs[table] = ch
-		h.Hub.Subscribe("ingest."+query.EncodeTable(table), ch)
+		h.Hub.Subscribe("ingest."+query.SafeEncodeNATS(table), ch)
 
 		// Pump per-table channel into merged channel, tagging each message with
 		// the subscribing table so the writer keeps the subscription context.
@@ -111,7 +111,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(subs, table)
 		mu.Unlock()
-		h.Hub.Unsubscribe("ingest."+query.EncodeTable(table), ch) // closes ch, which stops the pump goroutine
+		h.Hub.Unsubscribe("ingest."+query.SafeEncodeNATS(table), ch) // closes ch, which stops the pump goroutine
 	}
 
 	unsubscribeAll := func() {
@@ -136,7 +136,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// high-precision client timestamps.
 		if since := r.URL.Query().Get("since"); since != "" {
 			if ts, parseErr := time.Parse(time.RFC3339Nano, since); parseErr == nil && h.JS != nil {
-				h.replayFromNATS(ctx, ts, "ingest."+query.EncodeTable(table), func(data []byte) bool {
+				h.replayFromNATS(ctx, ts, "ingest."+query.SafeEncodeNATS(table), func(data []byte) bool {
 					out := h.applyStreamPolicy(data, role, map[string]any(claims), table)
 					if out == nil {
 						return true
@@ -216,6 +216,7 @@ type wsOutbound struct {
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
 // The result is wrapped in a table envelope: {"table":"...","data":{...}}.
 func (h *WSHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any, table string) []byte {
+	// Scope should be applied before getting here, so we ignore it here
 	var evt ingest.EventMessage
 	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
 		if !json.Valid(raw) {

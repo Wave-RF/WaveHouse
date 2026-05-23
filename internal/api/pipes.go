@@ -17,12 +17,12 @@ import (
 type PipesHandler struct {
 	Store      *pipes.Store
 	CHConn     driver.Conn
-	Cache      *cache.TieredCache
+	Cache      cache.Cache
 	DefaultTTL time.Duration
 	sf         singleflight.Group
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *PipesHandler {
+func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, defaultTTL time.Duration) *PipesHandler {
 	return &PipesHandler{Store: store, CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
 }
 
@@ -126,7 +126,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// Cache.
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
+		if data, _, err := h.Cache.GetPipe(r.Context(), cacheKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -150,7 +150,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
+			_ = h.Cache.SetPipe(r.Context(), cacheKey, data, h.DefaultTTL)
 		}
 		return data, nil
 	})

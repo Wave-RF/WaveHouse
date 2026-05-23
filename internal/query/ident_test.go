@@ -25,7 +25,7 @@ func TestEncodeTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := EncodeTable(tt.raw)
+			got := SafeEncodeNATS(tt.raw)
 			assert.Equal(t, tt.expected, got)
 		})
 	}
@@ -48,7 +48,7 @@ func TestDecodeTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := DecodeTable(tt.safe)
+			got, err := SafeDecodeNATS(tt.safe)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -72,8 +72,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	for _, raw := range rawTables {
 		t.Run(raw, func(t *testing.T) {
 			t.Parallel()
-			encoded := EncodeTable(raw)
-			decoded, err := DecodeTable(encoded)
+			encoded := SafeEncodeNATS(raw)
+			decoded, err := SafeDecodeNATS(encoded)
 			require.NoError(t, err)
 			assert.Equal(t, raw, decoded)
 		})
