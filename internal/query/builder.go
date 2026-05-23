@@ -86,7 +86,7 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, buck
 	// WHERE clause.
 	whereParts, whereParams, err := buildWhere(q.Filters, q.TimeRange, bucketSeconds)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building WHERE clause: %w", err)
 	}
 	params = append(params, whereParams...)
 	if len(whereParts) > 0 {
@@ -174,7 +174,7 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 	for _, f := range filters {
 		clause, p, err := filterToSQL(f)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("filter on column %q: %w", f.Column, err)
 		}
 		if clause == "" {
 			// How did I get here...?
