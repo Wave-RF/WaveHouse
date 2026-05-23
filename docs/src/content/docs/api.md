@@ -243,7 +243,7 @@ curl -X POST http://localhost:8080/v1/admin/query \
 
 ---
 
-### `POST /v1/query/?table={table}` — Structured Query
+### `POST /v1/query?table={table}` — Structured Query
 
 Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
 
