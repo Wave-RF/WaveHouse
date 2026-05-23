@@ -96,3 +96,36 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 		assert.Zero(t, ttl, "expected zero remaining TTL for key without TTL")
 	}
 }
+
+func TestLocalCache_InvalidateCache(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+
+	// Set value
+	err = c.Set(ctx, "queryHash", "users", "org_1", []byte("my_data"), 10*time.Second)
+	assert.NoError(t, err)
+	c.Wait()
+	time.Sleep(10 * time.Millisecond) // wait for admission
+
+	// Ensure readable
+	val, _, err := c.Get(ctx, "queryHash", "users", "org_1")
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("my_data"), val)
+
+	// Invalidate cache for the scope
+	scopes := map[string]struct{}{"org_1": {}}
+	count, err := c.InvalidateCache(ctx, "users", scopes)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(2), count) // Returns len(keys): "users" and "users.org_1"
+
+	// Try fetching again
+	// Since the underlying cache key includes the version (which was just incremented), this should result in a cache miss
+	valAfter, ttlAfter, errAfter := c.Get(ctx, "queryHash", "users", "org_1")
+	assert.NoError(t, errAfter)
+	assert.Nil(t, valAfter)
+	assert.Zero(t, ttlAfter)
+}
