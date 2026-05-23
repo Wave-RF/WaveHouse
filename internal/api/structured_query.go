@@ -119,7 +119,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// Try cache.
 	if h.Cache != nil {
-		if data, _, err := h.Cache.GetQuery(r.Context(), cacheKey, safeTableName, scope); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safeTableName, scope); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data) //nolint:gosec // G705 XSS only JSON
@@ -148,7 +148,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.SetQuery(r.Context(), cacheKey, safeTableName, scope, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, safeTableName, scope, data, ttl)
 		}
 		return data, nil
 	})

@@ -9,6 +9,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
@@ -123,10 +124,14 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: scope impl
+	scope := ""
+	safePipeName := query.SafeEncodeNATS(name)
+
 	// Cache.
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.GetPipe(r.Context(), cacheKey); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safePipeName, scope); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -150,7 +155,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.SetPipe(r.Context(), cacheKey, data, h.DefaultTTL)
+			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, h.DefaultTTL)
 		}
 		return data, nil
 	})

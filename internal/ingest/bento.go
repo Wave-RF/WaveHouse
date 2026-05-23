@@ -323,9 +323,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	}
 
 	// TODO: is this the only place we need to invalidate the cache? How do partial failures work?
-	// TODO: how do we get/pass the cache to this...? like Cache       *cache.TieredCache ?
 	// TODO: what context do we use here? reqCtx? parentCtx? or a new one?
-	// Cache.InvalidateCache(parentCtx, tableName, allScopes)
 	if c.cache != nil {
 		// Detached context so cancellation doesn't abort invalidation
 		invCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(reqCtx))

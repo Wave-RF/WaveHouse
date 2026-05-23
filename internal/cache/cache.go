@@ -9,15 +9,13 @@ import (
 // Cache provides key-value storage with TTL support.
 type Cache interface {
 	// Get retrieves a value and its remaining TTL. Returns nil, 0, nil on miss.
-	GetQuery(ctx context.Context, key string, table string, scope string) ([]byte, time.Duration, error)
+	// key is the hashed cache key value, namespace is the table or pipe, and scope applies roles
+	Get(ctx context.Context, key string, namespace string, scope string) ([]byte, time.Duration, error)
 
-	// Set stores a value with the given TTL.
 	// TODO: TTL should be set based on query execution time
-	SetQuery(ctx context.Context, key string, table string, scope string, value []byte, ttl time.Duration) error
-
-	GetPipe(ctx context.Context, key string) ([]byte, time.Duration, error)
-
-	SetPipe(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	// Set stores a value with the given TTL.
+	// key is the hashed cache key value, namespace is the table or pipe, and scope applies roles
+	Set(ctx context.Context, key string, namespace string, scope string, value []byte, ttl time.Duration) error
 
 	// TODO: option to prefetch pipes when invalidated?
 	// TODO: AST query builder needs to give us a deterministic key or bypass cache entirely
@@ -45,11 +43,9 @@ func QueryTimeToTTL(queryTime time.Duration) time.Duration {
 }
 
 func generateInvalidationKeys(table string, scopes map[string]struct{}) []string {
-	if len(scopes) == 0 {
-		return []string{table}
-	}
-
 	var keys []string
+
+	keys = append(keys, table) // always include the global table as invalidated
 	for scope := range scopes {
 		keys = append(keys, generateVersionKey(table, scope))
 	}
