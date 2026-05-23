@@ -131,12 +131,6 @@ func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
 			rawTable, err := query.DecodeTable(k)
 			if err == nil && rawTable == dlqSubject {
 				return true
-			} else {
-				if err != nil {
-					t.Logf("Failed to decode table name %q: %v", k, err)
-				} else {
-					t.Logf("Decoded table name %q does not match expected %q", rawTable, dlqSubject)
-				}
 			}
 		}
 		return false

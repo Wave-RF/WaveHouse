@@ -33,7 +33,14 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       );
     }
 
-    this._doConnect();
+    this._doConnect().catch((err) => {
+      this.onError?.({
+        status: 0,
+        code: "SSE_CONNECT_ERROR",
+        message: err instanceof Error ? err.message : String(err),
+        retryable: true,
+      });
+    });
   }
 
   disconnect(): void {

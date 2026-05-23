@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -37,7 +38,7 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
 
-	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table="+table, bytes.NewReader(data))
+	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table="+url.QueryEscape(table), bytes.NewReader(data))
 }
 
 func TestIngest_ValidPayload(t *testing.T) {

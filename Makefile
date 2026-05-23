@@ -197,8 +197,6 @@ dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveH
 	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
-	@echo "    Override config via env: e.g. $(CYAN)WH_AUTH_ENABLED=true WH_AUTH_DEV_MODE=true make dev$(RESET)"
-	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
 	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
 
 # Docs site dev/preview servers — long-running, blocking. Astro dev defaults

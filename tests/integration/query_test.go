@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +107,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			for _, id := range tt.rowIDs {
 				body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, id)
 				resp, err := http.Post(
-					e.server.URL+"/v1/ingest?table="+table,
+					e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
 					"application/json",
 					strings.NewReader(body),
 				)

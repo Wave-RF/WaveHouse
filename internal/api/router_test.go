@@ -249,6 +249,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
+			assert.Equal(t, tt.expect, rec.Code, "unexpected route status")
 			assert.NotEqual(t, http.StatusNotFound, rec.Code, "route should exist")
 			assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "method should be allowed")
 		})

@@ -8,10 +8,11 @@ describe("Streaming", () => {
   beforeAll(async () => {
     // Fetch the baseline policy to restore after tests finish
     const res = await admin.policy.get();
-    baselinePolicy = res.data;
+    baselinePolicy = structuredClone(res.data);
 
     // Configure the backend to assign the "anon" role to unauthenticated requests
-    const publicPolicy = { ...baselinePolicy, default_role: "anon" };
+    const publicPolicy = structuredClone(baselinePolicy);
+    publicPolicy.default_role = "anon";
 
     // Explicitly allow the 'anon' role to SELECT (stream) from these tables
     publicPolicy.tables.clicks.select = {

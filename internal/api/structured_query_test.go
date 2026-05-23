@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -20,9 +21,10 @@ import (
 
 func structuredQueryRequest(t *testing.T, table string, sq query.StructuredQuery) *http.Request {
 	t.Helper()
-	body, _ := json.Marshal(sq)
+	body, err := json.Marshal(sq)
+	require.NoError(t, err)
 
-	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table="+table, bytes.NewReader(body))
+	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table="+url.QueryEscape(table), bytes.NewReader(body))
 }
 
 func newStructuredQueryHandler() *StructuredQueryHandler {

@@ -84,7 +84,10 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, buck
 	sql := fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(selectParts, ", "), escapedTable)
 
 	// WHERE clause.
-	whereParts, whereParams := buildWhere(q.Filters, q.TimeRange, bucketSeconds)
+	whereParts, whereParams, err := buildWhere(q.Filters, q.TimeRange, bucketSeconds)
+	if err != nil {
+		return nil, err
+	}
 	params = append(params, whereParams...)
 	if len(whereParts) > 0 {
 		sql += " WHERE " + strings.Join(whereParts, " AND ")
@@ -164,16 +167,21 @@ func buildSelectParts(q *StructuredQuery) []string {
 	return parts
 }
 
-func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]string, []any) {
+func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]string, []any, error) {
 	var parts []string
 	var params []any
 
 	for _, f := range filters {
-		clause, p := filterToSQL(f)
-		if clause != "" {
-			parts = append(parts, clause)
-			params = append(params, p...)
+		clause, p, err := filterToSQL(f)
+		if err != nil {
+			return nil, nil, err
 		}
+		if clause == "" {
+			// How did I get here...?
+			return nil, nil, fmt.Errorf("empty WHERE clause for filter: %+v", f)
+		}
+		parts = append(parts, clause)
+		params = append(params, p...)
 	}
 
 	if timeRange != nil && timeRange.Column != "" && timeRange.Since != "" {
@@ -188,35 +196,35 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 		}
 	}
 
-	return parts, params
+	return parts, params, nil
 }
 
-func filterToSQL(f Filter) (string, []any) {
+func filterToSQL(f Filter) (string, []any, error) {
 	val := coerceFilterValue(f.Value)
 	switch strings.ToLower(f.Op) {
 	case "eq":
-		return f.Column + " = ?", []any{val}
+		return f.Column + " = ?", []any{val}, nil
 	case "neq":
-		return f.Column + " != ?", []any{val}
+		return f.Column + " != ?", []any{val}, nil
 	case "gt":
-		return f.Column + " > ?", []any{val}
+		return f.Column + " > ?", []any{val}, nil
 	case "gte":
-		return f.Column + " >= ?", []any{val}
+		return f.Column + " >= ?", []any{val}, nil
 	case "lt":
-		return f.Column + " < ?", []any{val}
+		return f.Column + " < ?", []any{val}, nil
 	case "lte":
-		return f.Column + " <= ?", []any{val}
+		return f.Column + " <= ?", []any{val}, nil
 	case "like":
-		return f.Column + " LIKE ?", []any{val}
+		return f.Column + " LIKE ?", []any{val}, nil
 	case "in":
 		if vals, ok := f.Value.([]any); ok && len(vals) > 0 {
 			placeholders := strings.Repeat("?,", len(vals))
 			placeholders = placeholders[:len(placeholders)-1]
-			return fmt.Sprintf("%s IN (%s)", f.Column, placeholders), vals
+			return fmt.Sprintf("%s IN (%s)", f.Column, placeholders), vals, nil
 		}
-		return "", nil
+		return "", nil, fmt.Errorf("invalid value for 'in' operator")
 	default:
-		return "", nil
+		return "", nil, fmt.Errorf("unsupported operator: %s", f.Op)
 	}
 }
 
@@ -241,6 +249,7 @@ func coerceFilterValue(v any) any {
 
 // resolveTimeValue parses an RFC3339 timestamp or a relative duration like "1h", "30m".
 // When bucketSeconds > 0, timestamps are bucketed (truncated) to the nearest boundary.
+// Failure to parse returns the original string, which will likely cause a ClickHouse error.
 func resolveTimeValue(val string, bucketSeconds int) string {
 	// Try relative duration first (e.g., "1h", "30m", "5m").
 	if d, err := time.ParseDuration(val); err == nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 
 	body := `{"user_id":"alice","event_type":"click","value":42.5}`
 	resp, err := http.Post(
-		e.server.URL+"/v1/ingest?table="+table,
+		e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
 		"application/json",
 		strings.NewReader(body),
 	)
