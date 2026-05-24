@@ -104,6 +104,12 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		msgCtx := observability.ExtractNATS(ctx, m)
+		// Stamp the bento component on the per-message context so every
+		// slog.XContext call below carries `component=ingest/bento`.
+		// ExtractNATS only adds W3C trace propagation; without this stamp
+		// the high-volume operational logs (one per inbound event) emit
+		// without the component field that the rest of the binary advertises.
+		msgCtx = observability.WithComponent(msgCtx, "ingest/bento")
 		// Per-message receipt is DEBUG: at ingest scale this fires for every
 		// inbound event. Keeping it at INFO floods stdout and any log shipper.
 		slog.DebugContext(msgCtx, "received message from JetStream", "subject", m.Subject())
@@ -196,7 +202,10 @@ func (d *dlqOutput) Wait(ctx context.Context) error    { return nil }
 func (d *dlqOutput) Close(ctx context.Context) error   { return nil }
 func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	for _, m := range batch {
-		msgCtx := m.Context()
+		// Stamp component on the per-message context — see jsInput.Read for
+		// the same pattern. m.Context() preserves the trace context from the
+		// inbound batch but does not carry the bento component label.
+		msgCtx := observability.WithComponent(m.Context(), "ingest/bento")
 		data, _ := m.AsBytes()
 
 		tableName, tableNameSet := m.MetaGet("table_name")
@@ -256,6 +265,11 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	if len(batch) == 0 {
 		return nil
 	}
+
+	// Stamp component on the batch-scoped context so the slog calls below
+	// (and the descendants we derive via tracer.Start) carry
+	// `component=ingest/bento`.
+	ctx = observability.WithComponent(ctx, "ingest/bento")
 
 	firstMsg := batch[0]
 

@@ -382,7 +382,8 @@ WaveHouse exports the following custom metrics (in addition to Go runtime metric
 | `wavehouse_dlq_depth` | Observable gauge | (none) | Total messages currently in the `WAVEHOUSE_DLQ` stream. |
 | `wavehouse_schema_validation_rejected_total` | Counter | `table`, `reason=unknown_field\|type_mismatch\|null_violation\|missing_required\|missing_table\|unknown_table\|invalid_json\|other` | Ingest payloads rejected before publishing to the queue. |
 | `wavehouse_auth_failures_total` | Counter | `reason=no_token\|bad_signature\|expired\|malformed\|unverifiable\|invalid_claims\|missing_role_claim\|invalid` | JWT verification failures, classified by the underlying error sentinel. |
-| `wavehouse_cache_hits_total` / `wavehouse_cache_misses_total` | Counter | `tier=L1`, `singleflight=true\|false` (hits only) | Cache effectiveness for the cached read paths (structured query, pipes). Today only L1 (Ristretto) emits; the `tier` dimension is forward-compat for a future L2. |
+| `wavehouse_cache_hits_total` / `wavehouse_cache_misses_total` | Counter | `tier=L1` | Cache effectiveness for the cached read paths (structured query, pipes). Today only L1 (Ristretto) emits; the `tier` dimension is forward-compat for a future L2. |
+| `wavehouse_query_singleflight_shared_total` | Counter | (none) | Queries whose fill execution was coalesced via `singleflight.Group.Do` — N concurrent callers collapsed into one ClickHouse round-trip. Pairs with the cache metrics for the structured-query and pipes effectiveness story. |
 | `wavehouse_dedupe_lookups_total` | Counter | `table`, `outcome=hit\|miss\|err` | Dedupe `CheckAndMark` outcomes, by table. |
 | `wavehouse_ingest_publish_throttled_total` | Counter | `table` | Ingest requests rejected with `503 Service Unavailable` + `Retry-After` because the JetStream stream is at capacity. |
 | `wavehouse_bento_events_processed` | Counter | `table` | Successful bento worker → ClickHouse commits, per row. |

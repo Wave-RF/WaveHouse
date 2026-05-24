@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -32,13 +31,19 @@ func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Lo
 	return &Sweeper{
 		js:        js,
 		gapWindow: gapWindow,
-		logger:    logger,
+		// Pre-tag the logger so every record from sweep() / findGapSequence()
+		// carries `component=ingest/sweeper` regardless of whether the call
+		// site uses the Context variant. (observability.WithComponent on the
+		// ctx is the alternative — but TraceHandler only stamps from ctx, and
+		// the sweeper uses bare s.logger.X(...) which slog routes through
+		// context.Background(). Pre-tagging is the simpler fix for a worker
+		// that owns its own logger.)
+		logger: logger.With("component", "ingest/sweeper"),
 	}
 }
 
 // Start runs the sweep loop every minute. Blocks until ctx is cancelled.
 func (s *Sweeper) Start(ctx context.Context) {
-	ctx = observability.WithComponent(ctx, "ingest/sweeper")
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {

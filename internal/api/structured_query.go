@@ -126,7 +126,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Execute with singleflight.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
+	v, err, shared := h.sf.Do(cacheKey, func() (interface{}, error) {
 		timeout := h.maxQueryTimeout
 		if perms.MaxExecutionTimeMs > 0 {
 			timeout = min(time.Duration(perms.MaxExecutionTimeMs)*time.Millisecond, timeout)
@@ -160,6 +160,9 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if shared {
+		observability.QuerySingleflightShared.Add(r.Context(), 1)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

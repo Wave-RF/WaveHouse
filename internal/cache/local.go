@@ -13,12 +13,15 @@ import (
 
 // L1 cache attribute sets — pre-allocated once so the hot path on each Get
 // stays free of per-call metric.WithAttributes/attribute.String slice allocs.
-// "singleflight" is recorded as a separate dimension so dashboards can show
-// the coalesced share of the hit count, but L1 itself doesn't see
-// singleflight — that's the handler's wrapping. We still emit singleflight=false
-// here so the counter has a consistent label set across tiers.
+//
+// Singleflight collapses are a SEPARATE concern from cache hits — the cache
+// layer doesn't see singleflight (that's the handler's wrapping around the
+// fill function). The cross-cutting singleflight counter
+// (wavehouse_query_singleflight_shared_total) lives at the handler level
+// in internal/api/structured_query.go and internal/api/pipes.go where shared
+// is actually observable.
 var (
-	cacheL1HitAttrs  = metric.WithAttributes(attribute.String("tier", "L1"), attribute.String("singleflight", "false"))
+	cacheL1HitAttrs  = metric.WithAttributes(attribute.String("tier", "L1"))
 	cacheL1MissAttrs = metric.WithAttributes(attribute.String("tier", "L1"))
 )
 

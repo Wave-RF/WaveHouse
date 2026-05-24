@@ -112,15 +112,25 @@ var (
 
 	// CacheHits and CacheMisses split the cache outcomes by tier. The L2 tier
 	// is reserved for a future shared cache; today only L1 (Ristretto) emits.
-	// singleflight=true is recorded when a request was coalesced via
-	// singleflight, which is logically a hit on a concurrent in-flight request.
 	CacheHits = mustInt64Counter(
 		"wavehouse_cache_hits_total",
-		metric.WithDescription("Cache hits, by tier and whether the read was coalesced via singleflight"),
+		metric.WithDescription("Cache hits, by tier"),
 	)
 	CacheMisses = mustInt64Counter(
 		"wavehouse_cache_misses_total",
 		metric.WithDescription("Cache misses, by tier"),
+	)
+
+	// QuerySingleflightShared counts requests whose fill function call was
+	// COLLAPSED into a concurrent caller's in-flight execution by
+	// golang.org/x/sync/singleflight. shared=true on the sf.Do return value
+	// means "you shared this result with at least one other caller" — i.e.
+	// the work was done once and N callers got the same value. Pairs with
+	// CacheHits/CacheMisses for the structured-query and pipes handlers'
+	// effectiveness story.
+	QuerySingleflightShared = mustInt64Counter(
+		"wavehouse_query_singleflight_shared_total",
+		metric.WithDescription("Queries whose fill execution was coalesced via singleflight (sf.Do shared=true)"),
 	)
 
 	// DedupeLookups counts dedupe lookups by outcome.

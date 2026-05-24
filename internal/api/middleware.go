@@ -107,89 +107,98 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Span around the whole verify+claim-extract path. Kept short
-			// (no body read, no upstream calls beyond JWKS rotation cache
-			// hits) so the parent HTTP span stays the right unit for
-			// per-request latency. The span attributes carry method (hmac vs
-			// jwks) so trace queries can split out JWKS-fetch-blip latency.
-			ctx, span := observability.Tracer().Start(r.Context(), "jwt_verify",
-				trace.WithAttributes(
-					attribute.String("auth.method", authMethod),
-					attribute.String("auth.role_claim", roleClaim),
-				),
-			)
-			defer span.End()
-
-			var tokenStr string
-
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer ") {
-				tokenStr = strings.TrimPrefix(auth, "Bearer ")
-			} else if q := r.URL.Query().Get("token"); q != "" {
-				// Fallback: accept token as query parameter (required for
-				// WebSocket connections where headers cannot be set).
-				tokenStr = q
-				// Strip the token from the URL to avoid leaking it in logs.
-				params := r.URL.Query()
-				params.Del("token")
-				r.URL.RawQuery = params.Encode()
-			} else {
-				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
-				span.SetAttributes(attribute.String("auth.failure_reason", "no_token"))
-				writeJSONError(w, http.StatusUnauthorized, "missing authorization")
-				return
-			}
-
-			keyFunc := func(t *jwt.Token) (interface{}, error) {
-				// Try JWKS first if configured.
-				if jwks != nil {
-					return jwks.Keyfunc(t)
-				}
-				// Fall back to HMAC shared secret.
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, jwt.ErrSignatureInvalid
-				}
-				return []byte(cfg.JWTSecret), nil
-			}
-
-			token, err := jwt.Parse(tokenStr, keyFunc)
-			if err != nil || !token.Valid {
-				reason := classifyJWTError(err)
-				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
-				span.SetAttributes(attribute.String("auth.failure_reason", reason))
-				if err != nil {
-					span.RecordError(err)
-				}
-				writeJSONError(w, http.StatusUnauthorized, "invalid token")
-				return
-			}
-
-			claims, ok := token.Claims.(jwt.MapClaims)
+			ctx, claims, role, ok := verifyJWT(w, r, cfg, jwks, roleClaim, authMethod)
 			if !ok {
-				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "invalid_claims")))
-				span.SetAttributes(attribute.String("auth.failure_reason", "invalid_claims"))
-				writeJSONError(w, http.StatusUnauthorized, "invalid claims")
+				// verifyJWT already responded with writeJSONError + recorded
+				// the auth-failure counter + ended the span.
 				return
 			}
-
-			// Extract role from claims using dot-separated path.
-			role := extractClaim(claims, roleClaim)
-			if role == "" {
-				// Successful JWT verify but no role — auth metadata pulled from
-				// the wrong claim, common misconfiguration. Surface as a
-				// distinct failure reason so /v1/admin/* 403s on this can be
-				// distinguished from a missing/expired token.
-				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "missing_role_claim")))
-				span.SetAttributes(attribute.String("auth.failure_reason", "missing_role_claim"))
-			} else {
-				span.SetAttributes(attribute.String("auth.role", role))
-			}
-
 			ctx = context.WithValue(ctx, ContextKeyClaims, claims)
 			ctx = context.WithValue(ctx, ContextKeyRole, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// verifyJWT performs the JWT verification + claim extraction under a
+// `jwt_verify` span. The span is ended explicitly before this function
+// returns (success OR failure) so its duration reflects only the verify
+// work, not the downstream handler — a deferred End() inside the
+// surrounding middleware would balloon the span to cover the whole request.
+//
+// Returns (childCtx, claims, role, true) on success. On failure the response
+// has already been written via writeJSONError, the auth-failure counter
+// incremented, and the span finalized; the caller should just return.
+func verifyJWT(w http.ResponseWriter, r *http.Request, cfg AuthConfig, jwks keyfunc.Keyfunc, roleClaim, authMethod string) (context.Context, jwt.MapClaims, string, bool) {
+	ctx, span := observability.Tracer().Start(r.Context(), "jwt_verify",
+		trace.WithAttributes(
+			attribute.String("auth.method", authMethod),
+			attribute.String("auth.role_claim", roleClaim),
+		),
+	)
+	// Local helper for the failure-return shape — keeps each return path
+	// to one line and guarantees span.End() fires before writeJSONError.
+	fail := func(status int, reason, msg string, recordErr error) (context.Context, jwt.MapClaims, string, bool) {
+		observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+		span.SetAttributes(attribute.String("auth.failure_reason", reason))
+		if recordErr != nil {
+			span.RecordError(recordErr)
+		}
+		span.End()
+		writeJSONError(w, status, msg)
+		return ctx, nil, "", false
+	}
+
+	var tokenStr string
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		tokenStr = strings.TrimPrefix(auth, "Bearer ")
+	} else if q := r.URL.Query().Get("token"); q != "" {
+		// Fallback: accept token as query parameter (required for
+		// WebSocket connections where headers cannot be set).
+		tokenStr = q
+		// Strip the token from the URL to avoid leaking it in logs.
+		params := r.URL.Query()
+		params.Del("token")
+		r.URL.RawQuery = params.Encode()
+	} else {
+		return fail(http.StatusUnauthorized, "no_token", "missing authorization", nil)
+	}
+
+	keyFunc := func(t *jwt.Token) (interface{}, error) {
+		if jwks != nil {
+			return jwks.Keyfunc(t)
+		}
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return []byte(cfg.JWTSecret), nil
+	}
+
+	token, err := jwt.Parse(tokenStr, keyFunc)
+	if err != nil || !token.Valid {
+		return fail(http.StatusUnauthorized, classifyJWTError(err), "invalid token", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return fail(http.StatusUnauthorized, "invalid_claims", "invalid claims", nil)
+	}
+
+	role := extractClaim(claims, roleClaim)
+	if role == "" {
+		// Successful JWT verify but no role — auth metadata pulled from the
+		// wrong claim, common misconfiguration. Surface as a distinct failure
+		// reason so /v1/admin/* 403s on this can be distinguished from a
+		// missing/expired token. Doesn't fail the request — RequireRole at
+		// the router level decides authorization based on the missing role.
+		observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "missing_role_claim")))
+		span.SetAttributes(attribute.String("auth.failure_reason", "missing_role_claim"))
+	} else {
+		span.SetAttributes(attribute.String("auth.role", role))
+	}
+	span.End()
+	return ctx, claims, role, true
 }
 
 // extractClaim navigates a dot-separated claim path in JWT claims.

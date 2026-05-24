@@ -144,7 +144,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute with singleflight.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
+	v, err, shared := h.sf.Do(cacheKey, func() (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 		defer cancel()
 
@@ -173,6 +173,9 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if shared {
+		observability.QuerySingleflightShared.Add(r.Context(), 1)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
