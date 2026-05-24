@@ -20,7 +20,23 @@ docker run --name "$NAME" -d \
   ghcr.io/mesaglio/otel-front:latest >/dev/null
 
 echo "==> Dashboard running at: http://localhost:$PORT"
-(sleep 2 && (command -v open >/dev/null && open "http://localhost:$PORT" || xdg-open "http://localhost:$PORT" 2>/dev/null)) &
+# Auto-open unless under CI.
+if [ -z "${CI:-}" ]; then
+  # Open browser once the dashboard is actually accepting connections
+  (
+    for i in $(seq 1 30); do
+      if curl -sf "http://localhost:${PORT}/" >/dev/null 2>&1; then
+        if command -v open >/dev/null 2>&1; then
+          open "http://localhost:${PORT}"
+        elif command -v xdg-open >/dev/null 2>&1; then
+          xdg-open "http://localhost:${PORT}"
+        fi
+        break
+      fi
+      sleep 1
+    done
+  ) &
+fi
 
 echo "==> Streaming logs (Press Ctrl+C to exit)..."
 docker logs -f "$NAME"
