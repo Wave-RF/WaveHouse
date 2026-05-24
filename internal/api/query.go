@@ -283,10 +283,28 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, respCap+1))
 	if err != nil {
+		// Mid-stream transport drop on the response read. No server-side code
+		// to attribute, so clickhouse_code stays "0" like the connect-time
+		// failure on line 263 above. Without this counter bump, dashboards
+		// filtering on wavehouse_clickhouse_errors_total{operation="admin_query"}
+		// undercount transient backend failures.
+		observability.ClickHouseErrors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("operation", "admin_query"),
+			attribute.String("clickhouse_code", "0"),
+		))
+		chSpan.RecordError(err)
 		writeJSONError(w, http.StatusBadGateway, "read clickhouse response: "+err.Error())
 		return
 	}
 	if int64(len(body)) > respCap {
+		// Caller-controlled oversize (a SELECT * that overshot the 64 MiB cap).
+		// Distinct from a ClickHouse-side error: clickhouse_code="caller_oversize"
+		// keeps the failure visible in the SLO counter while still distinguishing
+		// it from genuine server faults on dashboards.
+		observability.ClickHouseErrors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("operation", "admin_query"),
+			attribute.String("clickhouse_code", "caller_oversize"),
+		))
 		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("clickhouse response exceeded %d bytes; narrow the query or use FORMAT JSONEachRow with streaming", respCap))
 		return
 	}

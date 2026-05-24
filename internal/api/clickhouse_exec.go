@@ -108,6 +108,8 @@ func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []
 			valPtrs[i] = reflect.New(col.ScanType()).Interface()
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
+			observability.ClickHouseErrors.Add(ctx, 1, errAttrs(clickhouseDriverErrCode(err)))
+			span.RecordError(err)
 			return nil, fmt.Errorf("scan clickhouse row: %w", err)
 		}
 		row := make(map[string]any)
@@ -121,6 +123,8 @@ func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []
 	// failure on a row past the first). Without this check, a partial
 	// result set silently masquerades as a complete one.
 	if err := rows.Err(); err != nil {
+		observability.ClickHouseErrors.Add(ctx, 1, errAttrs(clickhouseDriverErrCode(err)))
+		span.RecordError(err)
 		return nil, fmt.Errorf("iterate clickhouse rows: %w", err)
 	}
 	return results, nil

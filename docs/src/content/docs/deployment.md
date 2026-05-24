@@ -393,7 +393,7 @@ WaveHouse exports the following custom metrics (in addition to Go runtime metric
 Custom span coverage (in addition to `otelhttp` HTTP-server spans):
 
 - `IngestHandler.Handle` with a child `schema_validation` span.
-- `jwt_verify` under the auth middleware, with `auth.method=hmac\|jwks` and `auth.failure_reason` on failures.
+- `jwt_verify` under the auth middleware, with `auth.method=hmac\|jwks`, `auth.role_claim=<dotted-path>`, and (on successful verify) `auth.role_present=true\|false` plus `auth.role=<value>` when present. `auth.failure_reason` is set only on verify failures (`no_token`, `bad_signature`, `expired`, `malformed`, `unverifiable`, `invalid_claims`); a successful verify with a missing role claim is distinguished by `auth.role_present=false` instead, so trace queries that filter on `auth.failure_reason` see a clean failure-correlate. The 403-distinguishability still flows through `wavehouse_auth_failures_total{reason=missing_role_claim}` on the metric side.
 - `bento_queue_wait` (retroactively drawn from the producer's published time) → `clickhouse_insert` sibling spans in the worker.
 - `clickhouse.<operation>` from `executeCHQuery` for the structured-query and pipes handlers; `clickhouse.admin_query` for the `/v1/admin/query` HTTP proxy. Raw SQL is intentionally omitted from span attributes — admins routinely paste secrets/PII into ad-hoc queries.
 

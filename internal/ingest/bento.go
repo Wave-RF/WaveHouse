@@ -122,15 +122,25 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.ErrorContext(msgCtx, "rejecting message: invalid JSON", "error", err)
+			// No parseable timestamp available — invalid JSON means we
+			// never extracted raw.ReceivedTimestamp. Skip the histogram;
+			// the drop is still visible via the WARN log and (eventually)
+			// the broader bento_events_dropped counter.
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
 		}
 
+		// Parse the receive timestamp once for any subsequent drop-path
+		// histogram records. Empty / unparseable yields a zero time which
+		// recordIngestDurationFromTS handles as "skip".
+		receivedTS, _ := time.Parse(time.RFC3339Nano, raw.ReceivedTimestamp)
+
 		// Reject messages with no table name.
 		if raw.TableName == "" {
 			slog.ErrorContext(msgCtx, "rejecting message: empty table_name")
+			recordIngestDurationFromTS(msgCtx, receivedTS, "_unknown", "dropped")
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
@@ -141,6 +151,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		if len(payload) == 0 || string(payload) == "null" {
 			// TODO: if they have a table with all defaults, would this not be a valid insert?
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
+			recordIngestDurationFromTS(msgCtx, receivedTS, raw.TableName, "dropped")
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for malformed message", "error", doubleAckErr)
 			}
@@ -240,11 +251,20 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 // silently when the receive timestamp is missing/unparseable — happens for
 // drop paths inside the worker that never see a well-formed envelope.
 func recordIngestDuration(ctx context.Context, m *service.Message, table, outcome string) {
-	t := parseReceivedTimestamp(m)
-	if t.IsZero() {
+	recordIngestDurationFromTS(ctx, parseReceivedTimestamp(m), table, outcome)
+}
+
+// recordIngestDurationFromTS records the same histogram as recordIngestDuration
+// but takes the parsed timestamp directly — needed for the early-reject paths
+// in jsInput.Read where we have raw.ReceivedTimestamp but not yet a
+// service.Message. Skipped silently when ts is zero (best-effort: the
+// invalid-JSON path has no parsed timestamp and produces no record, but the
+// empty-table-name and empty-payload paths do).
+func recordIngestDurationFromTS(ctx context.Context, ts time.Time, table, outcome string) {
+	if ts.IsZero() {
 		return
 	}
-	observability.IngestDuration.Record(ctx, time.Since(t).Seconds(),
+	observability.IngestDuration.Record(ctx, time.Since(ts).Seconds(),
 		metric.WithAttributes(
 			attribute.String("table", table),
 			attribute.String("outcome", outcome),
