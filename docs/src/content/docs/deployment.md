@@ -352,34 +352,30 @@ By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API se
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
 
-`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally. It is modelled on the upstream SigNoz `deploy/docker/docker-compose.yaml` (SigNoz `v0.122.0` / `signoz-otel-collector v0.144.3`), trimmed to a single node: ClickHouse + ZooKeeper + the SigNoz query/UI service + the OTel collector (OTLP gRPC on `:4317`, HTTP on `:4318`), plus two one-shot init containers (`init-clickhouse` fetches the `histogramQuantile` UDF binary; `signoz-telemetrystore-migrator` creates the `signoz_*` ClickHouse schema). Both init containers exit `0` after running — that's expected. Bring it up via the Makefile wrapper (recommended) or compose directly:
+### Local Observability Stack
+
+We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.
+
+The underlying Docker run scripts live in `scripts/otel/` and are invoked via Make:
 
 ```bash
-make signoz-up
-# or: docker compose -f deployments/signoz/compose.yaml up -d
+make obs-aspire   # Simplest, in-memory, no login
+make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
+make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
 ```
 
-The SigNoz UI is on `http://localhost:3301` (host `3301` → container `8080`; `8080` is left for WaveHouse). Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` for a host-side WaveHouse (the default), or `WH_OTEL_ADDR=host.docker.internal:4317` from a WaveHouse container — the collector publishes `4317` on the host. See `deployments/compose/standalone.signoz.yaml` for a compose override that wires the containerized `standalone.yaml` WaveHouse into this stack.
+All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the default environment variable `WH_OTEL_ADDR=127.0.0.1:4317` will route telemetry to these containers automatically.
+
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment variables to reach the host-bound collector: `WH_OTEL_ADDR=host.docker.internal:4317`.
 
 ### Dashboards
 
-Two dashboards live in `deployments/signoz/dashboards/` as version-controlled JSON — `wavehouse-overview.json` (HTTP traffic, latency, OTLP intake) and `wavehouse-runtime-internals.json` (Go runtime, embedded NATS, ingest pipeline, payload sizes). SigNoz OSS does not support dashboard provisioning from disk (unlike Grafana), so loading them is a one-time-per-person manual step rather than part of `compose up`:
+Because we use ephemeral, single-container observability tools for local development, we no longer maintain strict, version-controlled JSON dashboards in this repository.
 
-1. `make signoz-up` (or `docker compose -f deployments/signoz/compose.yaml up -d`).
-2. Open `http://localhost:3301` and **create your account** (first visit only).
-3. Load the dashboards (via Make wrapper or directly):
+- If you use `make obs-aspire`, the UI is pre-built and requires zero configuration.
+- If you use `make obs-grafana`, it is pre-configured to automatically provision the internal data sources and bypass the login screen. You can use Grafana's "Explore" tab to quickly jump between logs and traces.
 
-   ```bash
-   # First, get the token from the SigNoz UI's localStorage
-   export SIGNOZ_TOKEN='eyJ...'
-   make signoz-dashboards
-   # or call the loader directly:
-   deployments/signoz/load-dashboards.sh
-   ```
-
-The loader upserts by title (matching dashboards are updated in place, new ones created), so re-run it whenever the JSON changes. It requires `SIGNOZ_TOKEN` (the `AUTH_TOKEN` from the SigNoz UI's `localStorage`) and accepts `SIGNOZ_URL` (default `http://localhost:3301`). Needs `curl` and `jq`. To edit a dashboard, change it in the UI, then re-export it: `GET /api/v1/dashboards/<id>` and save the response's `.data.data` over the JSON file.
-
-The two **Ingest** panels (`wavehouse_bento_*`) are empty until events actually flow through the ingest pipeline — those counters aren't emitted until the first event is written.
+For production deployments, you should construct dashboards specific to your telemetry vendor (Datadog, Honeycomb, New Relic, etc.) based on the standard OpenTelemetry metrics and traces WaveHouse emits.
 
 ## Resetting Data in Development
 

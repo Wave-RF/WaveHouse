@@ -245,76 +245,17 @@ deps-wipe: ## Stop ClickHouse AND destroy its data volume (DESTRUCTIVE — use t
 
 ##@ Observability
 
-SIGNOZ_COMPOSE_FILE := deployments/signoz/compose.yaml
-SIGNOZ_SECRET_FILE  := deployments/signoz/.signoz-secret.local
-# Per-checkout JWT, cached in a gitignored file, rotated by signoz-wipe.
-# Avoids a shared default secret in a public repo. The teardown-placeholder
-# fallback keeps `down -v` working after the secret has been wiped (compose's
-# :? guard would otherwise abort teardown).
-SIGNOZ_COMPOSE       = SIGNOZ_TOKENIZER_JWT_SECRET="$$(cat $(SIGNOZ_SECRET_FILE) 2>/dev/null || printf teardown-placeholder)" docker compose -f $(SIGNOZ_COMPOSE_FILE)
+.PHONY: obs-aspire
+obs-aspire: ## Start local Aspire Dashboard (clean UI for Traces, Metrics, Logs)
+	@scripts/otel/aspire.sh
 
-$(SIGNOZ_SECRET_FILE):
-	@command -v openssl >/dev/null 2>&1 || { echo "$(RED)==> 'openssl' is required to generate the SigNoz JWT secret$(RESET)"; exit 1; }
-	@umask 077 && openssl rand -hex 32 > $@
+.PHONY: obs-grafana
+obs-grafana: ## Start local Grafana LGTM stack (advanced correlation & UI)
+	@scripts/otel/grafana.sh
 
-.PHONY: signoz-up
-signoz-up: $(SIGNOZ_SECRET_FILE) ## Start SigNoz stack (idempotent; blocks until UI + collector healthy)
-	@echo "$(CYAN)==> Starting SigNoz stack...$(RESET)"
-	@$(SIGNOZ_COMPOSE) up -d --wait signoz otel-collector
-	@echo "    SigNoz UI:  $(GREEN)http://localhost:3301$(RESET)  (first-run: create local admin account)"
-	@echo "    OTLP gRPC:  $(GREEN)localhost:4317$(RESET)"
-	@echo "    OTLP HTTP:  $(GREEN)localhost:4318$(RESET)"
-
-# No $(SIGNOZ_SECRET_FILE) prereq on signoz-down/signoz-logs/signoz-wipe:
-# JWT is irrelevant for teardown + log tailing (SIGNOZ_COMPOSE uses the
-# teardown-placeholder fallback), and listing it as a prereq would silently
-# regenerate the secret on the next invocation, leaving an orphan file.
-.PHONY: signoz-down
-signoz-down: ## Stop SigNoz stack (preserves volumes — UI history kept)
-	@echo "$(YELLOW)==> Stopping SigNoz...$(RESET)"
-	@$(SIGNOZ_COMPOSE) down
-
-.PHONY: signoz-logs
-signoz-logs: ## Tail SigNoz UI + collector logs (Ctrl+C to detach)
-	@$(SIGNOZ_COMPOSE) logs -f signoz otel-collector
-
-.PHONY: signoz-wipe
-signoz-wipe: ## Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin account reset)
-	@echo "$(RED)==> Wiping SigNoz (containers + volumes)...$(RESET)"
-	@$(SIGNOZ_COMPOSE) down -v --remove-orphans
-	@rm -f $(SIGNOZ_SECRET_FILE)
-
-# Token-only: SigNoz v0.122.0 moved password login behind an org UUID that
-# isn't externally discoverable, so AUTH_TOKEN from the UI's localStorage is
-# the only supported path. Guard fails fast with the first-run pointer
-# rather than letting the loader emit a less obvious 401.
-.PHONY: signoz-dashboards
-signoz-dashboards: ## Upsert WaveHouse dashboards into local SigNoz (needs SIGNOZ_TOKEN)
-	@if [ -z "$$SIGNOZ_TOKEN" ]; then \
-		echo "$(RED)==> Set SIGNOZ_TOKEN.$(RESET)"; \
-		echo "    First-run: open http://localhost:3301, create your admin account,"; \
-		echo "    then copy AUTH_TOKEN from DevTools → Application → Local Storage."; \
-		exit 1; \
-	fi
-	@deployments/signoz/load-dashboards.sh
-
-# WH_OTEL_ADDR already defaults to 127.0.0.1:4317 in
-# internal/config/config.go but is set explicitly so the recipe doubles as
-# documentation for what dev-obs wires together.
-.PHONY: dev-obs
-dev-obs: deps-up signoz-up $(AIR) ## Hot-reload dev server with SigNoz observability
-	@echo "$(CYAN)==> Starting WaveHouse with SigNoz observability$(RESET)"
-	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)"
-	@echo "    SigNoz UI:  $(GREEN)http://localhost:3301$(RESET)  (first-run: create local admin account)"
-	@if [ -n "$$SIGNOZ_TOKEN" ]; then \
-		echo "$(CYAN)==> Loading dashboards (SIGNOZ_TOKEN detected)...$(RESET)"; \
-		deployments/signoz/load-dashboards.sh || echo "$(YELLOW)==> Dashboard load failed; continuing$(RESET)"; \
-	else \
-		echo "    Dashboards: run $(CYAN)make signoz-dashboards$(RESET) after creating your SigNoz account"; \
-	fi
-	@WH_OTEL_ENABLED=true \
-	 WH_OTEL_ADDR=127.0.0.1:4317 \
-	 $(AIR) -c .air.toml
+.PHONY: obs-front
+obs-front: ## Start local OTel Front UI
+	@scripts/otel/otel-front.sh
 
 ##@ Code Quality
 
@@ -674,8 +615,9 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 	@echo "$(YELLOW)==> Full reset (dev state, docker)...$(RESET)"
 	@rm -rf data/
 	@$(DEV_COMPOSE) down -v --remove-orphans 2>/dev/null || true
-	@$(SIGNOZ_COMPOSE) down -v --remove-orphans 2>/dev/null || true
 	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans 2>/dev/null || true
+	@# Clean up any orphaned standalone observability containers
+	@docker rm -f aspire-dashboard otel-lgtm otel-front 2>/dev/null || true
 
 ##@ Tooling
 

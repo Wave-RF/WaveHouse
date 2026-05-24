@@ -158,40 +158,25 @@ when you need to poke at ClickHouse:
 
 **Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
 
-### Running with observability — `make dev-obs`
+### Running with observability
 
-`make dev-obs` is the dev-mode counterpart of `make dev`, with a local SigNoz stack alongside WaveHouse and the OTLP pipeline already pointed at it. Everything `make dev` gives you, plus traces / metrics / logs flowing into a UI on `http://localhost:3301`.
+WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
 
-```bash
-make dev-obs
-# WaveHouse: http://localhost:8080
-# SigNoz UI: http://localhost:3301   (first-run: create local admin account)
-```
+You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
 
-The stack is its own compose project under `deployments/signoz/compose.yaml` — ClickHouse + ZooKeeper + the SigNoz query/UI image + the OTel collector. `make dev-obs` brings up the SigNoz stack with `--wait` (blocks on the UI's `/api/v1/health` and the collector's `health_check` extension), then starts WaveHouse under air with `WH_OTEL_ENABLED=true` and `WH_OTEL_ADDR=127.0.0.1:4317`.
+They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear them down and clean up the container.
 
-**First run**: SigNoz prompts you to create a local admin account before any API request will authenticate — that's normal, not a misconfigured deployment. Once you've signed up, export credentials so subsequent runs auto-load the WaveHouse dashboards:
+| Target | What it does | UI URL |
+| ------ | ------------ | ------ |
+| `make obs-aspire` | Boots the Aspire dashboard. Extremely fast, in-memory only, and requires no login. Ideal for quick trace and log debugging. | `http://localhost:18888` |
+| `make obs-grafana` | Boots Grafana LGTM (Loki, Grafana, Tempo, Prometheus). Pre-configured to bypass login. Best for advanced UI charting and trace-to-log correlation. | `http://localhost:3000` |
+| `make obs-front` | Boots OTel-Front for a basic, alternative trace viewer. | `http://localhost:8000` |
 
-```bash
-# Grab AUTH_TOKEN from localStorage in the SigNoz UI:
-export SIGNOZ_TOKEN='...'
-make dev-obs
-```
+**Typical Workflow:**
 
-When `SIGNOZ_TOKEN` is set, `dev-obs` runs the dashboard loader best-effort (failure doesn't block the dev server). Without it, `dev-obs` prints a one-liner pointing at `make signoz-dashboards`.
-
-| Target | What it does |
-| ------ | ------------ |
-| `make signoz-up` | Start the SigNoz stack and block until UI + collector are healthy. Idempotent. |
-| `make signoz-down` | Stop the stack. Volumes preserved — UI history and admin account stay. |
-| `make signoz-logs` | `docker compose logs -f signoz otel-collector`. |
-| `make signoz-wipe` | Stop **and** destroy volumes (admin account reset; UI prompts for signup again). |
-| `make signoz-dashboards` | Upsert the WaveHouse dashboards into local SigNoz. Idempotent (upsert-by-title); needs `SIGNOZ_TOKEN`. |
-| `make dev-obs` | `make dev` + `make signoz-up` + WaveHouse pointed at the collector + (if `SIGNOZ_TOKEN` set) `make signoz-dashboards`. |
-
-The two version-controlled dashboards live under `deployments/signoz/dashboards/`: `wavehouse-overview` (HTTP traffic, latency, OTLP intake) and `wavehouse-runtime-internals` (Go runtime, embedded NATS, ingest pipeline). To edit one, change it in the SigNoz UI, then re-export via the API: `GET /api/v1/dashboards/<id>` and save the response's `.data.data` over the JSON file.
-
-The SigNoz `clickhouse` service is intentionally **separate** from WaveHouse's `clickhouse` (`deployments/compose/dependencies.yaml`). Don't dual-home a WaveHouse container onto both networks — the unqualified hostname becomes ambiguous. The dev-mode flow stays on `127.0.0.1:4317` and side-steps this entirely.
+1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
+2. Open Tab 2: run `make dev` (or `make test-e2e`)
+3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
 ### Using the SDK playground against `make dev`
 
