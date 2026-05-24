@@ -29,7 +29,7 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
 * **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
 * **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
-* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/tables/{table}/query`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
+* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/query?table={table}`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
 * **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
 * **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
 
@@ -62,7 +62,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 
 # Ingest data (no auth required by default)
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
@@ -137,6 +137,8 @@ make dev
 ```
 
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
+
+**With observability:** Run `make obs-aspire` (or `obs-grafana` or `obs-front`) in a separate terminal to boot a lightweight OpenTelemetry dashboard. They run side-by-side with `make dev` or your test suites. See [docs/development.md § Running with observability](docs/src/content/docs/development.md#running-with-observability).
 
 ## 🤖 Working with Claude Code
 

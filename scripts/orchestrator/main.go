@@ -152,13 +152,14 @@ func run() error {
 		// mints admin/viewer JWTs (tests/e2e/sdk/helpers.ts).
 		"WH_AUTH_JWT_SECRET=sdk-dev-secret",
 		"WH_AUTH_ROLE_CLAIM=role",
-		"WH_DEDUPE_ENABLED=false",
+		"WH_DEDUPE_ENABLED=true",
+		"WH_DEDUPE_ID_FIELD=event_id",
 		"WH_SCHEMA_REFRESH_INTERVAL=5",
 		"WH_DLQ_ENABLED=true",
 		"WH_SERVER_CORS_ALLOWED_ORIGINS=*",
 		// Exercise the OTel branch in coverage. gRPC exporters are lazy
 		// (no collector needs to be reachable for init to succeed), so
-		// this is safe in the e2e harness even without a SigNoz instance.
+		// this is safe in the e2e harness even without an o11y instance.
 		"WH_OTEL_ENABLED=true",
 		"WH_OTEL_ADDR=127.0.0.1:4317",
 	)

@@ -160,7 +160,7 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
 
-```
+```text
 WARN  data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.
 ```
 
@@ -188,7 +188,7 @@ volumes:
 
 Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
 
-```
+```text
 ERROR  mq init failed  error="..."  path=/app/data/nats  hint="if running in a container with a host bind mount, the host directory must be owned by UID 65532..."
 ```
 
@@ -325,7 +325,7 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 When `dlq.enabled` is `true` (default), failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
 
-## Observability (SigNoz)
+## Observability
 
 Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. Each signal can be toggled independently — see `docs/configuration.md` for the full table of knobs.
 
@@ -351,15 +351,31 @@ By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API se
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
 
-`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally (ClickHouse + query service + OTel collector at `:4317`). Bring it up:
+### Local Observability Stack
+
+We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.
+
+The underlying Docker run scripts live in `scripts/otel/` and are invoked via Make:
 
 ```bash
-docker compose -f deployments/signoz/docker-compose.yaml up -d
+make obs-aspire   # Simplest, in-memory, no login
+make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
+make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
 ```
 
-ClickHouse credentials inside the SigNoz stack default to `default` / `password`. To override, copy `deployments/signoz/.env.example` to `deployments/signoz/.env` and set `SIGNOZ_CH_USER` / `SIGNOZ_CH_PASSWORD`. The `.env` file is gitignored.
+All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the default environment variable `WH_OTEL_ADDR=127.0.0.1:4317` will route telemetry to these containers automatically.
 
-The SigNoz UI is exposed on `http://localhost:3301`. Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` (the default).
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment variables to reach the host-bound collector: `WH_OTEL_ADDR=host.docker.internal:4317`.
+
+### Dashboards
+
+Because we use ephemeral, single-container observability tools for local development, we no longer maintain strict, version-controlled JSON dashboards in this repository.
+
+- If you use `make obs-aspire`, the UI is pre-built and requires zero configuration.
+- If you use `make obs-grafana`, it is pre-configured to automatically provision the internal data sources and bypass the login screen. You can use Grafana's "Explore" tab to quickly jump between logs and traces.
+- If you use `make obs-front`, it allows custom and comparison dashboards like grafana, but is simpler and easier to configure like aspire.
+
+For production deployments, you should construct dashboards specific to your telemetry vendor (Datadog, Honeycomb, New Relic, etc.) based on the standard OpenTelemetry metrics and traces WaveHouse emits.
 
 ## Resetting Data in Development
 

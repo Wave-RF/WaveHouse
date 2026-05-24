@@ -49,6 +49,8 @@ type QueryHandler struct {
 	Username string
 	Password string
 	Database string
+	// maxQueryTimeout optionally ends an in-flight query when time is reached.
+	maxQueryTimeout time.Duration
 	// maxResponseBytes optionally overrides the default upstream response
 	// buffer cap (maxCHResponseBytes). When 0, the default applies. Exists
 	// so same-package tests can pin the cap-overflow path without
@@ -87,12 +89,12 @@ const (
 // headers (matching the ingest worker's convention in internal/ingest).
 // database is set as the `?database=` query-string parameter when non-empty.
 //
-// The HTTP client itself has no Timeout — every request gets a 30s deadline
+// The HTTP client itself has no Timeout — every request gets a queryTimeout deadline
 // from a context derived from the inbound request (see Handle), which
 // bounds the whole exchange including body read. Setting `Timeout` here
 // too would just duplicate that bound (and silently truncate any
-// inbound context longer than 30s).
-func NewQueryHandler(endpoint, username, password, database string) *QueryHandler {
+// inbound context longer than queryTimeout).
+func NewQueryHandler(endpoint, username, password, database string, queryTimeout time.Duration) *QueryHandler {
 	return &QueryHandler{
 		HTTPClient: &http.Client{
 			// ClickHouse's HTTP interface doesn't 3xx in normal operation,
@@ -105,10 +107,11 @@ func NewQueryHandler(endpoint, username, password, database string) *QueryHandle
 				return http.ErrUseLastResponse
 			},
 		},
-		Endpoint: endpoint,
-		Username: username,
-		Password: password,
-		Database: database,
+		Endpoint:        endpoint,
+		Username:        username,
+		Password:        password,
+		Database:        database,
+		maxQueryTimeout: queryTimeout,
 	}
 }
 
@@ -190,7 +193,7 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Bound the upstream call with a deadline derived from the inbound
 	// request context — client disconnect cancels the ClickHouse call too.
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 	defer cancel()
 
 	// Defensive: NewQueryHandler always sets HTTPClient, but a zero-value

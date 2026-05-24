@@ -11,22 +11,23 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store       *pipes.Store
-	PolicyStore *policy.Store // resolves empty role to default_role; may be nil
-	CHConn      driver.Conn
-	Cache       *cache.TieredCache
-	DefaultTTL  time.Duration
-	sf          singleflight.Group
+	Store           *pipes.Store
+	PolicyStore     *policy.Store // resolves empty role to default_role; may be nil
+	CHConn          driver.Conn
+	Cache           cache.Cache
+	sf              singleflight.Group
+	maxQueryTimeout time.Duration
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *PipesHandler {
-	return &PipesHandler{Store: store, CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
+func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
+	return &PipesHandler{Store: store, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
 }
 
 // List returns all named queries (admin endpoint).
@@ -127,10 +128,16 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: scope impl
+	scope := ""
+	safePipeName := query.SafeEncodeNATS(name)
+
+	// TODO: current pipe impl doesn't have a list of tables/scopes, so bento ingest cannot invalidate it
+
 	// Cache.
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safePipeName, scope); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -140,21 +147,28 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 		defer cancel()
 
+		start := time.Now()
+
 		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
+		queryDuration := time.Since(start)
 		if err != nil {
+			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
 
 		data, err := json.Marshal(rows)
 		if err != nil {
+			// TODO: eventually we want CSV support etc
 			return nil, err
 		}
 
+		ttl := cache.QueryTimeToTTL(queryDuration)
+
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
+			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, ttl)
 		}
 		return data, nil
 	})

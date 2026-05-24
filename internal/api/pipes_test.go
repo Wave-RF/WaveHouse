@@ -80,7 +80,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_NotFound(t *testing.T) {
@@ -94,7 +94,7 @@ func TestPipesHandler_Execute_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
@@ -144,7 +144,8 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"pipe restricted to %v must reject a request with no role in context", []string{"admin"})
-	assertJSONErrorResponse(t, w)
+	assert.Contains(t, w.Body.String(), "forbidden")
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 // TestPipesHandler_Execute_DefaultRoleGrantsAccess: a tokenless request (no role
@@ -185,7 +186,7 @@ func TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"default_role 'viewer' is not in AllowedRoles [admin] → denied")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_MissingParam(t *testing.T) {
@@ -210,7 +211,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing required parameter")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
@@ -353,7 +354,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"a pipe with no allowed_roles must reject a non-admin role")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 // TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed: the privileged built-in

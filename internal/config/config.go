@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -87,12 +88,13 @@ type Server struct {
 }
 
 type ClickHouse struct {
-	Addr       string `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
-	HTTPPort   string `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
-	HTTPScheme string `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
-	Database   string `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
-	Username   string `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
-	Password   string `yaml:"password" env:"WH_CH_PASSWORD"`
+	Addr         string        `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
+	HTTPPort     string        `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
+	HTTPScheme   string        `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
+	Database     string        `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
+	Username     string        `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
+	Password     string        `yaml:"password" env:"WH_CH_PASSWORD"`
+	QueryTimeout time.Duration `yaml:"query_timeout" env:"WH_CH_QUERY_TIMEOUT" env-default:"30s"`
 }
 
 type MQ struct {
@@ -107,7 +109,6 @@ type Dedupe struct {
 
 type Cache struct {
 	L1MaxCost              int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-	DefaultTTL             int   `yaml:"default_ttl" env:"WH_CACHE_DEFAULT_TTL" env-default:"300"`
 	TimestampBucketSeconds int   `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
 }
 
@@ -168,8 +169,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("schema.refresh_interval must be >= 1 second")
 	}
 
-	if c.Cache.DefaultTTL < 0 {
-		return fmt.Errorf("cache.default_ttl must be non-negative")
+	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
+		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
 	}
 
 	if c.MQ.GapWindowMinutes < 0 {

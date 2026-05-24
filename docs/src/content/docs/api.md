@@ -116,11 +116,11 @@ Status code: `503 Service Unavailable`
 
 ---
 
-### `POST /v1/ingest/{table}` — Ingest Data
+### `POST /v1/ingest?table={table}` — Ingest Data
 
 Accepts a flat JSON object, validates it against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
 
-The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
+The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
 > **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/admin/*`).
 >
@@ -167,7 +167,6 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
-| 400 | `{"error":"payload cannot contain reserved field 'received_timestamp'"}` | Payload contains a reserved field |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -175,7 +174,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
@@ -190,9 +189,9 @@ Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQ
 >
 > **64 MiB response cap.** The proxy buffers the upstream response in memory before forwarding (no row-streaming yet), so a `SELECT *` from a large table can pin RAM on the API server. To avoid an admin OOMing themselves, responses larger than 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Narrow the query with `LIMIT`, or use a streaming client outside WaveHouse that talks to ClickHouse directly (the standard escape hatch — the same admin credentials work).
 
-This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/tables/{table}/query`](#post-v1tablestablequery--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
+This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
-> **Admin only.** The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (never the admin role) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD, log-level). The normal surfaces for non-admin callers are `POST /v1/ingest/{table}` for writes, `POST /v1/tables/{table}/query` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+> **Admin only.** The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (never the admin role) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD, log-level). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 
 `/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`). (The endpoint moved here from `/v1/query` as part of the admin-lockdown change — the `policy.RolePermissions.raw_sql` field has been removed and `/v1/query` now returns 404.)
 
@@ -208,7 +207,7 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 | ----- | ---- | -------- | ----------- |
 | `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
 
-> **No parameter binding on this endpoint (yet).** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/tables/{table}/query`) — that's its job.
+> **No parameter binding on this endpoint (yet).** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
 
 **Response:**
 
@@ -246,7 +245,7 @@ curl -X POST http://localhost:8080/v1/admin/query \
 
 ---
 
-### `POST /v1/tables/{table}/query` — Structured Query
+### `POST /v1/query?table={table}` — Structured Query
 
 Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
 
@@ -268,8 +267,7 @@ Executes a type-safe structured query against a table. The query AST is validate
     "column": "received_timestamp",
     "since": "1h",
     "until": ""
-  },
-  "cache_ttl": 60
+  }
 }
 ```
 
@@ -282,7 +280,6 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
-| `cache_ttl` | int | No | Override default cache TTL (seconds). |
 
 **Response:**
 
@@ -439,7 +436,7 @@ Returns all discovered ClickHouse table schemas.
 
 ---
 
-### `GET /v1/schema/{table}` — Get Table Schema
+### `GET /v1/schema?table={table}` — Get Table Schema
 
 Returns the schema for a specific table.
 
@@ -583,6 +580,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 ```json
 {
   "table_name": "clicks",
+  "scope": "scope",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "data": {
     "page": "/home",
@@ -595,6 +593,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
+| `scope` | string | Optional scope namespace used for subject routing/cache invalidation context. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `data` | object | The original flat JSON body. |
 
@@ -630,7 +629,7 @@ jwt encode --secret "change-me-in-production" '{"exp": 9999999999}'
 
 # Export for use with curl:
 export TOKEN=$(jwt encode --secret "change-me-in-production" '{"exp": 9999999999}')
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home"}'

@@ -73,7 +73,7 @@ curl -s -X POST http://localhost:8080/v1/admin/query \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
 
-Prefer a type-safe query builder over raw SQL? See the [structured query endpoint](/api#post-v1tablestablequery--structured-query) or the [TypeScript SDK](/sdk).
+Prefer a type-safe query builder over raw SQL? See the [structured query endpoint](/api#post-v1querytabletable--structured-query) or the [TypeScript SDK](/sdk).
 
 ## 5. Subscribe to real-time updates
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ import (
 func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 	tests := []struct {
 		name        string
-		rowIDs      []string                                                          // IDs to seed via /v1/ingest/{table} before the mutation
+		rowIDs      []string                                                          // IDs to seed via /v1/ingest?table={table} before the mutation
 		mutationSQL func(table string) string                                         // SQL to POST to /v1/admin/query
 		postCheck   func(t *testing.T, ctx context.Context, e *testEnv, table string) // verify the mutation actually ran
 	}{
@@ -106,7 +107,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 			for _, id := range tt.rowIDs {
 				body := fmt.Sprintf(`{"id":%q,"page":"/about"}`, id)
 				resp, err := http.Post(
-					e.server.URL+"/v1/ingest/"+table,
+					e.server.URL+"/v1/ingest?table="+url.QueryEscape(table),
 					"application/json",
 					strings.NewReader(body),
 				)

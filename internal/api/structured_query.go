@@ -13,41 +13,40 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
-	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
 
-// StructuredQueryHandler handles POST /v1/tables/{table}/query.
+// StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
-	CHConn      driver.Conn
-	Cache       *cache.TieredCache
-	DefaultTTL  time.Duration
-	Registry    *discovery.SchemaRegistry
-	PolicyStore *policy.Store
-	BucketSecs  int
-	sf          singleflight.Group
+	CHConn          driver.Conn
+	Cache           cache.Cache
+	Registry        *discovery.SchemaRegistry
+	PolicyStore     *policy.Store
+	BucketSecs      int
+	sf              singleflight.Group
+	maxQueryTimeout time.Duration
 }
 
 func NewStructuredQueryHandler(
 	conn driver.Conn,
-	c *cache.TieredCache,
-	defaultTTL time.Duration,
+	c cache.Cache,
 	registry *discovery.SchemaRegistry,
 	policyStore *policy.Store,
 	bucketSecs int,
+	queryTimeout time.Duration,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
-		CHConn:      conn,
-		Cache:       c,
-		DefaultTTL:  defaultTTL,
-		Registry:    registry,
-		PolicyStore: policyStore,
-		BucketSecs:  bucketSecs,
+		CHConn:          conn,
+		Cache:           c,
+		Registry:        registry,
+		PolicyStore:     policyStore,
+		BucketSecs:      bucketSecs,
+		maxQueryTimeout: queryTimeout,
 	}
 }
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	table := chi.URLParam(r, "table")
+	table := r.URL.Query().Get("table")
 	if table == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
@@ -110,43 +109,50 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// Cache key.
 	cacheKey := queryCacheKey(result.SQL, result.Params)
-	ttl := h.DefaultTTL
-	if sq.CacheTTL != nil && *sq.CacheTTL > 0 {
-		ttl = time.Duration(*sq.CacheTTL) * time.Second
-	}
+
+	// TODO: impl scope
+	scope := ""
+	safeTableName := query.SafeEncodeNATS(table)
 
 	// Try cache.
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safeTableName, scope); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data)
+			_, _ = w.Write(data) //nolint:gosec // G705 XSS only JSON
 			return
 		}
 	}
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		timeout := 30 * time.Second
+		timeout := h.maxQueryTimeout
 		if perms.MaxExecutionTimeMs > 0 {
-			timeout = time.Duration(perms.MaxExecutionTimeMs) * time.Millisecond
+			timeout = min(time.Duration(perms.MaxExecutionTimeMs)*time.Millisecond, timeout)
 		}
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
+		start := time.Now()
+
 		rows, err := executeCHQuery(queryCtx, h.CHConn, result.SQL, result.Params)
+		queryDuration := time.Since(start)
 		if err != nil {
+			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
 
 		data, err := json.Marshal(rows)
 		if err != nil {
+			// TODO: eventually we want CSV support etc
 			return nil, err
 		}
 
+		ttl := cache.QueryTimeToTTL(queryDuration)
+
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, safeTableName, scope, data, ttl)
 		}
 		return data, nil
 	})

@@ -36,7 +36,7 @@ func TestRequireAdmin_NonAdminForbidden(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 // TestRequireAdmin_NoRoleForbidden: a roleless request (no token, or an
@@ -51,7 +51,7 @@ func TestRequireAdmin_NoRoleForbidden(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 // TestRequireAdmin_CustomAdminRole: the configured admin_role passes; the
@@ -270,8 +270,11 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	}{
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
-		{http.MethodGet, "/v1/schema", http.StatusOK},
-		{http.MethodGet, "/v1/schema/events", http.StatusOK},
+		// Schema is admin-only (see TestNewRouter_SchemaAdminOnly); a roleless
+		// request is denied 403 — the route still exists, which is what this
+		// registration test asserts (not 404/405).
+		{http.MethodGet, "/v1/schema", http.StatusForbidden},
+		{http.MethodGet, "/v1/schema?table=events", http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
@@ -280,6 +283,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
+			assert.Equal(t, tt.expect, rec.Code, "unexpected route status")
 			assert.NotEqual(t, http.StatusNotFound, rec.Code, "route should exist")
 			assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "method should be allowed")
 		})
@@ -346,14 +350,14 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		t.Parallel()
 		rec := post("viewer")
 		assert.Equal(t, http.StatusForbidden, rec.Code)
-		assertJSONErrorResponse(t, rec)
+		testutil.AssertJSONErrorResponse(t, rec)
 	})
 
 	t.Run("no role is 403", func(t *testing.T) {
 		t.Parallel()
 		rec := post("")
 		assert.Equal(t, http.StatusForbidden, rec.Code)
-		assertJSONErrorResponse(t, rec)
+		testutil.AssertJSONErrorResponse(t, rec)
 	})
 }
 
@@ -431,7 +435,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
@@ -457,7 +461,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
@@ -472,7 +476,7 @@ func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Contains(t, rec.Body.String(), "internal server error")
 }
 
@@ -560,13 +564,13 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		return rec
 	}
 
-	for _, path := range []string{"/v1/schema", "/v1/schema/events"} {
+	for _, path := range []string{"/v1/schema", "/v1/schema?table=events"} {
 		t.Run(path+" tokenless 403", func(t *testing.T) {
 			t.Parallel()
 			rec := get(path, "")
 			assert.Equal(t, http.StatusForbidden, rec.Code,
 				"tokenless request to %s must be denied (schema is admin-only)", path)
-			assertJSONErrorResponse(t, rec)
+			testutil.AssertJSONErrorResponse(t, rec)
 		})
 		t.Run(path+" admin reaches handler", func(t *testing.T) {
 			t.Parallel()

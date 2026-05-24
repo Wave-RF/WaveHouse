@@ -43,6 +43,7 @@ clickhouse:
   database: default
   username: default
   password: ""
+  query_timeout: 30s
 
 mq:
   gap_window_minutes: 15
@@ -54,7 +55,6 @@ dedupe:
 
 cache:
   l1_max_cost: 67108864
-  default_ttl: 300
   timestamp_bucket_seconds: 60
 
 # Auth has no on/off switch — the JWT middleware always runs. A request with no

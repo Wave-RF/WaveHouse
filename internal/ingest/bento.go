@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -23,17 +22,16 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"go.opentelemetry.io/otel"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// safeIdentifierRe matches safe SQL identifiers to prevent injection.
-var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
 	bentoMeter              = otel.Meter("wavehouse-bento")
@@ -76,6 +74,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 
 		var raw struct {
 			TableName         string          `json:"table_name"`
+			Scope             string          `json:"scope,omitempty"`
 			Payload           json.RawMessage `json:"data"`
 			ReceivedTimestamp string          `json:"received_timestamp"`
 		}
@@ -96,17 +95,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			continue
 		}
 
-		// Validate table name to prevent SQL injection.
-		if !safeIdentifierRe.MatchString(raw.TableName) {
-			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
-			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
-				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
-			}
-			continue
-		}
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
+			// TODO: if they have a table with all defaults, would this not be a valid insert?
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for malformed message", "error", doubleAckErr)
@@ -119,7 +110,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		msg = msg.WithContext(msgCtx)
 
 		msg.MetaSet("table_name", raw.TableName)
-
+		msg.MetaSet("scope", raw.Scope)
 		msg.MetaSet("received_timestamp", raw.ReceivedTimestamp)
 
 		// Instead of time.Now(), ask NATS exactly when this message arrived in the queue
@@ -170,11 +161,15 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 		msgCtx := m.Context()
 		data, _ := m.AsBytes()
 
-		tableName, exists := m.MetaGet("table_name")
+		tableName, tableNameSet := m.MetaGet("table_name")
+		scope, scopeSet := m.MetaGet("scope")
 
 		subject := "dlq.unknown"
-		if exists && tableName != "" {
-			subject = "dlq." + tableName
+		if tableNameSet && tableName != "" {
+			subject = "dlq." + query.SafeEncodeNATS(tableName)
+			if scopeSet && scope != "" {
+				subject += "." + query.SafeEncodeNATS(scope)
+			}
 		}
 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
@@ -189,6 +184,7 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 type clickhouseOutput struct {
 	httpClient *http.Client
+	cache      cache.Cache
 	scheme     string
 	host       string
 	port       string
@@ -207,13 +203,9 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 
 	firstMsg := batch[0]
 
-	tableName, ok := firstMsg.MetaGet("table_name")
-	if !ok || tableName == "" {
+	tableName, tableNameSet := firstMsg.MetaGet("table_name")
+	if !tableNameSet || tableName == "" {
 		return fmt.Errorf("missing table_name in message metadata")
-	}
-
-	if !safeIdentifierRe.MatchString(tableName) {
-		return fmt.Errorf("invalid table name: %q", tableName)
 	}
 
 	bentoStartTime := time.Now()
@@ -259,44 +251,29 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	reqCtx, chSpan := tracer.Start(parentCtx, "clickhouse_insert")
 	defer chSpan.End()
 
+	// set of all scope values in the batch for invalidation
+	allScopes := make(map[string]struct{})
+
 	var buf bytes.Buffer
 	for _, msg := range batch {
+		scope, scopeSet := msg.MetaGet("scope")
+		if !scopeSet {
+			scope = ""
+		}
+		allScopes[scope] = struct{}{}
+
 		data, err := msg.AsBytes()
 		if err != nil {
 			chSpan.RecordError(err)
 			slog.ErrorContext(reqCtx, "failed to read message bytes",
 				"table", tableName,
+				"scope", scope,
 				"error", err,
 			)
+			// TODO: is this path just dropping messages right now?
 			return fmt.Errorf("read message bytes: %w", err)
 		}
 
-		// Inject timestamp via byte-splicing to prevent float64 precision loss on large Int64/UInt64 values.
-		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
-			data = bytes.TrimSpace(data)
-			// Ensure it's a valid JSON object structure {...}
-			if len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}' {
-				rtJSON, _ := json.Marshal(rt)
-
-				// Check if the object has existing fields to see if we need a comma
-				inside := data[1 : len(data)-1]
-				needsComma := len(bytes.TrimSpace(inside)) > 0
-
-				var extra string
-				if needsComma {
-					extra = fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
-				} else {
-					extra = fmt.Sprintf(`"received_timestamp":%s}`, rtJSON)
-				}
-
-				// SAFE ALLOCATION: Create a completely new slice to avoid mutating the original message's backing array
-				newData := make([]byte, 0, len(data)+len(extra))
-				newData = append(newData, data[:len(data)-1]...) // copy everything except the trailing '}'
-				newData = append(newData, []byte(extra)...)      // append the new field + closing '}'
-
-				data = newData // reassign the local variable
-			}
-		}
 		buf.Write(data)
 		buf.WriteString("\n")
 	}
@@ -304,7 +281,9 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	q := url.Values{}
 	q.Set("database", c.db)
 
-	q.Set("query", fmt.Sprintf("INSERT INTO `%s` FORMAT JSONEachRow", tableName))
+	q.Set("param_target_table", tableName)
+
+	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
 	q.Set("input_format_skip_unknown_fields", "1")
 	q.Set("date_time_input_format", "best_effort")
 
@@ -324,6 +303,8 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	req.Header.Set("X-ClickHouse-User", c.user)
 	req.Header.Set("X-ClickHouse-Key", c.password)
 
+	// TODO: have ClickHouse insert all the rows it can, only failing rows that are invalid instead of the entire batch.
+	// TODO: how do we know which of the scope set to invalidate?
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		chSpan.RecordError(err)
@@ -341,6 +322,17 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return err
 	}
 
+	// TODO: is this the only place we need to invalidate the cache? How do partial failures work?
+	// TODO: what context do we use here? reqCtx? parentCtx? or a new one?
+	if c.cache != nil {
+		// Detached context so cancellation doesn't abort invalidation
+		invCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(reqCtx))
+		if _, err := c.cache.InvalidateCache(invCtx, tableName, allScopes); err != nil {
+			slog.ErrorContext(reqCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
+			// TODO: we need a safer mechanism to ensure the cache invalidation can be retried or something here – for now the assumption is ClickHouse insertion errors will happen far more frequently than ristretto increments will, so it should be an incredibly small/unlikely edge case that will be loudly logged, but this MUST be addressed before cache implementations like Redis are added
+		}
+	}
+
 	return nil
 }
 
@@ -348,7 +340,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, cache cache.Cache, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -365,7 +357,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chHost, chHTTPPort, c
 	defer setupCancel()
 
 	cons, err := js.CreateOrUpdateConsumer(setupCtx, mq.StreamName(), jetstream.ConsumerConfig{
-		Durable:       "buffer-consumer",
+		Durable:       BufferConsumerName,
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
@@ -404,6 +396,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chHost, chHTTPPort, c
 				}
 				return &clickhouseOutput{
 					httpClient: &http.Client{Timeout: 30 * time.Second},
+					cache:      cache,
 					scheme:     scheme,
 					host:       host,
 					port:       chHTTPPort,
@@ -450,6 +443,7 @@ output:
 	go func() {
 		logger.InfoContext(ctx, "ingest worker started")
 		if err := stream.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			// TODO: if bento fails unexpectedly, we probably want a retry loop here instead of just logging and exiting?
 			logger.ErrorContext(ctx, "ingest worker stopped unexpectedly", "error", err)
 
 			if onFatal != nil {

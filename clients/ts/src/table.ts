@@ -51,7 +51,7 @@ export class TableRef<Row = Record<string, unknown>> {
       for (const row of data) {
         const { error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
           method: 'POST',
-          path: `/v1/ingest/${encodeURIComponent(this._table)}`,
+          path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
           body: row,
           signal: opts?.signal,
         });
@@ -62,7 +62,7 @@ export class TableRef<Row = Record<string, unknown>> {
 
     const { data: res, error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
       method: 'POST',
-      path: `/v1/ingest/${encodeURIComponent(this._table)}`,
+      path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
       body: data,
       signal: opts?.signal,
     });
@@ -77,7 +77,7 @@ export class TableRef<Row = Record<string, unknown>> {
   async schema(opts?: { signal?: AbortSignal }): Promise<Result<TableSchema>> {
     const { data, error } = await request<TableSchema>(this._ctx, {
       method: 'GET',
-      path: `/v1/schema/${encodeURIComponent(this._table)}`,
+      path: `/v1/schema?table=${encodeURIComponent(this._table)}`,
       signal: opts?.signal,
     });
     if (error) return err(error);

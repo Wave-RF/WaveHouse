@@ -108,18 +108,17 @@ func NewRouter(deps Dependencies) http.Handler {
 		// Declaring it once keeps the gate consistent across the tree.
 		requireAdmin := RequireAdmin(deps.PolicyStore)
 
-		r.Post("/ingest/{table}", deps.Ingest.Handle)
+		r.Post("/ingest", deps.Ingest.Handle)
 		r.Get("/stream/sse", deps.SSE.Handle)
 		r.Get("/stream/ws", deps.WS.Handle)
 
 		// Schema discovery — admin-only (no policy gate of its own).
-		r.With(requireAdmin).Get("/schema", deps.Schema.List)
-		r.With(requireAdmin).Get("/schema/{table}", deps.Schema.Get)
+		r.With(requireAdmin).Get("/schema", deps.Schema.Get)
 		r.With(requireAdmin).Post("/schema/refresh", deps.Schema.Refresh)
 
 		// Structured query endpoint.
 		if deps.StructuredQuery != nil {
-			r.Post("/tables/{table}/query", deps.StructuredQuery.Handle)
+			r.Post("/query", deps.StructuredQuery.Handle)
 		}
 
 		// Named query pipes.
@@ -147,7 +146,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			// authorize predicates without a full SQL parser), so the
 			// role gate is the entire authorization story. Non-admin
 			// callers use the structured ingest path, structured
-			// queries (`/v1/tables/{table}/query`), or named pipes.
+			// queries (`/v1/query?table={table}`), or named pipes.
 			r.Post("/query", deps.Query.Handle)
 
 			if deps.Policy != nil {
