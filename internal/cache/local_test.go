@@ -32,7 +32,7 @@ func TestLocalCache_SetAndGet(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Ristretto uses async admission — wait briefly for it to be admitted.
-	time.Sleep(10 * time.Millisecond)
+	c.Wait()
 
 	val, ttl, err := c.Get(ctx, "key1", "table", "scope")
 	assert.NoError(t, err)
@@ -87,7 +87,8 @@ func TestLocalCache_ZeroTTL(t *testing.T) {
 	err = c.Set(ctx, "notimed", "table", "", []byte("data"), 0)
 	assert.NoError(t, err)
 
-	time.Sleep(10 * time.Millisecond)
+	c.Wait()
+	time.Sleep(10 * time.Millisecond) // arbitrary tiny sleep to see its still here after
 
 	val, ttl, err := c.Get(ctx, "notimed", "table", "")
 	assert.NoError(t, err)
@@ -109,7 +110,6 @@ func TestLocalCache_InvalidateCache(t *testing.T) {
 	err = c.Set(ctx, "queryHash", "users", "org_1", []byte("my_data"), 10*time.Second)
 	assert.NoError(t, err)
 	c.Wait()
-	time.Sleep(10 * time.Millisecond) // wait for admission
 
 	// Ensure readable
 	val, _, err := c.Get(ctx, "queryHash", "users", "org_1")
