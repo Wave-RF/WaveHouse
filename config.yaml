@@ -17,6 +17,12 @@ server:
   cors_allowed_origins:
     - "*"
 
+# Stdout always emits 100% — these knobs control format and minimum level only.
+# Sampling for scraped log pipelines belongs at the scraper, not here.
+logging:
+  level: info            # debug | info | warn | error (case-insensitive)
+  format: auto           # auto = colored text on TTY, JSON elsewhere; text|json forces
+
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
   addr: "127.0.0.1:4317"
