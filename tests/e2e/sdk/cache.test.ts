@@ -73,7 +73,7 @@ describe("Cache", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ colummns: ["*"], limit: 420 }), // Unique body for this test
+      body: JSON.stringify({ columns: ["*"], limit: 420 }), // Unique body for this test
     };
 
     const url = `${WH_URL}/v1/query?table=clicks`;

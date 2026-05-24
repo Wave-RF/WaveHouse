@@ -49,7 +49,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	scope := ""
 	topic := "ingest." + query.SafeEncodeNATS(table)
 	if scope != "" {
-		topic += query.SafeEncodeNATS(scope)
+		topic += "." + query.SafeEncodeNATS(scope)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

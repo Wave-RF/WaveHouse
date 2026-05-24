@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
@@ -43,7 +44,9 @@ func (l *LocalCache) Set(_ context.Context, key string, namespace string, scope 
 	cacheKey := l.versionManager.GetCacheKey(key, namespace, scope)
 
 	// set cost = 0 for dynamic cost evaluation
-	l.cache.SetWithTTL(cacheKey, value, int64(len(value)), ttl)
+	if ok := l.cache.SetWithTTL(cacheKey, value, int64(len(value)), ttl); !ok {
+		return fmt.Errorf("cache admission rejected for key %q", cacheKey)
+	}
 	return nil
 }
 

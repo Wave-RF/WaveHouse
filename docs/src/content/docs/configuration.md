@@ -167,7 +167,6 @@ dedupe:
 
 cache:
   l1_max_cost: 67108864
-  default_ttl: 300
   timestamp_bucket_seconds: 60
 
 auth:

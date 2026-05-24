@@ -169,8 +169,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("schema.refresh_interval must be >= 1 second")
 	}
 
-	if c.ClickHouse.QueryTimeout < 0 {
-		return fmt.Errorf("clickhouse.query_timeout must be non-negative")
+	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
+		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
 	}
 
 	if c.MQ.GapWindowMinutes < 0 {

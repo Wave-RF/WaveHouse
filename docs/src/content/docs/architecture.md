@@ -191,7 +191,7 @@ Client POST /v1/admin/query
     <scheme>://<host>:<httpport>/?default_format=JSON
        &date_time_output_format=iso&database=<db>
     Auth via X-ClickHouse-User / X-ClickHouse-Key headers.
-    Bound by a 30s context derived from the inbound request — client
+    Bound by a clickhouse.query_timeout context derived from the inbound request — client
     disconnect cancels the upstream call.
   → ClickHouse parses the SQL natively and decides what to do:
     → Read: returns 200 + {"meta":[...], "data":[...], "rows":N,

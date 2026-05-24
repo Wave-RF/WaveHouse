@@ -328,7 +328,8 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		// Detached context so cancellation doesn't abort invalidation
 		invCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(reqCtx))
 		if _, err := c.cache.InvalidateCache(invCtx, tableName, allScopes); err != nil {
-			slog.WarnContext(reqCtx, "failed to invalidate cache after insert", "table", tableName, "error", err)
+			slog.ErrorContext(reqCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
+			// TODO: we need a safer mechanism to ensure the cache invalidation can be retried or something here – for now the assumption is ClickHouse insertion errors will happen far more frequently than ristretto increments will, so it should be an incredibly small/unlikely edge case that will be loudly logged, but this MUST be addressed before cache implementations like Redis are added
 		}
 	}
 

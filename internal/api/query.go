@@ -89,11 +89,11 @@ const (
 // headers (matching the ingest worker's convention in internal/ingest).
 // database is set as the `?database=` query-string parameter when non-empty.
 //
-// The HTTP client itself has no Timeout — every request gets a 30s deadline
+// The HTTP client itself has no Timeout — every request gets a queryTimeout deadline
 // from a context derived from the inbound request (see Handle), which
 // bounds the whole exchange including body read. Setting `Timeout` here
 // too would just duplicate that bound (and silently truncate any
-// inbound context longer than 30s).
+// inbound context longer than queryTimeout).
 func NewQueryHandler(endpoint, username, password, database string, queryTimeout time.Duration) *QueryHandler {
 	return &QueryHandler{
 		HTTPClient: &http.Client{
