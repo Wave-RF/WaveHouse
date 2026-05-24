@@ -22,7 +22,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "default", cfg.ClickHouse.Database)
 	assert.Equal(t, "default", cfg.ClickHouse.Username)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
-	assert.False(t, cfg.Auth.Enabled)
 	assert.Equal(t, "role", cfg.Auth.RoleClaim)
 	assert.False(t, cfg.Dedupe.Enabled)
 	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
@@ -52,7 +51,6 @@ clickhouse:
   database: "mydb"
   http_scheme: "https"
 auth:
-  enabled: true
   jwt_secret: "test-secret"
 `
 	path := filepath.Join(dir, "config.yaml")
@@ -65,7 +63,6 @@ auth:
 	assert.Equal(t, "clickhouse:9000", cfg.ClickHouse.Addr)
 	assert.Equal(t, "mydb", cfg.ClickHouse.Database)
 	assert.Equal(t, "https", cfg.ClickHouse.HTTPScheme)
-	assert.True(t, cfg.Auth.Enabled)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 }
 
@@ -132,43 +129,6 @@ func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 	assert.Contains(t, err.Error(), "shutdown_timeout")
 }
 
-func TestValidate_AuthEnabledNoSecret(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
-		Auth:       Auth{Enabled: true},
-		Schema:     Schema{RefreshInterval: 60},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "jwt_secret or jwks_url")
-}
-
-func TestValidate_AuthEnabledWithJWKS(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
-		Auth:       Auth{Enabled: true, JWKSURL: "https://example.com/.well-known/jwks.json"},
-		Schema:     Schema{RefreshInterval: 60},
-	}
-	err := cfg.Validate()
-	assert.NoError(t, err)
-}
-
-func TestValidate_AuthDevModeBypassesCheck(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
-		Auth:       Auth{Enabled: true, DevMode: true},
-		Schema:     Schema{RefreshInterval: 60},
-	}
-	err := cfg.Validate()
-	assert.NoError(t, err)
-}
-
 func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
@@ -205,23 +165,6 @@ func TestValidate_NegativeGapWindow(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gap_window_minutes")
-}
-
-func TestLoad_AuthEnabledNoSecret_FailsValidation(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	yamlContent := `
-server:
-  port: 8080
-auth:
-  enabled: true
-`
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
-
-	_, err := Load(path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "validate config")
 }
 
 func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
@@ -489,15 +432,4 @@ func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clickhouse.http_scheme must be 'http' or 'https'")
-}
-
-func TestValidate_AuthEnabledWithSecret_OK(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
-		Schema:     Schema{RefreshInterval: 60},
-		Auth:       Auth{Enabled: true, JWTSecret: "secret"},
-	}
-	assert.NoError(t, cfg.Validate())
 }

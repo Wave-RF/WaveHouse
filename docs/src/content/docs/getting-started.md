@@ -66,8 +66,8 @@ Queries are cached in-process (L1 Ristretto) with singleflight coalescing — du
 
 ```bash
 # Wait ~5 seconds for the batch flush to ClickHouse, then:
-# `/v1/admin/query` requires the admin or service role when auth is on.
-# With `auth.enabled=false` (the default for the quickstart) it's open.
+# `/v1/admin/query` is admin-only: send a valid JWT whose role is the policy
+# `admin_role` ("admin" by default) via `Authorization: Bearer <jwt>`.
 curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
@@ -100,5 +100,5 @@ To consume multiple tables on a single connection, use the WebSocket endpoint (`
 
 ## Going further
 
-- **Enable JWT auth**: set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=<secret>` — see [API Reference — Authentication](/api#authentication).
+- **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) — see [API Reference — Authentication](/api#authentication).
 - **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](/configuration#deduplication).

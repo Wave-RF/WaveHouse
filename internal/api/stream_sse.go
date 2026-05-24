@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -53,9 +54,11 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	topic := "ingest." + table
 
-	// Resolve stream permissions for this request.
-	role := RoleFromContext(r.Context())
-	claims, _ := ClaimsFromContext(r.Context())
+	// Resolve stream permissions for this request. Evaluate maps an empty role
+	// to the policy default_role per event (applyStreamPolicy), so the raw role
+	// from context is what we keep here.
+	role := auth.RoleFromContext(r.Context())
+	claims, _ := auth.ClaimsFromContext(r.Context())
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

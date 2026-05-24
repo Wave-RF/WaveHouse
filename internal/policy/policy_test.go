@@ -9,9 +9,14 @@ import (
 
 func TestEvaluate_NilPolicy(t *testing.T) {
 	t.Parallel()
-	perms := Evaluate(nil, "viewer", "clicks", "select", nil)
-	require.NotNil(t, perms)
-	assert.True(t, perms.Allowed)
+	// A nil policy (none configured yet, or deleted from KV) fails closed: only
+	// the admin role passes, everyone else is denied — no fail-open allow-all.
+	assert.False(t, Evaluate(nil, "viewer", "clicks", "select", nil).Allowed,
+		"nil policy must deny a non-admin role")
+	assert.False(t, Evaluate(nil, "", "clicks", "select", nil).Allowed,
+		"nil policy must deny a roleless request")
+	assert.True(t, Evaluate(nil, "admin", "clicks", "select", nil).Allowed,
+		"nil policy must still admit the default admin role so a first policy can be written")
 }
 
 func TestEvaluate_NoTablePolicy_AdminAllowed(t *testing.T) {
@@ -361,18 +366,22 @@ func TestEvaluate_NilRolePermsMap_ViewerDenied(t *testing.T) {
 	assert.False(t, perms.Allowed)
 }
 
-func TestEvaluate_ServiceRoleTreatedLikeAdmin(t *testing.T) {
+func TestEvaluate_CustomAdminRole(t *testing.T) {
 	t.Parallel()
-	p := &Policy{Tables: map[string]TablePolicy{}}
-	perms := Evaluate(p, "service", "clicks", "select", nil)
-	assert.True(t, perms.Allowed)
+	p := &Policy{AdminRole: "superuser", Tables: map[string]TablePolicy{}}
+	assert.True(t, Evaluate(p, "superuser", "clicks", "select", nil).Allowed,
+		"the configured admin_role bypasses like admin")
+	assert.False(t, Evaluate(p, "admin", "clicks", "select", nil).Allowed,
+		`with a custom admin_role, the literal "admin" is an ordinary (denied) role`)
+	assert.False(t, Evaluate(p, "service", "clicks", "select", nil).Allowed,
+		`"service" is no longer a privileged role`)
 }
 
 // TestEvaluate_EmptyRoleDoesNotMatchEmptyKey is the evaluation-time guard that
 // pairs with TestValidate_RejectsEmptyRoleKey: even if a policy with an
 // empty-string role key reaches the engine (e.g. loaded from KV, written
 // before the validation existed), an empty/absent role must NOT match it and
-// must fail closed. Only admin/service or a configured default_role may
+// must fail closed. Only the admin role or a configured default_role may
 // authorize a roleless request — the "*" any-role wildcard was removed.
 func TestEvaluate_EmptyRoleDoesNotMatchEmptyKey(t *testing.T) {
 	t.Parallel()
@@ -440,23 +449,26 @@ func TestResolveRole(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
+		adminRole   string
 		defaultRole string
 		role        string
 		want        string
 	}{
-		{"non-empty role unchanged", "viewer", "editor", "editor"},
-		{"empty role -> default", "viewer", "", "viewer"},
-		{"empty role, no default -> empty", "", "", ""},
-		{"empty role, admin default refused", "admin", "", ""},
-		{"empty role, service default refused", "service", "", ""},
-		{"empty role, ADMIN (case) refused", "ADMIN", "", ""},
-		{"empty role, padded admin refused", "  admin  ", "", ""},
-		{"non-empty role ignores admin default", "admin", "viewer", "viewer"},
+		{"non-empty role unchanged", "", "viewer", "editor", "editor"},
+		{"empty role -> default", "", "viewer", "", "viewer"},
+		{"empty role, no default -> empty", "", "", "", ""},
+		{"empty role, default==admin refused", "", "admin", "", ""},
+		{"empty role, default==custom admin refused", "superuser", "superuser", "", ""},
+		// Matching is exact and case-sensitive — these are NOT the admin role.
+		{"service default allowed (no longer privileged)", "", "service", "", "service"},
+		{"ADMIN (case) is its own role", "", "ADMIN", "", "ADMIN"},
+		{"padded admin (no trim) is its own role", "", "  admin  ", "", "  admin  "},
+		{"non-empty role ignores admin default", "", "admin", "viewer", "viewer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, ResolveRole(&Policy{DefaultRole: tt.defaultRole}, tt.role))
+			assert.Equal(t, tt.want, ResolveRole(&Policy{AdminRole: tt.adminRole, DefaultRole: tt.defaultRole}, tt.role))
 		})
 	}
 }
@@ -542,15 +554,23 @@ func TestEvaluate_DefaultRoleAdmin_NotEscalated(t *testing.T) {
 	assert.False(t, perms.Allowed, "default_role=admin must not escalate a roleless request")
 }
 
-func TestValidate_RejectsPrivilegedDefaultRole(t *testing.T) {
+func TestValidate_RejectsDefaultRoleEqualToAdmin(t *testing.T) {
 	t.Parallel()
-	for _, dr := range []string{"admin", "service", "ADMIN", "Service", "  admin  "} {
-		t.Run(dr, func(t *testing.T) {
-			t.Parallel()
-			err := Validate(&Policy{DefaultRole: dr, Tables: map[string]TablePolicy{}})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "default_role")
-		})
+	// Default admin_role ("admin"): a default_role of "admin" would grant every
+	// roleless request admin, so it's refused.
+	err := Validate(&Policy{DefaultRole: "admin", Tables: map[string]TablePolicy{}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_role")
+
+	// Same guard tracks a custom admin_role.
+	err = Validate(&Policy{AdminRole: "superuser", DefaultRole: "superuser", Tables: map[string]TablePolicy{}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_role")
+
+	// Exact, case-sensitive, no trimming — these are NOT the admin role, so allowed.
+	for _, dr := range []string{"service", "ADMIN", "Service", "  admin  "} {
+		assert.NoError(t, Validate(&Policy{DefaultRole: dr, Tables: map[string]TablePolicy{}}),
+			"default_role %q is not the admin role and must be allowed", dr)
 	}
 }
 

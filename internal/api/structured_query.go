@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -65,12 +66,12 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Resolve permissions.
-	role := RoleFromContext(r.Context())
-	claims, _ := ClaimsFromContext(r.Context())
 	p := h.PolicyStore.Get()
+	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
+	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		writeJSONError(w, http.StatusForbidden, forbiddenForRole(role))
+		writeAuthzDenied(w, r, role)
 		return
 	}
 

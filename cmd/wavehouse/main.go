@@ -17,6 +17,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -66,15 +67,15 @@ func run() int {
 		return 1
 	}
 
-	// Validate auth config.
-	if cfg.Auth.Enabled {
-		switch cfg.Auth.JWTSecret {
-		case "":
-			logger.Error("FATAL: WH_AUTH_JWT_SECRET is required when auth is enabled")
-			return 1
-		case "change-me-in-production":
-			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
-		}
+	// Validate auth config. There is no on/off switch — the JWT middleware
+	// always runs. With neither a secret nor a JWKS URL no token can validate,
+	// so every request falls back to the policy default_role (a pure public
+	// deployment). That's a valid posture, so warn rather than fail.
+	switch {
+	case cfg.Auth.JWTSecret == "" && cfg.Auth.JWKSURL == "":
+		logger.Warn("no auth.jwt_secret or auth.jwks_url set: no token can be validated, so every request resolves to the policy default_role (public access)")
+	case cfg.Auth.JWTSecret == "change-me-in-production":
+		logger.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
 	ctx := context.Background()
@@ -259,11 +260,6 @@ func run() int {
 		return 1
 	}
 
-	// When auth is on, a no-token request is admitted only if a usable
-	// default_role is configured (see allowAnon below); hold the policy cache
-	// fail-closed so a runtime KV delete can't nil it into Evaluate's allow-all.
-	policyStore.SetFailClosed(cfg.Auth.Enabled)
-
 	// Pipes store (NATS KV + optional SQL file directory).
 	pipesStore, err := pipes.NewStore(ctx, embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
 	if err != nil {
@@ -361,12 +357,6 @@ func run() int {
 	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
 	wsHandler.PolicyStore = policyStore
 
-	// allowAnon reports whether a no-token request should be admitted: true iff
-	// the org has configured a usable (non-privileged) default_role — that is
-	// the single switch for public access. Read live so a policy PUT/delete
-	// flips it without a restart.
-	allowAnon := func() bool { return policy.ResolveRole(policyStore.Get(), "") != "" }
-
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -378,15 +368,12 @@ func run() int {
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           api.NewPipesHandler(pipesStore, chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second, registry, policyStore, cfg.Cache.TimestampBucketSeconds),
-		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
-			Enabled:        cfg.Auth.Enabled,
-			JWTSecret:      cfg.Auth.JWTSecret,
-			JWKSURL:        cfg.Auth.JWKSURL,
-			RoleClaim:      cfg.Auth.RoleClaim,
-			DevMode:        cfg.Auth.DevMode,
-			AllowAnonymous: allowAnon,
+		AuthMW: auth.Middleware(auth.Config{
+			JWTSecret: cfg.Auth.JWTSecret,
+			JWKSURL:   cfg.Auth.JWKSURL,
+			RoleClaim: cfg.Auth.RoleClaim,
 		}),
-		AuthEnabled: cfg.Auth.Enabled,
+		PolicyStore: policyStore,
 		JS:          js,
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,

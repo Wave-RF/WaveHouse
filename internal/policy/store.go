@@ -21,11 +21,10 @@ const (
 
 // Store manages policy persistence via NATS KV with optional file bootstrap.
 type Store struct {
-	kv         jetstream.KeyValue
-	logger     *slog.Logger
-	mu         sync.RWMutex
-	cached     *Policy
-	failClosed bool // when true, a KV delete retains the last policy instead of nilling
+	kv     jetstream.KeyValue
+	logger *slog.Logger
+	mu     sync.RWMutex
+	cached *Policy
 }
 
 // NewStore creates a policy store backed by NATS KV.
@@ -132,27 +131,15 @@ func (s *Store) Watch(ctx context.Context) {
 	}
 }
 
-// SetFailClosed controls how Watch reacts to a policy deletion from KV. When
-// true (set when auth is enabled), a delete is ignored: the last-known policy
-// is retained and an error logged, so Evaluate's nil-policy allow-all can
-// never be reached at runtime. Set once at startup, before Watch starts.
-func (s *Store) SetFailClosed(v bool) {
-	s.failClosed = v
-}
-
-// handleDelete applies a KV delete/purge to the cache. Under failClosed it
-// retains the last-known policy (logging an error) instead of nilling, so a
-// deletion can't silently flip Evaluate(nil) to allow-all while serving
-// public traffic.
+// handleDelete applies a KV delete/purge by clearing the cache. With no policy,
+// Evaluate fails closed — only the admin role passes — so deleting the policy
+// denies all non-admin traffic until a new one is written. No fail-closed
+// retention is needed: the deny-by-default is structural, not a runtime flag.
 func (s *Store) handleDelete() {
-	if s.failClosed {
-		s.logger.Error("policy deleted from KV but fail-closed is set (auth enabled); retaining last-known policy and refusing to fail open")
-		return
-	}
 	s.mu.Lock()
 	s.cached = nil
 	s.mu.Unlock()
-	s.logger.Info("policy deleted")
+	s.logger.Warn("policy deleted from KV; cache cleared — non-admin traffic is now denied until a new policy is written")
 }
 
 // load reads the current policy from NATS KV.

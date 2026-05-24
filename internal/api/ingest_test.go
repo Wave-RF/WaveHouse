@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -212,7 +213,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 	})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "viewer")
+	ctx := auth.WithRole(req.Context(), "viewer")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -241,7 +242,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 
 	// Try to insert 'button' which is not in AllowColumns.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "button": "signup"})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "writer")
+	ctx := auth.WithRole(req.Context(), "writer")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -272,8 +273,8 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "wrong-org"})
 	claims := jwt.MapClaims{"org_id": "correct-org"}
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
-	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -305,8 +306,8 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	// org_id in body matches JWT claim — should pass.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "my-org"})
 	claims := jwt.MapClaims{"org_id": "my-org"}
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
-	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -338,8 +339,8 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	// org_id NOT in body — should be auto-injected from JWT claim.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	claims := jwt.MapClaims{"org_id": "injected-org"}
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
-	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -386,7 +387,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 42})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "writer")
+	ctx := auth.WithRole(req.Context(), "writer")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -407,7 +408,7 @@ func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "admin")
+	ctx := auth.WithRole(req.Context(), "admin")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()

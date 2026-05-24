@@ -23,22 +23,23 @@ type RoleCase struct {
 
 // StandardRoleMatrix is the canonical set of (AllowedRoles, observed-role) cases
 // every AllowedRoles-style gate must cover. Authorization is allowlist
-// membership: the observed role must appear in AllowedRoles, the privileged
-// built-in roles (admin, service) always pass, and an empty/absent role matches
-// nothing — so a resource with no AllowedRoles authorizes nobody but
-// admin/service. The empty/absent-role rows are the ones that fail open when a
-// gate only enforces its allowlist for a non-empty role — the class of bug
-// behind #159. Keeping them in one shared place means a handler that takes
-// AllowedRoles without running this matrix looks obviously under-tested in review.
+// membership: the observed role must appear in AllowedRoles, the admin role
+// (policy.AdminRole — "admin" by default, which is what these cases assume)
+// always passes, and an empty/absent role matches nothing — so a resource with
+// no AllowedRoles authorizes nobody but admin. The empty/absent-role rows are
+// the ones that fail open when a gate only enforces its allowlist for a
+// non-empty role — the class of bug behind #159. Keeping them in one shared
+// place means a handler that takes AllowedRoles without running this matrix
+// looks obviously under-tested in review.
 func StandardRoleMatrix() []RoleCase {
 	return []RoleCase{
-		// No allowlist: authorizes nobody but the privileged built-ins.
+		// No allowlist: authorizes nobody but the admin role.
 		{Name: "no allowlist, no role", AllowedRoles: nil, SetRole: false, WantForbidden: true},
 		{Name: "no allowlist, empty role", AllowedRoles: nil, Role: "", SetRole: true, WantForbidden: true},
 		{Name: "no allowlist, ordinary role", AllowedRoles: nil, Role: "viewer", SetRole: true, WantForbidden: true},
 		{Name: "no allowlist, admin allowed", AllowedRoles: nil, Role: "admin", SetRole: true, WantForbidden: false},
-		{Name: "no allowlist, service allowed", AllowedRoles: nil, Role: "service", SetRole: true, WantForbidden: false},
-		// Restricted: exact membership; the privileged built-ins bypass the list.
+		{Name: "no allowlist, service denied", AllowedRoles: nil, Role: "service", SetRole: true, WantForbidden: true},
+		// Restricted: exact membership; the admin role bypasses the list.
 		{Name: "restricted, matching role", AllowedRoles: []string{"editor"}, Role: "editor", SetRole: true, WantForbidden: false},
 		{Name: "restricted, non-matching role", AllowedRoles: []string{"editor"}, Role: "viewer", SetRole: true, WantForbidden: true},
 		{Name: "restricted, admin bypass", AllowedRoles: []string{"editor"}, Role: "admin", SetRole: true, WantForbidden: false},

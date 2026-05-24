@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
@@ -98,8 +99,8 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+	ctx := auth.WithRole(r.Context(), "viewer")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -127,8 +128,8 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	// Request "count" column which is not in AllowColumns.
 	sq := query.StructuredQuery{Columns: []string{"count"}}
 	r := structuredQueryRequest(t, "clicks", sq)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+	ctx := auth.WithRole(r.Context(), "viewer")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -163,8 +164,8 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 		},
 	}
 	r := structuredQueryRequest(t, "clicks", sq)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+	ctx := auth.WithRole(r.Context(), "viewer")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()

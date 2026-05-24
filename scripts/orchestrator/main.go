@@ -148,9 +148,9 @@ func run() error {
 		"WH_CH_HTTP_PORT="+chHTTPPort.Port(),
 		"WH_DATA_DIR="+dataDir,
 		"WH_MQ_MAX_BYTES_GB=1",
-		"WH_AUTH_ENABLED=true",
+		// No auth on/off switch: the secret lets tokens validate. The e2e suite
+		// mints admin/viewer JWTs (tests/e2e/sdk/helpers.ts).
 		"WH_AUTH_JWT_SECRET=sdk-dev-secret",
-		"WH_AUTH_DEV_MODE=false",
 		"WH_AUTH_ROLE_CLAIM=role",
 		"WH_DEDUPE_ENABLED=false",
 		"WH_SCHEMA_REFRESH_INTERVAL=5",

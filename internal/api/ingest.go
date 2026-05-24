@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
@@ -83,13 +84,13 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Policy enforcement for inserts.
 	if h.PolicyStore != nil {
-		role := RoleFromContext(ctx)
-		claims, _ := ClaimsFromContext(ctx)
 		p := h.PolicyStore.Get()
+		role := policy.ResolveRole(p, auth.RoleFromContext(ctx))
+		claims, _ := auth.ClaimsFromContext(ctx)
 		perms := policy.Evaluate(p, role, table, "insert", claims)
 		if !perms.Allowed {
 			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			writeJSONError(w, http.StatusForbidden, forbiddenForRole(role))
+			writeAuthzDenied(w, r, role)
 			return
 		}
 		// Check column permissions — reject disallowed columns.

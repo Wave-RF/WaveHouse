@@ -83,13 +83,16 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `auth.enabled` | `WH_AUTH_ENABLED` | `false` | Enable JWT authentication on `/v1/*` routes. When disabled, all endpoints are open. |
-| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. **Must be set when auth is enabled** (unless using JWKS). |
+| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. With neither this nor `jwks_url` set, no token can validate, so every request is the policy `default_role`. |
 | `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is tried first, falling back to HMAC secret. |
 | `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
-| `auth.dev_mode` | `WH_AUTH_DEV_MODE` | `false` | When `true`, skips JWT validation and treats all requests as admin. **For development only.** |
 
-**Public (unauthenticated) access is not a config flag** — it's driven by the access-control policy. When `auth.enabled` is true, a request with **no token** is rejected with `401` *unless* the policy defines a usable (non-`admin`/`service`) `default_role`; if it does, no-token requests are admitted and evaluated as that role. So setting a `default_role` opens public access and removing it closes it. Invalid/expired tokens are always rejected, `/v1/admin/*` and the schema/DLQ endpoints stay token-gated, and a pipe with no `allowed_roles` authorizes nobody but `admin`/`service`. See [API — Authentication](/api#authentication).
+**There is no auth on/off switch.** The JWT middleware always runs. A request with no token, or an invalid/expired one, falls back to the policy `default_role`; elevated access needs a valid token whose role is granted (or equals the policy `admin_role`). The privileged role and public access are **policy** settings, not config flags:
+
+- **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match): the role granted full access and the `/v1/admin/*` gate. There is no separate `service` role.
+- **`default_role`** (policy field): set it to open public (no-token) access — roleless requests are evaluated as that role; remove it to close public access. It may **not** equal `admin_role`. `/v1/admin/*` and the schema/DLQ endpoints are admin-only, and a pipe with no `allowed_roles` authorizes nobody but the admin role.
+
+See [API — Authentication](/api#authentication).
 
 ### Dead Letter Queue (DLQ)
 
@@ -173,11 +176,9 @@ cache:
   timestamp_bucket_seconds: 60
 
 auth:
-  enabled: false
   jwt_secret: change-me-in-production
   jwks_url: ""
   role_claim: role
-  dev_mode: false
 
 schema:
   refresh_interval: 60

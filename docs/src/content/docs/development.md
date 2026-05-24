@@ -98,9 +98,9 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
-# Query events (wait a few seconds for the batch flush). `/v1/admin/query`
-# requires admin/service when auth is on — fine here because `make dev`
-# runs with `auth.enabled=false`.
+# Query events (wait a few seconds for the batch flush). `/v1/admin/query` is
+# admin-only: send a valid JWT whose role is the policy `admin_role`
+# ("admin" by default) via `Authorization: Bearer <jwt>`.
 curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
@@ -159,13 +159,10 @@ when you need to poke at ClickHouse:
 
 ### Using the SDK playground against `make dev`
 
-The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse with auth enabled in dev mode and the secret `sdk-dev-secret`. To match those defaults under `make dev`:
+The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse signing JWTs with the secret `sdk-dev-secret`. To match under `make dev`:
 
 ```bash
-WH_AUTH_ENABLED=true \
-WH_AUTH_DEV_MODE=true \
-WH_AUTH_JWT_SECRET=sdk-dev-secret \
-make dev
+WH_AUTH_JWT_SECRET=sdk-dev-secret make dev
 ```
 
 Then in another terminal:
@@ -179,12 +176,12 @@ npx tsx playground/public.ts         # SDK demo against the live server
 
 Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
 
-### Enable Auth (Optional)
+### Validating tokens
 
-Set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=my-secret` to require JWT tokens:
+There is no auth on/off switch — the JWT middleware always runs. Set `WH_AUTH_JWT_SECRET` so tokens can be validated; without it, every request resolves to the policy `default_role`. Mint a JWT signed with that secret (role == the policy `admin_role`) to reach admin/elevated endpoints:
 
 ```bash
-WH_AUTH_ENABLED=true WH_AUTH_JWT_SECRET=my-secret make dev
+WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
 Then generate a test token:

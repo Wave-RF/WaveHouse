@@ -45,9 +45,10 @@ services:
       WH_CH_ADDR: clickhouse:9000
       WH_DATA_DIR: /app/data
       WH_MQ_MAX_BYTES_GB: "1"
-      WH_AUTH_ENABLED: "true"
+      # No auth on/off switch: the secret lets tokens validate. Tests mint
+      # admin/viewer JWTs (helpers.ts); a no/invalid-token request resolves to
+      # the policy default_role.
       WH_AUTH_JWT_SECRET: sdk-dev-secret
-      WH_AUTH_DEV_MODE: "false"
       WH_AUTH_ROLE_CLAIM: role
       WH_DEDUPE_ENABLED: "false"
       WH_SCHEMA_REFRESH_INTERVAL: "5"

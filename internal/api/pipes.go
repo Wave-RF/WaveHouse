@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -85,34 +86,23 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization is allowlist membership: the caller's role — a tokenless or
-	// roleless request first mapped to the configured default_role — must appear
-	// in allowed_roles. Matching is exact (there is no "*" any-role wildcard) and
-	// empty allowlist entries are skipped, so a stray "" can't authorize an empty
-	// role. A pipe with no allowed_roles therefore authorizes nobody but the
-	// admin/service bypass below — an absent allowlist grants no one (fails closed).
-	role := RoleFromContext(r.Context())
-	if role == "" && h.PolicyStore != nil {
-		if p := h.PolicyStore.Get(); p != nil {
-			role = policy.ResolveRole(p, role)
-		}
+	// Authorization is allowlist membership (policy.RoleAllowed): the caller's
+	// role — a tokenless or roleless request first mapped to the configured
+	// default_role — must appear in allowed_roles by exact match. There is no
+	// "*" any-role wildcard and empty entries are ignored, so a stray "" can't
+	// authorize an empty role. The admin role bypasses every pipe's allowlist by
+	// design, not oversight: admins author pipes and can run arbitrary SQL via
+	// /v1/admin/query, so allowed_roles is never a confidentiality boundary
+	// against them (mirrors Evaluate's admin bypass). A pipe with no
+	// allowed_roles therefore authorizes nobody but admin (fails closed).
+	var p *policy.Policy
+	if h.PolicyStore != nil {
+		p = h.PolicyStore.Get()
 	}
-	// admin/service bypass every pipe's allowlist, listed or not — by design, not
-	// an oversight: they author pipes and can run arbitrary SQL via /v1/admin/query,
-	// so allowed_roles is never a confidentiality boundary against them. Mirrors
-	// policy.Evaluate's built-in admin/service bypass.
-	if role != "admin" && role != "service" {
-		allowed := false
-		for _, ar := range q.AllowedRoles {
-			if ar != "" && ar == role {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			writeJSONError(w, http.StatusForbidden, forbiddenForRole(role))
-			return
-		}
+	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
+	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
+		writeAuthzDenied(w, r, role)
+		return
 	}
 
 	// Gather parameters from query string and/or JSON body.

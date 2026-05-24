@@ -122,12 +122,11 @@ WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 # controls *which origins can read responses*, not cookie scope.
 WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 
-# Optional auth
-WH_AUTH_ENABLED=true
+# Auth (the JWT middleware always runs — set a secret/JWKS to validate tokens;
+# without one, every request resolves to the policy default_role)
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 WH_AUTH_ROLE_CLAIM=app_metadata.role
-# WH_AUTH_DEV_MODE=true            # Dev only — skips JWT validation
 
 # Access control & pipes
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml

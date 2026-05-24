@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/nats-io/nats.go/jetstream"
@@ -28,10 +30,12 @@ type Dependencies struct {
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
 	AuthMW          func(http.Handler) http.Handler
-	AuthEnabled     bool
-	JS              jetstream.JetStream // for SSE/WS gap-fill
-	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
-	LogLevel        *slog.LevelVar
+	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
+	// is read live from the policy, so admin_role changes apply without a restart.
+	PolicyStore *policy.Store
+	JS          jetstream.JetStream // for SSE/WS gap-fill
+	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
+	LogLevel    *slog.LevelVar
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -98,28 +102,20 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(deps.AuthMW)
 
-		// Single named role gate for /v1/admin/*. All admin-equivalent
-		// surfaces (management endpoints + raw-SQL passthrough) share the
-		// same admin/service principal set — service tokens have
-		// admin-scoped permissions across the rest of /v1/admin/*, so
-		// carving out a single tighter gate for raw SQL would be
-		// inconsistency without a real authorization win. Declaring the
-		// middleware once keeps the role-string list from drifting.
-		adminOrService := RequireRole(deps.AuthEnabled, "admin", "service")
-
-		// authd gates endpoints that have no policy/allowed_roles check of
-		// their own (schema discovery, DLQ stats) behind a valid token, so
-		// admitting tokenless requests (public access) does not expose them.
-		authd := RequireAuthenticated(deps.AuthEnabled)
+		// Single admin gate for every admin-equivalent surface. The admin role
+		// is policy.AdminRole (configurable via admin_role, "admin" by default),
+		// read live from the policy store so changes apply without a restart.
+		// Declaring it once keeps the gate consistent across the tree.
+		requireAdmin := RequireAdmin(deps.PolicyStore)
 
 		r.Post("/ingest/{table}", deps.Ingest.Handle)
 		r.Get("/stream/sse", deps.SSE.Handle)
 		r.Get("/stream/ws", deps.WS.Handle)
 
-		// Schema discovery — token-gated (no policy gate of its own).
-		r.With(authd).Get("/schema", deps.Schema.List)
-		r.With(authd).Get("/schema/{table}", deps.Schema.Get)
-		r.With(authd).Post("/schema/refresh", deps.Schema.Refresh)
+		// Schema discovery — admin-only (no policy gate of its own).
+		r.With(requireAdmin).Get("/schema", deps.Schema.List)
+		r.With(requireAdmin).Get("/schema/{table}", deps.Schema.Get)
+		r.With(requireAdmin).Post("/schema/refresh", deps.Schema.Refresh)
 
 		// Structured query endpoint.
 		if deps.StructuredQuery != nil {
@@ -132,16 +128,16 @@ func NewRouter(deps Dependencies) http.Handler {
 			r.Post("/pipes/{name}", deps.Pipes.Execute)
 		}
 
-		// DLQ stats — token-gated (no policy gate of its own).
+		// DLQ stats — admin-only (no policy gate of its own).
 		if deps.DLQ != nil {
-			r.With(authd).Get("/dlq/stats", deps.DLQ.Stats)
+			r.With(requireAdmin).Get("/dlq/stats", deps.DLQ.Stats)
 		}
 
-		// Admin routes. The adminOrService gate covers the whole tree;
-		// every surface below — including raw-SQL passthrough — shares
-		// the same admin-equivalent principal set.
+		// Admin routes. The requireAdmin gate covers the whole tree; every
+		// surface below — including raw-SQL passthrough — shares the same admin
+		// principal set (policy.AdminRole).
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(adminOrService)
+			r.Use(requireAdmin)
 
 			// Raw-SQL passthrough. The only sanctioned surface for
 			// non-insert mutations (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…)
@@ -230,52 +226,30 @@ func jsonRecoverer(next http.Handler) http.Handler {
 	})
 }
 
-// RequireRole returns middleware that restricts access to the given roles.
-// When no role is present in the request context, access is allowed only if
-// authEnabled is false. If authEnabled is true, the request is denied (fail-closed)
-// with a 401 Unauthorized response.
-func RequireRole(authEnabled bool, roles ...string) func(http.Handler) http.Handler {
+// RequireAdmin restricts a route to the policy admin role (policy.AdminRole —
+// configurable via admin_role, "admin" by default). The role established by the
+// auth middleware and the live policy are read per request, so an admin_role
+// change applies without a restart, and a fresh deployment with no policy yet
+// still admits an "admin" token (AdminRole defaults to "admin" for a nil
+// policy) so the first policy can be written.
+//
+// Authentication is decoupled from this gate: a missing/invalid/expired token
+// resolves to an empty (non-admin) role and is denied here. Denials go through
+// writeAuthzDenied, so a present-but-invalid token fails loud (401 + token
+// reason) rather than as a bare 403.
+func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role := RoleFromContext(r.Context())
-			// Fail-closed: if auth is explicitly enabled, an empty role is a security failure.
-			if role == "" {
-				if !authEnabled {
-					// Auth is disabled globally; allow for dev/testing.
-					next.ServeHTTP(w, r)
-					return
-				}
-				// FAIL-CLOSED: Auth is enabled, but no role was found in the context.
-				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			var p *policy.Policy
+			if store != nil {
+				p = store.Get()
+			}
+			role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
+			if policy.IsAdmin(p, role) {
+				next.ServeHTTP(w, r)
 				return
 			}
-			for _, allowed := range roles {
-				if role == allowed {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-			writeJSONError(w, http.StatusForbidden, "forbidden")
-		})
-	}
-}
-
-// RequireAuthenticated requires a valid token when auth is enabled (any role,
-// or none), returning 401 otherwise. It exists for endpoints that have no
-// policy/allowed_roles gate of their own: when public access is on, a tokenless
-// request reaches the router with no claims, and this keeps such endpoints
-// (schema discovery, DLQ stats) behind a token. When auth is disabled it is a
-// pass-through, matching the dev/test posture of the rest of the router.
-func RequireAuthenticated(authEnabled bool) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if authEnabled {
-				if _, ok := ClaimsFromContext(r.Context()); !ok {
-					writeJSONError(w, http.StatusUnauthorized, "unauthorized")
-					return
-				}
-			}
-			next.ServeHTTP(w, r)
+			writeAuthzDenied(w, r, role)
 		})
 	}
 }

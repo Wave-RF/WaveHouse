@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
@@ -111,8 +112,8 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
 		if tc.SetRole {
-			ctx := context.WithValue(r.Context(), ContextKeyRole, tc.Role)
-			ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+			ctx := auth.WithRole(r.Context(), tc.Role)
+			ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 			r = r.WithContext(ctx)
 		}
 
@@ -203,7 +204,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 	w := httptest.NewRecorder()
 	// No query params or body — missing "page".
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/by_page/execute", "by_page", nil)
-	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
 	h.Execute(w, r)
 
@@ -230,7 +231,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("name", "by_page")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
-	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
 	safeHandle(h.Execute, w, r)
 
@@ -322,7 +323,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 	w := httptest.NewRecorder()
 	body := map[string]any{"page": "/about"}
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", body)
-	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
 	safeHandle(h.Execute, w, r)
 
@@ -344,8 +345,8 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
-	ctx := context.WithValue(r.Context(), ContextKeyClaims, jwt.MapClaims{})
-	ctx = context.WithValue(ctx, ContextKeyRole, "viewer")
+	ctx := auth.WithClaims(r.Context(), jwt.MapClaims{})
+	ctx = auth.WithRole(ctx, "viewer")
 	r = r.WithContext(ctx)
 
 	safeHandle(h.Execute, w, r)
@@ -366,7 +367,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
-	r = r.WithContext(context.WithValue(r.Context(), ContextKeyRole, "admin"))
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
 
 	safeHandle(h.Execute, w, r)
 
