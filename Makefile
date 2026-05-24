@@ -243,6 +243,20 @@ deps-wipe: ## Stop ClickHouse AND destroy its data volume (DESTRUCTIVE — use t
 	@echo "$(RED)==> Wiping ClickHouse (containers + volumes)...$(RESET)"
 	@$(DEV_COMPOSE) down -v --remove-orphans
 
+##@ Observability
+
+.PHONY: obs-aspire
+obs-aspire: ## Start local Aspire Dashboard (clean UI for Traces, Metrics, Logs)
+	@scripts/otel/aspire.sh
+
+.PHONY: obs-grafana
+obs-grafana: ## Start local Grafana LGTM stack (advanced correlation & UI)
+	@scripts/otel/grafana.sh
+
+.PHONY: obs-front
+obs-front: ## Start local OTel Front UI
+	@scripts/otel/otel-front.sh
+
 ##@ Code Quality
 
 .PHONY: fmt
@@ -602,6 +616,8 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 	@rm -rf data/
 	@$(DEV_COMPOSE) down -v --remove-orphans 2>/dev/null || true
 	@docker compose -f tests/e2e/compose.yaml down -v --remove-orphans 2>/dev/null || true
+	@# Clean up any orphaned standalone observability containers
+	@docker rm -f aspire-dashboard otel-lgtm otel-front 2>/dev/null || true
 
 ##@ Tooling
 

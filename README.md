@@ -138,6 +138,8 @@ make dev
 
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
 
+**With observability:** Run `make obs-aspire` (or `obs-grafana` or `obs-front`) in a separate terminal to boot a lightweight OpenTelemetry dashboard. They run side-by-side with `make dev` or your test suites. See [docs/development.md § Running with observability](docs/src/content/docs/development.md#running-with-observability).
+
 ## 🤖 Working with Claude Code
 
 The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / a subagent, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.

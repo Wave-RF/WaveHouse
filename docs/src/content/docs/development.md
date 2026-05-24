@@ -157,6 +157,26 @@ when you need to poke at ClickHouse:
 
 **Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
 
+### Running with observability
+
+WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+
+You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
+
+They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear them down and clean up the container.
+
+| Target | What it does | UI URL |
+| ------ | ------------ | ------ |
+| `make obs-aspire` | Boots the Aspire dashboard. Extremely fast, in-memory only, and requires no login. Ideal for quick trace and log debugging. | `http://localhost:18888` |
+| `make obs-grafana` | Boots Grafana LGTM (Loki, Grafana, Tempo, Prometheus). Pre-configured to bypass login. Best for advanced UI charting and trace-to-log correlation. | `http://localhost:3000` |
+| `make obs-front` | Boots OTel-Front for a basic, alternative trace viewer. | `http://localhost:8000` |
+
+**Typical Workflow:**
+
+1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
+2. Open Tab 2: run `make dev` (or `make test-e2e`)
+3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
+
 ### Using the SDK playground against `make dev`
 
 The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse with auth enabled in dev mode and the secret `sdk-dev-secret`. To match those defaults under `make dev`:
@@ -290,7 +310,7 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 ### Test Structure
 
 | Category | Location | Docker? | Command |
-|----------|----------|---------|---------|
+| -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-sdk` |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
@@ -313,6 +333,7 @@ Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()`
 The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
 
 **Architecture**:
+
 - `tests/e2e/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app`, so you can also point the suite at a hot-reload `make dev` instance instead.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
@@ -418,6 +439,10 @@ Run `make help` to see all targets. Key ones:
 | `make deps-logs` | Tail ClickHouse logs |
 | `make deps-shell` | `clickhouse-client` REPL on the running container |
 | `make deps-wipe` | Stop ClickHouse AND destroy its data volume (DESTRUCTIVE) |
+| **Observability** | |
+| `make obs-aspire` | Prebuilt 0-config o11y UI to show WaveHouse metrics, logs, and traces locally |
+| `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
+| `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
 | **Static checks** | |
 | `make fmt` | Check formatting (run `make fix` to apply) |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
@@ -493,7 +518,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
 
-```
+```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
 ```
 
