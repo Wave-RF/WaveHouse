@@ -175,7 +175,10 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			// Per-message ack is DEBUG for the same reason as the receive log —
 			// at production load this fires once per row.
 			slog.DebugContext(msgCtx, "message batch acknowledged by ClickHouse")
-			bentoEventsProcessed.Add(ackCtx, 1, metric.WithAttributes(
+			// Counter increment uses msgCtx (component-stamped) rather than
+			// Bento's raw ackCtx so trace_id/span_id and component propagate
+			// onto the exemplar for the data point.
+			bentoEventsProcessed.Add(msgCtx, 1, metric.WithAttributes(
 				attribute.String("table", raw.TableName),
 			))
 
@@ -193,8 +196,7 @@ func (j *jsInput) Close(ctx context.Context) error {
 }
 
 type dlqOutput struct {
-	js     jetstream.JetStream
-	logger *slog.Logger
+	js jetstream.JetStream
 }
 
 func (d *dlqOutput) Connect(ctx context.Context) error { return nil }
@@ -486,10 +488,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, cache cache.Cache, ch
 
 		if err := service.RegisterBatchOutput("nats_dlq_bridge", service.NewConfigSpec(),
 			func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
-				return &dlqOutput{
-					js:     js,
-					logger: logger,
-				}, service.BatchPolicy{}, 1, nil
+				return &dlqOutput{js: js}, service.BatchPolicy{}, 1, nil
 			},
 		); err != nil {
 			registerErr = fmt.Errorf("register Bento DLQ output: %w", err)

@@ -13,8 +13,15 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/singleflight"
 )
+
+// sfSharedStructuredAttrs is the static label set for wavehouse_query_singleflight_shared_total
+// records produced by this handler. Pre-allocated so the hot path on a
+// coalesced request doesn't allocate.
+var sfSharedStructuredAttrs = metric.WithAttributes(attribute.String("surface", "structured_query"))
 
 // StructuredQueryHandler handles POST /v1/query?table={table}
 type StructuredQueryHandler struct {
@@ -162,7 +169,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if shared {
-		observability.QuerySingleflightShared.Add(r.Context(), 1)
+		observability.QuerySingleflightShared.Add(r.Context(), 1, sfSharedStructuredAttrs)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

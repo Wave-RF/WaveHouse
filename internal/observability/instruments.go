@@ -128,9 +128,24 @@ var (
 	// the work was done once and N callers got the same value. Pairs with
 	// CacheHits/CacheMisses for the structured-query and pipes handlers'
 	// effectiveness story.
+	// Labels: surface=structured_query|pipes — different read paths have
+	// different cache TTLs / parameter shapes, so dashboards want to split
+	// the savings by where they came from.
+	//
+	// TODO: no unit test currently pins the handler's `if shared { Add() }`
+	// trigger. The OTel-Go global delegating meter clears its instrument
+	// list after the first SetMeterProvider, so the standard test pattern
+	// (save global, swap to a manual reader, restore on cleanup) only
+	// works for the FIRST test that sets the provider — subsequent
+	// SetMeterProvider calls don't re-delegate to instruments created at
+	// package init. Proper coverage needs either a TestMain-installed
+	// shared MeterProvider for the whole package or a refactor to inject
+	// the counter at handler-construction time. Pre-existing problem; the
+	// same limitation affects TestHTTPMetricsMiddleware_* and
+	// TestRegisterSystemMetrics_*.
 	QuerySingleflightShared = mustInt64Counter(
 		"wavehouse_query_singleflight_shared_total",
-		metric.WithDescription("Queries whose fill execution was coalesced via singleflight (sf.Do shared=true)"),
+		metric.WithDescription("Queries whose fill execution was coalesced via singleflight (sf.Do shared=true), by surface"),
 	)
 
 	// DedupeLookups counts dedupe lookups by outcome.

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -91,7 +90,7 @@ func (m *bentoMockIter) Stop() {}
 func TestDLQOutput_WriteBatch_WithTableName(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJS{}
-	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d := &dlqOutput{js: js}
 
 	msg := service.NewMessage([]byte(`{"data": "test"}`))
 	msg.MetaSet("table_name", "clicks")
@@ -107,7 +106,7 @@ func TestDLQOutput_WriteBatch_WithTableName(t *testing.T) {
 func TestDLQOutput_WriteBatch_WithEmptyTableName(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJS{}
-	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d := &dlqOutput{js: js}
 
 	msg := service.NewMessage([]byte(`{"data": "test"}`))
 	msg.MetaSet("table_name", "")
@@ -123,7 +122,7 @@ func TestDLQOutput_WriteBatch_WithEmptyTableName(t *testing.T) {
 func TestDLQOutput_WriteBatch_MissingTableName(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJS{}
-	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d := &dlqOutput{js: js}
 
 	msg := service.NewMessage([]byte(`{"data": "orphan"}`))
 	// No table_name metadata set.
@@ -139,7 +138,7 @@ func TestDLQOutput_WriteBatch_MissingTableName(t *testing.T) {
 func TestDLQOutput_WriteBatch_MultipleMessages(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJS{}
-	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d := &dlqOutput{js: js}
 
 	m1 := service.NewMessage([]byte(`{"id":"1"}`))
 	m1.MetaSet("table_name", "clicks")
@@ -367,7 +366,7 @@ func (m *bentoMockJSWithError) Publish(_ context.Context, _ string, _ []byte, _ 
 func TestDLQOutput_WriteBatch_PublishError(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJSWithError{publishErr: errors.New("NATS unavailable")}
-	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d := &dlqOutput{js: js}
 
 	msg := service.NewMessage([]byte(`{"data": "orphan"}`))
 	msg.MetaSet("table_name", "clicks")
@@ -382,7 +381,7 @@ func TestDLQOutput_WriteBatch_PublishError(t *testing.T) {
 
 func TestDLQOutput_NoOps(t *testing.T) {
 	t.Parallel()
-	d := &dlqOutput{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	d := &dlqOutput{}
 
 	assert.NoError(t, d.Connect(context.Background()))
 	assert.NoError(t, d.Wait(context.Background()))

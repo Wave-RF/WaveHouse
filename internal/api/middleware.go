@@ -136,6 +136,19 @@ func verifyJWT(w http.ResponseWriter, r *http.Request, cfg AuthConfig, jwks keyf
 			attribute.String("auth.role_claim", roleClaim),
 		),
 	)
+	// Panic-safe span finalization: each explicit success/failure path
+	// flips `ended` and calls span.End() so the span boundary reflects only
+	// the verify work, not the downstream handler. If anything panics
+	// before one of those paths fires (jwt.Parse with a future library
+	// bump, extractClaim on a malformed claim shape, etc.), the deferred
+	// branch still ends the span — otherwise it stays pinned in the OTel
+	// SDK's active-span set and never exports.
+	ended := false
+	defer func() {
+		if !ended {
+			span.End()
+		}
+	}()
 	// Local helper for the failure-return shape — keeps each return path
 	// to one line and guarantees span.End() fires before writeJSONError.
 	fail := func(status int, reason, msg string, recordErr error) (context.Context, jwt.MapClaims, string, bool) {
@@ -144,6 +157,7 @@ func verifyJWT(w http.ResponseWriter, r *http.Request, cfg AuthConfig, jwks keyf
 		if recordErr != nil {
 			span.RecordError(recordErr)
 		}
+		ended = true
 		span.End()
 		writeJSONError(w, status, msg)
 		return ctx, nil, "", false
@@ -197,6 +211,7 @@ func verifyJWT(w http.ResponseWriter, r *http.Request, cfg AuthConfig, jwks keyf
 	} else {
 		span.SetAttributes(attribute.String("auth.role", role))
 	}
+	ended = true
 	span.End()
 	return ctx, claims, role, true
 }

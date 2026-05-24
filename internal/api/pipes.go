@@ -12,8 +12,15 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/singleflight"
 )
+
+// sfSharedPipesAttrs is the static label set for the singleflight-shared
+// counter from this handler. See sfSharedStructuredAttrs in structured_query.go
+// for the rationale.
+var sfSharedPipesAttrs = metric.WithAttributes(attribute.String("surface", "pipes"))
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
@@ -175,7 +182,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if shared {
-		observability.QuerySingleflightShared.Add(r.Context(), 1)
+		observability.QuerySingleflightShared.Add(r.Context(), 1, sfSharedPipesAttrs)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
