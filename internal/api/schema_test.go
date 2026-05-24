@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
-	"github.com/go-chi/chi/v5"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,10 +43,7 @@ func TestSchema_Get_Exists(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema/clicks", nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("table", "clicks")
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema?table=clicks", nil)
 
 	h.Get(w, r)
 
@@ -64,14 +61,11 @@ func TestSchema_Get_NotFound(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema/nonexistent", nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("table", "nonexistent")
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema?table=nonexistent", nil)
 
 	h.Get(w, r)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "table not found")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }

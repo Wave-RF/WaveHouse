@@ -209,11 +209,11 @@ describe('QueryBuilder', () => {
 
   // --- Fetch endpoint ---
 
-  it('POSTs to /v1/tables/{table}/query', async () => {
+  it('POSTs to /v1/query?table={table}', async () => {
     await builder('events').select('user_id').fetch();
 
     const [url] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/v1/tables/events/query');
+    expect(url).toContain('/v1/query?table=events');
   });
 
   it('returns data on successful fetch', async () => {

@@ -13,14 +13,14 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/go-chi/chi/v5"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// IngestHandler handles POST /v1/ingest/{table}.
+// IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	Registry    *discovery.SchemaRegistry
 	Dedup       dedupe.Deduplicator // nil if dedup disabled
@@ -34,7 +34,7 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *Ing
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	table := chi.URLParam(r, "table")
+	table := r.URL.Query().Get("table")
 
 	// Force the use of the GLOBAL provider
 	tracer := otel.GetTracerProvider().Tracer("internal/api")
@@ -45,7 +45,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Add a standard log to prove we are inside the span logic
-	slog.InfoContext(ctx, "debug: span started for ingest", "table", table)
+	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
 
 	r = r.WithContext(ctx)
 
@@ -66,12 +66,6 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-
-	if _, exists := data["received_timestamp"]; exists {
-		slog.WarnContext(ctx, "payload contains reserved field", "field", "received_timestamp", "table", table)
-		writeJSONError(w, http.StatusBadRequest, "payload cannot contain reserved field 'received_timestamp'")
 		return
 	}
 
@@ -147,7 +141,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject := "ingest." + table
+	subject := "ingest." + query.EncodeTable(table)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
 			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)

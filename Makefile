@@ -182,14 +182,22 @@ help: ## Show this help menu
 DEV_COMPOSE_FILE := deployments/compose/dependencies.yaml
 DEV_COMPOSE      := docker compose -f $(DEV_COMPOSE_FILE)
 
+CONFIG_FILES = .config.local.yaml # .policy.local.yaml
+# This strips the leading '.' and trailing '.local.yaml' to find the base name,
+# then appends '.yaml' to find the source file.
+# TODO: if we add a validate subcommand to the binary we could test that here too
+$(CONFIG_FILES): .%.local.yaml: %.yaml
+	@if [ ! -f $@ ]; then \
+		echo "⚙️  Creating local config: $@ from $<..."; \
+		cp $< $@; \
+	fi
+
 .PHONY: dev
-dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
+dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
 	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
-	@echo "    Override config via env: e.g. $(CYAN)WH_AUTH_ENABLED=true WH_AUTH_DEV_MODE=true make dev$(RESET)"
-	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
-	@$(AIR) -c .air.toml
+	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
 
 # Docs site dev/preview servers — long-running, blocking. Astro dev defaults
 # to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
@@ -424,7 +432,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
 	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="$(TAGS)" -cover -race ./internal/... ./cmd/... $(ARGS) \
+		-tags="$(TAGS)" -cover -race -timeout 15s ./internal/... ./cmd/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
 	@go run ./scripts/cov render unit
 
@@ -640,4 +648,3 @@ $(AIR):
 	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
-

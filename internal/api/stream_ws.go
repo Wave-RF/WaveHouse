@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/coder/websocket"
@@ -50,16 +51,6 @@ type wsCommand struct {
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	// Validate ?table= before upgrading. Empty is OK — the client can
-	// still subscribe via in-band commands after connect. Reject NATS
-	// wildcards / unsafe chars here so the gap-fill path that builds
-	// FilterSubject: "ingest."+table can't be tricked into a wildcard
-	// consumer.
-	if t := r.URL.Query().Get("table"); t != "" && !validTableNameRe.MatchString(t) {
-		writeJSONError(w, http.StatusBadRequest, "invalid table name")
-		return
-	}
-
 	origins := h.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"*"}
@@ -97,7 +88,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		ch := make(chan []byte, 64)
 		subs[table] = ch
-		h.Hub.Subscribe("ingest."+table, ch)
+		h.Hub.Subscribe("ingest."+query.EncodeTable(table), ch)
 
 		// Pump per-table channel into merged channel, tagging each message with
 		// the subscribing table so the writer keeps the subscription context.
@@ -120,7 +111,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(subs, table)
 		mu.Unlock()
-		h.Hub.Unsubscribe("ingest."+table, ch) // closes ch, which stops the pump goroutine
+		h.Hub.Unsubscribe("ingest."+query.EncodeTable(table), ch) // closes ch, which stops the pump goroutine
 	}
 
 	unsubscribeAll := func() {
@@ -145,7 +136,7 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// high-precision client timestamps.
 		if since := r.URL.Query().Get("since"); since != "" {
 			if ts, parseErr := time.Parse(time.RFC3339Nano, since); parseErr == nil && h.JS != nil {
-				h.replayFromNATS(ctx, ts, "ingest."+table, func(data []byte) bool {
+				h.replayFromNATS(ctx, ts, "ingest."+query.EncodeTable(table), func(data []byte) bool {
 					out := h.applyStreamPolicy(data, role, map[string]any(claims), table)
 					if out == nil {
 						return true
@@ -165,12 +156,6 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			var cmd wsCommand
 			if json.Unmarshal(data, &cmd) != nil || cmd.Table == "" {
-				continue
-			}
-			// Hub lookups are exact-match so wildcards here are inert, but
-			// reject them anyway for consistency with the ?table= path and
-			// to keep the contract crisp.
-			if !validTableNameRe.MatchString(cmd.Table) {
 				continue
 			}
 			switch cmd.Action {

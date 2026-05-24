@@ -5,24 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
-
-// validTableNameRe matches safe table identifiers and — critically — rejects
-// the NATS subject wildcards `*` and `>`. The `?table=` value is concatenated
-// into a NATS FilterSubject in the gap-fill path; without this guard,
-// `?table=>` would build `ingest.>` and replay every ingest subject.
-// Matches the same shape as ingest.safeIdentifierRe / query.validIdentifierRe.
-var validTableNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // SSEHandler handles GET /v1/stream/sse.
 type SSEHandler struct {
@@ -47,11 +40,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
 		return
 	}
-	if !validTableNameRe.MatchString(table) {
-		writeJSONError(w, http.StatusBadRequest, "invalid table name")
-		return
-	}
-	topic := "ingest." + table
+	topic := "ingest." + query.EncodeTable(table)
 
 	// Resolve stream permissions for this request.
 	role := RoleFromContext(r.Context())
