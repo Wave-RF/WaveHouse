@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go/jetstream"
@@ -29,6 +30,7 @@ func NewSSEHandler(hub *Hub, js jetstream.JetStream) *SSEHandler {
 }
 
 func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(observability.WithComponent(r.Context(), "api/sse"))
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "streaming not supported")

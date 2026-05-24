@@ -51,6 +51,7 @@ type wsCommand struct {
 }
 
 func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(observability.WithComponent(r.Context(), "api/ws"))
 	origins := h.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"*"}

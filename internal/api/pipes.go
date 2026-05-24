@@ -8,6 +8,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
@@ -77,6 +78,7 @@ func (h *PipesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // Execute runs a named query with the provided parameters.
 func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(observability.WithComponent(r.Context(), "api/pipes"))
 	name := chi.URLParam(r, "name")
 	q := h.Store.Get(name)
 	if q == nil {
@@ -148,7 +150,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 		start := time.Now()
 
-		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
+		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params, "pipes")
 		queryDuration := time.Since(start)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it

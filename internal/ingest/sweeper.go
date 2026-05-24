@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -37,6 +38,7 @@ func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Lo
 
 // Start runs the sweep loop every minute. Blocks until ctx is cancelled.
 func (s *Sweeper) Start(ctx context.Context) {
+	ctx = observability.WithComponent(ctx, "ingest/sweeper")
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {

@@ -2,13 +2,38 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// classifyJWTError maps the jwt-library error to a coarse failure-reason label
+// for wavehouse_auth_failures_total. The library returns sentinel errors per
+// failure mode, which gives us clean buckets without parsing messages. Falls
+// back to "invalid" for any error not matching a known sentinel — keeps the
+// counter label set bounded.
+func classifyJWTError(err error) string {
+	switch {
+	case errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenNotValidYet):
+		return "expired"
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		return "bad_signature"
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return "malformed"
+	case errors.Is(err, jwt.ErrTokenUnverifiable):
+		return "unverifiable"
+	default:
+		return "invalid"
+	}
+}
 
 type contextKey string
 
@@ -75,8 +100,26 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 		}
 	}
 
+	authMethod := "hmac"
+	if jwks != nil {
+		authMethod = "jwks"
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Span around the whole verify+claim-extract path. Kept short
+			// (no body read, no upstream calls beyond JWKS rotation cache
+			// hits) so the parent HTTP span stays the right unit for
+			// per-request latency. The span attributes carry method (hmac vs
+			// jwks) so trace queries can split out JWKS-fetch-blip latency.
+			ctx, span := observability.Tracer().Start(r.Context(), "jwt_verify",
+				trace.WithAttributes(
+					attribute.String("auth.method", authMethod),
+					attribute.String("auth.role_claim", roleClaim),
+				),
+			)
+			defer span.End()
+
 			var tokenStr string
 
 			auth := r.Header.Get("Authorization")
@@ -91,6 +134,8 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				params.Del("token")
 				r.URL.RawQuery = params.Encode()
 			} else {
+				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
+				span.SetAttributes(attribute.String("auth.failure_reason", "no_token"))
 				writeJSONError(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}
@@ -109,20 +154,38 @@ func JWTAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 			token, err := jwt.Parse(tokenStr, keyFunc)
 			if err != nil || !token.Valid {
+				reason := classifyJWTError(err)
+				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+				span.SetAttributes(attribute.String("auth.failure_reason", reason))
+				if err != nil {
+					span.RecordError(err)
+				}
 				writeJSONError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
 
 			claims, ok := token.Claims.(jwt.MapClaims)
 			if !ok {
+				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "invalid_claims")))
+				span.SetAttributes(attribute.String("auth.failure_reason", "invalid_claims"))
 				writeJSONError(w, http.StatusUnauthorized, "invalid claims")
 				return
 			}
 
 			// Extract role from claims using dot-separated path.
 			role := extractClaim(claims, roleClaim)
+			if role == "" {
+				// Successful JWT verify but no role — auth metadata pulled from
+				// the wrong claim, common misconfiguration. Surface as a
+				// distinct failure reason so /v1/admin/* 403s on this can be
+				// distinguished from a missing/expired token.
+				observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "missing_role_claim")))
+				span.SetAttributes(attribute.String("auth.failure_reason", "missing_role_claim"))
+			} else {
+				span.SetAttributes(attribute.String("auth.role", role))
+			}
 
-			ctx := context.WithValue(r.Context(), ContextKeyClaims, claims)
+			ctx = context.WithValue(ctx, ContextKeyClaims, claims)
 			ctx = context.WithValue(ctx, ContextKeyRole, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

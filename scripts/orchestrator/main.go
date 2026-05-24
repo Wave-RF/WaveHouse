@@ -39,6 +39,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -232,9 +233,57 @@ func run() error {
 	}
 
 	if vitestErr != nil && !verbose {
-		dumpLogTail(whLogPath, "vitest failed; tailing wavehouse logs for context")
+		if dst := suppressLogDumpReason(); dst != "" {
+			fmt.Fprintf(os.Stderr, "\n──── vitest failed; wavehouse log dump suppressed (%s) ────\n", dst)
+		} else {
+			dumpLogTail(whLogPath, "vitest failed; tailing wavehouse logs for context")
+		}
 	}
 	return vitestErr
+}
+
+// suppressLogDumpReason returns a short human-readable reason when the
+// orchestrator should skip the 80-line wavehouse log tail it would otherwise
+// stream to stderr on vitest failure. Returns "" when the dump should fire.
+//
+// Suppress when:
+//   - WH_E2E_LOG_DUMP=0 / false / no — operator forced off (commonly because
+//     they're already tailing wavehouse-cov.log in another pane).
+//   - WH_OTEL_ENABLED=true AND a collector responds at WH_OTEL_ADDR — the
+//     operator has an o11y UI (Aspire, Grafana LGTM) ingesting these logs in
+//     a more useful form, and tail-on-stderr is just noise.
+//
+// We try-dial the collector with a tight timeout rather than trusting
+// WH_OTEL_ENABLED alone — `make test-e2e` sets WH_OTEL_ENABLED=true to keep
+// the OTel branch covered, but the collector is usually NOT running, in
+// which case the dump remains the only path to a debuggable CI failure.
+func suppressLogDumpReason() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WH_E2E_LOG_DUMP"))) {
+	case "0", "false", "no", "off":
+		return "WH_E2E_LOG_DUMP=" + os.Getenv("WH_E2E_LOG_DUMP")
+	}
+	if strings.ToLower(os.Getenv("WH_OTEL_ENABLED")) != "true" {
+		return ""
+	}
+	addr := os.Getenv("WH_OTEL_ADDR")
+	if addr == "" {
+		return ""
+	}
+	// #nosec G404 G704 — addr is operator-controlled config (WH_OTEL_ADDR),
+	// not user input. The probe is a TCP connect-and-close to a configured
+	// internal collector; the orchestrator's whole job is to talk to that
+	// address. No request payload is sent. (*net.Dialer).DialContext is
+	// used so a slow listener doesn't pin orchestrator shutdown past the
+	// 250ms timeout.
+	probeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(probeCtx, "tcp", addr)
+	if err != nil {
+		return ""
+	}
+	_ = conn.Close()
+	return "OTel collector reachable at " + addr + "; check your obs UI for logs"
 }
 
 // pickFreePort asks the OS for an available port on 127.0.0.1, then

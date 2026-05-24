@@ -12,11 +12,12 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -36,21 +37,22 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *Ing
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	table := r.URL.Query().Get("table")
 
-	// Force the use of the GLOBAL provider
-	tracer := otel.GetTracerProvider().Tracer("internal/api")
+	tracer := observability.Tracer()
 
 	ctx, span := tracer.Start(r.Context(), "IngestHandler.Handle",
 		trace.WithAttributes(attribute.String("table", table)),
 	)
 	defer span.End()
-
-	// Add a standard log to prove we are inside the span logic
-	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
+	ctx = observability.WithComponent(ctx, "api/ingest")
 
 	r = r.WithContext(ctx)
 
 	if table == "" {
-		slog.ErrorContext(ctx, "missing table parameter in request")
+		slog.WarnContext(ctx, "ingest rejected: missing table parameter")
+		observability.SchemaRejected.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("table", ""),
+			attribute.String("reason", "missing_table"),
+		))
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
@@ -58,20 +60,40 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		slog.WarnContext(ctx, "unknown table requested", "table", table)
+		observability.SchemaRejected.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("table", table),
+			attribute.String("reason", "unknown_table"),
+		))
 		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
 		return
 	}
 
 	var data map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
+		slog.WarnContext(ctx, "ingest rejected: invalid json payload", "error", err, "table", table)
+		observability.SchemaRejected.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("table", table),
+			attribute.String("reason", "invalid_json"),
+		))
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
-	if err := discovery.Validate(schema, data); err != nil {
-		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
-		writeJSONError(w, http.StatusBadRequest, err.Error())
+	// Schema validation span — bounded work, gives operators a way to spot
+	// validation cost when ingest latency unexpectedly spikes (e.g. very
+	// wide tables, deep nested validation).
+	_, validateSpan := tracer.Start(ctx, "schema_validation",
+		trace.WithAttributes(attribute.String("table", table)),
+	)
+	validateErr := discovery.Validate(schema, data)
+	validateSpan.End()
+	if validateErr != nil {
+		slog.WarnContext(ctx, "schema validation failed", "error", validateErr, "table", table)
+		observability.SchemaRejected.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("table", table),
+			attribute.String("reason", discovery.ClassifyValidationError(validateErr)),
+		))
+		writeJSONError(w, http.StatusBadRequest, validateErr.Error())
 		return
 	}
 
@@ -116,15 +138,27 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			dup, err := h.Dedup.CheckAndMark(ctx, eventID)
 			if err != nil {
 				slog.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
+				observability.DedupeLookups.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("table", table),
+					attribute.String("outcome", "err"),
+				))
 				writeJSONError(w, http.StatusInternalServerError, "dedupe failed")
 				return
 			}
 			if dup {
-				slog.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
+				slog.DebugContext(ctx, "duplicate event skipped", "event_id", eventID)
+				observability.DedupeLookups.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("table", table),
+					attribute.String("outcome", "hit"),
+				))
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
 				return
 			}
+			observability.DedupeLookups.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("table", table),
+				attribute.String("outcome", "miss"),
+			))
 		}
 	}
 
@@ -150,10 +184,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		subject += "." + query.SafeEncodeNATS(scope)
 	}
 
-	slog.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
-			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)
+			slog.WarnContext(ctx, "nats maximum bytes exceeded — returning 503", "subject", subject)
+			observability.IngestPublishThrottled.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("table", table),
+			))
 			w.Header().Set("Retry-After", "30")
 			writeJSONError(w, http.StatusServiceUnavailable, "service unavailable")
 			return
@@ -163,7 +199,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.InfoContext(ctx, "event successfully ingested", "table", table, "subject", subject)
+	// Per-request success was previously logged at INFO — at ingest scale
+	// that's one stdout line per row. Demoted to DEBUG; success is the
+	// expected path and is already visible via the wavehouse_ingest_*
+	// histograms and the HTTP-request middleware metric.
+	slog.DebugContext(ctx, "event ingested", "table", table, "subject", subject)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }

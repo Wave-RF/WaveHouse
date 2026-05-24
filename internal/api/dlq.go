@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -23,6 +24,7 @@ func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
 // Stats returns per-table message counts in the DLQ stream.
 // Supports optional ?table= query parameter to filter by table name.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(observability.WithComponent(r.Context(), "api/dlq"))
 	stream, err := h.JS.Stream(r.Context(), mq.DLQStreamName())
 	if err != nil {
 		// Stream may not exist yet if no failures have occurred.

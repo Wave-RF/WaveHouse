@@ -83,6 +83,11 @@ func NewRouter(deps Dependencies) http.Handler {
 		})
 	})
 
+	// Per-route HTTP latency histogram. Applied after the otelhttp tracer so
+	// the chi RoutePattern is resolved by the time we record. Probe/stream/
+	// scrape paths are skipped to match the tracer's skip set.
+	r.Use(httpMetricsMiddleware(metricsPath))
+
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)

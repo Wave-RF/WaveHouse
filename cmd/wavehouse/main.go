@@ -50,7 +50,13 @@ func main() {
 // separate function (rather than os.Exit directly in main) ensures deferred
 // cleanups — especially OTEL flush — still run before the process exits.
 func run() int {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Pre-config bootstrap logger: stdout-only at the configured WH_LOG_FORMAT
+	// (TTY-detected by default). Until config.Load succeeds we can't know the
+	// resolved level, so we start at info — enough to surface a config error.
+	bootLevel := &slog.LevelVar{}
+	bootLevel.Set(slog.LevelInfo)
+	bootFormat := observability.ResolveLogFormat(os.Getenv("WH_LOG_FORMAT"))
+	logger := observability.NewBootstrapLogger("wavehouse", bootFormat, bootLevel)
 	slog.SetDefault(logger)
 
 	logger.Info("starting WaveHouse", "version", Version, "build_time", BuildTime, "git_commit", GitCommit)
@@ -81,12 +87,12 @@ func run() int {
 	serviceName := "wavehouse"
 
 	var level slog.Level
-	switch strings.ToUpper(strings.TrimSpace(os.Getenv("WH_LOG_LEVEL"))) {
-	case "DEBUG":
+	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
+	case "debug":
 		level = slog.LevelDebug
-	case "WARN":
+	case "warn":
 		level = slog.LevelWarn
-	case "ERROR":
+	case "error":
 		level = slog.LevelError
 	default:
 		level = slog.LevelInfo
@@ -95,7 +101,11 @@ func run() int {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
 
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	// Re-install the stdout logger at the configured level + format. Until
+	// InitProvider succeeds this is stdout-only; the OTel fanout is wired
+	// below after the provider is up.
+	logFormat := observability.ResolveLogFormat(cfg.Logging.Format)
+	logger = observability.NewBootstrapLogger(serviceName, logFormat, logLevel)
 	slog.SetDefault(logger)
 
 	var promHandler http.Handler
@@ -127,7 +137,7 @@ func run() int {
 			// Only swap to the OTLP-aware logger when OTLP logs are wired up;
 			// Prometheus-only mode keeps the stdout-only handler set earlier.
 			if cfg.OTel.Enabled && cfg.OTel.Logs.Enabled {
-				otelLogger := observability.NewLogger(serviceName, logLevel, true, cfg.OTel.Logs.SampleRate)
+				otelLogger := observability.NewLogger(serviceName, logLevel, logFormat, cfg.OTel.Logs.SampleRate)
 				logger = otelLogger.With(
 					"version", Version,
 					"build_time", BuildTime,
@@ -230,7 +240,14 @@ func run() int {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(observability.SystemMetricSources{
+			NATS:         embeddedMQ.GetServer(),
+			JS:           embeddedMQ.JetStream(),
+			Dedup:        dedup,
+			StreamName:   mq.StreamName(),
+			DLQStream:    mq.DLQStreamName(),
+			ConsumerName: ingest.BufferConsumerName,
+		}); err != nil {
 			logger.Error("failed to register system metrics", "error", err)
 		}
 	}

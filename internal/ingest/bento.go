@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -26,14 +27,17 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/query"
-	"go.opentelemetry.io/otel"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
 var (
+	// Pre-existing bento-specific counters. Naming retained for dashboard
+	// continuity; the new cross-cutting metrics (ingest duration, CH
+	// duration/errors) live in observability/instruments.go.
 	bentoMeter              = otel.Meter("wavehouse-bento")
 	bentoEventsProcessed, _ = bentoMeter.Int64Counter(
 		"wavehouse_bento_events_processed",
@@ -47,6 +51,36 @@ var (
 	registerOnce sync.Once
 	registerErr  error
 )
+
+// clickhouseErrCode parses ClickHouse's "Code: 60. DB::Exception: ..." prefix
+// out of a non-2xx response body. Returns 0 when the body has no recognizable
+// code (e.g. a network-level failure surfaced from the HTTP client, or an
+// empty body). The numeric code goes onto the wavehouse_clickhouse_errors_total
+// counter's `clickhouse_code` label so dashboards can split out "table doesn't
+// exist" (60) from "too many parts" (252) etc. without parsing message text.
+var clickhouseCodeRe = regexp.MustCompile(`^Code: (\d+)`)
+
+func clickhouseErrCode(body []byte) string {
+	if m := clickhouseCodeRe.FindSubmatch(body); m != nil {
+		return string(m[1])
+	}
+	return "0"
+}
+
+// parseReceivedTimestamp extracts the API-side ingest timestamp from message
+// metadata. Returns the zero time when the metadata is missing or unparseable
+// — callers must check IsZero() before computing a duration.
+func parseReceivedTimestamp(m *service.Message) time.Time {
+	rt, ok := m.MetaGet("received_timestamp")
+	if !ok || rt == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, rt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
 
 type jsInput struct {
 	consumer jetstream.Consumer
@@ -70,7 +104,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 
 		msgCtx := observability.ExtractNATS(ctx, m)
-		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
+		// Per-message receipt is DEBUG: at ingest scale this fires for every
+		// inbound event. Keeping it at INFO floods stdout and any log shipper.
+		slog.DebugContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
 			TableName         string          `json:"table_name"`
@@ -130,7 +166,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 				return nil
 			}
 
-			slog.InfoContext(msgCtx, "message batch successfully acknowledged by ClickHouse")
+			// Per-message ack is DEBUG for the same reason as the receive log —
+			// at production load this fires once per row.
+			slog.DebugContext(msgCtx, "message batch acknowledged by ClickHouse")
 			bentoEventsProcessed.Add(ackCtx, 1, metric.WithAttributes(
 				attribute.String("table", raw.TableName),
 			))
@@ -175,11 +213,29 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
 			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
 			bentoDLQDropped.Add(ctx, 1, metric.WithAttributes(attribute.String("table", tableName)))
+			recordIngestDuration(ctx, m, tableName, "dropped")
 		} else {
 			slog.WarnContext(msgCtx, "sent failed message to DLQ", "subject", subject)
+			recordIngestDuration(ctx, m, tableName, "dlq")
 		}
 	}
 	return nil
+}
+
+// recordIngestDuration records the end-to-end ingest latency for one message,
+// from the API handler's receive timestamp to the present moment. Skipped
+// silently when the receive timestamp is missing/unparseable — happens for
+// drop paths inside the worker that never see a well-formed envelope.
+func recordIngestDuration(ctx context.Context, m *service.Message, table, outcome string) {
+	t := parseReceivedTimestamp(m)
+	if t.IsZero() {
+		return
+	}
+	observability.IngestDuration.Record(ctx, time.Since(t).Seconds(),
+		metric.WithAttributes(
+			attribute.String("table", table),
+			attribute.String("outcome", outcome),
+		))
 }
 
 type clickhouseOutput struct {
@@ -229,7 +285,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 
 	// Extract original API trace context and setup Tracer
 	parentCtx := trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(firstMsg.Context()))
-	tracer := otel.Tracer("wavehouse-worker")
+	tracer := observability.Tracer()
 
 	var links []trace.Link
 	for i := 1; i < len(batch); i++ {
@@ -248,8 +304,20 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	bentoSpan.End(trace.WithTimestamp(time.Now()))
 
 	// START THE CLICKHOUSE SPAN (Sibling to Bento span)
-	reqCtx, chSpan := tracer.Start(parentCtx, "clickhouse_insert")
+	reqCtx, chSpan := tracer.Start(parentCtx, "clickhouse_insert",
+		trace.WithAttributes(
+			attribute.String("clickhouse.operation", "insert"),
+			attribute.String("clickhouse.table", tableName),
+			attribute.Int("batch.size", len(batch)),
+		),
+	)
 	defer chSpan.End()
+
+	insertStart := time.Now()
+	chAttrs := metric.WithAttributes(
+		attribute.String("operation", "insert"),
+		attribute.String("table", tableName),
+	)
 
 	// set of all scope values in the batch for invalidation
 	allScopes := make(map[string]struct{})
@@ -296,6 +364,10 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	req, err := http.NewRequestWithContext(reqCtx, "POST", u.String(), &buf)
 	if err != nil {
 		chSpan.RecordError(err)
+		observability.ClickHouseErrors.Add(reqCtx, 1, metric.WithAttributes(
+			attribute.String("operation", "insert"),
+			attribute.String("clickhouse_code", "0"),
+		))
 		return fmt.Errorf("create clickhouse request: %w", err)
 	}
 
@@ -308,6 +380,11 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		chSpan.RecordError(err)
+		observability.ClickHouseDuration.Record(reqCtx, time.Since(insertStart).Seconds(), chAttrs)
+		observability.ClickHouseErrors.Add(reqCtx, 1, metric.WithAttributes(
+			attribute.String("operation", "insert"),
+			attribute.String("clickhouse_code", "0"),
+		))
 		return fmt.Errorf("execute clickhouse request: %w", err)
 	}
 	defer func() {
@@ -317,9 +394,25 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		chCode := clickhouseErrCode(body)
 		err := fmt.Errorf("clickhouse error %d: %s", resp.StatusCode, string(body))
 		chSpan.RecordError(err)
+		chSpan.SetAttributes(attribute.String("clickhouse.error_code", chCode))
+		observability.ClickHouseDuration.Record(reqCtx, time.Since(insertStart).Seconds(), chAttrs)
+		observability.ClickHouseErrors.Add(reqCtx, 1, metric.WithAttributes(
+			attribute.String("operation", "insert"),
+			attribute.String("clickhouse_code", chCode),
+		))
 		return err
+	}
+
+	observability.ClickHouseDuration.Record(reqCtx, time.Since(insertStart).Seconds(), chAttrs)
+	// Record end-to-end ingest duration for every successfully committed row
+	// in the batch. We emit per-row rather than per-batch so the histogram
+	// reflects per-event SLO, not per-batch (which would understate the
+	// batch's actual fan-out to N rows).
+	for _, m := range batch {
+		recordIngestDuration(reqCtx, m, tableName, "committed")
 	}
 
 	// TODO: is this the only place we need to invalidate the cache? How do partial failures work?
@@ -346,7 +439,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, cache cache.Cache, ch
 		host = chHost
 	}
 
-	logger := slog.Default().With("component", "bento")
+	logger := slog.Default().With("component", "ingest/bento")
 
 	js, err := jetstream.New(nc)
 	if err != nil {

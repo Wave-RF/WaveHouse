@@ -8,9 +8,32 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
+
+// adminQueryMetricAttrs is the static label set used for every
+// /v1/admin/query measurement; allocated once to keep the per-request hot
+// path free of metric.WithAttributes/attribute.String slice allocs.
+var adminQueryMetricAttrs = metric.WithAttributes(attribute.String("operation", "admin_query"))
+
+// adminQueryErrCodeRe mirrors the bento worker's parser
+// (internal/ingest/bento.go) for the `clickhouse_code` label. ClickHouse's
+// HTTP interface returns error bodies prefixed with "Code: <N>. DB::Exception:
+// …" — the integer code is the meaningful split on the errors counter.
+var adminQueryErrCodeRe = regexp.MustCompile(`^Code: (\d+)`)
+
+func adminQueryErrCode(body []byte) string {
+	if m := adminQueryErrCodeRe.FindSubmatch(body); m != nil {
+		return string(m[1])
+	}
+	return "0"
+}
 
 // QueryHandler handles POST /v1/admin/query.
 //
@@ -120,6 +143,7 @@ type queryRequest struct {
 }
 
 func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(observability.WithComponent(r.Context(), "api/admin_query"))
 	// Every response from this handler is non-cacheable — admins expect
 	// every request to hit ClickHouse, and downstream caches (CDN, browser,
 	// corp proxy) re-introduce the staleness class of bug the in-process
@@ -218,12 +242,38 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		httpReq.Header.Set("X-ClickHouse-Key", h.Password)
 	}
 
+	// Span around the upstream call. The handler is already inside the parent
+	// HTTP server span (otelhttp middleware on the chi router), so this is a
+	// child that isolates the wall time spent waiting on ClickHouse from the
+	// surrounding body-read / response-marshal work in the parent.
+	ctx, chSpan := observability.Tracer().Start(ctx, "clickhouse.admin_query") // Raw SQL is intentionally omitted — admins routinely paste secrets/
+	// PII into ad-hoc queries and we don't want those in long-lived trace
+	// storage. Operation label is sufficient for dashboard breakdowns.
+
+	chSpan.SetAttributes(
+		attribute.String("db.system", "clickhouse"),
+		attribute.String("clickhouse.operation", "admin_query"),
+	)
+	httpReq = httpReq.WithContext(ctx)
+	chStart := time.Now()
+
 	resp, err := h.HTTPClient.Do(httpReq)
 	if err != nil {
+		observability.ClickHouseDuration.Record(ctx, time.Since(chStart).Seconds(), adminQueryMetricAttrs)
+		observability.ClickHouseErrors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("operation", "admin_query"),
+			attribute.String("clickhouse_code", "0"),
+		))
+		chSpan.RecordError(err)
+		chSpan.End()
 		writeJSONError(w, http.StatusBadGateway, "clickhouse request failed: "+err.Error())
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_ = resp.Body.Close()
+		observability.ClickHouseDuration.Record(ctx, time.Since(chStart).Seconds(), adminQueryMetricAttrs)
+		chSpan.End()
+	}()
 
 	// Cap the upstream body at the configured response limit. Read +1 so we
 	// can detect "exactly cap or more" without a second read.
@@ -254,10 +304,17 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		//                                                  upstream
 		//                                                  service had a
 		//                                                  problem.
-		// Distinguishing ClickHouse's specific error codes (Code: 60 for
-		// "table doesn't exist" etc.) would need a parser and is out of
-		// scope here. The body carries ClickHouse's exact message so the
-		// admin still sees the diagnostic verbatim.
+		// The numeric ClickHouse code (Code: N. DB::Exception: …) is
+		// parsed onto the errors counter so dashboards can split out e.g.
+		// "table doesn't exist" (60) from "too many parts" (252) without
+		// re-parsing message text. The body still carries ClickHouse's
+		// exact message so the admin sees the diagnostic verbatim.
+		chCode := adminQueryErrCode(body)
+		observability.ClickHouseErrors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("operation", "admin_query"),
+			attribute.String("clickhouse_code", chCode),
+		))
+		chSpan.SetAttributes(attribute.String("clickhouse.error_code", chCode))
 		status := http.StatusBadGateway
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			status = http.StatusBadRequest

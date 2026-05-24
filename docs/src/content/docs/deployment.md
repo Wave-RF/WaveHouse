@@ -368,6 +368,34 @@ All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HT
 
 If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment variables to reach the host-bound collector: `WH_OTEL_ADDR=host.docker.internal:4317`.
 
+### Emitted signals
+
+WaveHouse exports the following custom metrics (in addition to Go runtime metrics and `otelhttp` HTTP-server metrics). All histograms inherit the OTel SDK's default bucket boundaries — the Prometheus exporter applies the standard Prometheus-style fixed buckets, and the OTLP push path uses exponential buckets. Labels noted per instrument.
+
+| Metric | Type | Labels | What it tells you |
+| ------ | ---- | ------ | ----------------- |
+| `wavehouse_ingest_duration_seconds` | Histogram | `table`, `outcome=committed\|dlq\|dropped` | End-to-end per-event ingest latency from HTTP receive to ClickHouse commit. SLO surface for ingest. |
+| `wavehouse_clickhouse_duration_seconds` | Histogram | `operation=insert\|query\|admin_query\|structured_query\|pipes` | Per-operation ClickHouse latency. Splits the bento-INSERT path from the query proxies and named-pipe execution. |
+| `wavehouse_clickhouse_errors_total` | Counter | `operation`, `clickhouse_code` | Non-2xx ClickHouse responses. `clickhouse_code` is the numeric code parsed from `Code: N. DB::Exception: …`; `0` when the failure has no server-side code (transport, deadline). |
+| `wavehouse_http_request_duration_seconds` | Histogram | `route`, `method`, `status_class=1xx\|2xx\|3xx\|4xx\|5xx` | Per-route server-side request latency, with status-class for error-rate breakdown. Skips `/health`, `/ready`, `/v1/stream/*`, and the Prometheus scrape path. |
+| `wavehouse_jetstream_consumer_pending` | Observable gauge | (none) | Buffer-consumer queue depth — the leading indicator for ingest backpressure. |
+| `wavehouse_dlq_depth` | Observable gauge | (none) | Total messages currently in the `WAVEHOUSE_DLQ` stream. |
+| `wavehouse_schema_validation_rejected_total` | Counter | `table`, `reason=unknown_field\|type_mismatch\|null_violation\|missing_required\|missing_table\|unknown_table\|invalid_json\|other` | Ingest payloads rejected before publishing to the queue. |
+| `wavehouse_auth_failures_total` | Counter | `reason=no_token\|bad_signature\|expired\|malformed\|unverifiable\|invalid_claims\|missing_role_claim\|invalid` | JWT verification failures, classified by the underlying error sentinel. |
+| `wavehouse_cache_hits_total` / `wavehouse_cache_misses_total` | Counter | `tier=L1`, `singleflight=true\|false` (hits only) | Cache effectiveness for the cached read paths (structured query, pipes). Today only L1 (Ristretto) emits; the `tier` dimension is forward-compat for a future L2. |
+| `wavehouse_dedupe_lookups_total` | Counter | `table`, `outcome=hit\|miss\|err` | Dedupe `CheckAndMark` outcomes, by table. |
+| `wavehouse_ingest_publish_throttled_total` | Counter | `table` | Ingest requests rejected with `503 Service Unavailable` + `Retry-After` because the JetStream stream is at capacity. |
+| `wavehouse_bento_events_processed` | Counter | `table` | Successful bento worker → ClickHouse commits, per row. |
+| `wavehouse_bento_dlq_dropped` | Counter | `table` | Messages permanently dropped after a DLQ publish failed (data loss event). |
+| `wavehouse_nats_*`, `wavehouse_pebble_*` | Observable gauges | (none) | Embedded NATS varz + Pebble engine stats. |
+
+Custom span coverage (in addition to `otelhttp` HTTP-server spans):
+
+- `IngestHandler.Handle` with a child `schema_validation` span.
+- `jwt_verify` under the auth middleware, with `auth.method=hmac\|jwks` and `auth.failure_reason` on failures.
+- `bento_queue_wait` (retroactively drawn from the producer's published time) → `clickhouse_insert` sibling spans in the worker.
+- `clickhouse.<operation>` from `executeCHQuery` for the structured-query and pipes handlers; `clickhouse.admin_query` for the `/v1/admin/query` HTTP proxy. Raw SQL is intentionally omitted from span attributes — admins routinely paste secrets/PII into ad-hoc queries.
+
 ### Dashboards
 
 Because we use ephemeral, single-container observability tools for local development, we no longer maintain strict, version-controlled JSON dashboards in this repository.

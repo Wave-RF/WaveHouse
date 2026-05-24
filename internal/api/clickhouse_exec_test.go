@@ -141,7 +141,7 @@ func TestExecuteCHQuery_MutationRoutesToExec(t *testing.T) {
 		t.Run(sql, func(t *testing.T) {
 			t.Parallel()
 			conn := &stubConn{}
-			rows, err := executeCHQuery(context.Background(), conn, sql, nil)
+			rows, err := executeCHQuery(context.Background(), conn, sql, nil, "test")
 			require.NoError(t, err)
 			assert.Equal(t, 1, conn.execCount, "Exec must be used for mutations")
 			assert.Zero(t, conn.queryCount, "Query must not be used for mutations")
@@ -153,7 +153,7 @@ func TestExecuteCHQuery_MutationRoutesToExec(t *testing.T) {
 func TestExecuteCHQuery_SelectRoutesToQuery(t *testing.T) {
 	t.Parallel()
 	conn := &stubConn{}
-	rows, err := executeCHQuery(context.Background(), conn, "SELECT 1", nil)
+	rows, err := executeCHQuery(context.Background(), conn, "SELECT 1", nil, "test")
 	require.NoError(t, err)
 	assert.Zero(t, conn.execCount, "Exec must not be used for SELECT")
 	assert.Equal(t, 1, conn.queryCount, "Query must be used for SELECT")
@@ -179,7 +179,7 @@ func TestExecuteCHQuery_TransformsClickHouseTypes(t *testing.T) {
 		values: []any{id, ts, int64(42)},
 	}}
 
-	rows, err := executeCHQuery(context.Background(), conn, "SELECT id, received_at, n FROM t", nil)
+	rows, err := executeCHQuery(context.Background(), conn, "SELECT id, received_at, n FROM t", nil, "test")
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, id.String(), rows[0]["id"], "UUID must be stringified")

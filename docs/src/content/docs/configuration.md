@@ -137,9 +137,14 @@ Prometheus exposition is its own top-level config block, independent of `otel.*`
 
 ### Logging
 
-| Env Var | Default | Description |
-| ------- | ------- | ----------- |
-| `WH_LOG_LEVEL` | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARN`, `ERROR` (case-insensitive). Applies to both stdout and (when OTel is enabled) the OTLP log exporter. See `otel.logs.sample_rate` above for the OTLP export rate. |
+Stdout always receives 100% of records — sampling applies only to OTLP push (see `otel.logs.sample_rate`). These knobs control the stdout *format* and the minimum *level* (which gates both stdout and OTLP).
+
+| YAML Key | Env Var | Default | Description |
+| -------- | ------- | ------- | ----------- |
+| `logging.level` | `WH_LOG_LEVEL` | `info` | Minimum log level. One of `debug`, `info`, `warn`, `error` (case-insensitive). Applies to stdout and (when OTel is enabled) the OTLP log exporter. The `/v1/admin/log-level` endpoint can adjust this at runtime without a restart. |
+| `logging.format` | `WH_LOG_FORMAT` | `auto` | Stdout handler format. `auto` picks colored text when stdout is a TTY (e.g. `make dev` in a terminal) and JSON otherwise (containers, CI). `text` forces colored output unconditionally; `json` forces line-delimited JSON for log shippers (Promtail / Alloy / Vector → Loki). |
+
+Every record produced under a request-scoped or worker-scoped context carries a `component` field naming the producing subsystem (e.g. `api/ingest`, `api/admin_query`, `ingest/sweeper`). Combined with the existing `trace_id` / `span_id` injection, this lets log queries filter by area without grepping message text. The top-level `service=wavehouse` attribute identifies the process.
 
 ## Example Config File
 

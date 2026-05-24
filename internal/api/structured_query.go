@@ -10,6 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"golang.org/x/sync/singleflight"
@@ -45,6 +46,7 @@ func NewStructuredQueryHandler(
 }
 
 func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(observability.WithComponent(r.Context(), "api/structured_query"))
 	table := r.URL.Query().Get("table")
 	if table == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing table")
@@ -135,7 +137,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 		start := time.Now()
 
-		rows, err := executeCHQuery(queryCtx, h.CHConn, result.SQL, result.Params)
+		rows, err := executeCHQuery(queryCtx, h.CHConn, result.SQL, result.Params, "structured_query")
 		queryDuration := time.Since(start)
 		if err != nil {
 			// TODO: depending on the error, we may actually want to cache it

@@ -27,8 +27,29 @@ type Config struct {
 	DLQ        DLQ        `yaml:"dlq"`
 	Policy     Policy     `yaml:"policy"`
 	Pipes      Pipes      `yaml:"pipes"`
+	Logging    Logging    `yaml:"logging"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
+}
+
+// Logging configures stdout log output. Stdout is *always* 100% (see AGENTS.md
+// design decision #15) — these knobs only control formatting, not sampling.
+//
+// Format is one of "auto", "text", or "json":
+//
+//   - "auto" (default): pretty colored text when stdout is a TTY, JSON
+//     otherwise. Matches the behavior of `make dev` in a terminal vs. a
+//     containerized prod deployment whose stdout is captured by a log shipper.
+//   - "text": always render via the colored tint handler. Pretty for humans,
+//     not for grep/jq. Reasonable for interactive debugging only.
+//   - "json": always render line-delimited JSON. Required for scraped log
+//     pipelines (Promtail/Alloy/Vector → Loki).
+//
+// Level is one of "debug", "info" (default), "warn", "error" — case-insensitive.
+// Drives the slog.LevelVar that gates both stdout and OTLP export.
+type Logging struct {
+	Level  string `yaml:"level" env:"WH_LOG_LEVEL" env-default:"info"`
+	Format string `yaml:"format" env:"WH_LOG_FORMAT" env-default:"auto"`
 }
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
@@ -175,6 +196,21 @@ func (c *Config) Validate() error {
 
 	if c.MQ.GapWindowMinutes < 0 {
 		return fmt.Errorf("mq.gap_window_minutes must be non-negative")
+	}
+
+	// Empty Level/Format are tolerated to keep callers that construct Config{}
+	// literally (tests, embedded use) working without having to thread defaults.
+	// Load() goes through cleanenv which applies env-defaults, so Real Use never
+	// hits the empty case.
+	switch strings.ToLower(strings.TrimSpace(c.Logging.Level)) {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("logging.level %q must be one of debug, info, warn, error", c.Logging.Level)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Logging.Format)) {
+	case "", "auto", "text", "json":
+	default:
+		return fmt.Errorf("logging.format %q must be one of auto, text, json", c.Logging.Format)
 	}
 
 	if c.OTel.Enabled {

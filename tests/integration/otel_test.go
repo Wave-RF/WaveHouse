@@ -133,7 +133,7 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 	lvl := &slog.LevelVar{}
 	lvl.Set(slog.LevelDebug)
 	// sample_rate=0.0 → DEBUG/INFO entirely dropped from OTLP, WARN+ still 100%.
-	logger := observability.NewLogger("wavehouse-test", lvl, true, 0.0)
+	logger := observability.NewLogger("wavehouse-test", lvl, observability.LogFormatJSON, 0.0)
 
 	const n = 50
 	for i := 0; i < n; i++ {
@@ -243,7 +243,7 @@ func TestOTel_PerSignal_LogsOnly(t *testing.T) {
 
 	lvl := &slog.LevelVar{}
 	lvl.Set(slog.LevelInfo)
-	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
+	logger := observability.NewLogger("wavehouse-test", lvl, observability.LogFormatJSON, 1.0)
 	logger.Info("hello")
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -284,7 +284,7 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	// drops asynchronously; this is the contract that lets the request hot
 	// path survive collector outages.
 	lvl := &slog.LevelVar{}
-	logger := observability.NewLogger("wavehouse-test", lvl, true, 1.0)
+	logger := observability.NewLogger("wavehouse-test", lvl, observability.LogFormatJSON, 1.0)
 
 	done := make(chan struct{})
 	go func() {

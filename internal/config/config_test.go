@@ -40,6 +40,84 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.True(t, cfg.OTel.Metrics.Enabled)
 	assert.True(t, cfg.OTel.Logs.Enabled)
 	assert.InEpsilon(t, 1.0, cfg.OTel.Logs.SampleRate, 0.0001)
+	// Logging block defaults — info level, auto format (TTY-detected at boot).
+	assert.Equal(t, "info", cfg.Logging.Level)
+	assert.Equal(t, "auto", cfg.Logging.Format)
+}
+
+func TestValidate_LoggingLevel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		level string
+		ok    bool
+	}{
+		{"debug", true},
+		{"info", true},
+		{"warn", true},
+		{"error", true},
+		{"DEBUG", true},
+		{" Warn ", true}, // case + whitespace tolerated
+		{"", true},       // empty tolerated for struct-literal callers
+		{"trace", false},
+		{"fatal", false},
+		{"nope", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.level, func(t *testing.T) {
+			t.Parallel()
+			cfg := defaultValidConfig()
+			cfg.Logging.Level = tc.level
+			err := cfg.Validate()
+			if tc.ok {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "logging.level")
+			}
+		})
+	}
+}
+
+func TestValidate_LoggingFormat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		format string
+		ok     bool
+	}{
+		{"auto", true},
+		{"text", true},
+		{"json", true},
+		{"JSON", true},
+		{" auto ", true}, // case + whitespace tolerated
+		{"", true},       // empty tolerated for struct-literal callers
+		{"yaml", false},
+		{"pretty", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			t.Parallel()
+			cfg := defaultValidConfig()
+			cfg.Logging.Format = tc.format
+			err := cfg.Validate()
+			if tc.ok {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "logging.format")
+			}
+		})
+	}
+}
+
+// defaultValidConfig returns a Config that passes Validate, suitable as a
+// starting point for tests that tweak one field to check rejection. Keeping
+// it in one place avoids fix-up churn when new validation rules are added.
+func defaultValidConfig() Config {
+	return Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+		Schema:     Schema{RefreshInterval: 60},
+	}
 }
 
 func TestLoad_FromYAML(t *testing.T) {

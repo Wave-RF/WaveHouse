@@ -44,7 +44,7 @@ func TestRegisterSystemMetrics_NilInputs(t *testing.T) {
 		otel.SetMeterProvider(savedMP)
 	})
 
-	err := RegisterSystemMetrics(nil, nil)
+	err := RegisterSystemMetrics(SystemMetricSources{})
 	require.NoError(t, err)
 
 	// Collect — the callback should run without panicking even when both
@@ -68,7 +68,7 @@ func TestRegisterSystemMetrics_WithDedup(t *testing.T) {
 		"pebble_wal_size":    1024,
 		"pebble_table_count": 7,
 	}}
-	require.NoError(t, RegisterSystemMetrics(nil, dedup))
+	require.NoError(t, RegisterSystemMetrics(SystemMetricSources{Dedup: dedup}))
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -97,7 +97,7 @@ func TestRegisterSystemMetrics_NilDedupStats(t *testing.T) {
 
 	// Stats() returning nil must not panic inside the callback.
 	dedup := &stubDeduplicator{stats: nil}
-	require.NoError(t, RegisterSystemMetrics(nil, dedup))
+	require.NoError(t, RegisterSystemMetrics(SystemMetricSources{Dedup: dedup}))
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))

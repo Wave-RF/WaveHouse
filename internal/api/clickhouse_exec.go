@@ -2,14 +2,31 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
+
+// clickhouseDriverErrCode extracts the numeric ClickHouse server error code
+// from a clickhouse-go driver error. Returns "0" for transport-level errors
+// (connection refused, deadline exceeded, etc.) that have no server-side
+// code. Used as the `clickhouse_code` label on wavehouse_clickhouse_errors_total.
+func clickhouseDriverErrCode(err error) string {
+	if exc, ok := errors.AsType[*clickhouse.Exception](err); ok {
+		return strconv.Itoa(int(exc.Code))
+	}
+	return "0"
+}
 
 // executeCHQuery runs sql against the native-protocol driver conn,
 // classifying by leading SQL verb to pick the Exec-vs-Query path —
@@ -18,23 +35,66 @@ import (
 // a row-array suitable for JSON marshalling; mutations marshal to `[]`,
 // preserving the "always-an-array" response shape callers depend on.
 //
+// `operation` is the high-level feature name (e.g. "structured_query",
+// "pipes") used as the metric/span label so dashboards can split by
+// caller. The exec vs query verb dispatch is recorded as a separate span
+// attribute (clickhouse.verb=exec|query) for finer-grained breakdowns.
+//
 // Used by the structured-query and pipes handlers — those are the cached
 // read paths that need explicit Query/Exec dispatch and per-row scanning.
 // The raw-SQL endpoint (/v1/admin/query) proxies straight to ClickHouse
 // over HTTP and never calls this; see internal/api/query.go.
-func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
+func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any, operation string) ([]map[string]any, error) {
+	verb := "query"
 	if isMutation(sql) {
+		verb = "exec"
+	}
+
+	ctx, span := observability.Tracer().Start(ctx, "clickhouse."+operation) // Span attributes follow the OTel semconv naming for db client spans.
+	// Raw SQL is omitted — it can contain user-provided values that leak
+	// PII when traces are stored long-term. We expose only the structural
+	// shape (verb).
+
+	span.SetAttributes(
+		attribute.String("db.system", "clickhouse"),
+		attribute.String("clickhouse.verb", verb),
+		attribute.String("clickhouse.operation", operation),
+	)
+	defer span.End()
+
+	metricAttrs := metric.WithAttributes(
+		attribute.String("operation", operation),
+	)
+	errAttrs := func(code string) metric.MeasurementOption {
+		return metric.WithAttributes(
+			attribute.String("operation", operation),
+			attribute.String("clickhouse_code", code),
+		)
+	}
+	start := time.Now()
+
+	if verb == "exec" {
 		if err := conn.Exec(ctx, sql, params...); err != nil {
+			observability.ClickHouseDuration.Record(ctx, time.Since(start).Seconds(), metricAttrs)
+			observability.ClickHouseErrors.Add(ctx, 1, errAttrs(clickhouseDriverErrCode(err)))
+			span.RecordError(err)
 			return nil, fmt.Errorf("clickhouse exec: %w", err)
 		}
+		observability.ClickHouseDuration.Record(ctx, time.Since(start).Seconds(), metricAttrs)
 		return []map[string]any{}, nil
 	}
 
 	rows, err := conn.Query(ctx, sql, params...)
 	if err != nil {
+		observability.ClickHouseDuration.Record(ctx, time.Since(start).Seconds(), metricAttrs)
+		observability.ClickHouseErrors.Add(ctx, 1, errAttrs(clickhouseDriverErrCode(err)))
+		span.RecordError(err)
 		return nil, fmt.Errorf("clickhouse query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		_ = rows.Close()
+		observability.ClickHouseDuration.Record(ctx, time.Since(start).Seconds(), metricAttrs)
+	}()
 
 	columns := rows.ColumnTypes()
 	// Initialize as empty (not nil) so a zero-row result marshals to `[]`,

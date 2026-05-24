@@ -5,7 +5,21 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/dgraph-io/ristretto/v2"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+// L1 cache attribute sets — pre-allocated once so the hot path on each Get
+// stays free of per-call metric.WithAttributes/attribute.String slice allocs.
+// "singleflight" is recorded as a separate dimension so dashboards can show
+// the coalesced share of the hit count, but L1 itself doesn't see
+// singleflight — that's the handler's wrapping. We still emit singleflight=false
+// here so the counter has a consistent label set across tiers.
+var (
+	cacheL1HitAttrs  = metric.WithAttributes(attribute.String("tier", "L1"), attribute.String("singleflight", "false"))
+	cacheL1MissAttrs = metric.WithAttributes(attribute.String("tier", "L1"))
 )
 
 // LocalCache is an L1 in-process cache backed by Ristretto.
@@ -28,14 +42,16 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 	return &LocalCache{cache: cache, versionManager: vm}, nil
 }
 
-func (l *LocalCache) Get(_ context.Context, key string, namespace string, scope string) ([]byte, time.Duration, error) {
+func (l *LocalCache) Get(ctx context.Context, key string, namespace string, scope string) ([]byte, time.Duration, error) {
 	cacheKey := l.versionManager.GetCacheKey(key, namespace, scope)
 
 	val, foundVal := l.cache.Get(cacheKey)
 	if !foundVal {
+		observability.CacheMisses.Add(ctx, 1, cacheL1MissAttrs)
 		return nil, 0, nil
 	}
 	remaining, _ := l.cache.GetTTL(cacheKey)
+	observability.CacheHits.Add(ctx, 1, cacheL1HitAttrs)
 
 	return val, remaining, nil
 }
