@@ -20,7 +20,6 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.1+ (pinned via `packageManager` in `clients/ts/package.json`, `tests/e2e/sdk/package.json`, and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site; `make build-sdk`, `make test-sdk`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
-| **openssl** + **jq** | any recent | Only required for the observability stack: `make signoz-up` uses `openssl rand -hex 32` to mint a per-checkout JWT secret; `make signoz-dashboards` / `load-dashboards.sh` uses `jq` to parse the SigNoz dashboards API. Both targets fail fast with a friendly error if either is missing | macOS: usually preinstalled (or `brew install openssl jq`); Linux: `apt-get install openssl jq` |
 
 ### Auto-installed by `make tools`
 
@@ -311,7 +310,7 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 ### Test Structure
 
 | Category | Location | Docker? | Command |
-|----------|----------|---------|---------|
+| -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-sdk` |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
@@ -334,6 +333,7 @@ Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()`
 The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
 
 **Architecture**:
+
 - `tests/e2e/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app`, so you can also point the suite at a hot-reload `make dev` instance instead.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
@@ -440,12 +440,9 @@ Run `make help` to see all targets. Key ones:
 | `make deps-shell` | `clickhouse-client` REPL on the running container |
 | `make deps-wipe` | Stop ClickHouse AND destroy its data volume (DESTRUCTIVE) |
 | **Observability** | |
-| `make dev-obs` | `make dev` + local SigNoz stack with WaveHouse already pointed at its OTLP collector |
-| `make signoz-up` | Start SigNoz stack alone (idempotent; blocks until healthy) |
-| `make signoz-down` | Stop SigNoz stack (preserves UI history + admin account) |
-| `make signoz-logs` | Tail SigNoz UI + collector logs |
-| `make signoz-wipe` | Stop SigNoz AND destroy its volumes (DESTRUCTIVE — admin account reset) |
-| `make signoz-dashboards` | Upsert version-controlled dashboards into local SigNoz |
+| `make obs-aspire` | Prebuilt 0-config o11y UI to show WaveHouse metrics, logs, and traces locally |
+| `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
+| `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
 | **Static checks** | |
 | `make fmt` | Check formatting (run `make fix` to apply) |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
@@ -521,7 +518,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
 
-```
+```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
 ```
 

@@ -118,7 +118,7 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. |
-| `otel.addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | OTLP gRPC endpoint used by every enabled signal. Plain `host:port` — no scheme, plaintext gRPC only (see TLS note above). See `deployments/signoz/` for a local collector setup. |
+| `otel.addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | OTLP gRPC endpoint used by every enabled signal. Plain `host:port` — no scheme, plaintext gRPC only (see TLS note above). See `make help` for a local collector setup. |
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
