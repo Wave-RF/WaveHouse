@@ -49,6 +49,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	r = r.WithContext(ctx)
 
+	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
+
 	if table == "" {
 		slog.ErrorContext(ctx, "missing table parameter in request")
 		writeJSONError(w, http.StatusBadRequest, "missing table")
@@ -63,7 +65,9 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var data map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
 		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return

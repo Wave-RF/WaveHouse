@@ -415,16 +415,32 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, cache cache.Cache, ch
 
 	yamlConfig := `
 input:
-  nats_bridge: {}
+  # Wrap the custom NATS bridge in a batched input
+  batched:
+    child:
+      nats_bridge: {}
+    policy:
+      count: 500
+      period: 5s
+      # Processors in the policy execute on the flushed batch.
+      # This groups the 500 messages by table_name into smaller sub-batches
+      # before sending them through the pipeline.
+      processors:
+        - group_by_value:
+            value: '${! meta("table_name") }'
+
 output:
   fallback:
-    - clickhouse_json_bridge:
-        batching:
-          count: 500
-          period: 5s
-          processors:
-            - group_by_value:
-                value: '${! meta("table_name") }'
+    # Try ClickHouse first, but RETRY transient network failures
+    - retry:
+        max_retries: 3
+        backoff:
+          initial_interval: 1s
+          max_interval: 5s
+        output:
+          clickhouse_json_bridge: {}
+
+    # If all retries fail, route the specific table's batch to the DLQ
     - nats_dlq_bridge: {}
 `
 
