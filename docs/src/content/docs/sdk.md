@@ -260,10 +260,6 @@ clicks.select('page').timeRange('received_timestamp', '1h')
 clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
 ```
 
-#### `.cacheTTL(seconds)`
-
-Override the server's default cache TTL for this query.
-
 ```ts
 clicks.select('page').count().cacheTTL(300) // cache for 5 minutes
 ```
@@ -307,19 +303,15 @@ while (result.hasMore && result.next) {
 
 ---
 
-## Raw SQL — `wh.sql(query, params?, opts?)`
+## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. Requires admin/service role when access control policy is active.
+Execute a raw SQL query. When authentication is enabled (`auth.enabled=true`), the caller's JWT must resolve to the `admin` or `service` role. With `auth.enabled=false` or `auth.dev_mode=true` (both dev/test postures), the endpoint is open.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
-
-// With positional parameters
-const { data } = await wh.sql(
-  'SELECT * FROM clicks WHERE page = ? LIMIT ?',
-  ['/home', 100],
-);
 ```
+
+> **No parameter binding through the SDK.** Positional `?` substitution is not supported, and the SDK has no way to forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and `wh.sql()` doesn't expose a hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder (`wh.from(table)…`).
 
 ---
 
@@ -535,12 +527,12 @@ interface StreamEvent<T> {
 
 ### `SharedWSManager`
 
-When using WebSocket transport, the SDK automatically multiplexes all topic subscriptions over a single WebSocket connection per client via `SharedWSManager`. This is transparent — `.stream()` calls route through it automatically.
+When using WebSocket transport, the SDK automatically multiplexes all per-table subscriptions over a single WebSocket connection per client via `SharedWSManager`. This is transparent — `.stream()` calls route through it automatically.
 
 Key behaviors:
-- Ref-counted subscriptions: unsubscribing removes only when the last subscriber for a topic disconnects.
-- Auto-reconnect with exponential backoff; all active topics resubscribed on reconnect.
-- NATS-style wildcard matching (`*` = one token, `>` = one-or-more) on the client side.
+- Ref-counted subscriptions: unsubscribing removes only when the last subscriber for a table disconnects.
+- Auto-reconnect with exponential backoff; all active table subscriptions resubscribed on reconnect.
+- Exact-match dispatch by table name. The legacy NATS-style wildcards (`*`, `>`) are no longer accepted server-side; subscribe to one concrete table per call.
 
 ### Client-Side Stream Filtering
 
@@ -663,7 +655,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .get(name) → Promise<Result<Pipe>>
 │   ├── .set(name, def) → Promise<Result<void>>
 │   └── .delete(name) → Promise<Result<void>>
-├── .sql(query, params?) → Promise<Result<Row[]>>
+├── .sql(query, opts?) → Promise<Result<Row[]>>
 ├── .schema
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>
@@ -745,4 +737,4 @@ make test-e2e-dev      # Watch mode for iterative development
 
 Test files: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
 
-See [Development Guide — E2E Tests via SDK](development.md#e2e-tests-via-sdk) for architecture details and workflow tips.
+See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

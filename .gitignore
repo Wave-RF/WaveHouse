@@ -51,6 +51,10 @@ node_modules/
 *.swo
 *~
 
+# Claude Code local state (per-user; not for committing)
+.claude/settings.local.json
+.claude/worktrees/
+
 # Local git worktrees
 .worktrees/
 
@@ -79,3 +83,7 @@ docs/dist/
 
 # pnpm
 pnpm-debug.log*
+
+# local config files
+.config.local.yaml
+.policy.local.yaml

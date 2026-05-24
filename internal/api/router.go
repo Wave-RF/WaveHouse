@@ -97,19 +97,18 @@ func NewRouter(deps Dependencies) http.Handler {
 	// API v1 endpoints (auth middleware may be no-op if disabled).
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(deps.AuthMW)
-		r.Post("/ingest/{table}", deps.Ingest.Handle)
-		r.Post("/query", deps.Query.Handle)
+
+		r.Post("/ingest", deps.Ingest.Handle)
 		r.Get("/stream/sse", deps.SSE.Handle)
 		r.Get("/stream/ws", deps.WS.Handle)
 
 		// Schema discovery.
-		r.Get("/schema", deps.Schema.List)
-		r.Get("/schema/{table}", deps.Schema.Get)
+		r.Get("/schema", deps.Schema.Get)
 		r.Post("/schema/refresh", deps.Schema.Refresh)
 
 		// Structured query endpoint.
 		if deps.StructuredQuery != nil {
-			r.Post("/tables/{table}/query", deps.StructuredQuery.Handle)
+			r.Post("/query", deps.StructuredQuery.Handle)
 		}
 
 		// Named query pipes.
@@ -123,9 +122,32 @@ func NewRouter(deps Dependencies) http.Handler {
 			r.Get("/dlq/stats", deps.DLQ.Stats)
 		}
 
-		// Admin routes (require admin or service role).
+		// Single named role gate for /v1/admin/*. All admin-equivalent
+		// surfaces (management endpoints + raw-SQL passthrough) share the
+		// same admin/service principal set — service tokens have
+		// admin-scoped permissions across the rest of /v1/admin/*, so
+		// carving out a single tighter gate for raw SQL would be
+		// inconsistency without a real authorization win. Declaring the
+		// middleware once keeps the role-string list from drifting.
+		adminOrService := RequireRole(deps.AuthEnabled, "admin", "service")
+
+		// Admin routes. The adminOrService gate covers the whole tree;
+		// every surface below — including raw-SQL passthrough — shares
+		// the same admin-equivalent principal set.
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(RequireRole(deps.AuthEnabled, "admin", "service"))
+			r.Use(adminOrService)
+
+			// Raw-SQL passthrough. The only sanctioned surface for
+			// non-insert mutations (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…)
+			// and for ad-hoc SELECTs that don't fit the structured
+			// query AST. Authorization is the /v1/admin/* gate above:
+			// raw SQL has no per-statement scope check (we can't
+			// authorize predicates without a full SQL parser), so the
+			// role gate is the entire authorization story. Non-admin
+			// callers use the structured ingest path, structured
+			// queries (`/v1/query?table={table}`), or named pipes.
+			r.Post("/query", deps.Query.Handle)
+
 			if deps.Policy != nil {
 				r.Get("/policy", deps.Policy.Get)
 				r.Put("/policy", deps.Policy.Put)

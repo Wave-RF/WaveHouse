@@ -182,24 +182,39 @@ help: ## Show this help menu
 DEV_COMPOSE_FILE := deployments/compose/dependencies.yaml
 DEV_COMPOSE      := docker compose -f $(DEV_COMPOSE_FILE)
 
+CONFIG_FILES = .config.local.yaml # .policy.local.yaml
+# This strips the leading '.' and trailing '.local.yaml' to find the base name,
+# then appends '.yaml' to find the source file.
+# TODO: if we add a validate subcommand to the binary we could test that here too
+$(CONFIG_FILES): .%.local.yaml: %.yaml
+	@if [ ! -f $@ ]; then \
+		echo "⚙️  Creating local config: $@ from $<..."; \
+		cp $< $@; \
+	fi
+
 .PHONY: dev
-dev: deps-up $(AIR) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
+dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveHouse via air on :8080
 	@echo "$(CYAN)==> Starting WaveHouse with air hot-reload (Ctrl+C to stop)$(RESET)"
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
-	@echo "    Override config via env: e.g. $(CYAN)WH_AUTH_ENABLED=true WH_AUTH_DEV_MODE=true make dev$(RESET)"
-	@echo "    More targets: $(CYAN)make deps-down deps-logs deps-shell deps-wipe$(RESET)"
-	@$(AIR) -c .air.toml
+	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
 
 # Docs site dev/preview servers — long-running, blocking. Astro dev defaults
 # to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
 # `make dev` on :8080.
 .PHONY: dev-docs
-dev-docs: install-docs ## Hot-reload docs site dev server (Astro on :4321)
+dev-docs: install-docs-playwright ## Hot-reload docs site dev server (Astro on :4321)
 	@cd $(DOCS_DIR) && $(PNPM) dev
 
 .PHONY: preview-docs
-preview-docs: build-docs ## Preview the production docs build locally
+preview-docs: install-docs-playwright ## Preview the production docs build locally (auto-builds if dist/ is missing)
+	@# Skip the build if `dist/` already exists — running `make build-docs`
+	@# and then `make preview-docs` should serve the existing artifact, not
+	@# rebuild from scratch. Re-run `make build-docs` explicitly to refresh.
+	@if [ ! -d $(DOCS_DIR)/dist ]; then \
+	  echo "$(CYAN)==> No dist/ — building docs first...$(RESET)"; \
+	  cd $(DOCS_DIR) && $(PNPM) build; \
+	fi
 	@cd $(DOCS_DIR) && $(PNPM) preview
 
 # `up -d --wait` blocks until the compose healthcheck transitions to
@@ -437,6 +452,17 @@ install-sdk:
 install-docs:
 	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
 
+# Playwright Chromium (~130 MB) is required by `rehype-mermaid` (build-time
+# diagram SSR) and `starlight-links-validator`. Kept out of `install-docs` so
+# the top-level `make tools` bootstrap doesn't force every Go-only contributor
+# to download Chromium. Wired into `build-docs` / `dev-docs` instead. The
+# `--with-deps` apt step is $CI-gated since it needs sudo on Linux laptops;
+# CI runners on minimal base images need it. Both steps are idempotent. See
+# docs/src/content/docs/development.md for the full Linux-dev-machine story.
+.PHONY: install-docs-playwright
+install-docs-playwright: install-docs
+	@cd $(DOCS_DIR) && $(PNPM) exec playwright install chromium $${CI:+--with-deps} >/dev/null
+
 .PHONY: install-e2e-sdk
 install-e2e-sdk:
 	@cd $(E2E_SDK_DIR) && $(PNPM) install --frozen-lockfile
@@ -449,7 +475,7 @@ build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by
 # Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
 # Starlight content collection itself — no separate convert step.
 .PHONY: build-docs
-build-docs: install-docs ## Build docs site for production → docs/dist/
+build-docs: install-docs-playwright ## Build docs site for production → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@cd $(DOCS_DIR) && $(PNPM) build
 
@@ -479,7 +505,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 	@printf "$(CYAN)==> Running Unit Tests...$(RESET)\n"
 	@rm -rf $(COV_UNIT)/data && mkdir -p $(COV_UNIT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="$(TAGS)" -cover -race ./internal/... $(ARGS) \
+		-tags="$(TAGS)" -cover -race -timeout 15s ./internal/... ./cmd/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
 	@go run ./scripts/cov render unit
 
@@ -557,6 +583,10 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
+	@# Marker file for the pre-push git hook: confirms `make ci` passed for the
+	@# exact HEAD being pushed. tmp/ is gitignored. New commits invalidate the
+	@# marker (different SHA), so `make ci` must re-run before the next push.
+	@mkdir -p tmp && touch "tmp/ci-passed-$$(git rev-parse HEAD)"
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
@@ -660,8 +690,13 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, and pnpm deps
-	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed$(RESET)"
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, pnpm deps, and git hooks
+	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
+	@# `make tools` repeatedly just re-asserts the config. The .githooks/
+	@# directory is committed; this line plumbs git to it. Users can opt out
+	@# locally by unsetting the config (`git config --unset core.hooksPath`).
+	@git config core.hooksPath .githooks
+	@echo "$(GREEN)==> Tools cached; Go modules + pnpm packages installed; git hooks active (.githooks/)$(RESET)"
 	@echo "    (go.mod tool deps compile on first \`go tool <name>\` invocation)"
 
 # File-target rules: only run when the versioned binary is missing. Bumping
@@ -687,4 +722,3 @@ $(AIR):
 	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
 	@mv $(LOCAL_BIN)/air $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"
-

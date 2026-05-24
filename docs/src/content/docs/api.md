@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. Authentication is optional and controlled by `auth.enabled`; see [Configuration](configuration.md#authentication) for the full auth config surface.
+Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. Authentication is optional and controlled by `auth.enabled`; see [Configuration](/configuration#authentication) for the full auth config surface.
 
 ## Authentication
 
@@ -74,19 +74,29 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 
 ### `GET /health` — Liveness Probe
 
-Returns `200 OK` if the process is running. No authentication required.
+Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
-**Response:**
+**Response (ready):**
 
 ```json
 {"status": "ok"}
 ```
 
+**Response (boot-degraded):**
+
+```json
+{"status": "degraded", "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"}
+```
+
+Status code: `503 Service Unavailable`
+
+The boot-degraded response lets an operator `curl /health` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
+
 ---
 
 ### `GET /ready` — Readiness Probe
 
-Returns `200 OK` if the process is running and ClickHouse is reachable. No authentication required.
+Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
 
 **Response (ready):**
 
@@ -104,11 +114,15 @@ Status code: `503 Service Unavailable`
 
 ---
 
-### `POST /v1/ingest/{table}` — Ingest Data
+### `POST /v1/ingest?table={table}` — Ingest Data
 
 Accepts a flat JSON object, validates it against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
 
-The `{table}` URL parameter must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
+The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
+
+> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse). When authentication is enabled, that endpoint is restricted to the `admin` / `service` role (the same gate as the rest of `/v1/admin/*`); with `auth.enabled=false` or `auth.dev_mode=true` (the dev/test postures) it is intentionally open.
+>
+> The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
 
 **Request:**
 
@@ -151,7 +165,6 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
-| 400 | `{"error":"payload cannot contain reserved field 'received_timestamp'"}` | Payload contains a reserved field |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -159,30 +172,40 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
 
 ---
 
-### `POST /v1/query` — Query ClickHouse
+### `POST /v1/admin/query` — Query ClickHouse
 
-Executes a SQL query directly against ClickHouse. Results are cached in-process (L1 Ristretto) with singleflight coalescing so duplicate concurrent queries hit ClickHouse once. UUID and DateTime columns are converted to string representations in the response.
+Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. Multi-statement input (`SELECT 1; TRUNCATE t`) also works on recent ClickHouse versions where multi-query is enabled by default; older or restrictively-configured servers may reject the second statement with a clear error. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting; other types are returned as ClickHouse renders them under `FORMAT JSON`.
+
+> **Inline `FORMAT` overrides the JSON envelope.** ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON` setting. When the SQL contains an explicit `FORMAT`, the proxy forwards ClickHouse's raw response body (CSV, Pretty, TSV, …) and passes through the upstream `Content-Type` header — `text/csv`, `text/tab-separated-values`, etc. — so consumers see the right MIME type. The "extract the `data` array" behavior only applies when ClickHouse returned the `FORMAT JSON` envelope, which is the default.
+>
+> **64 MiB response cap.** The proxy buffers the upstream response in memory before forwarding (no row-streaming yet), so a `SELECT *` from a large table can pin RAM on the API server. To avoid an admin OOMing themselves, responses larger than 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Narrow the query with `LIMIT`, or use a streaming client outside WaveHouse that talks to ClickHouse directly (the standard escape hatch — the same admin credentials work).
+
+This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
+
+> **Admin / service only.** The route is mounted under `/v1/admin/*`, which sits behind a `RequireRole("admin","service")` gate: callers whose JWT resolves to either role may use it (or any caller when `auth.enabled=false` or `auth.dev_mode=true`, the dev/test postures). Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story — but the role set matches the rest of `/v1/admin/*` rather than carving out a separate tighter gate, because service tokens already hold admin-scoped powers across that whole tree (policy CRUD, pipes CRUD, log-level) and the inconsistency would be a footgun without a real authorization win. The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+
+`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate as `admin` / `service`. (The endpoint moved here from `/v1/query` as part of the admin-lockdown change — the `policy.RolePermissions.raw_sql` field has been removed and `/v1/query` now returns 404.)
 
 **Request:**
 
 ```json
 {
-  "sql": "SELECT * FROM clicks LIMIT 10",
-  "params": []
+  "sql": "SELECT * FROM clicks LIMIT 10"
 }
 ```
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `sql` | string | Yes | SQL query executed directly against ClickHouse. |
-| `params` | array | No | Query parameters (bound positionally). |
+| `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
+
+> **No parameter binding on this endpoint (yet).** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
 
 **Response:**
 
@@ -197,30 +220,30 @@ Executes a SQL query directly against ClickHouse. Results are cached in-process 
 ]
 ```
 
-The response includes a cache header:
-
-- `X-Cache: HIT` — served from cache
-- `X-Cache: MISS` — fetched from ClickHouse
-
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
-| 500 | `{"error":"..."}` | ClickHouse query error |
+| 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement with a 4xx (bad SQL, missing table, type error, …). The body carries ClickHouse's own error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.`. The proxy maps any ClickHouse 4xx to HTTP 400 — caller-fault, the request itself is what's wrong. |
+| 401 | `{"error":"unauthorized"}` | `auth.enabled=true` and the request carries no role claim |
+| 403 | `{"error":"forbidden"}` | Caller's role is not `admin` or `service` |
+| 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
+| 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
+| 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
 
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/query \
+curl -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
 
 ---
 
-### `POST /v1/tables/{table}/query` — Structured Query
+### `POST /v1/query?table={table}` — Structured Query
 
 Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
 
@@ -242,8 +265,7 @@ Executes a type-safe structured query against a table. The query AST is validate
     "column": "received_timestamp",
     "since": "1h",
     "until": ""
-  },
-  "cache_ttl": 60
+  }
 }
 ```
 
@@ -256,11 +278,10 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
-| `cache_ttl` | int | No | Override default cache TTL (seconds). |
 
 **Response:**
 
-Same format as `/v1/query` with `X-Cache` header.
+JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
 
 **Error responses:**
 
@@ -276,7 +297,7 @@ Same format as `/v1/query` with `X-Cache` header.
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached.
+Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/admin/query`.
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -291,7 +312,7 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-Same format as `/v1/query` with `X-Cache` header.
+JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
 
 **Error responses:**
 
@@ -311,8 +332,8 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `topic` | string | `ingest.>` | NATS subject to subscribe to. Supports NATS wildcards: `*` matches one token, `>` matches one or more remaining tokens. |
-| `since` | string | — | RFC 3339 timestamp. If provided, replays historical events from NATS before switching to live streaming. |
+| `table` | string | (required) | Table name to subscribe to. Must match `^[a-zA-Z_][a-zA-Z0-9_]*$` (rejects NATS wildcards `*` / `>`). Returns 400 if missing or invalid. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp. If provided, replays historical events from NATS before switching to live streaming. |
 | `token` | string | — | JWT token (alternative to `Authorization` header, useful for `EventSource`). Stripped from URL after extraction. |
 
 **Headers:**
@@ -328,36 +349,35 @@ id: 2026-03-24T12:00:00.123Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:00.123Z","data":{"page":"/home","button":"signup"}}
 
 id: 2026-03-24T12:00:01.456Z
-data: {"table_name":"page_views","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"url":"/dashboard"}}
+data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"page":"/pricing"}}
 ```
+
+Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table or use the WebSocket endpoint with in-band multiplexing.
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
 **curl example:**
 
 ```bash
-# All tables
-curl -N http://localhost:8080/v1/stream/sse
-
-# Specific table
-curl -N "http://localhost:8080/v1/stream/sse?topic=ingest.clicks"
+# Subscribe to a specific table
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 
 # With gap-fill
-curl -N "http://localhost:8080/v1/stream/sse?since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
 ---
 
 ### `GET /v1/stream/ws` — WebSocket Stream
 
-Opens a WebSocket connection for real-time event streaming. Supports in-band multiplexing — a single WebSocket can subscribe to multiple topics dynamically.
+Opens a WebSocket connection for real-time event streaming. Supports in-band multiplexing — a single WebSocket can subscribe to multiple tables dynamically.
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `topic` | string | — | Optional initial topic to subscribe to (backward compatible). If omitted, the client must send subscribe commands. |
-| `since` | string | — | RFC 3339 timestamp for gap-fill on the initial `?topic=` subscription. |
+| `table` | string | — | Optional initial table to subscribe to. If omitted, the client must send subscribe commands. When present, must match `^[a-zA-Z_][a-zA-Z0-9_]*$` — invalid values return 400 before the WebSocket upgrade. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp for gap-fill on the initial `?table=` subscription. |
 | `token` | string | — | JWT token (alternative to `Authorization` header). Stripped from URL after extraction. |
 
 **In-band commands (client → server):**
@@ -365,17 +385,17 @@ Opens a WebSocket connection for real-time event streaming. Supports in-band mul
 After connecting, send JSON commands to manage subscriptions:
 
 ```json
-{"action": "subscribe", "topic": "ingest.clicks"}
-{"action": "subscribe", "topic": "ingest.page_views"}
-{"action": "unsubscribe", "topic": "ingest.clicks"}
+{"action": "subscribe", "table": "clicks"}
+{"action": "subscribe", "table": "page_views"}
+{"action": "unsubscribe", "table": "clicks"}
 ```
 
 **Outbound message format (server → client):**
 
-Each message is wrapped in an envelope with the topic:
+Each message is wrapped in an envelope labelled with the table name:
 
 ```json
-{"topic": "ingest.clicks", "data": {"table_name": "clicks", "received_timestamp": "...", "data": {...}}}
+{"table": "clicks", "data": {"table_name": "clicks", "received_timestamp": "...", "data": {...}}}
 ```
 
 **JavaScript example:**
@@ -383,12 +403,12 @@ Each message is wrapped in an envelope with the topic:
 ```javascript
 const ws = new WebSocket("ws://localhost:8080/v1/stream/ws?token=<jwt>");
 ws.onopen = () => {
-  ws.send(JSON.stringify({ action: "subscribe", topic: "ingest.clicks" }));
-  ws.send(JSON.stringify({ action: "subscribe", topic: "ingest.page_views" }));
+  ws.send(JSON.stringify({ action: "subscribe", table: "clicks" }));
+  ws.send(JSON.stringify({ action: "subscribe", table: "page_views" }));
 };
 ws.onmessage = (event) => {
-  const { topic, data } = JSON.parse(event.data);
-  console.log(`[${topic}]`, data.table_name, data.data);
+  const { table, data } = JSON.parse(event.data);
+  console.log(`[${table}]`, data.table_name, data.data);
 };
 ```
 
@@ -414,7 +434,7 @@ Returns all discovered ClickHouse table schemas.
 
 ---
 
-### `GET /v1/schema/{table}` — Get Table Schema
+### `GET /v1/schema?table={table}` — Get Table Schema
 
 Returns the schema for a specific table.
 
@@ -554,6 +574,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 ```json
 {
   "table_name": "clicks",
+  "scope": "scope",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "data": {
     "page": "/home",
@@ -566,6 +587,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
+| `scope` | string | Optional scope namespace used for subject routing/cache invalidation context. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `data` | object | The original flat JSON body. |
 
@@ -587,7 +609,7 @@ Same as the wire format — events are passed through directly:
 
 ## Dead Letter Queue (DLQ)
 
-When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection.
+When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ payload is the inner data object that failed to insert (`{"id":"abc","field":...}`).
 
 Use `GET /v1/dlq/stats` to monitor DLQ depth.
 
@@ -601,7 +623,7 @@ jwt encode --secret "change-me-in-production" '{"exp": 9999999999}'
 
 # Export for use with curl:
 export TOKEN=$(jwt encode --secret "change-me-in-production" '{"exp": 9999999999}')
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home"}'

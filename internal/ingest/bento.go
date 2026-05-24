@@ -11,13 +11,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -25,17 +22,16 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"go.opentelemetry.io/otel"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// safeIdentifierRe matches safe SQL identifiers to prevent injection.
-var safeIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
 	bentoMeter              = otel.Meter("wavehouse-bento")
@@ -55,9 +51,6 @@ var (
 type jsInput struct {
 	consumer jetstream.Consumer
 	iter     jetstream.MessagesContext
-	chConn   driver.Conn
-	js       jetstream.JetStream
-	inFlight atomic.Int32
 }
 
 func (j *jsInput) Connect(ctx context.Context) error {
@@ -80,9 +73,8 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		slog.InfoContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
-			Action            string          `json:"action"`
 			TableName         string          `json:"table_name"`
-			ID                string          `json:"id"`
+			Scope             string          `json:"scope,omitempty"`
 			Payload           json.RawMessage `json:"data"`
 			ReceivedTimestamp string          `json:"received_timestamp"`
 		}
@@ -103,153 +95,9 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			continue
 		}
 
-		// Validate table name to prevent SQL injection.
-		if !safeIdentifierRe.MatchString(raw.TableName) {
-			slog.WarnContext(msgCtx, "rejecting message with unsafe table name", "table", raw.TableName)
-			// TODO: manually push to a DLQ subject with metadata for later analysis instead of silently dropping?
-			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
-				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
-			}
-			continue
-		}
-
-		// Delete case
-		if raw.Action == "delete" {
-			tracer := otel.Tracer("wavehouse-worker")
-			spanCtx, span := tracer.Start(msgCtx, "clickhouse_delete") // Use the extracted msgCtx
-
-			slog.InfoContext(spanCtx, "delete received, waiting for in-flight inserts to drain", "table", raw.TableName)
-
-			// Wait for in-flight insert messages to be finalized by Bento's pipeline.
-			// The inFlight counter is decremented in the ackFn callback once the
-			// message batch is fully processed (either successfully committed to
-			// ClickHouse or routed to the DLQ). This drain ensures that pending
-			// writes are finished before executing a delete operation.
-			if j.inFlight.Load() > 0 {
-				// NOTE: The effective drain window is min(60s, global_shutdown_timeout).
-				// If the main context (ctx) is cancelled, the drain terminates immediately.
-				flushCtx, flushCancel := context.WithTimeout(ctx, 60*time.Second)
-				ticker := time.NewTicker(10 * time.Millisecond)
-
-				for j.inFlight.Load() > 0 {
-					select {
-					case <-ctx.Done(): // Main context cancelled (shutdown)
-						ticker.Stop()
-						span.End()
-						flushCancel() // Explicit cancel
-						return nil, nil, ctx.Err()
-
-					case <-flushCtx.Done(): // 60-second drain timeout hit or context cancelled
-						ticker.Stop()
-						span.End()
-						flushCancel()
-
-						if ctx.Err() != nil {
-							return nil, nil, ctx.Err() // Return canonical cancellation
-						}
-
-						// Real 60-second timeout
-						slog.ErrorContext(spanCtx, "timeout waiting for in-flight inserts to drain",
-							"table", raw.TableName,
-							"id", raw.ID,
-						)
-						// Only Nak if we aren't shutting down; otherwise, let NATS handle redelivery
-						if nakErr := m.Nak(); nakErr != nil {
-							slog.WarnContext(spanCtx, "nak failed during drain timeout", "error", nakErr)
-						}
-
-						// Use ErrNotConnected to trigger a Bento reconnect/retry rather than a fatal exit.
-						return nil, nil, service.ErrNotConnected
-
-					case <-ticker.C:
-						// Keep waiting
-					}
-				}
-				ticker.Stop()
-				flushCancel() // Explicit cancel on successful drain
-			}
-
-			delQuery := fmt.Sprintf("DELETE FROM `%s` WHERE id = ?", raw.TableName)
-
-			if err := j.chConn.Exec(spanCtx, delQuery, raw.ID); err != nil {
-				span.RecordError(err)
-				// Phase 1 (issue #91): treat every delete Exec error as permanent
-				// to break the infinite-Nak retry loop that a bad query (syntax
-				// error, missing table, etc.) would otherwise produce. Route the
-				// original NATS envelope to dlq.<table> and DoubleAck so the
-				// message is removed from the main queue.
-				//
-				// TODO(#91, Phase 2): classify transient (network/timeout) vs
-				// permanent errors and Nak the transient ones so they get retried.
-				// Until that lands, a ClickHouse blip during a delete drops the
-				// message to DLQ instead of retrying — accepted trade-off, see #91.
-				slog.ErrorContext(spanCtx, "clickhouse delete failed — routing to DLQ",
-					"table", raw.TableName,
-					"id", raw.ID,
-					"error", err,
-				)
-
-				// DLQ shape contract: `dlq.<table>` carries two structurally different
-				// payloads — insert-failure inner-data via dlqOutput.WriteBatch, and
-				// delete-failure full envelopes via this branch
-				// (`{"action":"delete","table_name":...,"id":...}`). Consumers must NOT
-				// branch on a JSON field to tell them apart: under BYOS a user row can
-				// carry any key, including `action`. We instead set a non-user-controlled
-				// NATS header here (`Wave-DLQ-Type: delete-envelope`) so consumers can
-				// detect the shape via header presence. The insert path has no header
-				// today; absence means insert-payload. Phase 2 (issue #91) will add
-				// `Wave-DLQ-Type: insert-payload` on the insert path and may normalize
-				// the shapes. observability.InjectNATS also propagates the
-				// `clickhouse_delete` span into the message so a Phase 2 consumer can
-				// stitch its own trace to the worker's.
-				dlqSubject := "dlq." + raw.TableName
-				dlqMsg := &nats.Msg{
-					Subject: dlqSubject,
-					Data:    m.Data(),
-					Header:  nats.Header{"Wave-DLQ-Type": []string{"delete-envelope"}},
-				}
-				observability.InjectNATS(spanCtx, dlqMsg)
-				if _, pubErr := j.js.PublishMsg(spanCtx, dlqMsg); pubErr != nil {
-					slog.ErrorContext(spanCtx, "DLQ publish failed for permanent delete error — message dropped",
-						"subject", dlqSubject,
-						"error", pubErr,
-					)
-					bentoDLQDropped.Add(spanCtx, 1, metric.WithAttributes(attribute.String("table", raw.TableName)))
-				} else {
-					slog.WarnContext(spanCtx, "sent failed delete to DLQ", "subject", dlqSubject)
-				}
-
-				if doubleAckErr := m.DoubleAck(spanCtx); doubleAckErr != nil {
-					slog.WarnContext(spanCtx, "double ack failed after permanent delete error", "error", doubleAckErr)
-				}
-
-				span.End()
-				continue
-			}
-			// Log the success with all context
-			slog.InfoContext(spanCtx, "successfully deleted record",
-				"table", raw.TableName,
-				"id", raw.ID,
-			)
-			if doubleAckErr := m.DoubleAck(spanCtx); doubleAckErr != nil {
-				slog.WarnContext(spanCtx, "double ack failed for processed delete message", "error", doubleAckErr)
-			}
-
-			span.End()
-			continue
-		} else if raw.Action != "insert" && raw.Action != "" {
-			// ACTION SAFETY: Reject unrecognized actions (e.g., "update", "upsert")
-			// to prevent them from accidentally falling through to the insert path.
-			slog.WarnContext(msgCtx, "rejecting message: unknown action type", "action", raw.Action)
-			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
-				slog.WarnContext(msgCtx, "double ack failed for rejected message", "error", doubleAckErr)
-			}
-			continue
-		}
-
-		// Insert case
 		payload := raw.Payload
 		if len(payload) == 0 || string(payload) == "null" {
+			// TODO: if they have a table with all defaults, would this not be a valid insert?
 			slog.ErrorContext(msgCtx, "rejecting insert: empty payload/data")
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for malformed message", "error", doubleAckErr)
@@ -262,7 +110,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		msg = msg.WithContext(msgCtx)
 
 		msg.MetaSet("table_name", raw.TableName)
-
+		msg.MetaSet("scope", raw.Scope)
 		msg.MetaSet("received_timestamp", raw.ReceivedTimestamp)
 
 		// Instead of time.Now(), ask NATS exactly when this message arrived in the queue
@@ -272,11 +120,7 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		msg.MetaSet("bento_start_time", fmt.Sprintf("%d", publishedTime.UnixMilli()))
 
-		j.inFlight.Add(1)
-
 		ackFn := func(ackCtx context.Context, err error) error {
-			defer j.inFlight.Add(-1)
-
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
 				// Log the Nak failure but return nil to Bento so it doesn't treat the Nak-error as a crash
@@ -317,11 +161,15 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 		msgCtx := m.Context()
 		data, _ := m.AsBytes()
 
-		tableName, exists := m.MetaGet("table_name")
+		tableName, tableNameSet := m.MetaGet("table_name")
+		scope, scopeSet := m.MetaGet("scope")
 
 		subject := "dlq.unknown"
-		if exists && tableName != "" {
-			subject = "dlq." + tableName
+		if tableNameSet && tableName != "" {
+			subject = "dlq." + query.SafeEncodeNATS(tableName)
+			if scopeSet && scope != "" {
+				subject += "." + query.SafeEncodeNATS(scope)
+			}
 		}
 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
@@ -336,6 +184,7 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 type clickhouseOutput struct {
 	httpClient *http.Client
+	cache      cache.Cache
 	scheme     string
 	host       string
 	port       string
@@ -354,13 +203,9 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 
 	firstMsg := batch[0]
 
-	tableName, ok := firstMsg.MetaGet("table_name")
-	if !ok || tableName == "" {
+	tableName, tableNameSet := firstMsg.MetaGet("table_name")
+	if !tableNameSet || tableName == "" {
 		return fmt.Errorf("missing table_name in message metadata")
-	}
-
-	if !safeIdentifierRe.MatchString(tableName) {
-		return fmt.Errorf("invalid table name: %q", tableName)
 	}
 
 	bentoStartTime := time.Now()
@@ -406,44 +251,29 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	reqCtx, chSpan := tracer.Start(parentCtx, "clickhouse_insert")
 	defer chSpan.End()
 
+	// set of all scope values in the batch for invalidation
+	allScopes := make(map[string]struct{})
+
 	var buf bytes.Buffer
 	for _, msg := range batch {
+		scope, scopeSet := msg.MetaGet("scope")
+		if !scopeSet {
+			scope = ""
+		}
+		allScopes[scope] = struct{}{}
+
 		data, err := msg.AsBytes()
 		if err != nil {
 			chSpan.RecordError(err)
 			slog.ErrorContext(reqCtx, "failed to read message bytes",
 				"table", tableName,
+				"scope", scope,
 				"error", err,
 			)
+			// TODO: is this path just dropping messages right now?
 			return fmt.Errorf("read message bytes: %w", err)
 		}
 
-		// Inject timestamp via byte-splicing to prevent float64 precision loss on large Int64/UInt64 values.
-		if rt, ok := msg.MetaGet("received_timestamp"); ok && rt != "" {
-			data = bytes.TrimSpace(data)
-			// Ensure it's a valid JSON object structure {...}
-			if len(data) >= 2 && data[0] == '{' && data[len(data)-1] == '}' {
-				rtJSON, _ := json.Marshal(rt)
-
-				// Check if the object has existing fields to see if we need a comma
-				inside := data[1 : len(data)-1]
-				needsComma := len(bytes.TrimSpace(inside)) > 0
-
-				var extra string
-				if needsComma {
-					extra = fmt.Sprintf(`,"received_timestamp":%s}`, rtJSON)
-				} else {
-					extra = fmt.Sprintf(`"received_timestamp":%s}`, rtJSON)
-				}
-
-				// SAFE ALLOCATION: Create a completely new slice to avoid mutating the original message's backing array
-				newData := make([]byte, 0, len(data)+len(extra))
-				newData = append(newData, data[:len(data)-1]...) // copy everything except the trailing '}'
-				newData = append(newData, []byte(extra)...)      // append the new field + closing '}'
-
-				data = newData // reassign the local variable
-			}
-		}
 		buf.Write(data)
 		buf.WriteString("\n")
 	}
@@ -451,7 +281,9 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	q := url.Values{}
 	q.Set("database", c.db)
 
-	q.Set("query", fmt.Sprintf("INSERT INTO `%s` FORMAT JSONEachRow", tableName))
+	q.Set("param_target_table", tableName)
+
+	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
 	q.Set("input_format_skip_unknown_fields", "1")
 	q.Set("date_time_input_format", "best_effort")
 
@@ -471,6 +303,8 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	req.Header.Set("X-ClickHouse-User", c.user)
 	req.Header.Set("X-ClickHouse-Key", c.password)
 
+	// TODO: have ClickHouse insert all the rows it can, only failing rows that are invalid instead of the entire batch.
+	// TODO: how do we know which of the scope set to invalidate?
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		chSpan.RecordError(err)
@@ -488,6 +322,17 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return err
 	}
 
+	// TODO: is this the only place we need to invalidate the cache? How do partial failures work?
+	// TODO: what context do we use here? reqCtx? parentCtx? or a new one?
+	if c.cache != nil {
+		// Detached context so cancellation doesn't abort invalidation
+		invCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(reqCtx))
+		if _, err := c.cache.InvalidateCache(invCtx, tableName, allScopes); err != nil {
+			slog.ErrorContext(reqCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
+			// TODO: we need a safer mechanism to ensure the cache invalidation can be retried or something here – for now the assumption is ClickHouse insertion errors will happen far more frequently than ristretto increments will, so it should be an incredibly small/unlikely edge case that will be loudly logged, but this MUST be addressed before cache implementations like Redis are added
+		}
+	}
+
 	return nil
 }
 
@@ -495,7 +340,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 // running stream for lifecycle management. Callers should call stream.Stop(ctx)
 // during graceful shutdown to drain in-flight batches. The provided ctx controls
 // the stream's lifetime — cancelling it initiates shutdown of the Bento pipeline.
-func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
+func StartIngestWorker(ctx context.Context, nc *nats.Conn, cache cache.Cache, chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string, onFatal func(error)) (*service.Stream, error) {
 	host, _, err := net.SplitHostPort(chHost)
 	if err != nil {
 		host = chHost
@@ -512,7 +357,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 	defer setupCancel()
 
 	cons, err := js.CreateOrUpdateConsumer(setupCtx, mq.StreamName(), jetstream.ConsumerConfig{
-		Durable:       "buffer-consumer",
+		Durable:       BufferConsumerName,
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
@@ -525,8 +370,6 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 			func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
 				return &jsInput{
 					consumer: cons,
-					chConn:   chConn,
-					js:       js,
 				}, nil
 			},
 		); err != nil {
@@ -553,6 +396,7 @@ func StartIngestWorker(ctx context.Context, nc *nats.Conn, chConn driver.Conn, c
 				}
 				return &clickhouseOutput{
 					httpClient: &http.Client{Timeout: 30 * time.Second},
+					cache:      cache,
 					scheme:     scheme,
 					host:       host,
 					port:       chHTTPPort,
@@ -599,6 +443,7 @@ output:
 	go func() {
 		logger.InfoContext(ctx, "ingest worker started")
 		if err := stream.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			// TODO: if bento fails unexpectedly, we probably want a retry loop here instead of just logging and exiting?
 			logger.ErrorContext(ctx, "ingest worker stopped unexpectedly", "error", err)
 
 			if onFatal != nil {

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -24,11 +23,8 @@ import (
 // Different names from sweeper_test.go mocks to avoid redeclaration.
 // ---------------------------------------------------------------------------
 
-// bentoMockJS satisfies jetstream.JetStream; Publish and PublishMsg are overridden.
+// bentoMockJS satisfies jetstream.JetStream; only Publish is overridden.
 // Publish is used by dlqOutput.WriteBatch (insert-failure path).
-// PublishMsg is used by jsInput.Read's delete-failure branch, which needs to set
-// a non-user-controlled `Wave-DLQ-Type` header to discriminate DLQ payload shapes
-// under BYOS (see internal/ingest/bento.go).
 type bentoMockJS struct {
 	jetstream.JetStream
 	published []publishedMsg
@@ -42,11 +38,6 @@ type publishedMsg struct {
 
 func (m *bentoMockJS) Publish(_ context.Context, subject string, payload []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	m.published = append(m.published, publishedMsg{Subject: subject, Data: payload})
-	return &jetstream.PubAck{}, nil
-}
-
-func (m *bentoMockJS) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
-	m.published = append(m.published, publishedMsg{Subject: msg.Subject, Data: msg.Data, Header: msg.Header})
 	return &jetstream.PubAck{}, nil
 }
 
@@ -93,55 +84,6 @@ func (m *bentoMockIter) Next(_ ...jetstream.NextOpt) (jetstream.Msg, error) {
 
 func (m *bentoMockIter) Stop() {}
 
-// bentoMockConn satisfies driver.Conn; only Exec is overridden.
-type bentoMockConn struct {
-	driver.Conn
-	execFn func(ctx context.Context, query string, args ...any) error
-}
-
-func (m *bentoMockConn) Exec(ctx context.Context, query string, args ...any) error {
-	if m.execFn != nil {
-		return m.execFn(ctx, query, args...)
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// safeIdentifierRe tests
-// ---------------------------------------------------------------------------
-
-func TestSafeIdentifierRe(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		input string
-		valid bool
-	}{
-		{"simple", "clicks", true},
-		{"underscore prefix", "_private", true},
-		{"mixed case", "Table123", true},
-		{"underscore in middle", "user_events", true},
-		{"single char", "x", true},
-		{"digits after letter", "a1b2", true},
-		{"empty string", "", false},
-		{"starts with digit", "123start", false},
-		{"contains dash", "table-name", false},
-		{"contains dot", "schema.table", false},
-		{"contains space", "my table", false},
-		{"SQL injection", "; DROP TABLE users", false},
-		{"semicolon", "table;", false},
-		{"parens", "table()", false},
-		{"star", "table*", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := safeIdentifierRe.MatchString(tt.input)
-			assert.Equal(t, tt.valid, got)
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // dlqOutput.WriteBatch tests
 // ---------------------------------------------------------------------------
@@ -162,6 +104,22 @@ func TestDLQOutput_WriteBatch_WithTableName(t *testing.T) {
 	assert.Equal(t, []byte(`{"data": "test"}`), js.published[0].Data)
 }
 
+func TestDLQOutput_WriteBatch_WithEmptyTableName(t *testing.T) {
+	t.Parallel()
+	js := &bentoMockJS{}
+	d := &dlqOutput{js: js, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	msg := service.NewMessage([]byte(`{"data": "test"}`))
+	msg.MetaSet("table_name", "")
+
+	err := d.WriteBatch(context.Background(), service.MessageBatch{msg})
+	require.NoError(t, err)
+
+	require.Len(t, js.published, 1)
+	assert.Equal(t, "dlq.unknown", js.published[0].Subject)
+	assert.Equal(t, []byte(`{"data": "test"}`), js.published[0].Data)
+}
+
 func TestDLQOutput_WriteBatch_MissingTableName(t *testing.T) {
 	t.Parallel()
 	js := &bentoMockJS{}
@@ -175,6 +133,7 @@ func TestDLQOutput_WriteBatch_MissingTableName(t *testing.T) {
 
 	require.Len(t, js.published, 1)
 	assert.Equal(t, "dlq.unknown", js.published[0].Subject)
+	assert.Equal(t, []byte(`{"data": "orphan"}`), js.published[0].Data)
 }
 
 func TestDLQOutput_WriteBatch_MultipleMessages(t *testing.T) {
@@ -225,13 +184,9 @@ func TestJsInput_Read_InsertMessage(t *testing.T) {
 	assert.True(t, exists)
 	assert.Equal(t, "clicks", table)
 
-	// Verify inFlight counter incremented.
-	assert.Equal(t, int32(1), input.inFlight.Load())
-
 	// Ack with nil error — should increment Ack on NATS msg.
 	require.NoError(t, ackFn(context.Background(), nil))
 	assert.True(t, natsMsg.doubleAcked, "insert message should use DoubleAck, not Ack")
-	assert.Equal(t, int32(0), input.inFlight.Load())
 }
 
 func TestJsInput_Read_InsertNack(t *testing.T) {
@@ -250,12 +205,11 @@ func TestJsInput_Read_InsertNack(t *testing.T) {
 	// Ack with error — should Nak the NATS message.
 	_ = ackFn(context.Background(), errors.New("insert failed"))
 	assert.True(t, natsMsg.naked)
-	assert.Equal(t, int32(0), input.inFlight.Load())
 }
 
-func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
+func TestJsInput_Read_UnsafeTableNameAllowed(t *testing.T) {
 	t.Parallel()
-	bad := EventMessage{TableName: "; DROP TABLE users", Data: map[string]any{}}
+	bad := EventMessage{TableName: "; DROP TABLE users", Data: map[string]any{"x": 1}}
 	badData, _ := json.Marshal(bad)
 	badMsg := &bentoMockMsg{data: badData}
 
@@ -268,207 +222,21 @@ func TestJsInput_Read_UnsafeTableNameDropped(t *testing.T) {
 	iter.msgs <- goodMsg
 
 	input := &jsInput{iter: iter}
-	msg, _, err := input.Read(context.Background())
+	ctx := context.Background()
+
+	msg1, _, err := input.Read(ctx)
 	require.NoError(t, err)
 
-	assert.True(t, badMsg.doubleAcked, "unsafe message should be double-acked and dropped")
+	assert.False(t, badMsg.doubleAcked, "malicious message should NOT be dropped")
+	table1, _ := msg1.MetaGet("table_name")
+	assert.Equal(t, "; DROP TABLE users", table1)
 
-	// Returned message should be the safe one.
-	table, _ := msg.MetaGet("table_name")
-	assert.Equal(t, "safe_table", table)
-}
-
-func TestJsInput_Read_DeleteMessage(t *testing.T) {
-	t.Parallel()
-	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "abc123"}
-	delData, _ := json.Marshal(del)
-	delMsg := &bentoMockMsg{data: delData}
-
-	insert := EventMessage{TableName: "events", Data: map[string]any{"x": "1"}}
-	insertData, _ := json.Marshal(insert)
-	insertMsg := &bentoMockMsg{data: insertData}
-
-	var execCalled bool
-	var execQuery string
-	var execArgs []any
-	conn := &bentoMockConn{
-		execFn: func(_ context.Context, query string, args ...any) error {
-			execCalled = true
-			execQuery = query
-			execArgs = args
-			return nil
-		},
-	}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-	iter.msgs <- delMsg
-	iter.msgs <- insertMsg
-
-	input := &jsInput{iter: iter, chConn: conn}
-	msg, _, err := input.Read(context.Background())
+	msg2, _, err := input.Read(ctx)
 	require.NoError(t, err)
 
-	// Delete should have been executed.
-	assert.True(t, execCalled)
-	assert.Equal(t, "DELETE FROM `clicks` WHERE id = ?", execQuery)
-	require.Len(t, execArgs, 1)
-	assert.Equal(t, "abc123", execArgs[0])
-	assert.True(t, delMsg.doubleAcked, "delete message should be double-acked on success")
-
-	// Returned message should be the insert.
-	table, _ := msg.MetaGet("table_name")
-	assert.Equal(t, "events", table)
-}
-
-func TestJsInput_Read_DeleteExecError(t *testing.T) {
-	t.Parallel()
-	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "fail"}
-	delData, _ := json.Marshal(del)
-	delMsg := &bentoMockMsg{data: delData}
-
-	insert := EventMessage{TableName: "events", Data: map[string]any{}}
-	insertData, _ := json.Marshal(insert)
-	insertMsg := &bentoMockMsg{data: insertData}
-
-	conn := &bentoMockConn{
-		execFn: func(context.Context, string, ...any) error { return errors.New("db error") },
-	}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-	iter.msgs <- delMsg
-	iter.msgs <- insertMsg
-
-	js := &bentoMockJS{}
-	input := &jsInput{iter: iter, chConn: conn, js: js}
-	msg, _, err := input.Read(context.Background())
-	require.NoError(t, err, "delete error should be handled as permanent (no error returned)")
-	require.NotNil(t, msg, "Read should advance to the next message after a failed delete")
-
-	// Permanent-fail policy: original envelope routed to dlq.<table>, message DoubleAck'd, not Nak'd.
-	assert.False(t, delMsg.naked, "delete message must not be Nak'd (would cause infinite retry)")
-	assert.True(t, delMsg.doubleAcked, "delete message should be DoubleAck'd after routing to DLQ")
-
-	require.Len(t, js.published, 1, "failed delete should be published to DLQ exactly once")
-	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
-	assert.JSONEq(t, string(delData), string(js.published[0].Data), "DLQ payload should preserve the original delete envelope")
-	// BYOS-safe shape discriminator: a `Wave-DLQ-Type: delete-envelope` NATS
-	// header tells consumers this is a full-envelope payload, not an insert
-	// row. Header is non-user-controlled — a user column named `action` in an
-	// insert row can't forge it.
-	assert.Equal(t, "delete-envelope", js.published[0].Header.Get("Wave-DLQ-Type"),
-		"delete failures must be tagged with Wave-DLQ-Type header so DLQ consumers can distinguish them from insert-failure payloads under BYOS")
-
-	// Next message in queue should be the follow-up insert.
-	table, _ := msg.MetaGet("table_name")
-	assert.Equal(t, "events", table)
-}
-
-func TestJsInput_Read_DeleteExecErrorDLQPublishFails(t *testing.T) {
-	t.Parallel()
-	// Even when the DLQ publish itself fails (NATS unavailable), the worker must
-	// still DoubleAck the message — Nak'ing here would re-create the infinite
-	// retry loop that the permanent-fail policy is designed to prevent.
-	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "fail"}
-	delData, _ := json.Marshal(del)
-	delMsg := &bentoMockMsg{data: delData}
-
-	good := EventMessage{TableName: "events", Data: map[string]any{"id": "1"}}
-	goodData, _ := json.Marshal(good)
-	goodMsg := &bentoMockMsg{data: goodData}
-
-	conn := &bentoMockConn{
-		execFn: func(context.Context, string, ...any) error { return errors.New("syntax error") },
-	}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-	iter.msgs <- delMsg
-	iter.msgs <- goodMsg
-
-	js := &bentoMockJSWithError{publishErr: errors.New("NATS unavailable")}
-	input := &jsInput{iter: iter, chConn: conn, js: js}
-
-	msg, _, err := input.Read(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, msg)
-
-	assert.False(t, delMsg.naked, "delete must not be Nak'd even when DLQ publish fails")
-	assert.True(t, delMsg.doubleAcked, "delete must still be DoubleAck'd to avoid infinite redelivery")
-
-	// Prove the DLQ publish was actually attempted before we DoubleAck'd. A
-	// regression that skipped PublishMsg entirely (jumping straight to
-	// DoubleAck) would still satisfy the no-Nak/DoubleAck assertions above,
-	// but it would silently drop messages on every transient NATS hiccup
-	// instead of giving the operator a single DLQ-dropped error to grep on.
-	require.Len(t, js.published, 1, "DLQ publish must still be attempted once even when NATS is unavailable")
-	assert.Equal(t, "dlq.clicks", js.published[0].Subject)
-	assert.JSONEq(t, string(delData), string(js.published[0].Data),
-		"the attempted DLQ payload must still be the original delete envelope")
-	assert.Equal(t, "delete-envelope", js.published[0].Header.Get("Wave-DLQ-Type"),
-		"discriminator header must be set on the attempted publish, not only on successful ones")
-
-	table, _ := msg.MetaGet("table_name")
-	assert.Equal(t, "events", table)
-}
-
-func TestJsInput_Read_DeleteDrainSuccess(t *testing.T) {
-	t.Parallel()
-	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "drain123"}
-	delData, _ := json.Marshal(del)
-	delMsg := &bentoMockMsg{data: delData}
-
-	insert := EventMessage{TableName: "events", Data: map[string]any{"x": "1"}}
-	insertData, _ := json.Marshal(insert)
-	insertMsg := &bentoMockMsg{data: insertData}
-
-	var execCalled bool
-	conn := &bentoMockConn{
-		execFn: func(_ context.Context, query string, args ...any) error {
-			execCalled = true
-			return nil
-		},
-	}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-	iter.msgs <- delMsg
-	iter.msgs <- insertMsg
-
-	input := &jsInput{iter: iter, chConn: conn}
-
-	// Pre-warm the in-flight counter to force the delete block to wait
-	input.inFlight.Store(2)
-
-	// Run Read in a goroutine so we can deterministically unblock it
-	type readResult struct {
-		msg *service.Message
-		err error
-	}
-	resCh := make(chan readResult, 1)
-
-	go func() {
-		msg, _, err := input.Read(context.Background())
-		resCh <- readResult{msg: msg, err: err}
-	}()
-
-	// Decrement the counter to unblock Read()
-	input.inFlight.Add(-2)
-
-	// Use require.Eventually as the assertion fence (no time.Sleep)
-	var res readResult
-	require.Eventually(t, func() bool {
-		select {
-		case res = <-resCh:
-			return true
-		default:
-			return false
-		}
-	}, 2*time.Second, 10*time.Millisecond, "Read() should unblock and return after inFlight drains")
-
-	require.NoError(t, res.err)
-	assert.True(t, execCalled, "delete should be executed after drain")
-	assert.True(t, delMsg.doubleAcked, "delete message should use DoubleAck")
-
-	table, _ := res.msg.MetaGet("table_name")
-	assert.Equal(t, "events", table, "should return the insert message after delete finishes")
+	assert.False(t, goodMsg.doubleAcked, "safe message should NOT be dropped")
+	table2, _ := msg2.MetaGet("table_name")
+	assert.Equal(t, "safe_table", table2)
 }
 
 func TestJsInput_Read_IteratorError(t *testing.T) {
@@ -584,85 +352,15 @@ func TestJsInput_Read_EmptyTableName(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// jsInput.Read — delete with unsafe table name
-// ---------------------------------------------------------------------------
-
-func TestJsInput_Read_DeleteUnsafeTableName(t *testing.T) {
-	t.Parallel()
-	del := map[string]any{"action": "delete", "table_name": "; DROP TABLE users", "id": "x"}
-	delData, _ := json.Marshal(del)
-	delMsg := &bentoMockMsg{data: delData}
-
-	good := EventMessage{TableName: "safe_table", Data: map[string]any{"id": "1"}}
-	goodData, _ := json.Marshal(good)
-	goodMsg := &bentoMockMsg{data: goodData}
-
-	var execCalled bool
-	conn := &bentoMockConn{
-		execFn: func(context.Context, string, ...any) error {
-			execCalled = true
-			return nil
-		},
-	}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-	iter.msgs <- delMsg
-	iter.msgs <- goodMsg
-
-	input := &jsInput{iter: iter, chConn: conn}
-	msg, _, err := input.Read(context.Background())
-	require.NoError(t, err)
-
-	assert.True(t, delMsg.doubleAcked, "unsafe delete should be double-acked and dropped")
-	assert.False(t, execCalled, "delete should not be executed for unsafe table name")
-
-	table, _ := msg.MetaGet("table_name")
-	assert.Equal(t, "safe_table", table)
-}
-
-// ---------------------------------------------------------------------------
-// jsInput.Read — delete with context cancellation during flush-wait
-// ---------------------------------------------------------------------------
-
-func TestJsInput_Read_DeleteCancelledCtx(t *testing.T) {
-	t.Parallel()
-	del := map[string]any{"action": "delete", "table_name": "clicks", "id": "abc"}
-	delData, _ := json.Marshal(del)
-	delMsg := &bentoMockMsg{data: delData}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 1)}
-	iter.msgs <- delMsg
-
-	input := &jsInput{iter: iter, chConn: &bentoMockConn{}}
-	// Simulate in-flight messages so the flush-wait loop blocks.
-	input.inFlight.Store(1)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel instantly to deterministically trigger the shutdown path
-
-	_, _, err := input.Read(ctx)
-	assert.ErrorIs(t, err, context.Canceled)
-	assert.False(t, delMsg.naked, "delete should NOT be Nak'd when context is cancelled (relies on AckWait)")
-}
-
-// ---------------------------------------------------------------------------
 // dlqOutput — DLQ publish error is logged, WriteBatch still returns nil
 // ---------------------------------------------------------------------------
 
 type bentoMockJSWithError struct {
 	jetstream.JetStream
 	publishErr error
-	published  []publishedMsg
 }
 
 func (m *bentoMockJSWithError) Publish(_ context.Context, _ string, _ []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
-	return nil, m.publishErr
-}
-
-// Capture the published message before returning the error so tests can
-// distinguish "DLQ publish failed" from "DLQ publish never attempted".
-func (m *bentoMockJSWithError) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
-	m.published = append(m.published, publishedMsg{Subject: msg.Subject, Data: msg.Data, Header: msg.Header})
 	return nil, m.publishErr
 }
 
@@ -728,21 +426,52 @@ func TestClickhouseOutput_WriteBatch_EmptyBatch(t *testing.T) {
 func TestClickhouseOutput_WriteBatch_MissingTableName(t *testing.T) {
 	t.Parallel()
 	c := &clickhouseOutput{}
-	msg := service.NewMessage([]byte(`{"x": 1}`))
+	msg1 := service.NewMessage([]byte(`{"x": 1}`))
 	// Intentionally omitting table_name metadata
 
-	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
-	assert.ErrorContains(t, err, "missing table_name in message metadata")
+	err1 := c.WriteBatch(context.Background(), service.MessageBatch{msg1})
+	assert.ErrorContains(t, err1, "missing table_name in message metadata")
+
+	msg2 := service.NewMessage([]byte(`{"x": 1}`))
+	msg2.MetaSet("table_name", "")
+
+	err2 := c.WriteBatch(context.Background(), service.MessageBatch{msg2})
+	assert.ErrorContains(t, err2, "missing table_name in message metadata")
 }
 
-func TestClickhouseOutput_WriteBatch_UnsafeTableName(t *testing.T) {
+func TestClickhouseOutput_WriteBatch_SafelyParametersTableName(t *testing.T) {
 	t.Parallel()
-	c := &clickhouseOutput{}
+
+	maliciousName := "users; DROP TABLE users;"
+
+	mockTransport := &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			// Verify the SQL query itself is 100% static and immune to injection
+			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", req.URL.Query().Get("query"))
+
+			// Verify the malicious payload was safely tucked into the out-of-band parameter
+			assert.Equal(t, maliciousName, req.URL.Query().Get("param_target_table"))
+
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(bytes.NewBufferString("OK")),
+			}, nil
+		},
+	}
+
+	c := &clickhouseOutput{
+		httpClient: &http.Client{Transport: mockTransport},
+		scheme:     "http",
+		host:       "localhost",
+		port:       "8123",
+		db:         "test_db",
+	}
+
 	msg := service.NewMessage([]byte(`{"x": 1}`))
-	msg.MetaSet("table_name", "users; DROP TABLE users;") // Malicious table name
+	msg.MetaSet("table_name", maliciousName)
 
 	err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
-	assert.ErrorContains(t, err, "invalid table name")
+	assert.NoError(t, err)
 }
 
 func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
@@ -755,8 +484,11 @@ func TestClickhouseOutput_WriteBatch_Success(t *testing.T) {
 			assert.Equal(t, "POST", req.Method)
 			assert.Equal(t, "test_db", req.URL.Query().Get("database"))
 
-			// Use Query().Get() to verify the un-encoded SQL string safely
-			assert.Equal(t, "INSERT INTO `test_table` FORMAT JSONEachRow", req.URL.Query().Get("query"))
+			// Verify the query is now using the static parameter syntax
+			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", req.URL.Query().Get("query"))
+
+			// Verify the actual table name is passed safely as a param
+			assert.Equal(t, "test_table", req.URL.Query().Get("param_target_table"))
 
 			// Verify headers
 			assert.Equal(t, "test_user", req.Header.Get("X-ClickHouse-User"))
@@ -900,69 +632,6 @@ func TestClickhouseOutput_WriteBatch_MultiMessage(t *testing.T) {
 	assert.NoError(t, err, "WriteBatch should succeed with multi-message batch")
 }
 
-func TestClickhouseOutput_WriteBatch_TimestampInjection(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		payload        string
-		timestamp      string
-		expectedPrefix string
-	}{
-		{
-			name:           "standard injection",
-			payload:        `{"metric": 99}`,
-			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{"metric": 99,"received_timestamp":"2026-05-07T12:00:00Z"}`,
-		},
-		{
-			name:           "empty object without syntax error",
-			payload:        `{}`,
-			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{"received_timestamp":"2026-05-07T12:00:00Z"}`,
-		},
-		{
-			name:           "whitespace empty object",
-			payload:        `{  }`,
-			timestamp:      "2026-05-07T12:00:00Z",
-			expectedPrefix: `{  "received_timestamp":"2026-05-07T12:00:00Z"}`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			// MOVED INSIDE THE LOOP: Each subtest now has its own isolated variables
-			var capturedBody string
-			mockTransport := &mockRoundTripper{
-				roundTripFn: func(req *http.Request) (*http.Response, error) {
-					bodyBytes, _ := io.ReadAll(req.Body)
-					capturedBody = string(bodyBytes)
-					return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
-				},
-			}
-
-			c := &clickhouseOutput{
-				httpClient: &http.Client{Transport: mockTransport},
-				scheme:     "http",
-				host:       "localhost",
-				port:       "8123",
-			}
-
-			msg := service.NewMessage([]byte(tt.payload))
-			msg.MetaSet("table_name", "test_table")
-			msg.MetaSet("received_timestamp", tt.timestamp)
-
-			err := c.WriteBatch(context.Background(), service.MessageBatch{msg})
-			require.NoError(t, err)
-
-			// Verify the injected payload matches what we expect
-			assert.Equal(t, tt.expectedPrefix+"\n", capturedBody)
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // jsInput payload extraction validation
 // ---------------------------------------------------------------------------
@@ -971,7 +640,7 @@ func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	t.Parallel()
 
 	// Message missing the "data" payload completely. Should be rejected.
-	badData := []byte(`{"table_name": "events", "action": "insert"}`)
+	badData := []byte(`{"table_name": "events"}`)
 	badMsg := &bentoMockMsg{data: badData}
 
 	// Good message so the Read loop has something to successfully return
@@ -993,32 +662,4 @@ func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	payload, err := msg.AsBytes()
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id": 1}`, string(payload))
-}
-
-func TestJsInput_Read_UnknownActionRejected(t *testing.T) {
-	t.Parallel()
-
-	// Message with an unsupported action ("update")
-	badData := []byte(`{"table_name": "events", "action": "update", "data": {"id": 1}}`)
-	badMsg := &bentoMockMsg{data: badData}
-
-	// Good message so Read loop returns successfully
-	goodData := []byte(`{"table_name": "events", "action": "insert", "data": {"id": 2}}`)
-	goodMsg := &bentoMockMsg{data: goodData}
-
-	iter := &bentoMockIter{msgs: make(chan jetstream.Msg, 2)}
-	iter.msgs <- badMsg
-	iter.msgs <- goodMsg
-
-	input := &jsInput{iter: iter}
-	msg, _, err := input.Read(context.Background())
-	require.NoError(t, err)
-
-	// The unknown action message should be DoubleAcked (dropped)
-	assert.True(t, badMsg.doubleAcked, "unknown action message should be acked and dropped")
-
-	// We should have received the good message
-	payload, err := msg.AsBytes()
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"id": 2}`, string(payload))
 }

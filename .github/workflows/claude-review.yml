@@ -1,25 +1,17 @@
 name: Claude PR review
 
-# Auto-reviews PRs whose HEAD commit was authored or pushed by a user
-# with repo permission. Manual re-runs via `@claude` / `/review`
-# comments (trusted reviewers only) or workflow_dispatch.
-#
-# Triggers use `pull_request` rather than `pull_request_target`: the
-# action's OIDC token exchange rejects pull_request_target claims
-# (anthropics/claude-code-action#713). The cost is that fork-PR
-# secrets are unavailable, so drive-by contributor PRs aren't
-# auto-reviewed — the benefit is that the action can never run with
-# fork-supplied code holding write tokens.
+# Manual-only PR review. Triggered by `@claude` or `/review`
+# comments from trusted reviewers, or by workflow_dispatch.
 #
 # Trust gate: HEAD commit's author OR committer must have ≥read on
-# the repo. Accepting either covers the admin-fixup-onto-fork-PR case
-# (author = external, committer = admin) that author-only gates miss.
-# When the gate skips, the job exits 0 so the "Claude review" check
-# stays visible on the PR.
+# the repo. Without this, a trusted reviewer commenting `@claude` on
+# a fork PR would check out untrusted fork code with write tokens.
+# Accepting either author or committer covers the
+# admin-fixup-onto-fork-PR case (author = external, committer = admin)
+# that author-only gates miss. When the gate skips, the job exits 0
+# so the "Claude review" check stays visible on the PR.
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -29,16 +21,11 @@ on:
         required: true
         type: string
 
-# Dedup per PR. Only `pull_request` events cancel the in-flight run —
-# a new HEAD SHA invalidates any review mid-flight. Other triggers
-# (issue_comment, workflow_dispatch) queue behind it instead, so:
-#   - `@claude` / `/review` comments don't kill the in-flight review
-#   - manual retries don't kill the previous attempt
-#   - Claude's own sticky-comment edits (which fire `issue_comment`)
-#     can't cancel themselves
+# Dedup per PR. Manual triggers (comments, dispatches) queue rather
+# than cancel — back-to-back retries don't kill an in-flight review.
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: claude-review-${{ github.event.issue.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   review:
@@ -48,9 +35,6 @@ jobs:
     # and would miss admin-pushed fixups.
     if: |
       (
-        github.event_name == 'pull_request'
-        && github.event.pull_request.user.login != 'dependabot[bot]'
-      ) || (
         github.event_name == 'issue_comment'
         && github.event.issue.pull_request != null
         && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '/review'))
@@ -72,29 +56,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          PR_EVENT_NUM: ${{ github.event.pull_request.number }}
-          PR_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ISSUE_COMMENT_PR: ${{ github.event.issue.number }}
           DISPATCH_PR: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
 
-          # Resolve PR number + HEAD SHA. pull_request has both in the
-          # webhook payload; other paths need a `gh pr view` round-trip.
+          # Resolve PR number from the trigger, then look up HEAD SHA.
           case "$EVENT_NAME" in
-            pull_request)
-              pr_num="$PR_EVENT_NUM"
-              head_sha="$PR_EVENT_HEAD_SHA"
-              ;;
             issue_comment)
               pr_num="$ISSUE_COMMENT_PR"
-              head_sha=$(gh pr view "$pr_num" -R "$REPO" --json headRefOid --jq '.headRefOid')
               ;;
             workflow_dispatch)
               pr_num="$DISPATCH_PR"
-              head_sha=$(gh pr view "$pr_num" -R "$REPO" --json headRefOid --jq '.headRefOid')
               ;;
           esac
+          head_sha=$(gh pr view "$pr_num" -R "$REPO" --json headRefOid --jq '.headRefOid')
 
           # Self-modification gate. The action's validation step
           # auto-fails when its own workflow or prompt file is in the
@@ -175,7 +151,7 @@ jobs:
             echo 'PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: anthropics/claude-code-action@f4fb5c6cdccc1ee7af63692f5d08d56efaa64cc8 # v1.0.121
+      - uses: anthropics/claude-code-action@24492741e0ccfdef4c1d19da8e11e0f373d07494 # v1.0.124
         if: steps.gate.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

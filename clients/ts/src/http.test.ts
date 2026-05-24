@@ -44,7 +44,7 @@ describe('request', () => {
 
     await request(makeCtx(), {
       method: 'POST',
-      path: '/v1/ingest/clicks',
+      path: '/v1/ingest?table=clicks',
       body: { page: '/home' },
     });
 
@@ -83,7 +83,7 @@ describe('request', () => {
       new Response(JSON.stringify({ error: 'unknown table: foo' }), { status: 404 }),
     );
 
-    const result = await request(makeCtx(), { method: 'GET', path: '/v1/schema/foo' });
+    const result = await request(makeCtx(), { method: 'GET', path: '/v1/schema?table=foo' });
 
     expect(result.data).toBeNull();
     expect(result.error?.status).toBe(404);

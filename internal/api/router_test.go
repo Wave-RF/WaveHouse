@@ -39,7 +39,7 @@ func TestRequireRole_DeniedRole(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestRequireRole_NoRole_Passthrough(t *testing.T) {
@@ -240,7 +240,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
 		{http.MethodGet, "/v1/schema", http.StatusOK},
-		{http.MethodGet, "/v1/schema/events", http.StatusOK},
+		{http.MethodGet, "/v1/schema?table=events", http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -249,10 +249,109 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
+			assert.Equal(t, tt.expect, rec.Code, "unexpected route status")
 			assert.NotEqual(t, http.StatusNotFound, rec.Code, "route should exist")
 			assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "method should be allowed")
 		})
 	}
+}
+
+// TestNewRouter_RawSQLAdminGate pins the contract for POST /v1/admin/query:
+//
+//	admin role          → reaches handler
+//	service role        → reaches handler (same gate as the rest of /v1/admin/*)
+//	viewer role         → 403
+//	no role, auth off   → reaches handler (dev/test posture)
+//	no role, auth on    → 401
+//
+// A regression that re-mounted the route under the top-level /v1 auth
+// middleware (the pre-move state) would let viewer through — the viewer
+// sub-test would flip from 403 to "reaches handler" and fail.
+func TestNewRouter_RawSQLAdminGate(t *testing.T) {
+	t.Parallel()
+
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+
+	build := func(authEnabled bool) http.Handler {
+		return NewRouter(Dependencies{
+			Ingest:      NewIngestHandler(reg, pub),
+			Query:       &QueryHandler{},
+			SSE:         NewSSEHandler(hub, nil),
+			WS:          NewWSHandler(hub, nil, nil),
+			Health:      &HealthHandler{},
+			Schema:      NewSchemaHandler(reg),
+			AuthMW:      func(next http.Handler) http.Handler { return next },
+			AuthEnabled: authEnabled,
+		})
+	}
+
+	post := func(router http.Handler, role string) *httptest.ResponseRecorder {
+		ctx := context.Background()
+		if role != "" {
+			ctx = context.WithValue(ctx, ContextKeyRole, role)
+		}
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/admin/query", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("admin reaches handler", func(t *testing.T) {
+		t.Parallel()
+		// nil driver.Conn would panic inside executeQuery, but the handler
+		// returns 400 before that on a missing body — which is enough to
+		// confirm the gate let the request through.
+		rec := post(build(true), "admin")
+		assert.NotEqual(t, http.StatusNotFound, rec.Code, "admin must reach the handler")
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "admin must not be 403'd")
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "admin must not be 401'd")
+		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "admin path must remain POST-mounted")
+	})
+
+	t.Run("service reaches handler", func(t *testing.T) {
+		t.Parallel()
+		// /v1/admin/query shares the /v1/admin/* gate — admin and
+		// service both pass. Service tokens already have admin-scoped
+		// powers across the rest of the admin tree (policy CRUD, pipes
+		// CRUD, log-level), so excluding them just for raw SQL would be
+		// inconsistency without a real authorization win.
+		rec := post(build(true), "service")
+		assert.NotEqual(t, http.StatusNotFound, rec.Code)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code)
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+
+	t.Run("viewer is 403", func(t *testing.T) {
+		t.Parallel()
+		rec := post(build(true), "viewer")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		testutil.AssertJSONErrorResponse(t, rec)
+	})
+
+	t.Run("auth disabled passthrough for no role", func(t *testing.T) {
+		t.Parallel()
+		// Auth disabled = role middleware passes through (dev/test posture).
+		// The endpoint is still reachable so the handler can decide. Pin
+		// negative assertions for the four statuses that would indicate
+		// a routing/auth regression: 404 (route missing), 403 (role gate
+		// firing despite auth being off), 401 (auth middleware rejecting
+		// despite auth being off), 405 (POST no longer mounted on this path).
+		rec := post(build(false), "")
+		assert.NotEqual(t, http.StatusNotFound, rec.Code)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code)
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+
+	t.Run("auth enabled rejects no role with 401", func(t *testing.T) {
+		t.Parallel()
+		rec := post(build(true), "")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		testutil.AssertJSONErrorResponse(t, rec)
+	})
 }
 
 func TestNewRouter_OptionalDepsNil(t *testing.T) {
@@ -320,7 +419,7 @@ func TestRequireRole_NoRole_FailClosed(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), "unauthorized")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
@@ -345,7 +444,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
@@ -371,7 +470,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
@@ -386,7 +485,7 @@ func TestJSONRecoverer_PanicEmitsJSON(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Contains(t, rec.Body.String(), "internal server error")
 }
 

@@ -7,6 +7,7 @@ const BufferConsumerName = "buffer-consumer"
 // EventMessage is the wire format published to the MQ.
 type EventMessage struct {
 	TableName         string         `json:"table_name"`
+	Scope             string         `json:"scope,omitempty"`
 	ReceivedTimestamp string         `json:"received_timestamp"`
 	Data              map[string]any `json:"data"`
 }

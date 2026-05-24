@@ -28,7 +28,7 @@ func TestBuild_SimpleSelect(t *testing.T) {
 	sq := &StructuredQuery{Columns: []string{"page", "count"}, Limit: 10}
 	result, err := Build("clicks", sq, testSchema(), 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT page, count FROM clicks LIMIT 10", result.SQL)
+	assert.Equal(t, "SELECT page, count FROM `clicks` LIMIT 10", result.SQL)
 	assert.Empty(t, result.Params)
 }
 
@@ -36,7 +36,7 @@ func TestBuild_SelectStar(t *testing.T) {
 	t.Parallel()
 	result, err := Build("clicks", &StructuredQuery{}, testSchema(), 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM clicks LIMIT 10000", result.SQL)
+	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", result.SQL)
 }
 
 func TestBuild_WithAggregation(t *testing.T) {
@@ -131,7 +131,7 @@ func TestBuild_TimeRange(t *testing.T) {
 
 func TestInjectPermissionFilters_WithWhere(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks WHERE page = ?", Params: []any{"/home"}}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` WHERE page = ?", Params: []any{"/home"}}
 	InjectPermissionFilters(result, "org_id = ?", []any{"org-1"})
 	assert.Contains(t, result.SQL, "(org_id = ?)")
 	assert.Equal(t, []any{"org-1", "/home"}, result.Params)
@@ -139,7 +139,7 @@ func TestInjectPermissionFilters_WithWhere(t *testing.T) {
 
 func TestInjectPermissionFilters_WithoutWhere(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks ORDER BY page"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` ORDER BY page"}
 	InjectPermissionFilters(result, "org_id = ?", []any{"org-1"})
 	assert.Contains(t, result.SQL, "WHERE org_id = ?")
 	assert.Contains(t, result.SQL, "ORDER BY page")
@@ -147,35 +147,35 @@ func TestInjectPermissionFilters_WithoutWhere(t *testing.T) {
 
 func TestInjectPermissionFilters_Empty(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
 	InjectPermissionFilters(result, "", nil)
-	assert.Equal(t, "SELECT * FROM clicks", result.SQL)
+	assert.Equal(t, "SELECT * FROM `clicks`", result.SQL)
 }
 
 func TestApplyMaxRows_NoLimit(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
 	ApplyMaxRows(result, 100)
 	assert.Contains(t, result.SQL, "LIMIT 100")
 }
 
 func TestApplyMaxRows_HigherExisting(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks LIMIT 500"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` LIMIT 500"}
 	ApplyMaxRows(result, 100)
 	assert.Contains(t, result.SQL, "LIMIT 100")
 }
 
 func TestApplyMaxRows_LowerExisting(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks LIMIT 50"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks` LIMIT 50"}
 	ApplyMaxRows(result, 100)
 	assert.Contains(t, result.SQL, "LIMIT 50")
 }
 
 func TestApplyMaxRows_Zero(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM clicks"}
+	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
 	ApplyMaxRows(result, 0)
 	assert.NotContains(t, result.SQL, "LIMIT")
 }
@@ -333,4 +333,91 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	strVal, isString := result.Params[0].(string)
 	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
 	assert.Equal(t, "2026-04-02 16:02:07.666", strVal)
+}
+
+func TestBuild_TableNameWithBacktick(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{Columns: []string{"page"}, Limit: 10}
+	result, err := Build("my`table", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT page FROM `my``table` LIMIT 10", result.SQL)
+}
+
+func TestBuild_InvalidColumns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		sq      *StructuredQuery
+		wantErr string
+	}{
+		{
+			name: "invalid aggregation column",
+			sq: &StructuredQuery{
+				Aggregations: []Aggregation{{Fn: "sum", Column: "nonexistent", Alias: "total"}},
+			},
+			wantErr: "unknown column",
+		},
+		{
+			name: "invalid order by column",
+			sq: &StructuredQuery{
+				Columns: []string{"page"},
+				// Aliases are allowed, but they must still be valid identifiers
+				OrderBy: []OrderClause{{Column: "invalid;--", Dir: "asc"}},
+			},
+			wantErr: "invalid order column",
+		},
+		{
+			name: "invalid time range column",
+			sq: &StructuredQuery{
+				Columns:   []string{"page"},
+				TimeRange: &TimeRange{Column: "nonexistent", Since: "2024-01-01T00:00:00Z"},
+			},
+			wantErr: "unknown column",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Build("clicks", tt.sq, testSchema(), 0)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestBuild_TimeRange_SinceOnly(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns:   []string{"page"},
+		TimeRange: &TimeRange{Column: "ts", Since: "2024-01-01T00:00:00Z", Until: ""},
+	}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	require.NoError(t, err)
+	assert.Contains(t, result.SQL, "ts >= ?")
+	assert.NotContains(t, result.SQL, "ts <= ?")
+}
+
+func TestBuild_FilterUnsupportedOp(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		// Unsupported operations should gracefully be ignored by filterToSQL
+		Filters: []Filter{{Column: "page", Op: "magic", Value: "val"}},
+	}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestBuild_FilterInOp_InvalidValueType(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		// 'in' operator requires an array ([]any) value. A scalar string shouldn't panic.
+		Filters: []Filter{{Column: "page", Op: "in", Value: "not-an-array"}},
+	}
+	result, err := Build("clicks", sq, testSchema(), 0)
+	assert.Error(t, err)
+	assert.Nil(t, result)
 }

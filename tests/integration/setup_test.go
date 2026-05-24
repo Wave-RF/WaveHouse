@@ -162,10 +162,17 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
+	localCache, err := cache.NewLocal(1 << 30) // 1 GB
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: cache initialization: %v\n", err)
+		return 1, cleanup
+	}
+	cleanups.push(func() { _ = localCache.Close() })
+
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		ch.conn,
+		localCache,
 		ch.nativeAddr(),
 		ch.httpPort,
 		"http",
@@ -180,7 +187,7 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
-	server, err := buildServer(ch.conn, embeddedMQ, registry, logger)
+	server, err := buildServer(ch, embeddedMQ, registry, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: build server: %v\n", err)
 		return 1, cleanup
@@ -301,22 +308,20 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 // against the test ClickHouse + embedded NATS, with auth disabled so tests
 // can hit endpoints without minting JWTs. Auth-enforcement coverage lives
 // in the unit tests for middleware.go and the e2e SDK suite.
-func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
+func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
 	hub := api.NewHub()
-	l1, err := cache.NewLocal(1024 * 1024)
-	if err != nil {
-		return nil, fmt.Errorf("local cache: %w", err)
-	}
-	tiered := cache.NewTiered(l1, nil)
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ),
-		Query:  api.NewQueryHandler(chConn, tiered, 5*time.Second),
+		// /v1/admin/query proxies straight to ClickHouse's HTTP interface,
+		// so the handler needs the HTTP URL + creds rather than the
+		// native-protocol driver.Conn other handlers use.
+		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
 		SSE:    api.NewSSEHandler(hub, js),
 		WS:     api.NewWSHandler(hub, js, nil),
-		Health: api.NewHealthHandler(chConn),
+		Health: api.NewHealthHandler(ch.conn),
 		Schema: api.NewSchemaHandler(registry),
 		DLQ:    api.NewDLQHandler(js, logger),
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),

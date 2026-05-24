@@ -34,7 +34,7 @@ End every review with a one-line verdict: **`Ship it`** (no MUSTs, few/no SHOULD
 Walk every diff against:
 
 - **SQL injection** in ClickHouse paths (`BindParams`, dynamic table names, user-supplied filters). The `safeIdentifierRe` regex exists for a reason; flag any SQL built without it.
-- **Broken auth / authz**: JWT claim handling, role extraction (`auth.role_claim`), policy templating (`{{ jwt.path }}`), raw-SQL access without `raw_sql: true`.
+- **Broken auth / authz**: JWT claim handling, role extraction (`auth.role_claim`), policy templating (`{{ jwt.path }}`). When authentication is enabled, `/v1/admin/query` requires the `admin` or `service` role; with `auth.enabled=false` (or `auth.dev_mode=true`) the endpoint is intentionally open, so flag bypasses only in the auth-enabled path.
 - **Sensitive data exposure**: secrets in logs, full error messages to clients, credentials or JWT payload echoed into responses.
 - **Security misconfiguration**: CORS allowlist bypass, TLS downgrade, default credentials, permissive-by-default flags.
 - **Input validation gaps**: unvalidated JSON reaching ClickHouse, unbounded request sizes, missing rate limits.
@@ -57,19 +57,11 @@ Severity-tag every security finding `CRITICAL` / `HIGH` / `MEDIUM` / `LOW`.
 - Missing edge-case coverage (nil inputs, empty batches, cancelled contexts, invalid JWT)
 - Mocks where an integration test would catch more (per `AGENTS.md` testing conventions)
 - Tests that don't actually exercise the path they claim
-- Coverage ≥60% is CI-enforced (interim; #67 tracks restoring 70%); flag drops below threshold as `[MUST]`
+- CI gates coverage against the thresholds in `.testcoverage.yml` (project-wide total + per-suite). Flag drops below threshold as `[MUST]`
 
 ### 5. Documentation sync — `[MUST]` when missed
 
-`AGENTS.md` §"Documentation & Consistency Sync (MANDATORY)" lists exactly which docs must update for which code changes. Diff the changed files against that table:
-
-- Handler / router changes → `docs/api.md`, README if user-facing
-- Config struct / env var → `docs/configuration.md`, `config.yaml`, compose files, `docs/deployment.md`
-- Architecture / package changes → `docs/architecture.md`, `AGENTS.md`
-- Notable changes → `CHANGELOG.md` under `[Unreleased]`
-- Build / test process → `docs/development.md`, `Makefile`
-
-Flag every missed sync.
+`AGENTS.md` §"Documentation Sync" lists exactly which docs must update for which code changes (handler/router, config, architecture, build/test, etc.). Diff the changed files against that table and flag every missed sync.
 
 ### 6. Go idiom — `[SHOULD]` for quality
 

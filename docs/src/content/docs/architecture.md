@@ -68,19 +68,19 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
 
-- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest/{table}`, `/v1/query`, `/v1/tables/{table}/query` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema/*`, `/v1/dlq/stats`. Admin: `/v1/admin/policy`, `/v1/admin/pipes/*`.
+- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest/{table}`, `/v1/tables/{table}/query` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema/*`, `/v1/dlq/stats`. Admin (admin/service): `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
 - **middleware.go** — JWT auth middleware supporting HMAC and JWKS validation, role extraction from configurable claim path, and dev mode bypass. Controlled by `auth.enabled`.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/tables/{table}/query`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest/{table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`.
 - **query.go** — Executes SQL queries directly against ClickHouse. Results are cached. UUID/DateTime columns are converted to strings.
-- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Default topic is `ingest.>` (all tables). Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
+- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Callers select a table with the `?table=` query parameter (required for SSE); WS additionally accepts in-band `{"action":"subscribe","table":"..."}` commands. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
-- **health.go** — Liveness (`/health`) and readiness (`/ready`) probes.
+- **health.go** — Liveness (`/health`) and readiness (`/ready`) probes. Both consult an optional `BootState` so they can return 503 with a diagnostic while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/health` returns 200 and stays there.
 
 ### `cache/` — Query Cache
 
@@ -90,7 +90,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `config/` — Configuration
 
-- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](configuration.md).
+- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](/configuration).
 
 ### `dedupe/` — Deduplication (Optional)
 
@@ -99,14 +99,14 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `discovery/` — Schema Discovery & Validation
 
-- **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Supports periodic auto-refresh and on-demand refresh. Thread-safe via `sync.RWMutex`.
+- **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Supports periodic auto-refresh, on-demand refresh, and `RetryRefresh` (boot-time exponential backoff loop used by `cmd/wavehouse` so a transiently unreachable ClickHouse doesn't crash-loop the binary). Thread-safe via `sync.RWMutex`.
 - **validation.go** — `Validate(schema, data)` checks incoming JSON against the discovered schema: unknown fields, type compatibility, missing required columns, null handling.
 - **discovery_test.go** — Unit tests for validation logic.
 
 ### `ingest/` — Bento Pipeline, DLQ & Sweeping
 
-- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. Delete actions (`action: "delete"`) are handled inline via `chConn.Exec`; a failed delete is treated as permanent — the original envelope is routed to `dlq.{table}` and the message is `DoubleAck`'d to break the infinite-Nak retry loop a bad query would otherwise produce. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes to `dlq.{table}` NATS subjects when DLQ is enabled. Unsafe table names are rejected via `safeIdentifierRe`. **DLQ shape note**: insert-failure messages on `dlq.{table}` carry the inner data payload only (`{"id":"abc","field":...}`) because `dlqOutput.WriteBatch` publishes the Bento message bytes (already-extracted `data`); delete-failure messages carry the full NATS envelope (`{"action":"delete","table_name":"...","id":"..."}`) so a consumer can re-issue the delete with full context. To stay BYOS-safe — a user row can have any column name, including `action` — consumers MUST discriminate via the `Wave-DLQ-Type` NATS header (set by the worker, non-user-controlled), not via any JSON field: `Wave-DLQ-Type: delete-envelope` → delete-failure shape; header absent → insert-payload shape. Delete-failure messages also carry W3C `traceparent`/`tracestate` headers via `observability.InjectNATS` so a consumer can stitch its trace to the worker's `clickhouse_delete` span. Phase 2 (issue #91) will tag insert-failure messages with `Wave-DLQ-Type: insert-payload` and may normalize the payload shapes.
-- **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
+- **bento.go** — `StartIngestWorker` launches a Bento-based ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; when authentication is enabled, the `/v1/admin/*` middleware enforces that role check at the API layer, so non-admin callers never reach the proxy. With `auth.enabled=false` (or `auth.dev_mode=true`) the endpoint is intentionally open — the dev/test posture. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
+- **types.go** — `EventMessage` struct (TableName, Scope, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
 ### `mq/` — Message Queue
@@ -154,12 +154,17 @@ Client POST /v1/ingest/{table}
 Bento ingest pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
   → Validate table name against safeIdentifierRe
+  → Validate payload presence (reject envelopes with empty `data`)
   → Batch events per table, bulk INSERT to ClickHouse
-  → Delete actions handled inline (chConn.Exec)
-    → On success: DoubleAck and continue
-    → On failure: route original envelope to dlq.{table} and DoubleAck (Phase 1: all delete errors treated as permanent to prevent infinite Nak loops)
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
+
+  (Insert-only pipeline. The wire format `EventMessage` carries only
+  {table_name, scope, received_timestamp, data}; non-insert mutations
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query — when
+  authentication is enabled, the /v1/admin/* role gate rejects non-admin
+  callers at the API layer (with auth.enabled=false or auth.dev_mode=true
+  the endpoint is intentionally open).)
 
 Active Sweeper (async goroutine, every 60s):
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)
@@ -171,16 +176,54 @@ Active Sweeper (async goroutine, every 60s):
 ### Query Path
 
 ```text
-Client POST /v1/query
+Client POST /v1/admin/query
   → Optional JWT auth middleware
-  → Check tiered cache (L1 → L2)
-  → Cache HIT: return cached result (X-Cache: HIT header)
-  → Cache MISS:
-    → Execute query directly on ClickHouse
-    → Convert UUID/DateTime types to strings
-    → Store result in L1 + L2
-    → Return result (X-Cache: MISS header)
+  → /v1/admin RequireRole(admin, service) — single gate shared with the
+    rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Raw SQL has
+    no per-statement scope check (a full SQL parser would be needed to
+    authorize predicates), so the role gate is the entire authorization
+    story. /v1/admin/query is the only sanctioned surface for non-SELECT
+    statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…); non-admin callers
+    use `POST /v1/ingest/{table}` for writes and the structured query
+    endpoint or named pipes for reads.
+  → Decode {"sql": "..."} from the request body.
+  → POST the SQL verbatim to ClickHouse's HTTP interface at
+    <scheme>://<host>:<httpport>/?default_format=JSON
+       &date_time_output_format=iso&database=<db>
+    Auth via X-ClickHouse-User / X-ClickHouse-Key headers.
+    Bound by a clickhouse.query_timeout context derived from the inbound request — client
+    disconnect cancels the upstream call.
+  → ClickHouse parses the SQL natively and decides what to do:
+    → Read: returns 200 + {"meta":[...], "data":[...], "rows":N,
+      "statistics":{...}} as JSON. The handler extracts `data` and
+      forwards just that array, preserving the [{...}, {...}] response
+      shape callers expect.
+    → Mutation/DDL: returns 200 + empty body. The handler emits `[]` so
+      response shape stays "always an array."
+    → Error: returns 4xx/5xx + plain-text error message. The handler
+      maps ClickHouse 4xx → HTTP 400 (caller-fault, bad SQL or missing
+      table) and ClickHouse 5xx → HTTP 502 (gateway-fault, upstream
+      problem), with the trimmed message inside the JSON error
+      envelope — admins see ClickHouse's exact diagnostic.
+  → Response carries Cache-Control: no-store so no downstream layer
+    (browser, CDN, corp proxy) caches the result.
 ```
+
+The proxy-pattern wins are: zero classification logic on the WaveHouse
+side (no isMutation heuristic to maintain), and any ClickHouse statement
+type — including verbs added in future versions and inline FORMAT
+overrides — works without WaveHouse code changes. Multi-statement input
+(`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has
+multi-query enabled, which is the default on recent versions; older or
+restrictively-configured servers will return a clear error from
+ClickHouse itself for the second statement. The proxy buffers the response in memory with a
+64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow,
+to keep a runaway `SELECT *` from pinning RAM on the API server), and
+passes ClickHouse's `Content-Type` through when an inline `FORMAT`
+directive overrides the default JSON envelope. The structured query
+endpoint and pipes still go through `clickhouse-go`'s native driver
+(Query/Exec) for performance and to keep the cached row-array shape
+consistent.
 
 ### Streaming Path
 

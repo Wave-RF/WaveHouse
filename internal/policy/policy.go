@@ -28,7 +28,6 @@ type RolePermissions struct {
 	DeniedAggregations  []string          `json:"denied_aggregations,omitempty" yaml:"denied_aggregations,omitempty"`
 	MaxRows             int               `json:"max_rows,omitempty" yaml:"max_rows,omitempty"`
 	MaxExecutionTimeMs  int               `json:"max_execution_time_ms,omitempty" yaml:"max_execution_time_ms,omitempty"`
-	RawSQL              bool              `json:"raw_sql,omitempty" yaml:"raw_sql,omitempty"`
 }
 
 // Filter represents a single comparison operation.
@@ -52,7 +51,6 @@ type ResolvedPermissions struct {
 	DeniedAggregations  []string
 	MaxRows             int
 	MaxExecutionTimeMs  int
-	RawSQL              bool
 }
 
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
@@ -61,14 +59,14 @@ var claimTemplateRe = regexp.MustCompile(`\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}`)
 // Evaluate resolves a policy for a given role, table, and operation against JWT claims.
 func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *ResolvedPermissions {
 	if p == nil {
-		return &ResolvedPermissions{Allowed: true, RawSQL: true}
+		return &ResolvedPermissions{Allowed: true}
 	}
 
 	tp, ok := p.Tables[table]
 	if !ok {
 		// No policy for this table — default deny for non-admin.
 		if role == "admin" || role == "service" {
-			return &ResolvedPermissions{Allowed: true, RawSQL: true}
+			return &ResolvedPermissions{Allowed: true}
 		}
 		return &ResolvedPermissions{Allowed: false}
 	}
@@ -85,7 +83,7 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 
 	if rolePerms == nil {
 		if role == "admin" || role == "service" {
-			return &ResolvedPermissions{Allowed: true, RawSQL: true}
+			return &ResolvedPermissions{Allowed: true}
 		}
 		return &ResolvedPermissions{Allowed: false}
 	}
@@ -96,7 +94,7 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		perms, ok = rolePerms["*"]
 		if !ok {
 			if role == "admin" || role == "service" {
-				return &ResolvedPermissions{Allowed: true, RawSQL: true}
+				return &ResolvedPermissions{Allowed: true}
 			}
 			return &ResolvedPermissions{Allowed: false}
 		}
@@ -110,7 +108,6 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		DeniedAggregations:  perms.DeniedAggregations,
 		MaxRows:             perms.MaxRows,
 		MaxExecutionTimeMs:  perms.MaxExecutionTimeMs,
-		RawSQL:              perms.RawSQL,
 	}
 
 	// Resolve filters into WHERE clause.

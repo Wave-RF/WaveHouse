@@ -17,6 +17,15 @@
 #      runners it falls back to a workspace-relative path. Hard-coding
 #      the default silently fails the save with a Path Validation
 #      Error.
+#
+#   4. Playwright browser cache (~/.cache/ms-playwright) keyed on the
+#      docs lockfile. ~130 MB Chromium download otherwise re-fetched
+#      every run. See #132.
+#
+#   5. Astro content-collection cache (docs/.astro/) keyed on docs
+#      lockfile + astro.config.mjs. Speeds up warm `astro build` —
+#      unchanged content skips the parse + transform pipeline. See
+#      #132.
 name: Setup CI environment
 description: Restores caches and sets up Go + pnpm + Node for WaveHouse CI
 
@@ -34,6 +43,12 @@ outputs:
   pnpm-store-path:
     description: "Absolute path to the pnpm content-addressable store on this runner — pass to actions/cache/save in the consuming workflow."
     value: ${{ steps.pnpm-store.outputs.path }}
+  playwright-cache-hit:
+    description: "true if the exact-key Playwright browser cache was restored"
+    value: ${{ steps.playwright-cache.outputs.cache-hit }}
+  astro-cache-hit:
+    description: "true if the exact-key Astro content cache was restored"
+    value: ${{ steps.astro-cache.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -68,7 +83,7 @@ runs:
     # ask pnpm for the actual store path.
     - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       with:
-        version: "10.33.0"
+        version: "11.1.3"
         run_install: false
 
     - name: Resolve pnpm store directory
@@ -83,6 +98,34 @@ runs:
         key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
         restore-keys: |
           pnpm-${{ runner.os }}-
+
+    # Playwright Chromium binary (~130 MB) lives outside the pnpm store at
+    # ~/.cache/ms-playwright. Without this cache, every CI run cold-pulls
+    # Chromium during install-docs-playwright — adds 30-60s per run. Keyed
+    # on docs/pnpm-lock.yaml since that's where the Playwright version is
+    # locked. Closes the Playwright half of #132.
+    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      id: playwright-cache
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml') }}
+        restore-keys: |
+          playwright-${{ runner.os }}-
+
+    # Astro's content-collection cache (docs/.astro/data-store.json plus
+    # generated content types). Restored across runs so unchanged Markdown
+    # / MDX content skips the parse + transform pipeline. Keyed on
+    # lockfile + astro.config.mjs since plugin-chain changes invalidate
+    # the cache shape; intra-key content changes are caught by Astro's
+    # own file-hash check inside data-store.json. Closes the build-cache
+    # half of #132.
+    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      id: astro-cache
+      with:
+        path: docs/.astro
+        key: astro-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml', 'docs/astro.config.mjs') }}
+        restore-keys: |
+          astro-${{ runner.os }}-
 
     - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:

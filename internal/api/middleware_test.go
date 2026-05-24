@@ -64,7 +64,7 @@ func TestJWTAuthMiddleware_MissingToken(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Contains(t, rec.Body.String(), "missing authorization")
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestJWTAuthMiddleware_InvalidToken(t *testing.T) {
@@ -84,7 +84,7 @@ func TestJWTAuthMiddleware_InvalidToken(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Contains(t, rec.Body.String(), "invalid token")
-	assertJSONErrorResponse(t, rec)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestJWTAuthMiddleware_ExpiredToken(t *testing.T) {

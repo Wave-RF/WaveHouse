@@ -30,7 +30,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](deployment.md#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Server
 
@@ -45,11 +45,12 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `clickhouse.addr` | `WH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
-| `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by schema discovery to query `system.columns`. |
+| `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by the Bento ingest worker (`internal/ingest`) for bulk INSERT and by the raw-SQL proxy (`POST /v1/admin/query`, `internal/api/query.go`) to forward SQL to ClickHouse. Schema discovery uses the native protocol on `addr` instead. |
 | `clickhouse.http_scheme` | `WH_CH_HTTP_SCHEME` | `http` | HTTP scheme for the ClickHouse HTTP interface (`http` or `https`). Set to `https` for TLS-encrypted ClickHouse connections. |
 | `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
+| `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum allowed execution time for ClickHouse queries |
 
 ### Schema Discovery
 
@@ -76,7 +77,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `cache.l1_max_cost` | `WH_CACHE_L1_MAX_COST` | `67108864` | Maximum L1 cache size in bytes (~64 MB). |
-| `cache.default_ttl` | `WH_CACHE_DEFAULT_TTL` | `300` | Default cache TTL in seconds (5 minutes). |
 | `cache.timestamp_bucket_seconds` | `WH_CACHE_TIMESTAMP_BUCKET_SECONDS` | `60` | Bucket size (seconds) for time-range truncation in structured queries. Improves cache hit rate by normalizing timestamps. |
 
 ### Authentication
@@ -167,7 +167,6 @@ dedupe:
 
 cache:
   l1_max_cost: 67108864
-  default_ttl: 300
   timestamp_bucket_seconds: 60
 
 auth:

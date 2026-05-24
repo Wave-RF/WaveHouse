@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"go.opentelemetry.io/otel"
@@ -34,14 +35,22 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topic := r.URL.Query().Get("topic")
-	if topic == "" {
-		topic = "ingest.>"
+	table := r.URL.Query().Get("table")
+	if table == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
+		return
 	}
 
 	// Resolve stream permissions for this request.
 	role := RoleFromContext(r.Context())
 	claims, _ := ClaimsFromContext(r.Context())
+
+	// TODO: impl scope
+	scope := ""
+	topic := "ingest." + query.SafeEncodeNATS(table)
+	if scope != "" {
+		topic += "." + query.SafeEncodeNATS(scope)
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -137,6 +146,7 @@ func extractEventTimestamp(data []byte) string {
 // applyStreamPolicy transforms raw event data for the client, filtering columns
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
 func (h *SSEHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
+	// Scope should be applied before getting here, so we ignore it here
 	var evt ingest.EventMessage
 	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
 		// Not an EventMessage — pass through if valid JSON, skip otherwise.

@@ -3,9 +3,7 @@ package testutil
 import (
 	"context"
 	"sync"
-	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 )
 
@@ -97,44 +95,3 @@ func (m *MockDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool
 }
 
 func (m *MockDeduplicator) Close() error { return nil }
-
-// ── Mock Cache ───────────────────────────────────────────────────
-
-// Ensure MockCache implements cache.Cache at compile time.
-var _ cache.Cache = (*MockCache)(nil)
-
-// MockCache implements cache.Cache for testing.
-type MockCache struct {
-	mu    sync.Mutex
-	store map[string][]byte
-	Err   error // if set, all operations return this error
-}
-
-func NewMockCache() *MockCache {
-	return &MockCache{store: make(map[string][]byte)}
-}
-
-func (m *MockCache) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
-	if m.Err != nil {
-		return nil, 0, m.Err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	v, ok := m.store[key]
-	if !ok {
-		return nil, 0, nil
-	}
-	return v, 300 * time.Second, nil
-}
-
-func (m *MockCache) Set(_ context.Context, key string, value []byte, _ time.Duration) error {
-	if m.Err != nil {
-		return m.Err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store[key] = value
-	return nil
-}
-
-func (m *MockCache) Close() error { return nil }

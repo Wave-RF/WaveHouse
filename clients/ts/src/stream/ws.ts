@@ -3,7 +3,7 @@ import type { StreamTransport } from './controller.js';
 
 export interface WSOptions {
   baseURL: string;
-  topic: string;
+  table: string;
   since?: string;
   auth?: () => Promise<string> | string;
 }
@@ -48,7 +48,7 @@ export class WSTransport<T = Record<string, unknown>> implements StreamTransport
   private async _doConnect(): Promise<void> {
     const wsBase = this._opts.baseURL.replace(/^http/, 'ws');
     const url = new URL('/v1/stream/ws', wsBase);
-    url.searchParams.set('topic', this._opts.topic);
+    url.searchParams.set('table', this._opts.table);
     if (this._opts.since) {
       url.searchParams.set('since', this._opts.since);
     }
@@ -70,15 +70,23 @@ export class WSTransport<T = Record<string, unknown>> implements StreamTransport
 
     this._ws.onmessage = (e) => {
       try {
-        const msg = JSON.parse(e.data as string) as {
-          table_name: string;
-          received_timestamp: string;
-          data: T;
+        // Server WS envelope: {table, data: {table_name, received_timestamp, data}}.
+        // For non-EventMessage (raw-JSON pass-through) payloads, table_name on
+        // the inner object may be absent — fall back to the envelope's table so
+        // the StreamEvent always carries the subscribing table name.
+        const envelope = JSON.parse(e.data as string) as {
+          table: string;
+          data: {
+            table_name?: string;
+            received_timestamp?: string;
+            data: T;
+          };
         };
+        if (!envelope.table || !envelope.data) return;
         const event: StreamEvent<T> = {
-          table: msg.table_name,
-          timestamp: msg.received_timestamp,
-          data: msg.data,
+          table: envelope.data.table_name ?? envelope.table,
+          timestamp: envelope.data.received_timestamp ?? '',
+          data: envelope.data.data,
         };
         this.onEvent?.(event);
       } catch {

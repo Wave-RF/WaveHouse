@@ -29,7 +29,7 @@ ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend a
 * **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE/WebSocket listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
 * **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
 * **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
-* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/tables/{table}/query`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
+* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/query?table={table}`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
 * **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
 * **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
 
@@ -62,7 +62,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 
 # Ingest data (no auth required by default)
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
@@ -70,13 +70,15 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
-# Query data (wait ~5s for the batch flush to ClickHouse)
-curl -s -X POST http://localhost:8080/v1/query \
+# Query data (wait ~5s for the batch flush to ClickHouse).
+# /v1/admin/query requires the admin or service role when auth is on. With
+# auth.enabled=false (the default for the quickstart) it's open.
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
-# Open a real-time SSE stream (Ctrl+C to stop)
-curl -N http://localhost:8080/v1/stream/sse
+# Open a real-time SSE stream for a specific table (Ctrl+C to stop)
+curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
 ```
 
 WaveHouse is now accepting API requests on `http://localhost:8080`.
@@ -110,19 +112,21 @@ go run github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@v0.1.0
 ```
 
-You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/configuration.md).
+You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/src/content/docs/configuration.md).
 
-WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/sdk.md) is the supported integration surface.
+WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/src/content/docs/sdk.md) is the supported integration surface.
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 20+, and pnpm 10+** on your PATH — see [docs/development.md § Prerequisites](docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
+You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11.1+** on your PATH — see [docs/development.md § Prerequisites](docs/src/content/docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
 
 For building and testing WaveHouse locally with hot-reload:
 
 ```bash
 # One-time bootstrap: installs golangci-lint into .bin/, downloads Go modules,
-# and runs pnpm install for the SDK + E2E harness.
+# runs pnpm install for the SDK + E2E harness, and configures git hooks
+# (.githooks/pre-commit runs `make verify`; .githooks/pre-push enforces that
+# `make ci` has passed for HEAD before publishing).
 make tools
 
 # Start ClickHouse
@@ -135,6 +139,10 @@ make dev
 WaveHouse will automatically recompile and restart whenever you save a `.go` file.
 
 **With observability:** `make dev-obs` is the same as `make dev`, plus a local [SigNoz](https://signoz.io/) stack on `http://localhost:3301` with WaveHouse already pointed at its OTLP collector. See [docs/development.md § Running with observability](docs/src/content/docs/development.md#running-with-observability--make-dev-obs).
+
+## 🤖 Working with Claude Code
+
+The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / a subagent, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
 ## 🤝 Contributing
 

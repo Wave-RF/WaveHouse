@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -160,12 +161,42 @@ func run() int {
 	}
 	defer func() { _ = chConn.Close() }()
 
-	// Schema discovery — discover ClickHouse table schemas on boot.
+	// Process-lifetime context — cancelled by the SIGINT/SIGTERM handler
+	// below. Created here (instead of further down) so the boot-time schema
+	// discovery retry goroutine ties cleanly to shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Schema discovery — non-fatal on boot. If the first Refresh fails
+	// (ClickHouse unreachable, database missing, etc.) we mark the binary
+	// degraded via bootState (which /health surfaces as 503 + diagnostic)
+	// and retry in the background with exponential backoff. The process
+	// still binds :8080 so operators can `curl /health` instead of grepping
+	// a restart-loop log. Once a Refresh succeeds, bootState flips to nil
+	// and /health returns 200. The periodic auto-refresh ticker is started
+	// only after the first successful Refresh (sync or retry) so it never
+	// races RetryRefresh on Refresh calls or on bootState writes.
+	bootState := api.NewBootState(nil)
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
-	if err := registry.Refresh(context.Background()); err != nil {
-		logger.Error("schema discovery failed on boot", "error", err)
-		return 1
+	if err := registry.Refresh(ctx); err != nil {
+		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
+		bootState.Set(fmt.Errorf("schema discovery: %w", err))
+		go func() {
+			retryErr := registry.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(attemptErr error) {
+				logger.Warn("schema discovery retry failed", "error", attemptErr)
+				bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
+			})
+			if retryErr != nil {
+				// ctx cancelled before success — process is shutting down.
+				return
+			}
+			logger.Info("schema discovery succeeded after retry, /health now 200")
+			bootState.Set(nil)
+			go registry.StartAutoRefresh(ctx)
+		}()
+	} else {
+		go registry.StartAutoRefresh(ctx)
 	}
 
 	// State directories — one configurable root, fixed subdir convention.
@@ -206,7 +237,7 @@ func run() int {
 
 	// DLQ stream.
 	if cfg.DLQ.Enabled {
-		if err := api.EnsureDLQStream(context.Background(), embeddedMQ.JetStream(), maxBytes/10); err != nil {
+		if err := api.EnsureDLQStream(ctx, embeddedMQ.JetStream(), maxBytes/10); err != nil {
 			logger.Error("dlq stream init", "error", err)
 			return 1
 		}
@@ -218,18 +249,19 @@ func run() int {
 		logger.Error("cache init", "error", err)
 		return 1
 	}
-	tiered := cache.NewTiered(l1, nil)
-	defer func() { _ = tiered.Close() }()
+	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
+	cache := l1
+	defer func() { _ = cache.Close() }()
 
 	// Policy store (NATS KV + optional file bootstrap).
-	policyStore, err := policy.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
+	policyStore, err := policy.NewStore(ctx, embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
 	if err != nil {
 		logger.Error("policy store init", "error", err)
 		return 1
 	}
 
 	// Pipes store (NATS KV + optional SQL file directory).
-	pipesStore, err := pipes.NewStore(context.Background(), embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
+	pipesStore, err := pipes.NewStore(ctx, embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
 		return 1
@@ -243,12 +275,6 @@ func run() int {
 	// Hub for streaming fan-out.
 	hub := api.NewHub()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start schema auto-refresh.
-	go registry.StartAutoRefresh(ctx)
-
 	// Start policy watch for cluster-wide updates.
 	go policyStore.Watch(ctx)
 
@@ -256,7 +282,7 @@ func run() int {
 	ingestStream, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		chConn,
+		cache,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.HTTPScheme,
@@ -308,8 +334,23 @@ func run() int {
 		dlqHandler = api.NewDLQHandler(js, logger)
 	}
 
-	queryHandler := api.NewQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second)
-	queryHandler.PolicyStore = policyStore
+	// TODO: is this really the best/right way to do this?
+	// /v1/admin/query proxies straight to ClickHouse over HTTP — no native
+	// driver involvement. Construct the base URL from the same fields the
+	// ingest worker uses, defaulting the scheme to http if blank.
+	queryHost, _, err := net.SplitHostPort(cfg.ClickHouse.Addr)
+	if err != nil {
+		queryHost = cfg.ClickHouse.Addr
+	}
+	queryScheme := cfg.ClickHouse.HTTPScheme
+	if queryScheme == "" {
+		queryScheme = "http"
+	}
+	queryEndpoint := fmt.Sprintf("%s://%s", queryScheme, net.JoinHostPort(queryHost, cfg.ClickHouse.HTTPPort))
+	queryHandler := api.NewQueryHandler(queryEndpoint, cfg.ClickHouse.Username, cfg.ClickHouse.Password, cfg.ClickHouse.Database, cfg.ClickHouse.QueryTimeout)
+
+	healthHandler := api.NewHealthHandler(chConn)
+	healthHandler.Boot = bootState
 
 	sseHandler := api.NewSSEHandler(hub, js)
 	sseHandler.PolicyStore = policyStore
@@ -322,12 +363,12 @@ func run() int {
 		Query:           queryHandler,
 		SSE:             sseHandler,
 		WS:              wsHandler,
-		Health:          api.NewHealthHandler(chConn),
+		Health:          healthHandler,
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, tiered, time.Duration(cfg.Cache.DefaultTTL)*time.Second, registry, policyStore, cfg.Cache.TimestampBucketSeconds),
+		Pipes:           api.NewPipesHandler(pipesStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
 			Enabled:   cfg.Auth.Enabled,
 			JWTSecret: cfg.Auth.JWTSecret,

@@ -248,7 +248,7 @@ flowchart TB
     classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:2px
     classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
 
-    Q["Client<br/>POST /v1/query"]:::client
+    Q["Client<br/>POST /v1/tables/{table}/query"]:::client
     Q --> L1["Ristretto cache<br/>(in-process)"]:::wh
     L1 -. "miss + singleflight" .-> CH[("ClickHouse")]:::store
     L1 -. "hit: ~0.5ms" .-> Q
@@ -282,6 +282,6 @@ The pitch in one sentence: **ClickHouse is a great database and a poor API**. Ev
 
 Read next:
 
-- **[Architecture](architecture.md)** — the internal package map and how each of these capabilities is implemented.
-- **[Getting Started](getting-started.md)** — five minutes to `200 OK`.
-- **[API Reference](api.md)** — every endpoint and the schema-validation contract.
+- **[Architecture](/architecture)** — the internal package map and how each of these capabilities is implemented.
+- **[Getting Started](/getting-started)** — five minutes to `200 OK`.
+- **[API Reference](/api)** — every endpoint and the schema-validation contract.
