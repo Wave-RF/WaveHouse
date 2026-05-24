@@ -348,7 +348,7 @@ func run() int {
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
-		dlqHandler = api.NewDLQHandler(js, logger)
+		dlqHandler = api.NewDLQHandler(js)
 	}
 
 	// TODO: is this really the best/right way to do this?

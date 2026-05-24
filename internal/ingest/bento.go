@@ -223,11 +223,13 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
 			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
-			bentoDLQDropped.Add(ctx, 1, metric.WithAttributes(attribute.String("table", tableName)))
-			recordIngestDuration(ctx, m, tableName, "dropped")
+			// msgCtx (not ctx) so metric exemplars carry the bento component
+			// label and trace_id/span_id from the message's propagation header.
+			bentoDLQDropped.Add(msgCtx, 1, metric.WithAttributes(attribute.String("table", tableName)))
+			recordIngestDuration(msgCtx, m, tableName, "dropped")
 		} else {
 			slog.WarnContext(msgCtx, "sent failed message to DLQ", "subject", subject)
-			recordIngestDuration(ctx, m, tableName, "dlq")
+			recordIngestDuration(msgCtx, m, tableName, "dlq")
 		}
 	}
 	return nil

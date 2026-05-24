@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -13,12 +12,11 @@ import (
 
 // DLQHandler exposes Dead Letter Queue statistics.
 type DLQHandler struct {
-	JS     jetstream.JetStream
-	Logger *slog.Logger
+	JS jetstream.JetStream
 }
 
-func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
-	return &DLQHandler{JS: js, Logger: logger}
+func NewDLQHandler(js jetstream.JetStream) *DLQHandler {
+	return &DLQHandler{JS: js}
 }
 
 // Stats returns per-table message counts in the DLQ stream.

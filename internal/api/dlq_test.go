@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,7 +19,7 @@ func TestDLQStats_EmptyWhenNoStream(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = emb.Close() }()
 
-	handler := NewDLQHandler(emb.JetStream(), slog.Default())
+	handler := NewDLQHandler(emb.JetStream())
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
@@ -60,7 +59,7 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	handler := NewDLQHandler(js, slog.Default())
+	handler := NewDLQHandler(js)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 
@@ -92,7 +91,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	_, err = js.Publish(ctx, "dlq.orders", []byte(`{"table_name":"orders"}`))
 	require.NoError(t, err)
 
-	handler := NewDLQHandler(js, slog.Default())
+	handler := NewDLQHandler(js)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec := httptest.NewRecorder()
 

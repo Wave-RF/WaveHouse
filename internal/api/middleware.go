@@ -202,14 +202,20 @@ func verifyJWT(w http.ResponseWriter, r *http.Request, cfg AuthConfig, jwks keyf
 	role := extractClaim(claims, roleClaim)
 	if role == "" {
 		// Successful JWT verify but no role — auth metadata pulled from the
-		// wrong claim, common misconfiguration. Surface as a distinct failure
-		// reason so /v1/admin/* 403s on this can be distinguished from a
-		// missing/expired token. Doesn't fail the request — RequireRole at
-		// the router level decides authorization based on the missing role.
+		// wrong claim, common misconfiguration. Doesn't fail the request:
+		// RequireRole at the router decides authorization downstream. The
+		// missing role is surfaced as auth.role_present=false on the span (a
+		// distinct dimension from `auth.failure_reason`, which stays a clean
+		// failure-correlate — verify-time issues only) and as a counter
+		// record with reason=missing_role_claim so /v1/admin/* 403s can be
+		// distinguished from missing/expired-token 401s in metrics.
 		observability.AuthFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "missing_role_claim")))
-		span.SetAttributes(attribute.String("auth.failure_reason", "missing_role_claim"))
+		span.SetAttributes(attribute.Bool("auth.role_present", false))
 	} else {
-		span.SetAttributes(attribute.String("auth.role", role))
+		span.SetAttributes(
+			attribute.String("auth.role", role),
+			attribute.Bool("auth.role_present", true),
+		)
 	}
 	ended = true
 	span.End()

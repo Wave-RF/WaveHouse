@@ -323,7 +323,7 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		WS:     api.NewWSHandler(hub, js, nil),
 		Health: api.NewHealthHandler(ch.conn),
 		Schema: api.NewSchemaHandler(registry),
-		DLQ:    api.NewDLQHandler(js, logger),
+		DLQ:    api.NewDLQHandler(js),
 		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
 		JS:     js,
 	}
