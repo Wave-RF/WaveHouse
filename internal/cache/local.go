@@ -17,7 +17,7 @@ type LocalCache struct {
 // NewLocal creates a new Ristretto-backed local cache.
 func NewLocal(maxCost int64) (*LocalCache, error) {
 	cache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
-		NumCounters: maxCost / 100 * 10,
+		NumCounters: max(maxCost/10, 1000),
 		MaxCost:     maxCost,
 		BufferItems: 64,
 	})
@@ -50,7 +50,7 @@ func (l *LocalCache) Set(_ context.Context, key string, namespace string, scope 
 	return nil
 }
 
-func (l *LocalCache) InvalidateCache(ctx context.Context, table string, scopes map[string]struct{}) (uint64, error) {
+func (l *LocalCache) InvalidateCache(_ context.Context, table string, scopes map[string]struct{}) (uint64, error) {
 	keys := generateInvalidationKeys(table, scopes)
 
 	for _, key := range keys {
