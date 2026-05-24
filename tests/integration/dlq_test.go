@@ -59,7 +59,7 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.EncodeTable(table), payload)
+	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.SafeEncodeNATS(table), payload)
 	require.NoError(t, err)
 
 	// Bento batches every 5s; 30s upper bound gives generous slack on a
@@ -103,7 +103,7 @@ func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.EncodeTable(table), payload)
+	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.SafeEncodeNATS(table), payload)
 	require.NoError(t, err)
 
 	dlqSubject := "dlq." + table
@@ -128,7 +128,7 @@ func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
 		}
 		// iterate over all table names to try query.DecodeTable()
 		for k := range tables {
-			rawTable, err := query.DecodeTable(k)
+			rawTable, err := query.SafeDecodeNATS(k)
 			if err == nil && rawTable == dlqSubject {
 				return true
 			}

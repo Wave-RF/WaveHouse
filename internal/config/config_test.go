@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "default", cfg.ClickHouse.Database)
 	assert.Equal(t, "default", cfg.ClickHouse.Username)
 	assert.Equal(t, "", cfg.ClickHouse.Password)
+	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
 	assert.False(t, cfg.Auth.Enabled)
 	assert.Equal(t, "role", cfg.Auth.RoleClaim)
 	assert.False(t, cfg.Dedupe.Enabled)
@@ -31,7 +33,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.Pipes.Dir)
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
-	assert.Equal(t, 300, cfg.Cache.DefaultTTL)
 	assert.False(t, cfg.OTel.Enabled)
 	assert.Equal(t, "127.0.0.1:4317", cfg.OTel.Addr)
 	assert.True(t, cfg.OTel.Traces.Enabled)
@@ -65,6 +66,7 @@ auth:
 	assert.Equal(t, "clickhouse:9000", cfg.ClickHouse.Addr)
 	assert.Equal(t, "mydb", cfg.ClickHouse.Database)
 	assert.Equal(t, "https", cfg.ClickHouse.HTTPScheme)
+	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
 	assert.True(t, cfg.Auth.Enabled)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 }
@@ -110,7 +112,7 @@ func TestValidate_PortOutOfRange(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: tt.port},
-				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 				Schema:     Schema{RefreshInterval: 60},
 			}
 			err := cfg.Validate()
@@ -124,7 +126,7 @@ func TestValidate_NegativeShutdownTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080, ShutdownTimeout: -1},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
@@ -136,7 +138,7 @@ func TestValidate_AuthEnabledNoSecret(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Auth:       Auth{Enabled: true},
 		Schema:     Schema{RefreshInterval: 60},
 	}
@@ -149,7 +151,7 @@ func TestValidate_AuthEnabledWithJWKS(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Auth:       Auth{Enabled: true, JWKSURL: "https://example.com/.well-known/jwks.json"},
 		Schema:     Schema{RefreshInterval: 60},
 	}
@@ -161,7 +163,7 @@ func TestValidate_AuthDevModeBypassesCheck(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Auth:       Auth{Enabled: true, DevMode: true},
 		Schema:     Schema{RefreshInterval: 60},
 	}
@@ -173,7 +175,7 @@ func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 0},
 	}
 	err := cfg.Validate()
@@ -181,24 +183,35 @@ func TestValidate_SchemaRefreshIntervalZero(t *testing.T) {
 	assert.Contains(t, err.Error(), "schema.refresh_interval")
 }
 
-func TestValidate_NegativeCacheTTL(t *testing.T) {
+func TestValidate_NegativeQueryTime(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
-		Cache:      Cache{DefaultTTL: -1},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: -1},
 		Schema:     Schema{RefreshInterval: 60},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cache.default_ttl")
+	assert.Contains(t, err.Error(), "clickhouse.query_timeout")
+}
+
+func TestValidate_ZeroQueryTime(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 0},
+		Schema:     Schema{RefreshInterval: 60},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "clickhouse.query_timeout")
 }
 
 func TestValidate_NegativeGapWindow(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		MQ:         MQ{GapWindowMinutes: -1},
 		Schema:     Schema{RefreshInterval: 60},
 	}
@@ -239,7 +252,7 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
-				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 				Schema:     Schema{RefreshInterval: 60},
 				OTel: OTel{
 					Enabled: true,
@@ -259,7 +272,7 @@ func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
@@ -280,7 +293,7 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 	// config that they haven't enabled yet.
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: false,
@@ -298,7 +311,7 @@ func TestValidate_RejectsEmptyOTelAddrWhenEnabled(t *testing.T) {
 	// load instead with an explicit message.
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
@@ -318,7 +331,7 @@ func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 	// signal is off, its sample_rate is unused and should not gate startup.
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
@@ -344,7 +357,7 @@ func TestValidate_PrometheusPortCollidesWithServerPort(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{
 			Enabled: true,
@@ -372,7 +385,7 @@ func TestValidate_PrometheusPortOutOfRange(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
-				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 				Schema:     Schema{RefreshInterval: 60},
 				Prometheus: Prometheus{
 					Enabled: true,
@@ -391,7 +404,7 @@ func TestValidate_PrometheusPathMustStartWithSlash(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{
 			Enabled: true,
@@ -422,7 +435,7 @@ func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				Server:     Server{Port: 8080},
-				ClickHouse: ClickHouse{HTTPScheme: "http"},
+				ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 				Schema:     Schema{RefreshInterval: 60},
 				Prometheus: Prometheus{Enabled: true, Path: tc.path, Port: tc.port},
 			}
@@ -440,7 +453,7 @@ func TestValidate_PrometheusV1PathAllowedOnSidecarPort(t *testing.T) {
 	// path doesn't collide with the API. Validation should let this through.
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{Enabled: true, Path: "/v1/metrics", Port: 9091},
 	}
@@ -453,7 +466,7 @@ func TestValidate_PrometheusOnly_NoOTel(t *testing.T) {
 	// otel.enabled stays false, prometheus.enabled is true. Must validate.
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{Enabled: true, Path: "/metrics", Port: 0},
 	}
@@ -467,7 +480,7 @@ func TestValidate_PrometheusIgnoredWhenDisabled(t *testing.T) {
 	// get yelled at about unused fields.
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http"},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
 		Schema:     Schema{RefreshInterval: 60},
 		Prometheus: Prometheus{
 			Enabled: false,
@@ -482,7 +495,7 @@ func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "ftp"}, // Intentionally invalid
+		ClickHouse: ClickHouse{HTTPScheme: "ftp", QueryTimeout: time.Duration(30) * time.Second}, // Intentionally invalid ftp
 		Schema:     Schema{RefreshInterval: 60},
 	}
 

@@ -32,6 +32,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
@@ -161,9 +162,17 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
+	localCache, err := cache.NewLocal(1 << 30) // 1 GB
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: cache initialization: %v\n", err)
+		return 1, cleanup
+	}
+	cleanups.push(func() { _ = localCache.Close() })
+
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
+		localCache,
 		ch.nativeAddr(),
 		ch.httpPort,
 		"http",
@@ -309,7 +318,7 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		// /v1/admin/query proxies straight to ClickHouse's HTTP interface,
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
-		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase),
+		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
 		SSE:    api.NewSSEHandler(hub, js),
 		WS:     api.NewWSHandler(hub, js, nil),
 		Health: api.NewHealthHandler(ch.conn),

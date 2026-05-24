@@ -30,7 +30,7 @@ func newProxyHandler(t *testing.T, fakeCH http.Handler) *QueryHandler {
 	t.Helper()
 	srv := httptest.NewServer(fakeCH)
 	t.Cleanup(srv.Close)
-	return NewQueryHandler(srv.URL, "default", "secret", "default")
+	return NewQueryHandler(srv.URL, "default", "secret", "default", time.Second*time.Duration(30))
 }
 
 func postQuery(h *QueryHandler, body []byte) *httptest.ResponseRecorder {
@@ -107,7 +107,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := NewQueryHandler("http://unused.invalid", "", "", "")
+			h := NewQueryHandler("http://unused.invalid", "", "", "", time.Second*time.Duration(30))
 			w := httptest.NewRecorder()
 			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(tt.body)))
 			h.Handle(w, r)
@@ -351,7 +351,7 @@ func TestQueryHandler_NoAuthHeadersWhenBlank(t *testing.T) {
 	})
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
-	h := NewQueryHandler(srv.URL, "", "", "")
+	h := NewQueryHandler(srv.URL, "", "", "", time.Second*time.Duration(30))
 
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 	w := postQuery(h, body)
@@ -431,7 +431,7 @@ func TestQueryHandler_RequestBodyCap(t *testing.T) {
 	t.Parallel()
 
 	const testCap = 64
-	h := NewQueryHandler("http://unused.invalid", "", "", "")
+	h := NewQueryHandler("http://unused.invalid", "", "", "", time.Second*time.Duration(30))
 	h.maxRequestBytes = testCap
 
 	body, _ := json.Marshal(queryRequest{SQL: strings.Repeat("x", 200)})
@@ -471,7 +471,7 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 	defer srv.Close()
 	defer close(allowReturn)
 
-	h := NewQueryHandler(srv.URL, "", "", "")
+	h := NewQueryHandler(srv.URL, "", "", "", time.Second*time.Duration(30))
 	body, _ := json.Marshal(queryRequest{SQL: "SELECT 1"})
 
 	w := httptest.NewRecorder()
@@ -507,3 +507,5 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 	// cancel(), proving the request context made it to the upstream call.
 	assert.NotEqual(t, http.StatusOK, w.Code, "cancelled request must not return 200")
 }
+
+// TODO: new test for very short max query duration to test

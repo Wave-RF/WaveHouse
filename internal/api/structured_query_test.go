@@ -38,7 +38,7 @@ func newStructuredQueryHandler() *StructuredQueryHandler {
 			},
 		},
 	})
-	return NewStructuredQueryHandler(nil, nil, 5*time.Second, reg, nil, 60)
+	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second)
 }
 
 func TestStructuredQuery_MissingTable(t *testing.T) {

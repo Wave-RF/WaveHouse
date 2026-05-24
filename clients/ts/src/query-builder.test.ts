@@ -183,15 +183,6 @@ describe('QueryBuilder', () => {
     expect(body.time_range).toEqual({ column: 'ts', since: '2026-01-01', until: '2026-02-01' });
   });
 
-  // --- CacheTTL ---
-
-  it('builds cacheTTL', async () => {
-    await builder().cacheTTL(300).fetch();
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.cache_ttl).toBe(300);
-  });
-
   // --- Empty AST ---
 
   it('omits empty arrays and undefined fields from AST', async () => {
@@ -204,7 +195,6 @@ describe('QueryBuilder', () => {
     expect(body.group_by).toBeUndefined();
     expect(body.order_by).toEqual([{ column: 'received_timestamp', dir: 'desc' }]);
     expect(body.time_range).toBeUndefined();
-    expect(body.cache_ttl).toBeUndefined();
   });
 
   // --- Fetch endpoint ---
@@ -330,7 +320,6 @@ describe('QueryBuilder', () => {
       order_by: [{ column: 'total', dir: 'desc' }],
       limit: 50,
       time_range: { column: 'received_timestamp', since: '1h' },
-      cache_ttl: 60,
     });
   });
 });

@@ -9,7 +9,6 @@ type StructuredQuery struct {
 	OrderBy      []OrderClause `json:"order_by,omitempty"`
 	Limit        int           `json:"limit,omitempty"`
 	TimeRange    *TimeRange    `json:"time_range,omitempty"`
-	CacheTTL     *int          `json:"cache_ttl,omitempty"` // override default TTL (seconds)
 }
 
 // Aggregation represents an aggregation function call.

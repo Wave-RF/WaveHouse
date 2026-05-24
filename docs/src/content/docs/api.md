@@ -265,8 +265,7 @@ Executes a type-safe structured query against a table. The query AST is validate
     "column": "received_timestamp",
     "since": "1h",
     "until": ""
-  },
-  "cache_ttl": 60
+  }
 }
 ```
 
@@ -279,7 +278,6 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
-| `cache_ttl` | int | No | Override default cache TTL (seconds). |
 
 **Response:**
 
@@ -576,6 +574,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 ```json
 {
   "table_name": "clicks",
+  "scope": "scope",
   "received_timestamp": "2026-03-24T12:00:00.123456789Z",
   "data": {
     "page": "/home",
@@ -588,6 +587,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
+| `scope` | string | Optional scope namespace used for subject routing/cache invalidation context. |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `data` | object | The original flat JSON body. |
 

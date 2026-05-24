@@ -6,9 +6,9 @@ import (
 	"net/url"
 )
 
-// EncodeTable converts any ClickHouse table name into a safe, single NATS token.
+// SafeEncodeNATS converts any ClickHouse table name into a safe, single NATS token.
 // It preserves alphanumerics and underscores, but percent-encodes everything else.
-func EncodeTable(raw string) string {
+func SafeEncodeNATS(raw string) string {
 	var buf bytes.Buffer
 	for i := 0; i < len(raw); i++ {
 		b := raw[i]
@@ -23,8 +23,8 @@ func EncodeTable(raw string) string {
 	return buf.String()
 }
 
-// DecodeTable reverses the NATS-safe encoding back to the raw ClickHouse table name.
-func DecodeTable(safe string) (string, error) {
+// SafeDecodeNATS reverses the NATS-safe encoding back to the raw ClickHouse table name.
+func SafeDecodeNATS(safe string) (string, error) {
 	// Re-use Go's standard library to unescape the percent-encoding
 	// url.PathUnescape perfectly handles the %XX format we generated above
 	return url.PathUnescape(safe)

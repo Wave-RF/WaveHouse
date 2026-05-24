@@ -186,4 +186,41 @@ describe("Query", () => {
     // Restore the baseline policy using the non-null assertion (!)
     await admin.policy.set(currentPolicyRes.data!);
   });
+
+  it("enforces max_execution_time_ms policy limit", async () => {
+    const admin = adminClient();
+    const currentPolicyRes = await admin.policy.get();
+
+    // Temporarily restrict viewer queries to an impossibly fast 1ms timeout
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        clicks: {
+          ...((currentPolicyRes.data as any).tables.clicks || {}),
+          select: {
+            viewer: {
+              allow_columns: ["*"],
+              max_execution_time_ms: 1, // 1 millisecond limit
+            },
+          },
+        },
+      },
+    });
+
+    try {
+      // The query will hit the Go context deadline exceeded error
+      // IMPORTANT: Make the query unique so it doesn't get served instantly from the cache!
+      const result = await wh
+        .from("clicks")
+        .select("*")
+        .where("event_id", "=", testId())
+        .limit(999)
+        .fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(500);
+    } finally {
+      // Restore policy even if test fails so that others don't too
+      await admin.policy.set(currentPolicyRes.data!);
+    }
+  });
 });
