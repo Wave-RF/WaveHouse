@@ -137,7 +137,7 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0)
 
 	w := httptest.NewRecorder()
-	// No ContextKeyRole set which simulates auth-disabled or a JWT without the role claim.
+	// No ContextKeyRole set, which simulates no token or a JWT without the role claim.
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/admin_report/execute", "admin_report", nil)
 
 	safeHandle(h.Execute, w, r)

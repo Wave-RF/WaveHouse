@@ -49,7 +49,7 @@ Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/r
 
 ## 3. Ingest an event
 
-Authentication is **disabled by default**, so you can POST straight to `/v1/ingest/{table}`.
+The JWT middleware always runs, but with no secret configured (the default) every request resolves to the policy `default_role` — so you can POST straight to `/v1/ingest/{table}`.
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/ingest/clicks \

@@ -16,7 +16,7 @@ type RoleCase struct {
 	Name         string
 	AllowedRoles []string
 	Role         string // role placed in context when SetRole is true
-	SetRole      bool   // false → no role in context at all (e.g. auth disabled)
+	SetRole      bool   // false → no role in context at all (e.g. no token / invalid token)
 	// WantForbidden is true when the request must be rejected with 403.
 	WantForbidden bool
 }

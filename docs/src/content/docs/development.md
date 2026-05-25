@@ -82,7 +82,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no external cache needed
-- **Auth disabled** by default — no JWT needed
+- **No JWT secret** by default — requests resolve to the policy `default_role`
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
 
@@ -136,7 +136,7 @@ dev: deps-up $(AIR)
 **While `make dev` is running you get:**
 
 - WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
-- Auth disabled by default — every request goes through. Override with env vars (see below).
+- No JWT secret set by default, so every request resolves to the policy `default_role`. Override with env vars (see below).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` (or `config.yaml`) triggers a debounced rebuild + restart. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
