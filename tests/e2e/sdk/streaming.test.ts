@@ -50,7 +50,6 @@ describe("Streaming", () => {
         error: (err) => console.error("SSE error:", err),
       });
 
-      // TODO: replace with wait for status connected?
       await new Promise((r) => setTimeout(r, 1000));
 
       await whAuth.from("clicks").insert({
@@ -130,7 +129,6 @@ describe("Streaming", () => {
         error: (err) => console.error("WS stream error:", err),
       });
 
-      // TODO: replace with wait for status connected?
       // Give the WS connection a solid moment to handshake
       await new Promise((r) => setTimeout(r, 3000));
 
@@ -171,7 +169,7 @@ describe("Streaming", () => {
 
       await whAuth.from("events").insert({
         event_id: id,
-
+        type: "ws_auth_test",
         user_id: "ws-auth-user",
         source: "test",
       });

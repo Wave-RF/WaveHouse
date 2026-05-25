@@ -92,25 +92,49 @@ export class StreamController<T = Record<string, unknown>> {
 
   /**
    * Returns a promise that resolves when the stream status reaches `'live'`,
-   * or rejects after `timeoutMs` milliseconds (default: 10 000).
+   * rejects immediately if the stream is already `'closed'`, or rejects after
+   * `timeoutMs` milliseconds (default: 10 000) if it never connects.
+   *
+   * Safe to call before `.subscribe()` — does not trigger auto-close when
+   * the internal waiter is removed.
    */
   connected(timeoutMs = 10_000): Promise<void> {
     if (this._status === 'live') return Promise.resolve();
+    if (this._status === 'closed') return Promise.reject(new Error('Stream is closed'));
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
+
       const timer = setTimeout(() => {
-        unsub();
+        if (settled) return;
+        settled = true;
+        this._subscribers.delete(watcher);
         reject(new Error(`Stream did not connect within ${timeoutMs}ms`));
       }, timeoutMs);
 
-      const unsub = this.subscribe({
+      // Use a private subscriber directly to avoid the auto-close side-effect
+      // that the public subscribe() triggers when subscriber count drops to zero.
+      const watcher: StreamSubscriber<T> = {
+        next: () => {
+          // no-op: we only care about status transitions here
+        },
         status: (s) => {
           if (s === 'live') {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
-            unsub();
+            this._subscribers.delete(watcher);
             resolve();
+          } else if (s === 'closed') {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            this._subscribers.delete(watcher);
+            reject(new Error('Stream closed before connecting'));
           }
         },
-      });
+      };
+
+      this._subscribers.add(watcher);
     });
   }
 

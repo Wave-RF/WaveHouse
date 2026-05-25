@@ -73,32 +73,24 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if sinceStr == "" {
 		sinceStr = r.URL.Query().Get("since")
 	}
-	if sinceStr != "" {
-		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
+	if sinceStr != "" && h.JS != nil {
+		var ts time.Time
+		var parseErr error
+		// Try RFC3339Nano first (canonical SSE id format), then plain RFC3339 as fallback.
+		if ts, parseErr = time.Parse(time.RFC3339Nano, sinceStr); parseErr != nil {
+			ts, parseErr = time.Parse(time.RFC3339, sinceStr)
+		}
+		if parseErr == nil {
 			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
 				out := h.applyStreamPolicy(data, role, claims)
 				if out == nil {
-					return true // skip this message
+					return true // skip this message (policy-filtered)
 				}
 				id := extractEventTimestamp(out)
 				_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 				flusher.Flush()
 				return true
 			})
-		} else if parseErr := err; parseErr != nil {
-			// Try RFC3339 without nanos as fallback.
-			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-					out := h.applyStreamPolicy(data, role, claims)
-					if out == nil {
-						return true
-					}
-					id := extractEventTimestamp(out)
-					_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
-					flusher.Flush()
-					return true
-				})
-			}
 		}
 	}
 
