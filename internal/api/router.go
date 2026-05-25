@@ -263,7 +263,7 @@ func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
 //     (echoed back, with Vary: Origin so caches key on it).
 //
 // Credentials: we deliberately do NOT emit Access-Control-Allow-Credentials.
-// WaveHouse is a Bearer-token API (see internal/api/middleware.go) — clients
+// WaveHouse is a Bearer-token API (see internal/auth) — clients
 // send Authorization: Bearer <jwt> as an explicit request header, not via
 // browser-managed cookies, so credentials mode is unnecessary. Sending
 // Allow-Credentials: true together with Allow-Origin: "*" is also a CORS
