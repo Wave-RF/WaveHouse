@@ -33,7 +33,7 @@ describe("Ingest", () => {
         `SELECT event_id FROM default.clicks WHERE event_id = '${id}'`,
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     const rows = await chQuery(
       `SELECT event_id FROM default.clicks WHERE event_id = '${id}'`,
@@ -61,7 +61,7 @@ describe("Ingest", () => {
         `SELECT event_id FROM default.clicks WHERE event_id IN ('${ids.join("','")}')`,
       );
       return r.length === 3;
-    }, 15_000);
+    }, 10_000);
 
     const inCH = await chQuery(
       `SELECT event_id FROM default.clicks WHERE event_id IN ('${ids.join("','")}')`,
@@ -111,7 +111,7 @@ describe("Ingest", () => {
         `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     const rows = await chQuery(
       `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
@@ -148,7 +148,7 @@ describe("Ingest", () => {
         `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     const rows = await chQuery(
       `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
@@ -200,7 +200,7 @@ describe("Ingest", () => {
         `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     const rows = await chQuery(
       `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`
@@ -255,7 +255,7 @@ describe("Ingest", () => {
         `SELECT event_id FROM default.\`${maliciousName}\` WHERE event_id = '${id}'`
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     // 6. ULTIMATE ASSERTION: Verify the actual 'clicks' table was NOT dropped!
     // In ClickHouse, EXISTS returns a row with { result: 1 } if it exists.
@@ -338,7 +338,7 @@ describe("Ingest", () => {
     await waitForCondition(async () => {
       const r = await chQuery(`SELECT country FROM default.clicks WHERE event_id = '${autoId}'`);
       return r.length === 1 && r[0].country === "US";
-    }, 15_000);
+    }, 10_000);
 
     // Restore policy
     await admin.policy.set(currentPolicyRes.data!);

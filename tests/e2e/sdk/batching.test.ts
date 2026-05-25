@@ -5,8 +5,6 @@ describe("Ingest Batching Triggers", () => {
   const wh = dataClient();
 
     it("flushes immediately when hitting the 500-item batch limit", async () => {
-      await new Promise((r) => setTimeout(r, 6000)); // let any existing batches clear out first
-
     const runId = testId();
     const rows = Array.from({ length: 500 }).map((_, i) => ({
       event_id: `${runId}-${i}`,
@@ -20,7 +18,11 @@ describe("Ingest Batching Triggers", () => {
         // Insert all 500 at once
     const res = await wh.from("clicks").insert(rows);
         expect(res.error).toBeNull();
-        console.log(`All 500 events updated in ${Date.now() - startTime}ms`);
+        const apiEndTime = Date.now();
+        console.log(
+          `All 500 events uploaded (API fsync latency) in ${apiEndTime - startTime}ms`,
+        );
+        expect(apiEndTime - startTime).toBeLessThan(5_000);
 
     // It should hit ClickHouse almost instantly (< 2 seconds), well before the 5s timer
     await waitForCondition(
@@ -28,25 +30,18 @@ describe("Ingest Batching Triggers", () => {
         const r = await chQuery(
           `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
         );
-            console.log(
-              `batched insert (batch from sdk as one upload) selection only found ${Number((r[0] as any).cnt)} results, waiting for 500`,
-            );
         return Number((r[0] as any).cnt) === 500;
       },
-      6_000,
+      5_000,
       100,
     );
 
       const elapsed = Date.now() - startTime;
-      console.log("500 item batch uploaded in " + elapsed + "ms");
     expect(elapsed).toBeLessThan(5000); // Prove it didn't wait for the 5s timer
   });
 
   it("waits for the 5-second period if batch limit is not met", async () => {
       const runId = testId();
-
-      // wait for previous messages for table in batch to clear
-      await new Promise((r) => setTimeout(r, 30000));
 
     const startTime = Date.now();
     const res = await wh.from("clicks").insert({
@@ -71,7 +66,7 @@ describe("Ingest Batching Triggers", () => {
         );
         return Number((check[0] as any).cnt) === 1;
       },
-      10_000,
+      6_000,
       500,
     );
 
@@ -79,5 +74,5 @@ describe("Ingest Batching Triggers", () => {
 
     // It should take roughly ~5 seconds for Bento's period trigger to fire
     expect(elapsed).toBeGreaterThanOrEqual(4500);
-  }, 60_000);
+  }, 20_000);
 });

@@ -53,7 +53,7 @@ describe("Cache", () => {
         `SELECT event_id FROM default.clicks WHERE event_id = '${eventId}'`,
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     // 5. Fetch a third time (MISS - cache was invalidated)
     const res3 = await fetch(url, reqOpts);

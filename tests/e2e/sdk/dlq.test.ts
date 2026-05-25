@@ -14,9 +14,6 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
   it("routes an entire batch to DLQ if one row fails strict ClickHouse validation", async () => {
       const runId = testId();
 
-      // wait for other tests to cleanup first...
-      await new Promise((r) => setTimeout(r, 30000));
-
     // Get baseline DLQ stats before we pollute them
     const initialDlq = await admin.dlq.list();
     const initialClicksDlq =
@@ -44,36 +41,28 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
     });
 
     const res = await wh.from("clicks").insert(rows as any);
-    expect(res.error).toBeNull(); // API accepts it (schema validation is loose by design)
+      expect(res.error).toBeNull(); // API accepts it (schema validation is loose by design)
 
-    // Wait for the Bento 5-second timer to flush to CH and fail
-    await new Promise((r) => setTimeout(r, 6000));
+      await waitForCondition(async () => {
+          // Verify 9 of the rows made it to ClickHouse
+          const chRows = await chQuery(
+              `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
+          );
+          return Number((chRows[0] as any).cnt) == 9;
+      }, 6_000);
 
-    // 1. Verify NONE of the rows made it to ClickHouse
-    const chRows = await chQuery(
-      `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
-    );
-      expect(Number((chRows[0] as any).cnt)).toBeOneOf([0, 9]);
-      console.log(`Inserted ${Number((chRows[0] as any).cnt)} records to clickhouse`);
-
-    // 2. Verify exactly 10 messages were added to the DLQ for the clicks table
+    // Verify exactly 1 message was added to the DLQ for the clicks table
     await waitForCondition(async () => {
       const dlqRes = await admin.dlq.list();
       const currentClicksDlq =
-          (dlqRes.data?.tables as any)?.["dlq.clicks"] || 0;
-        if (currentClicksDlq > initialClicksDlq) {
-            console.log(`${currentClicksDlq-initialClicksDlq} DLQ entries detected`);
-        }
-      return (
-        currentClicksDlq === initialClicksDlq + 10 ||
-        currentClicksDlq === initialClicksDlq + 1
-      );
+            (dlqRes.data?.tables as any)?.["dlq.clicks"] || 0;
+        return currentClicksDlq === initialClicksDlq + 1;
     }, 5_000);
 
     const finalDlq = await admin.dlq.list();
     const finalClicksDlq = (finalDlq.data?.tables as any)?.["dlq.clicks"] || 0;
 
     // The entire batch of 10 was rejected and routed to the DLQ
-    expect(finalClicksDlq).toBeOneOf([initialClicksDlq + 10, initialClicksDlq + 1]);
-  }, 60_000);
+    expect(finalClicksDlq).toBe(initialClicksDlq + 1);
+  }, 20_000);
 });

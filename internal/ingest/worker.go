@@ -86,7 +86,7 @@ func StartIngestWorker(
 		db:       chDB,
 	}
 
-	workerCtx, workerCancel := context.WithCancel(context.Background())
+	workerCtx, workerCancel := context.WithCancel(ctx)
 	worker.wg.Add(1)
 
 	// Start push-based loop
@@ -136,7 +136,7 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 	for {
 		select {
 		case <-ctx.Done():
-			w.flush(context.Background(), batch)
+			w.flush(context.WithoutCancel(ctx), batch)
 			return
 		case <-timer.C:
 			w.flush(ctx, batch)
@@ -282,7 +282,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	}
 
 	if len(versionKeys) > 0 {
-		invCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+		invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
 		_, err := w.cache.InvalidateCache(invCtx, versionKeys)
 		if err != nil {
 			w.logger.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
@@ -300,8 +300,8 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 
 			go func(m jetstream.Msg) {
 				defer ackWg.Done()
-				if err := m.DoubleAck(context.Background()); err != nil {
-					w.logger.ErrorContext(context.Background(), "double ack failed for processed message", "error", err, "table", tableName)
+				if err := m.DoubleAck(context.WithoutCancel(ctx)); err != nil {
+					w.logger.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "table", tableName)
 				}
 			}(pm.natsMsg)
 		}
