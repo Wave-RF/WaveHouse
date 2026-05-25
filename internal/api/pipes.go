@@ -32,7 +32,7 @@ func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	q := h.Store.List()
 	if q == nil {
-		_ = json.NewEncoder(w).Encode([]string{})
+		q = []*pipes.NamedQuery{}
 	}
 	_ = json.NewEncoder(w).Encode(q)
 }

@@ -93,7 +93,7 @@ func TestPipesHandler_List_Empty(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var list []interface{}
-	err := json.NewDecoder(w.Body).Decode(&list)
+	err := json.Unmarshal(w.Body.Bytes(), &list)
 	assert.NoError(t, err)
 	assert.Empty(t, list, "Response should be an empty list")
 }

@@ -71,7 +71,7 @@ export class StreamController<T = Record<string, unknown>> {
   /**
    * Returns a promise that resolves when the stream status reaches `'live'`,
    * rejects immediately if the stream is already `'closed'`, or rejects after
-   * `timeoutMs` milliseconds (default: 10 000) if it never connects.
+   * `timeoutMs` milliseconds (default: 5 000) if it never connects.
    *
    * Safe to call before `.subscribe()` — does not trigger auto-close when
    * the internal waiter is removed.
@@ -152,6 +152,12 @@ export class StreamController<T = Record<string, unknown>> {
   /** Close the stream and release resources. */
   close(): void {
     this._transport.disconnect();
+    if (this._status !== 'closed') {
+      this._status = 'closed';
+      for (const sub of this._subscribers) {
+        sub.status?.('closed');
+      }
+    }
     this._done = true;
     for (const w of this._waiters) {
       w.resolve({ value: undefined as never, done: true });

@@ -58,7 +58,9 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Flush headers immediately so the client's EventSource.onopen fires right
 	// away instead of waiting for the first data event.
-	_, _ = fmt.Fprintf(w, ": connected\n\n")
+	if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	// Subscribe for live events.

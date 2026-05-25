@@ -324,7 +324,8 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 
 	_, pubErr := w.js.PublishMsg(ctx, msg)
 	if pubErr != nil {
-		w.logger.ErrorContext(ctx, "NATS DLQ publish failed", "subject", subject, "error", pubErr)
+		w.logger.ErrorContext(ctx, "NATS DLQ publish failed, this data will likely be retried and introduce a duplicate in your database if no merge engines are setup for this table", "table", tableName, "subject", subject, "error", pubErr)
+		return
 	}
 
 	// DoubleAck original message so NATS doesn't redeliver the corrupt data
