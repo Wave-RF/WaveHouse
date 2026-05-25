@@ -2,7 +2,7 @@ import type { Result, HttpContext, Policy, ValidationResult } from './types.js';
 import { request } from './http.js';
 import { ok, err } from './errors.js';
 
-/** Namespace for access control policy management. Requires admin/service role. */
+/** Namespace for access control policy management. Requires the admin role (the configured `admin_role`, `"admin"` by default). */
 export class PolicyNamespace {
   private readonly _ctx: HttpContext;
 

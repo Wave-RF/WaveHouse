@@ -98,7 +98,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		r.Method(http.MethodGet, deps.MetricsPath, deps.MetricsHandler)
 	}
 
-	// API v1 endpoints (auth middleware may be no-op if disabled).
+	// API v1 endpoints. The JWT auth middleware always runs (no enable/disable switch).
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(deps.AuthMW)
 
