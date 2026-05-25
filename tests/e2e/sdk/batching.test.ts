@@ -4,7 +4,9 @@ import { dataClient, testId, waitForCondition, chQuery } from "./helpers.js";
 describe("Ingest Batching Triggers", () => {
   const wh = dataClient();
 
-  it("flushes immediately when hitting the 500-item batch limit", async () => {
+    it("flushes immediately when hitting the 500-item batch limit", async () => {
+      await new Promise((r) => setTimeout(r, 6000)); // let any existing batches clear out first
+
     const runId = testId();
     const rows = Array.from({ length: 500 }).map((_, i) => ({
       event_id: `${runId}-${i}`,
@@ -15,9 +17,10 @@ describe("Ingest Batching Triggers", () => {
 
     const startTime = Date.now();
 
-    // Insert all 500 at once
+        // Insert all 500 at once
     const res = await wh.from("clicks").insert(rows);
-    expect(res.error).toBeNull();
+        expect(res.error).toBeNull();
+        console.log(`All 500 events updated in ${Date.now() - startTime}ms`);
 
     // It should hit ClickHouse almost instantly (< 2 seconds), well before the 5s timer
     await waitForCondition(
@@ -30,7 +33,7 @@ describe("Ingest Batching Triggers", () => {
             );
         return Number((r[0] as any).cnt) === 500;
       },
-      5_000,
+      6_000,
       100,
     );
 

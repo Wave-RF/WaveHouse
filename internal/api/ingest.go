@@ -34,6 +34,7 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *Ing
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UTC()
 	table := r.URL.Query().Get("table")
 
 	// Force the use of the GLOBAL provider
@@ -64,6 +65,23 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// FAST AUTH: Table-level policy check (Before spending CPU parsing JSON)
+	var perms *policy.ResolvedPermissions
+	var role string
+
+	if h.PolicyStore != nil {
+		role = RoleFromContext(ctx)
+		claims, _ := ClaimsFromContext(ctx)
+		p := h.PolicyStore.Get()
+		perms = policy.Evaluate(p, role, table, "insert", claims)
+
+		if !perms.Allowed {
+			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+	}
+
 	var data map[string]any
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()
@@ -79,17 +97,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Policy enforcement for inserts.
+	// DEEP AUTH: Column-level & check clauses
 	if h.PolicyStore != nil {
-		role := RoleFromContext(ctx)
-		claims, _ := ClaimsFromContext(ctx)
-		p := h.PolicyStore.Get()
-		perms := policy.Evaluate(p, role, table, "insert", claims)
-		if !perms.Allowed {
-			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			writeJSONError(w, http.StatusForbidden, "forbidden")
-			return
-		}
 		// Check column permissions — reject disallowed columns.
 		for col := range data {
 			if !perms.IsColumnAllowed(col) {
@@ -135,13 +144,13 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
 	scope := ""
 
-	now := time.Now().UTC()
 	evt := ingest.EventMessage{
 		TableName:         table,
 		Scope:             scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
-		Data:              data,
+		Data:              data, // Put the data back in the envelope
 	}
+
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)

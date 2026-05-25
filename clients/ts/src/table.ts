@@ -48,14 +48,21 @@ export class TableRef<Row = Record<string, unknown>> {
     opts?: { signal?: AbortSignal },
   ): Promise<Result<InsertResult>> {
     if (Array.isArray(data)) {
-      for (const row of data) {
-        const { error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
-          method: 'POST',
+      // FAST: Fire all HTTP requests concurrently instead of waiting for each one
+      const promises = data.map((row) =>
+        request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
+          method: "POST",
           path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
           body: row,
           signal: opts?.signal,
-        });
-        if (error) return err(error);
+        }),
+      );
+
+      const results = await Promise.all(promises);
+
+      // Check if any of the concurrent requests failed
+      for (const res of results) {
+        if (res.error) return err(res.error);
       }
       return ok({ ok: true });
     }

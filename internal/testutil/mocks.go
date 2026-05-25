@@ -22,7 +22,7 @@ type PublishedMessage struct {
 	Data    []byte
 }
 
-func (m *MockPublisher) Publish(_ context.Context, subject string, data []byte) error {
+func (m *MockPublisher) Publish(_ context.Context, subject string, data []byte, opts ...mq.PublishOpt) error {
 	if m.Err != nil {
 		return m.Err
 	}

@@ -117,8 +117,10 @@ func TestLocalCache_InvalidateCache(t *testing.T) {
 	assert.Equal(t, []byte("my_data"), val)
 
 	// Invalidate cache for the scope
-	scopes := map[string]struct{}{"org_1": {}}
-	count, err := c.InvalidateCache(ctx, "users", scopes)
+	var versionKeys []string
+	versionKeys = append(versionKeys, "users")
+	versionKeys = append(versionKeys, "users.org_1")
+	count, err := c.InvalidateCache(ctx, versionKeys)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(2), count) // Returns len(keys): "users" and "users.org_1"
 
