@@ -47,7 +47,7 @@ func writeAuthzDenied(w http.ResponseWriter, r *http.Request, role string) {
 // reaches here; writeAuthzDenied turns that into a 401 first.
 func forbiddenForRole(role string) string {
 	if role == "" {
-		return "forbidden: request has no role and no default_role grants access"
+		return "forbidden: request has no role and no public default_role is configured"
 	}
 	return "forbidden"
 }
