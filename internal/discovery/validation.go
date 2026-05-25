@@ -5,11 +5,10 @@ import (
 	"strings"
 )
 
-// ClassifyValidationError maps a Validate error to a coarse reason label for
-// the wavehouse_schema_validation_rejected_total counter. Substring-based
-// because Validate currently emits errors via fmt.Errorf — promoting them to
-// typed sentinels is a bigger refactor than this PR's scope. Keep the
-// substrings in lock-step with the messages emitted by Validate below.
+// ClassifyValidationError maps a Validate error to a coarse reason label
+// for wavehouse_schema_validation_rejected_total. Substring-based — Validate
+// emits via fmt.Errorf today; keep these strings in lock-step with the
+// messages below.
 func ClassifyValidationError(err error) string {
 	if err == nil {
 		return ""

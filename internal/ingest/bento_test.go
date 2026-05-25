@@ -662,3 +662,60 @@ func TestJsInput_Read_EmptyPayloadRejected(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id": 1}`, string(payload))
 }
+
+func TestClickhouseErrCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"empty body", "", "0"},
+		{"no prefix", "garbled", "0"},
+		{"table missing", "Code: 60. DB::Exception: ...", "60"},
+		{"too many parts", "Code: 252. DB::Exception: ...", "252"},
+		{"large code", "Code: 1000. DB::Exception: ...", "1000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, clickhouseErrCode([]byte(tc.body)))
+		})
+	}
+}
+
+func TestParseReceivedTimestamp(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		meta string
+		zero bool
+	}{
+		{"missing", "", true},
+		{"unparseable", "not-a-timestamp", true},
+		{"rfc3339nano", "2024-05-25T12:34:56.789Z", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := service.NewMessage(nil)
+			if tc.meta != "" {
+				m.MetaSet("received_timestamp", tc.meta)
+			}
+			got := parseReceivedTimestamp(m)
+			assert.Equal(t, tc.zero, got.IsZero(), "got=%v", got)
+		})
+	}
+}
+
+func TestRecordIngestDurationFromTS_SkipPaths(t *testing.T) {
+	t.Parallel()
+	// recordIngestDurationFromTS is observable via the global Meter, which
+	// is no-op in tests. We assert it does not panic on the skip paths
+	// (zero ts; future ts). Concrete record-counting belongs in an
+	// integration test with a real MeterProvider.
+	ctx := context.Background()
+	assert.NotPanics(t, func() { recordIngestDurationFromTS(ctx, time.Time{}, "events", "dropped") })
+	assert.NotPanics(t, func() { recordIngestDurationFromTS(ctx, time.Now().Add(time.Hour), "events", "dropped") })
+	assert.NotPanics(t, func() { recordIngestDurationFromTS(ctx, time.Now().Add(-time.Second), "events", "committed") })
+}

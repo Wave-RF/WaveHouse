@@ -2,15 +2,39 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClickhouseDriverErrCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil error", nil, "0"},
+		{"transport error", errors.New("connection refused"), "0"},
+		{"unknown table", &clickhouse.Exception{Code: 60}, "60"},
+		{"too many parts", &clickhouse.Exception{Code: 252}, "252"},
+		{"wrapped exception", fmt.Errorf("insert: %w", &clickhouse.Exception{Code: 117}), "117"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, clickhouseDriverErrCode(tc.err))
+		})
+	}
+}
 
 // stubConn records how many times Exec or Query was called and returns
 // canned results. The embedded nil driver.Conn keeps every method we don't

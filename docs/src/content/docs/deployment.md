@@ -370,7 +370,7 @@ If you are running a containerized WaveHouse (e.g., via `deployments/compose/sta
 
 ### Emitted signals
 
-WaveHouse exports the following custom metrics (in addition to Go runtime metrics and `otelhttp` HTTP-server metrics). All histograms inherit the OTel SDK's default bucket boundaries — the Prometheus exporter applies the standard Prometheus-style fixed buckets, and the OTLP push path uses exponential buckets. Labels noted per instrument.
+WaveHouse exports the following custom metrics on top of Go runtime metrics and `otelhttp` HTTP-server metrics. Histograms use OTel SDK default buckets (Prometheus-style fixed via the Prometheus exporter; exponential via OTLP push).
 
 | Metric | Type | Labels | What it tells you |
 | ------ | ---- | ------ | ----------------- |
@@ -393,7 +393,7 @@ WaveHouse exports the following custom metrics (in addition to Go runtime metric
 Custom span coverage (in addition to `otelhttp` HTTP-server spans):
 
 - `IngestHandler.Handle` with a child `schema_validation` span.
-- `jwt_verify` under the auth middleware, with `auth.method=hmac\|jwks`, `auth.role_claim=<dotted-path>`, and (on successful verify) `auth.role_present=true\|false` plus `auth.role=<value>` when present. `auth.failure_reason` is set only on verify failures (`no_token`, `bad_signature`, `expired`, `malformed`, `unverifiable`, `invalid_claims`); a successful verify with a missing role claim is distinguished by `auth.role_present=false` instead, so trace queries that filter on `auth.failure_reason` see a clean failure-correlate. The 403-distinguishability still flows through `wavehouse_auth_failures_total{reason=missing_role_claim}` on the metric side.
+- `jwt_verify` under the auth middleware, with `auth.method=hmac\|jwks`, `auth.role_claim=<dotted-path>`, and (on success) `auth.role_present` plus `auth.role` when present. `auth.failure_reason` is set only on verify failures; a missing-role-on-success uses `auth.role_present=false` so traces filtering on `auth.failure_reason` stay a clean failure-correlate. `wavehouse_auth_failures_total{reason=missing_role_claim}` keeps 403s metric-distinguishable from 401s.
 - `bento_queue_wait` (retroactively drawn from the producer's published time) → `clickhouse_insert` sibling spans in the worker.
 - `clickhouse.<operation>` from `executeCHQuery` for the structured-query and pipes handlers; `clickhouse.admin_query` for the `/v1/admin/query` HTTP proxy. Raw SQL is intentionally omitted from span attributes — admins routinely paste secrets/PII into ad-hoc queries.
 

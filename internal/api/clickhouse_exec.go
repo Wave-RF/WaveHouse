@@ -17,10 +17,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// clickhouseDriverErrCode extracts the numeric ClickHouse server error code
-// from a clickhouse-go driver error. Returns "0" for transport-level errors
-// (connection refused, deadline exceeded, etc.) that have no server-side
-// code. Used as the `clickhouse_code` label on wavehouse_clickhouse_errors_total.
+// clickhouseDriverErrCode returns the numeric ClickHouse server error code
+// from a clickhouse-go error, or "0" for transport-level failures.
 func clickhouseDriverErrCode(err error) string {
 	if exc, ok := errors.AsType[*clickhouse.Exception](err); ok {
 		return strconv.Itoa(int(exc.Code))
@@ -28,33 +26,23 @@ func clickhouseDriverErrCode(err error) string {
 	return "0"
 }
 
-// executeCHQuery runs sql against the native-protocol driver conn,
-// classifying by leading SQL verb to pick the Exec-vs-Query path —
-// clickhouse-go's driver.Query() errors on statements that return no
-// result set, so the dispatch is correctness, not optimisation. Returns
-// a row-array suitable for JSON marshalling; mutations marshal to `[]`,
-// preserving the "always-an-array" response shape callers depend on.
+// executeCHQuery runs sql against the native-protocol driver conn, picking
+// Exec vs Query by the leading SQL verb (clickhouse-go's Query errors on
+// statements with no result set, so dispatch is correctness, not perf).
+// Mutations return `[]` to preserve the always-an-array response shape.
 //
-// `operation` is the high-level feature name (e.g. "structured_query",
-// "pipes") used as the metric/span label so dashboards can split by
-// caller. The exec vs query verb dispatch is recorded as a separate span
-// attribute (clickhouse.verb=exec|query) for finer-grained breakdowns.
-//
-// Used by the structured-query and pipes handlers — those are the cached
-// read paths that need explicit Query/Exec dispatch and per-row scanning.
-// The raw-SQL endpoint (/v1/admin/query) proxies straight to ClickHouse
-// over HTTP and never calls this; see internal/api/query.go.
+// `operation` is the high-level feature name used as the metric/span label
+// (structured_query, pipes). Used by the cached read paths only; the raw-SQL
+// /v1/admin/query endpoint proxies over HTTP and never calls this.
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any, operation string) ([]map[string]any, error) {
 	verb := "query"
 	if isMutation(sql) {
 		verb = "exec"
 	}
 
-	ctx, span := observability.Tracer().Start(ctx, "clickhouse."+operation) // Span attributes follow the OTel semconv naming for db client spans.
-	// Raw SQL is omitted — it can contain user-provided values that leak
-	// PII when traces are stored long-term. We expose only the structural
-	// shape (verb).
-
+	// Raw SQL is intentionally omitted — it can carry user-provided values
+	// that leak PII into long-lived trace storage.
+	ctx, span := observability.Tracer().Start(ctx, "clickhouse."+operation)
 	span.SetAttributes(
 		attribute.String("db.system", "clickhouse"),
 		attribute.String("clickhouse.verb", verb),
@@ -97,9 +85,7 @@ func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []
 	}()
 
 	columns := rows.ColumnTypes()
-	// Initialize as empty (not nil) so a zero-row result marshals to `[]`,
-	// not `null`. SDK consumers do `data!.length` on the response; a `null`
-	// crashes the client on every empty fetch.
+	// Empty slice (not nil) so a zero-row result marshals to `[]`, not `null`.
 	results := []map[string]any{}
 
 	for rows.Next() {
@@ -118,10 +104,8 @@ func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []
 		}
 		results = append(results, transformRow(row))
 	}
-	// rows.Next() returns false both when iteration completes successfully
-	// AND when the driver hits an error mid-stream (network drop, decode
-	// failure on a row past the first). Without this check, a partial
-	// result set silently masquerades as a complete one.
+	// rows.Next() returns false on both completion and mid-stream error;
+	// without rows.Err() a partial result silently looks complete.
 	if err := rows.Err(); err != nil {
 		observability.ClickHouseErrors.Add(ctx, 1, errAttrs(clickhouseDriverErrCode(err)))
 		span.RecordError(err)
@@ -130,12 +114,9 @@ func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []
 	return results, nil
 }
 
-// mutationVerbs is a set of SQL leading keywords that don't return a result
-// set — anything that mutates schema or data. Routed through Exec rather
-// than Query (see executeCHQuery). Sourced from the ClickHouse statement
-// reference: DML, DDL, role/privilege management, and runtime control
-// (SYSTEM/KILL/SET). Read-only verbs (SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/
-// EXISTS) intentionally fall through to the default Query path.
+// mutationVerbs are SQL leading keywords with no result set — routed through
+// Exec, not Query. Sourced from the ClickHouse statement reference (DML, DDL,
+// role/privilege, SYSTEM/KILL/SET). Read-only verbs fall through to Query.
 var mutationVerbs = map[string]struct{}{
 	"INSERT":   {},
 	"UPDATE":   {},
@@ -158,17 +139,12 @@ var mutationVerbs = map[string]struct{}{
 	"SYSTEM":   {},
 }
 
-// isMutation reports whether sql's leading statement is a non-SELECT — i.e.
-// one that returns no result set and must go through Exec, not Query.
-// Leading whitespace and SQL line/block comments are skipped, then the first
-// alphabetic token is matched case-insensitively against mutationVerbs. A
-// leading WITH clause (CTE) routes through a paren-aware scan because
-// ClickHouse accepts `WITH cte AS (...) INSERT INTO t SELECT * FROM cte` as
-// equivalent to `INSERT INTO t WITH cte AS (...) SELECT * FROM cte` (see
-// https://clickhouse.com/docs/sql-reference/statements/insert-into). Without
-// the skip, the WITH form would classify as a read, route through Query,
-// silently succeed, and return `[]` — the same silent-success class that
-// motivated the original cache-bypass guard.
+// isMutation reports whether sql's leading statement returns no result set
+// (must go through Exec). Skips whitespace/comments, matches the first token
+// case-insensitively. A leading WITH (CTE) routes through a paren-aware scan
+// because ClickHouse accepts `WITH cte AS (...) INSERT INTO t SELECT * FROM
+// cte` — without that scan the WITH form would be misclassified as a read,
+// route through Query, silently succeed, and return `[]`.
 func isMutation(sql string) bool {
 	s := stripLeadingSQLComments(sql)
 	end := 0
@@ -190,13 +166,10 @@ func isMutation(sql string) bool {
 	return containsMutationVerbAtTopLevel(s[end:])
 }
 
-// nonMutationVerbs is the read/metadata-statement counterpart to
-// mutationVerbs. Together they cover every ClickHouse statement-introducing
-// keyword that can legally follow a CTE list. The CTE-aware scanner in
-// containsMutationVerbAtTopLevel needs the union to identify *which* token
-// is the statement keyword — without it, ordinary identifiers in the CTE
-// list (table names, database names like the ClickHouse-built-in `system`)
-// can collide with mutation-verb names and false-positive the classifier.
+// nonMutationVerbs is the read counterpart to mutationVerbs. The CTE scanner
+// needs the union to identify *which* token starts the statement — otherwise
+// a CTE-list identifier matching a mutation verb name (e.g. `system`,
+// `alter`) false-positives the classifier.
 var nonMutationVerbs = map[string]struct{}{
 	"SELECT":   {},
 	"SHOW":     {},
@@ -207,31 +180,19 @@ var nonMutationVerbs = map[string]struct{}{
 	"CHECK":    {},
 }
 
-// containsMutationVerbAtTopLevel scans s for the statement-introducing
-// keyword at paren-depth 0, stepping over SQL string literals (`'…'` with
-// `”` escape), quoted identifiers (`"…"` and “ `…` “), parenthesized CTE
-// subqueries, and SQL comments. The CTE list contains ordinary identifiers
-// (CTE names, table/database names) that must not be matched as mutation
-// verbs — `system` would otherwise pattern-match `SYSTEM` and route a
-// `WITH … SELECT * FROM system.tables` read through `Exec` (silent empty-
-// array result instead of the actual rows). Two-part fix:
+// containsMutationVerbAtTopLevel scans s for the statement-introducing keyword
+// at paren-depth 0, stepping over string literals, quoted identifiers,
+// parenthesized CTE subqueries, and comments.
 //
-//  1. Skip identifiers whose next non-whitespace, non-comment token is
-//     `AS` (case-insensitive) or `(` — those are CTE definition names
-//     (with optional column list before AS). This catches the harder
-//     class where the CTE alias is itself a mutation-verb name
-//     (`WITH set AS (…) SELECT …`, `WITH alter AS (…) …`, etc.).
-//  2. Among the remaining identifiers, stop on the FIRST that's a
-//     known statement keyword (mutation OR read-class), and decide
-//     based on mutationVerbs membership.
+// CTE-name suppression: identifiers followed by `AS` or `(` are CTE names,
+// not statement keywords — skipped so a CTE alias that spells like a mutation
+// verb (`WITH set AS (…) SELECT …`) doesn't false-positive. Among remaining
+// tokens, the FIRST known statement keyword (mutation or non-mutation)
+// decides — returning based on mutationVerbs membership.
 //
-// Tokens that aren't CTE names and aren't statement keywords (RECURSIVE,
-// MATERIALIZED, scalar CTE aliases, etc.) are skipped silently. Returns
-// false if no statement keyword is found — the SQL is syntactically
-// incomplete or unrecognised; safer to treat as non-mutation than to
-// silently route an unknown verb through Exec (an Exec'd SELECT returns
-// `[]` with no error; a Query'd unrecognised statement surfaces a clear
-// error).
+// Returns false when no known keyword appears: safer to treat unknown SQL as
+// non-mutation (Query surfaces a clear error) than to Exec it (silent empty
+// array on a SELECT).
 func containsMutationVerbAtTopLevel(s string) bool {
 	depth := 0
 	i := 0
@@ -279,21 +240,12 @@ func containsMutationVerbAtTopLevel(s string) bool {
 			}
 			if depth == 0 {
 				kw := strings.ToUpper(s[start:i])
-				// Check non-mutation statement keywords (SELECT, SHOW,
-				// DESCRIBE, …) FIRST — these can legitimately be followed
-				// by `(` (e.g. `SELECT (1) FROM …`, `SELECT (a, b) FROM …`
-				// for tuple syntax), so we must not let the CTE-name
-				// lookahead below misclassify them as CTE aliases.
+				// Read keywords must be checked BEFORE the CTE-name
+				// lookahead — `SELECT (a, b) FROM …` (tuple syntax) would
+				// otherwise be classified as a CTE alias.
 				if _, ok := nonMutationVerbs[kw]; ok {
 					return false
 				}
-				// CTE name suppression: an identifier that ISN'T a
-				// non-mutation statement keyword and is followed by `AS`
-				// or `(` is a CTE definition name (with optional column
-				// list before AS). Skip without checking mutationVerbs
-				// — protects against CTE aliases that share a spelling
-				// with a mutation verb (`WITH set AS (...)`,
-				// `WITH alter AS (...)`, etc.).
 				if isCTENameLookahead(s, i) {
 					continue
 				}
@@ -321,12 +273,8 @@ func containsMutationVerbAtTopLevel(s string) bool {
 	return false
 }
 
-// isCTENameLookahead returns true if the next non-whitespace, non-comment
-// token at or after pos is `AS` (case-insensitive, word-boundary terminated)
-// or `(` — signaling that whatever identifier just ended at pos is a CTE
-// definition name (with optional column list before AS). Walks past space /
-// tab / newline / `--` line comments / `#` line comments / `/* … */` block
-// comments. Returns false on EOF or any other token.
+// isCTENameLookahead returns true when the next non-trivial token at or
+// after pos is `AS` or `(` — the identifier just before pos is a CTE name.
 func isCTENameLookahead(s string, pos int) bool {
 	i := pos
 	for i < len(s) {
@@ -366,11 +314,8 @@ func isCTENameLookahead(s string, pos int) bool {
 	return false
 }
 
-// stripLeadingSQLComments trims whitespace plus line comments (`-- …` and
-// MySQL-compat `# …`, both accepted by ClickHouse) and `/* block */`
-// comments from the front of sql, returning the remainder with no leading
-// whitespace. Unclosed block comments swallow the rest of the string —
-// matches what ClickHouse itself would do at parse time.
+// stripLeadingSQLComments trims whitespace + leading line/block comments.
+// Unclosed block comments swallow the rest of the string (matches ClickHouse).
 func stripLeadingSQLComments(sql string) string {
 	s := strings.TrimLeft(sql, " \t\r\n")
 	for {

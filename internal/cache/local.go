@@ -11,19 +11,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// L1 cache attribute sets — pre-allocated once so the hot path on each Get
-// stays free of per-call metric.WithAttributes/attribute.String slice allocs.
-//
-// Singleflight collapses are a SEPARATE concern from cache hits — the cache
-// layer doesn't see singleflight (that's the handler's wrapping around the
-// fill function). The cross-cutting singleflight counter
-// (wavehouse_query_singleflight_shared_total) lives at the handler level
-// in internal/api/structured_query.go and internal/api/pipes.go where shared
-// is actually observable.
-var (
-	cacheL1HitAttrs  = metric.WithAttributes(attribute.String("tier", "L1"))
-	cacheL1MissAttrs = metric.WithAttributes(attribute.String("tier", "L1"))
-)
+// cacheL1Attrs is pre-allocated so cache hot paths don't allocate per call.
+// Singleflight collapses are tracked at the handler level (where shared is
+// observable), not here.
+var cacheL1Attrs = metric.WithAttributes(attribute.String("tier", "L1"))
 
 // LocalCache is an L1 in-process cache backed by Ristretto.
 type LocalCache struct {
@@ -50,11 +41,11 @@ func (l *LocalCache) Get(ctx context.Context, key string, namespace string, scop
 
 	val, foundVal := l.cache.Get(cacheKey)
 	if !foundVal {
-		observability.CacheMisses.Add(ctx, 1, cacheL1MissAttrs)
+		observability.CacheMisses.Add(ctx, 1, cacheL1Attrs)
 		return nil, 0, nil
 	}
 	remaining, _ := l.cache.GetTTL(cacheKey)
-	observability.CacheHits.Add(ctx, 1, cacheL1HitAttrs)
+	observability.CacheHits.Add(ctx, 1, cacheL1Attrs)
 
 	return val, remaining, nil
 }

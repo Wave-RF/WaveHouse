@@ -684,3 +684,46 @@ func TestStartAutoRefresh_LogsAndContinuesOnError(t *testing.T) {
 	// the test pass off a stale buffer assertion on a never-run loop.
 	assert.Greater(t, conn.calls.Load(), int32(0), "ticker never fired Refresh")
 }
+
+func TestClassifyValidationError(t *testing.T) {
+	t.Parallel()
+	schema := &TableSchema{Name: "events", Columns: []Column{
+		{Name: "id", Type: "UInt64", IsNullable: false},
+		{Name: "name", Type: "String", IsNullable: false},
+		{Name: "ts", Type: "DateTime", IsNullable: false, HasDefault: true},
+	}}
+	cases := []struct {
+		name string
+		data map[string]any
+		want string
+	}{
+		{"valid", map[string]any{"id": float64(1), "name": "a"}, ""},
+		{"unknown column", map[string]any{"id": float64(1), "name": "a", "bogus": 1}, "unknown_field"},
+		{"missing required", map[string]any{"id": float64(1)}, "missing_required"},
+		{"null on non-nullable", map[string]any{"id": float64(1), "name": nil}, "null_violation"},
+		{"type mismatch", map[string]any{"id": "not a number", "name": "a"}, "type_mismatch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := Validate(schema, tc.data)
+			if tc.want == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "", ClassifyValidationError(err))
+				return
+			}
+			require.Error(t, err)
+			assert.Equal(t, tc.want, ClassifyValidationError(err))
+		})
+	}
+}
+
+func TestClassifyValidationError_Nil(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "", ClassifyValidationError(nil))
+}
+
+func TestClassifyValidationError_Other(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "other", ClassifyValidationError(errors.New("something else")))
+}

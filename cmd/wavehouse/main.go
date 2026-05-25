@@ -46,13 +46,10 @@ func main() {
 	os.Exit(run())
 }
 
-// run executes the binary and returns a process exit code. Using a
-// separate function (rather than os.Exit directly in main) ensures deferred
-// cleanups — especially OTEL flush — still run before the process exits.
+// run executes the binary and returns a process exit code; deferred cleanups
+// (especially OTEL flush) only run because we don't call os.Exit directly.
 func run() int {
-	// Pre-config bootstrap logger: stdout-only at the configured WH_LOG_FORMAT
-	// (TTY-detected by default). Until config.Load succeeds we can't know the
-	// resolved level, so we start at info — enough to surface a config error.
+	// Bootstrap logger before config: stdout-only at WH_LOG_FORMAT, info level.
 	bootLevel := &slog.LevelVar{}
 	bootLevel.Set(slog.LevelInfo)
 	bootFormat := observability.ResolveLogFormat(os.Getenv("WH_LOG_FORMAT"))
@@ -101,17 +98,14 @@ func run() int {
 	logLevel := &slog.LevelVar{}
 	logLevel.Set(level)
 
-	// Re-install the stdout logger at the configured level + format. Until
-	// InitProvider succeeds this is stdout-only; the OTel fanout is wired
-	// below after the provider is up.
+	// Re-install stdout logger at the resolved level + format; OTel fanout
+	// wires in below once InitProvider succeeds.
 	logFormat := observability.ResolveLogFormat(cfg.Logging.Format)
 	logger = observability.NewBootstrapLogger(serviceName, logFormat, logLevel)
 	slog.SetDefault(logger)
 
 	var promHandler http.Handler
-	// Provider init runs whenever either OTLP push or Prometheus exposition is
-	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
-	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
+	// Either OTLP push OR Prometheus exposition triggers provider init.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
 			Endpoint:          cfg.OTel.Addr,
@@ -126,16 +120,14 @@ func run() int {
 		} else {
 			promHandler = ph
 			defer func() {
-				// Bound shutdown so an unreachable collector doesn't hang
-				// process exit. The OTel SDK's batch processors don't fully
-				// honor the context deadline during gRPC retry/backoff.
+				// Bound shutdown — OTel batch processors don't honor ctx
+				// fully during gRPC retry/backoff.
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				_ = otelShutdown(ctx)
 			}()
 
-			// Only swap to the OTLP-aware logger when OTLP logs are wired up;
-			// Prometheus-only mode keeps the stdout-only handler set earlier.
+			// Swap to the OTLP-aware logger only when OTLP logs are on.
 			if cfg.OTel.Enabled && cfg.OTel.Logs.Enabled {
 				otelLogger := observability.NewLogger(serviceName, logLevel, logFormat, cfg.OTel.Logs.SampleRate)
 				logger = otelLogger.With(
@@ -235,10 +227,8 @@ func run() int {
 	}
 	defer func() { _ = embeddedMQ.Close() }()
 
-	// Only register system metric gauges when a real MeterProvider is in
-	// place — otherwise `otel.GetMeterProvider()` returns the no-op SDK
-	// provider and RegisterCallback silently no-ops, making this look
-	// authoritative when it's actually doing nothing.
+	// Skip when no real MeterProvider is installed — otherwise the no-op
+	// SDK provider silently swallows the RegisterCallback.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
 		if err := observability.RegisterSystemMetrics(observability.SystemMetricSources{
 			NATS:         embeddedMQ.GetServer(),
@@ -352,9 +342,8 @@ func run() int {
 	}
 
 	// TODO: is this really the best/right way to do this?
-	// /v1/admin/query proxies straight to ClickHouse over HTTP — no native
-	// driver involvement. Construct the base URL from the same fields the
-	// ingest worker uses, defaulting the scheme to http if blank.
+	// /v1/admin/query proxies to ClickHouse HTTP; build the base URL from
+	// the same fields the ingest worker uses.
 	queryHost, _, err := net.SplitHostPort(cfg.ClickHouse.Addr)
 	if err != nil {
 		queryHost = cfg.ClickHouse.Addr

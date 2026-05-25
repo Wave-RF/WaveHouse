@@ -18,9 +18,8 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// sfSharedStructuredAttrs is the static label set for wavehouse_query_singleflight_shared_total
-// records produced by this handler. Pre-allocated so the hot path on a
-// coalesced request doesn't allocate.
+// sfSharedStructuredAttrs is pre-allocated to keep the coalesced-request
+// hot path alloc-free.
 var sfSharedStructuredAttrs = metric.WithAttributes(attribute.String("surface", "structured_query"))
 
 // StructuredQueryHandler handles POST /v1/query?table={table}

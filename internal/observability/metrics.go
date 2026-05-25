@@ -12,10 +12,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// clampUint64 saturates a uint64 to int64's positive range. JetStream message
-// counts are uint64 in the API but never realistically exceed int64's range;
-// clamp rather than wrap on the off-chance an integer-overflow bug elsewhere
-// produces a nonsense huge value.
+// clampUint64 saturates to int64's positive range. JetStream counts are
+// uint64 but never realistically exceed int64; clamp rather than wrap.
 func clampUint64(v uint64) int64 {
 	if v > math.MaxInt64 {
 		return math.MaxInt64
@@ -23,24 +21,21 @@ func clampUint64(v uint64) int64 {
 	return int64(v)
 }
 
-// SystemMetricSources is the set of live runtime components that the
-// system-metric scraper inspects on each callback. Each field is independently
-// optional — nil sources are skipped at scrape time rather than refused at
-// registration, so partial deployments (Prometheus-only, no dedupe, etc.)
-// don't trip on missing wiring.
+// SystemMetricSources collects live runtime components for the scraper.
+// Each field is independently optional — nil sources are skipped at scrape
+// time, not refused at registration.
 type SystemMetricSources struct {
 	NATS         *server.Server
 	JS           jetstream.JetStream
 	Dedup        dedupe.Deduplicator
-	StreamName   string // primary ingest stream — empty disables DLQ + consumer-pending probes
+	StreamName   string // primary ingest stream — empty disables consumer-pending probe
 	DLQStream    string // dead-letter stream — empty disables DLQ-depth probe
 	ConsumerName string // durable consumer on StreamName — empty disables consumer-pending probe
 }
 
-// RegisterSystemMetrics creates asynchronous gauges that periodically pull
-// stats from embedded systems (NATS, JetStream, Pebble) and push them to
-// OpenTelemetry. Callback runs at the MeterProvider's read interval (15s
-// for our OTLP push reader; on-demand for the Prometheus reader).
+// RegisterSystemMetrics wires asynchronous gauges that pull from NATS,
+// JetStream, and Pebble. The callback fires at the MeterProvider's read
+// interval (15s for OTLP push; on-demand for Prometheus).
 func RegisterSystemMetrics(src SystemMetricSources) error {
 	m := Meter()
 
@@ -60,9 +55,8 @@ func RegisterSystemMetrics(src SystemMetricSources) error {
 	if err != nil {
 		return err
 	}
-	// Tier S — JetStream consumer lag is the leading indicator for ingest
-	// backpressure: ClickHouse falling behind shows up here long before the
-	// stream fills and we start returning 503s.
+	// Consumer lag is the leading indicator for ingest backpressure — shows
+	// up here long before the stream fills and starts returning 503s.
 	consumerPending, err := m.Int64ObservableGauge(
 		"wavehouse_jetstream_consumer_pending",
 		metric.WithDescription("JetStream consumer pending message count (queue depth waiting on the ingest worker)"),
@@ -70,9 +64,6 @@ func RegisterSystemMetrics(src SystemMetricSources) error {
 	if err != nil {
 		return err
 	}
-	// Tier A — DLQ depth complements bentoDLQDropped: dropped is "we lost a
-	// message", depth is "the dead-letter queue has N messages someone
-	// should look at".
 	dlqDepth, err := m.Int64ObservableGauge(
 		"wavehouse_dlq_depth",
 		metric.WithDescription("Number of messages currently in the DLQ stream"),
@@ -97,9 +88,9 @@ func RegisterSystemMetrics(src SystemMetricSources) error {
 			}
 		}
 
-		// JetStream probes — best-effort, surface non-NotFound errors at
-		// DEBUG so a transient failure doesn't spam logs but a persistent
-		// misconfiguration is debuggable.
+		// JetStream probes are best-effort. Non-NotFound errors log at
+		// DEBUG so transient failures don't spam but persistent
+		// misconfiguration stays debuggable.
 		if src.JS != nil && src.StreamName != "" && src.ConsumerName != "" {
 			if cons, err := src.JS.Consumer(ctx, src.StreamName, src.ConsumerName); err == nil {
 				if info, err := cons.Info(ctx); err == nil {

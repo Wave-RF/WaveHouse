@@ -31,13 +31,8 @@ func NewSweeper(js jetstream.JetStream, gapWindow time.Duration, logger *slog.Lo
 	return &Sweeper{
 		js:        js,
 		gapWindow: gapWindow,
-		// Pre-tag the logger so every record from sweep() / findGapSequence()
-		// carries `component=ingest/sweeper` regardless of whether the call
-		// site uses the Context variant. (observability.WithComponent on the
-		// ctx is the alternative — but TraceHandler only stamps from ctx, and
-		// the sweeper uses bare s.logger.X(...) which slog routes through
-		// context.Background(). Pre-tagging is the simpler fix for a worker
-		// that owns its own logger.)
+		// Pre-tag because sweep() uses bare s.logger.X (no ctx), so
+		// TraceHandler can't stamp component from observability.WithComponent.
 		logger: logger.With("component", "ingest/sweeper"),
 	}
 }

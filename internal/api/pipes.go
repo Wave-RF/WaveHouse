@@ -17,9 +17,7 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// sfSharedPipesAttrs is the static label set for the singleflight-shared
-// counter from this handler. See sfSharedStructuredAttrs in structured_query.go
-// for the rationale.
+// sfSharedPipesAttrs is pre-allocated; see structured_query.go for rationale.
 var sfSharedPipesAttrs = metric.WithAttributes(attribute.String("surface", "pipes"))
 
 // PipesHandler handles named query pipe endpoints.
@@ -93,21 +91,20 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check role permissions.
+	// Empty role must NOT short-circuit the allowlist check — that would
+	// fail open. Empty allowlist entries must NOT match an empty role either.
 	if len(q.AllowedRoles) > 0 {
 		role := RoleFromContext(r.Context())
-		if role != "" {
-			allowed := false
-			for _, ar := range q.AllowedRoles {
-				if ar == role || ar == "*" {
-					allowed = true
-					break
-				}
+		allowed := false
+		for _, ar := range q.AllowedRoles {
+			if ar == "*" || (ar != "" && ar == role) {
+				allowed = true
+				break
 			}
-			if !allowed {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
+		}
+		if !allowed {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
 		}
 	}
 

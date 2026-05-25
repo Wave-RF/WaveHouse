@@ -14,9 +14,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// newTestTracer returns a locally-scoped tracer that always samples. Using
-// the global tracer here would be flaky because other tests in this package
-// (InitProvider) swap the global for a ratio-sampled one.
+// newTestTracer is a locally-scoped, always-sampling tracer — the global
+// would be flaky because InitProvider tests swap it for ratio-sampled.
 func newTestTracer(_ *testing.T) trace.Tracer {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	return tp.Tracer("observability-test")
@@ -30,10 +29,6 @@ func TestNewLogger_JSON(t *testing.T) {
 
 	log := NewLogger("api", lvl, LogFormatJSON, 0.10)
 	require.NotNil(t, log)
-	// Component tag is added via With; confirm the attribute is present by
-	// emitting a record and re-parsing it through a capturing handler isn't
-	// practical — the fanout writes to stdout. Instead, just confirm the
-	// factory returns a usable *slog.Logger.
 	log.Info("hello")
 }
 
@@ -59,15 +54,10 @@ func TestResolveLogFormat(t *testing.T) {
 		{" Text ", LogFormatText},
 		{"json", LogFormatJSON},
 		{"JSON", LogFormatJSON},
-		// "auto" resolves dynamically based on whether stdout is a TTY when
-		// the test runs. In `go test` without a -v terminal, stdout is a
-		// pipe, so we get JSON. Asserting concrete TTY behavior would
-		// require swapping os.Stdout, which is more setup than the value
-		// adds — we instead assert resolution is one of the two known
-		// values.
-		// The explicit non-auto cases above cover the determinism.
-		{"unknown-thing", LogFormatJSON}, // defense-in-depth fallthrough
-		{"", LogFormatJSON},              // empty string → auto → tested separately
+		// "auto" resolves at runtime based on stdout TTY — `go test` pipes,
+		// so we get JSON. Assert membership only for "auto"/"".
+		{"unknown-thing", LogFormatJSON},
+		{"", LogFormatJSON},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -87,13 +77,13 @@ func TestNewBootstrapLogger(t *testing.T) {
 
 	lvl := &slog.LevelVar{}
 	lvl.Set(slog.LevelDebug)
-	// Bootstrap logger must produce a non-nil *slog.Logger with the requested
-	// component attached, and must not panic for either format. We don't
-	// inspect stdout because the JSON handler writes there directly.
 	for _, format := range []LogFormat{LogFormatText, LogFormatJSON} {
-		log := NewBootstrapLogger("boot", format, lvl)
-		require.NotNil(t, log)
-		log.Info("bootstrap message", "format", format)
+		t.Run(string(format), func(t *testing.T) {
+			t.Parallel()
+			log := NewBootstrapLogger("boot", format, lvl)
+			require.NotNil(t, log)
+			log.Info("bootstrap message", "format", format)
+		})
 	}
 }
 
@@ -126,18 +116,13 @@ func TestTraceHandler_NoSpan(t *testing.T) {
 	log := slog.New(h)
 	log.InfoContext(context.Background(), "hello")
 
-	out := buf.String()
-	// Without an active span, the handler should not fabricate trace/span IDs.
-	assert.False(t, strings.Contains(out, "trace_id="), "unexpected trace_id in %q", out)
+	assert.False(t, strings.Contains(buf.String(), "trace_id="))
 }
 
 func TestOTLPSamplerFn_WarnFloor(t *testing.T) {
 	t.Parallel()
 
-	// At the most aggressive setting (rate=0.0) WARN+ must still report
-	// 1.0 — this is the safety floor that makes the configurable rate
-	// safe to expose. If this ever returns the rate for WARN/ERROR,
-	// production loses error visibility silently.
+	// rate=0.0 is the most aggressive setting; WARN+ must still return 1.0.
 	s := otlpSamplerFn(0.0)
 
 	cases := []struct {
@@ -190,10 +175,8 @@ func TestOTLPSamplerFn_PassesThroughRateForBelowWarn(t *testing.T) {
 	}
 }
 
-// Regression: NewLogger ends with `.With("component", ...)`, which calls
-// Handler.WithAttrs. If TraceHandler doesn't implement WithAttrs/WithGroup,
-// promotion to the embedded interface returns the unwrapped inner handler and
-// stdout trace-ID injection silently breaks.
+// Regression: without WithAttrs/WithGroup overrides, Logger.With promotes
+// to the embedded handler and trace-ID injection silently breaks.
 func TestTraceHandler_WithAttrsPreservesWrapping(t *testing.T) {
 	t.Parallel()
 
@@ -269,12 +252,8 @@ func TestTraceHandler_InvalidSpan(t *testing.T) {
 	base := slog.NewTextHandler(&buf, nil)
 	h := &TraceHandler{Handler: base}
 
-	// Manually install an invalid span context in the context. IsValid() returns
-	// false when either TraceID or SpanID is zero.
-	sc := trace.NewSpanContext(trace.SpanContextConfig{})
-	ctx := trace.ContextWithSpanContext(context.Background(), sc)
-
-	log := slog.New(h)
-	log.InfoContext(ctx, "hello")
+	// Zero TraceID/SpanID → IsValid() is false → no injection.
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{}))
+	slog.New(h).InfoContext(ctx, "hello")
 	assert.NotContains(t, buf.String(), "trace_id=")
 }

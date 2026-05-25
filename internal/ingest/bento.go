@@ -35,9 +35,8 @@ import (
 )
 
 var (
-	// Pre-existing bento-specific counters. Naming retained for dashboard
-	// continuity; the new cross-cutting metrics (ingest duration, CH
-	// duration/errors) live in observability/instruments.go.
+	// Pre-existing bento-specific counters — names retained for dashboard
+	// continuity. New cross-cutting metrics live in observability/instruments.go.
 	bentoMeter              = otel.Meter("wavehouse-bento")
 	bentoEventsProcessed, _ = bentoMeter.Int64Counter(
 		"wavehouse_bento_events_processed",
@@ -52,12 +51,7 @@ var (
 	registerErr  error
 )
 
-// clickhouseErrCode parses ClickHouse's "Code: 60. DB::Exception: ..." prefix
-// out of a non-2xx response body. Returns 0 when the body has no recognizable
-// code (e.g. a network-level failure surfaced from the HTTP client, or an
-// empty body). The numeric code goes onto the wavehouse_clickhouse_errors_total
-// counter's `clickhouse_code` label so dashboards can split out "table doesn't
-// exist" (60) from "too many parts" (252) etc. without parsing message text.
+// clickhouseErrCode pulls "Code: N" off the ClickHouse error body, or "0".
 var clickhouseCodeRe = regexp.MustCompile(`^Code: (\d+)`)
 
 func clickhouseErrCode(body []byte) string {
@@ -67,9 +61,8 @@ func clickhouseErrCode(body []byte) string {
 	return "0"
 }
 
-// parseReceivedTimestamp extracts the API-side ingest timestamp from message
-// metadata. Returns the zero time when the metadata is missing or unparseable
-// — callers must check IsZero() before computing a duration.
+// parseReceivedTimestamp returns the API-side ingest timestamp from message
+// metadata, or zero time on missing/unparseable input.
 func parseReceivedTimestamp(m *service.Message) time.Time {
 	rt, ok := m.MetaGet("received_timestamp")
 	if !ok || rt == "" {
@@ -103,15 +96,11 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 			return nil, nil, service.ErrNotConnected
 		}
 
+		// ExtractNATS adds W3C trace propagation; WithComponent stamps
+		// `component=ingest/bento` for the per-message logs below.
 		msgCtx := observability.ExtractNATS(ctx, m)
-		// Stamp the bento component on the per-message context so every
-		// slog.XContext call below carries `component=ingest/bento`.
-		// ExtractNATS only adds W3C trace propagation; without this stamp
-		// the high-volume operational logs (one per inbound event) emit
-		// without the component field that the rest of the binary advertises.
 		msgCtx = observability.WithComponent(msgCtx, "ingest/bento")
-		// Per-message receipt is DEBUG: at ingest scale this fires for every
-		// inbound event. Keeping it at INFO floods stdout and any log shipper.
+		// DEBUG: one line per inbound row at production scale.
 		slog.DebugContext(msgCtx, "received message from JetStream", "subject", m.Subject())
 
 		var raw struct {
@@ -122,19 +111,15 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		}
 		if err := json.Unmarshal(m.Data(), &raw); err != nil {
 			slog.ErrorContext(msgCtx, "rejecting message: invalid JSON", "error", err)
-			// No parseable timestamp available — invalid JSON means we
-			// never extracted raw.ReceivedTimestamp. Skip the histogram;
-			// the drop is still visible via the WARN log and (eventually)
-			// the broader bento_events_dropped counter.
+			// Invalid JSON → no parsed timestamp → no histogram record.
 			if doubleAckErr := m.DoubleAck(msgCtx); doubleAckErr != nil {
 				slog.WarnContext(msgCtx, "double ack failed for dropped message", "error", doubleAckErr)
 			}
 			continue
 		}
 
-		// Parse the receive timestamp once for any subsequent drop-path
-		// histogram records. Empty / unparseable yields a zero time which
-		// recordIngestDurationFromTS handles as "skip".
+		// Parse once for the subsequent drop-path histogram records.
+		// Zero time → recordIngestDurationFromTS skips.
 		receivedTS, _ := time.Parse(time.RFC3339Nano, raw.ReceivedTimestamp)
 
 		// Reject messages with no table name.
@@ -176,19 +161,17 @@ func (j *jsInput) Read(ctx context.Context) (*service.Message, service.AckFunc, 
 		ackFn := func(ackCtx context.Context, err error) error {
 			if err != nil {
 				slog.ErrorContext(msgCtx, "batch processing failed", "error", err)
-				// Log the Nak failure but return nil to Bento so it doesn't treat the Nak-error as a crash
+				// Return nil to Bento so it doesn't treat a Nak failure as a crash.
 				if nakErr := m.Nak(); nakErr != nil {
 					slog.WarnContext(msgCtx, "nak failed for unprocessed batch", "error", nakErr)
 				}
 				return nil
 			}
 
-			// Per-message ack is DEBUG for the same reason as the receive log —
-			// at production load this fires once per row.
+			// DEBUG: one line per ack'd row.
 			slog.DebugContext(msgCtx, "message batch acknowledged by ClickHouse")
-			// Counter increment uses msgCtx (component-stamped) rather than
-			// Bento's raw ackCtx so trace_id/span_id and component propagate
-			// onto the exemplar for the data point.
+			// msgCtx (not ackCtx) so the exemplar carries trace_id/span_id +
+			// the bento component label.
 			bentoEventsProcessed.Add(msgCtx, 1, metric.WithAttributes(
 				attribute.String("table", raw.TableName),
 			))
@@ -215,9 +198,8 @@ func (d *dlqOutput) Wait(ctx context.Context) error    { return nil }
 func (d *dlqOutput) Close(ctx context.Context) error   { return nil }
 func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	for _, m := range batch {
-		// Stamp component on the per-message context — see jsInput.Read for
-		// the same pattern. m.Context() preserves the trace context from the
-		// inbound batch but does not carry the bento component label.
+		// m.Context() carries the inbound trace context but not the
+		// component label; stamp it.
 		msgCtx := observability.WithComponent(m.Context(), "ingest/bento")
 		data, _ := m.AsBytes()
 
@@ -234,8 +216,8 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 
 		if _, err := d.js.Publish(ctx, subject, data); err != nil {
 			slog.ErrorContext(msgCtx, "NATS DLQ publish failed — message dropped", "subject", subject, "error", err)
-			// msgCtx (not ctx) so metric exemplars carry the bento component
-			// label and trace_id/span_id from the message's propagation header.
+			// msgCtx (not ctx) so metric exemplars carry the component +
+			// trace context from the inbound NATS header.
 			bentoDLQDropped.Add(msgCtx, 1, metric.WithAttributes(attribute.String("table", tableName)))
 			recordIngestDuration(msgCtx, m, tableName, "dropped")
 		} else {
@@ -246,25 +228,25 @@ func (d *dlqOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) 
 	return nil
 }
 
-// recordIngestDuration records the end-to-end ingest latency for one message,
-// from the API handler's receive timestamp to the present moment. Skipped
-// silently when the receive timestamp is missing/unparseable — happens for
-// drop paths inside the worker that never see a well-formed envelope.
+// recordIngestDuration records the end-to-end ingest latency for one message
+// from the API handler's receive timestamp to now. No-op on missing TS.
 func recordIngestDuration(ctx context.Context, m *service.Message, table, outcome string) {
 	recordIngestDurationFromTS(ctx, parseReceivedTimestamp(m), table, outcome)
 }
 
 // recordIngestDurationFromTS records the same histogram as recordIngestDuration
-// but takes the parsed timestamp directly — needed for the early-reject paths
-// in jsInput.Read where we have raw.ReceivedTimestamp but not yet a
-// service.Message. Skipped silently when ts is zero (best-effort: the
-// invalid-JSON path has no parsed timestamp and produces no record, but the
-// empty-table-name and empty-payload paths do).
+// but takes the parsed timestamp directly — used by jsInput.Read early-reject
+// paths that have raw.ReceivedTimestamp but no service.Message yet. Skips on
+// zero ts (invalid-JSON path) or future ts (clock skew → negative latency).
 func recordIngestDurationFromTS(ctx context.Context, ts time.Time, table, outcome string) {
 	if ts.IsZero() {
 		return
 	}
-	observability.IngestDuration.Record(ctx, time.Since(ts).Seconds(),
+	latencySec := time.Since(ts).Seconds()
+	if latencySec < 0 {
+		return
+	}
+	observability.IngestDuration.Record(ctx, latencySec,
 		metric.WithAttributes(
 			attribute.String("table", table),
 			attribute.String("outcome", outcome),
@@ -290,9 +272,6 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 		return nil
 	}
 
-	// Stamp component on the batch-scoped context so the slog calls below
-	// (and the descendants we derive via tracer.Start) carry
-	// `component=ingest/bento`.
 	ctx = observability.WithComponent(ctx, "ingest/bento")
 
 	firstMsg := batch[0]
@@ -402,6 +381,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	req, err := http.NewRequestWithContext(reqCtx, "POST", u.String(), &buf)
 	if err != nil {
 		chSpan.RecordError(err)
+		observability.ClickHouseDuration.Record(reqCtx, time.Since(insertStart).Seconds(), chAttrs)
 		observability.ClickHouseErrors.Add(reqCtx, 1, metric.WithAttributes(
 			attribute.String("operation", "insert"),
 			attribute.String("clickhouse_code", "0"),
@@ -445,10 +425,7 @@ func (c *clickhouseOutput) WriteBatch(ctx context.Context, batch service.Message
 	}
 
 	observability.ClickHouseDuration.Record(reqCtx, time.Since(insertStart).Seconds(), chAttrs)
-	// Record end-to-end ingest duration for every successfully committed row
-	// in the batch. We emit per-row rather than per-batch so the histogram
-	// reflects per-event SLO, not per-batch (which would understate the
-	// batch's actual fan-out to N rows).
+	// Per-row (not per-batch) so the histogram reflects per-event SLO.
 	for _, m := range batch {
 		recordIngestDuration(reqCtx, m, tableName, "committed")
 	}

@@ -242,39 +242,25 @@ func run() error {
 	return vitestErr
 }
 
-// suppressLogDumpReason returns a short human-readable reason when the
-// orchestrator should skip the 80-line wavehouse log tail it would otherwise
-// stream to stderr on vitest failure. Returns "" when the dump should fire.
-//
-// Suppress when:
-//   - WH_E2E_LOG_DUMP=0 / false / no — operator forced off (commonly because
-//     they're already tailing wavehouse-cov.log in another pane).
-//   - WH_OTEL_ENABLED=true AND a collector responds at WH_OTEL_ADDR — the
-//     operator has an o11y UI (Aspire, Grafana LGTM) ingesting these logs in
-//     a more useful form, and tail-on-stderr is just noise.
-//
-// We try-dial the collector with a tight timeout rather than trusting
-// WH_OTEL_ENABLED alone — `make test-e2e` sets WH_OTEL_ENABLED=true to keep
-// the OTel branch covered, but the collector is usually NOT running, in
-// which case the dump remains the only path to a debuggable CI failure.
+// suppressLogDumpReason returns a short reason when the orchestrator should
+// skip the 80-line vitest-failure log tail, or "" when it should fire.
+// Suppressed when WH_E2E_LOG_DUMP=0/false/no, or when WH_OTEL_ENABLED=true and
+// a collector is reachable at WH_OTEL_ADDR (operator has o11y UI ingesting).
+// The dial is a tight probe because `make test-e2e` sets WH_OTEL_ENABLED=true
+// even when no collector is running.
 func suppressLogDumpReason() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WH_E2E_LOG_DUMP"))) {
 	case "0", "false", "no", "off":
 		return "WH_E2E_LOG_DUMP=" + os.Getenv("WH_E2E_LOG_DUMP")
 	}
-	if strings.ToLower(os.Getenv("WH_OTEL_ENABLED")) != "true" {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("WH_OTEL_ENABLED"))) != "true" {
 		return ""
 	}
 	addr := os.Getenv("WH_OTEL_ADDR")
 	if addr == "" {
 		return ""
 	}
-	// #nosec G404 G704 — addr is operator-controlled config (WH_OTEL_ADDR),
-	// not user input. The probe is a TCP connect-and-close to a configured
-	// internal collector; the orchestrator's whole job is to talk to that
-	// address. No request payload is sent. (*net.Dialer).DialContext is
-	// used so a slow listener doesn't pin orchestrator shutdown past the
-	// 250ms timeout.
+	// #nosec G404 G704 — addr is operator-controlled config, not user input.
 	probeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	var d net.Dialer

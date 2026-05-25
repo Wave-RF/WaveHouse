@@ -14,10 +14,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// TestHTTPMetricsMiddleware_RecordsLabeledHistogram pins the middleware's
-// contract: every non-skipped request produces a histogram sample with
-// route/method/status_class labels. Without this, a refactor that broke the
-// chi RoutePattern lookup would silently lose all per-route latency data.
+// Pins: non-skipped requests record a histogram sample with route/method/
+// status_class. Without this, a broken RoutePattern lookup silently drops
+// all per-route latency data.
 func TestHTTPMetricsMiddleware_RecordsLabeledHistogram(t *testing.T) {
 	// Not parallel — swaps the global MeterProvider.
 	savedMP := otel.GetMeterProvider()
@@ -59,17 +58,15 @@ func TestHTTPMetricsMiddleware_RecordsLabeledHistogram(t *testing.T) {
 	route, _ := attrs.Value("route")
 	method, _ := attrs.Value("method")
 	statusClass, _ := attrs.Value("status_class")
-	// The {name} parameter must collapse into the chi RoutePattern, not the
-	// raw URL — otherwise cardinality explodes on unique user values.
+	// {name} must collapse into the RoutePattern, not blow cardinality.
 	assert.Equal(t, "/v1/echo/{name}", route.AsString())
 	assert.Equal(t, http.MethodGet, method.AsString())
 	assert.Equal(t, "4xx", statusClass.AsString())
 }
 
-// TestHTTPMetricsMiddleware_SkipsProbeAndStreamPaths confirms the skip set
-// (/health, /ready, /v1/stream/*, metrics scrape path). Cardinality control:
-// scrape-path metrics would create a self-loop; long-lived stream metrics
-// would record one sample per disconnect with skewed latency.
+// /health, /ready, /v1/stream/*, and the scrape path must all skip the
+// histogram. Scrape-path samples create a self-loop; long-lived streams
+// record one skewed sample per disconnect.
 func TestHTTPMetricsMiddleware_SkipsProbeAndStreamPaths(t *testing.T) {
 	savedMP := otel.GetMeterProvider()
 	reader := sdkmetric.NewManualReader()
@@ -87,9 +84,20 @@ func TestHTTPMetricsMiddleware_SkipsProbeAndStreamPaths(t *testing.T) {
 	r.Get("/metrics", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	r.Get("/v1/stream/sse", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
-	for _, path := range []string{"/health", "/ready", "/metrics", "/v1/stream/sse"} {
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil))
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"health", "/health"},
+		{"ready", "/ready"},
+		{"metrics", "/metrics"},
+		{"stream_sse", "/v1/stream/sse"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, tc.path, nil))
+		})
 	}
 
 	var rm metricdata.ResourceMetrics

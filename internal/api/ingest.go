@@ -60,8 +60,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		slog.WarnContext(ctx, "unknown table requested", "table", table)
+		// Collapse unknown tables to a constant so a flood of bogus names
+		// doesn't blow up `table` label cardinality on the rejection counter.
 		observability.SchemaRejected.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("table", table),
+			attribute.String("table", "__unknown__"),
 			attribute.String("reason", "unknown_table"),
 		))
 		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
@@ -79,9 +81,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Schema validation span — bounded work, gives operators a way to spot
-	// validation cost when ingest latency unexpectedly spikes (e.g. very
-	// wide tables, deep nested validation).
+	// schema_validation span — surfaces validation cost when ingest latency
+	// spikes on wide tables / deep validation.
 	_, validateSpan := tracer.Start(ctx, "schema_validation",
 		trace.WithAttributes(attribute.String("table", table)),
 	)
@@ -199,10 +200,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per-request success was previously logged at INFO — at ingest scale
-	// that's one stdout line per row. Demoted to DEBUG; success is the
-	// expected path and is already visible via the wavehouse_ingest_*
-	// histograms and the HTTP-request middleware metric.
+	// DEBUG — one line per row at scale; lifecycle visible via metrics.
 	slog.DebugContext(ctx, "event ingested", "table", table, "subject", subject)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
