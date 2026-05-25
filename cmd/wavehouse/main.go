@@ -323,8 +323,7 @@ func run() int {
 
 	// Build handlers.
 	js := embeddedMQ.JetStream()
-	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
-	ingestHandler.PolicyStore = policyStore
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, policyStore)
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
@@ -353,11 +352,9 @@ func run() int {
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
 
-	sseHandler := api.NewSSEHandler(hub, js)
-	sseHandler.PolicyStore = policyStore
+	sseHandler := api.NewSSEHandler(hub, js, policyStore)
 
-	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
-	wsHandler.PolicyStore = policyStore
+	wsHandler := api.NewWSHandler(hub, js, policyStore, cfg.Server.CORSAllowedOrigins)
 
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
@@ -368,7 +365,7 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
+		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
 		AuthMW: auth.Middleware(auth.Config{
 			JWTSecret: cfg.Auth.JWTSecret,
@@ -380,10 +377,6 @@ func run() int {
 		CORSOrigins: cfg.Server.CORSAllowedOrigins,
 		LogLevel:    logLevel,
 	}
-
-	// Pipes resolves an empty role to the policy default_role; give it the
-	// store (mirrors the ingest/SSE/WS handlers above).
-	deps.Pipes.PolicyStore = policyStore
 
 	// Prometheus /metrics routing: same-port → mount on API router,
 	// dedicated port → spin a sidecar HTTP server below.

@@ -317,13 +317,13 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 	hub := api.NewHub()
 
 	deps := api.Dependencies{
-		Ingest: api.NewIngestHandler(registry, embeddedMQ),
+		Ingest: api.NewIngestHandler(registry, embeddedMQ, nil),
 		// /v1/admin/query proxies straight to ClickHouse's HTTP interface,
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
 		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
-		SSE:    api.NewSSEHandler(hub, js),
-		WS:     api.NewWSHandler(hub, js, nil),
+		SSE:    api.NewSSEHandler(hub, js, nil),
+		WS:     api.NewWSHandler(hub, js, nil, nil),
 		Health: api.NewHealthHandler(ch.conn),
 		Schema: api.NewSchemaHandler(registry),
 		DLQ:    api.NewDLQHandler(js, logger),

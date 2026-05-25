@@ -26,8 +26,8 @@ type PipesHandler struct {
 	maxQueryTimeout time.Duration
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
-	return &PipesHandler{Store: store, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
+func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
 }
 
 // List returns all named queries (admin endpoint).

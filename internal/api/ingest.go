@@ -30,8 +30,8 @@ type IngestHandler struct {
 	PolicyStore *policy.Store
 }
 
-func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *IngestHandler {
-	return &IngestHandler{Registry: registry, Publisher: pub}
+func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, policyStore *policy.Store) *IngestHandler {
+	return &IngestHandler{Registry: registry, Publisher: pub, PolicyStore: policyStore}
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {

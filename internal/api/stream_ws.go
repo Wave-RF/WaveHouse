@@ -41,8 +41,8 @@ type WSHandler struct {
 	AllowedOrigins []string
 }
 
-func NewWSHandler(hub *Hub, js jetstream.JetStream, allowedOrigins []string) *WSHandler {
-	return &WSHandler{Hub: hub, JS: js, AllowedOrigins: allowedOrigins}
+func NewWSHandler(hub *Hub, js jetstream.JetStream, policyStore *policy.Store, allowedOrigins []string) *WSHandler {
+	return &WSHandler{Hub: hub, JS: js, PolicyStore: policyStore, AllowedOrigins: allowedOrigins}
 }
 
 // wsCommand represents an in-band subscribe/unsubscribe command.
