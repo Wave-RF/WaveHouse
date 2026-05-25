@@ -48,6 +48,7 @@ export class TableRef<Row = Record<string, unknown>> {
     opts?: { signal?: AbortSignal },
   ): Promise<Result<InsertResult>> {
     if (Array.isArray(data)) {
+      // TODO: Switch to NDJSON
       // FAST: Fire all HTTP requests concurrently instead of waiting for each one
       const promises = data.map((row) =>
         request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {

@@ -25,10 +25,11 @@ func pipesRequest(t *testing.T, method, path, name string, body any) *http.Reque
 	} else {
 		r = httptest.NewRequestWithContext(context.Background(), method, path, nil)
 	}
-	rctx := chi.NewRouteContext()
-	if name != "" {
-		rctx.URLParams.Add("name", name)
+	if name == "" {
+		return r
 	}
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", name)
 	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 }
 
@@ -79,6 +80,22 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "pipe not found")
 	testutil.AssertJSONErrorResponse(t, w)
+}
+
+func TestPipesHandler_List_Empty(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore()
+	h := NewPipesHandler(store, nil, nil, 0)
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodGet, "/v1/pipes", "", nil)
+	h.List(w, r)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var list []interface{}
+	err := json.NewDecoder(w.Body).Decode(&list)
+	assert.NoError(t, err)
+	assert.Empty(t, list, "Response should be an empty list")
 }
 
 func TestPipesHandler_Execute_NotFound(t *testing.T) {

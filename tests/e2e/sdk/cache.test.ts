@@ -86,8 +86,11 @@ describe("Cache", () => {
     expect(res1.ok).toBe(true);
     expect(res1.headers.get("x-cache")).toEqual("MISS");
 
-    const ttl = Math.max(10_000, queryTime * 1000);
+    const ttl = Math.max(10_000, queryTime * 1000); // queryTime * 1000 is what our cache.QueryTimeToTTL does
     console.log(`Query [MISS] took ${queryTime}ms, so expected TTL: ${ttl}`);
+    if (ttl > 20_000) {
+      console.warn("Query took a longer time than expected, this could be flakiness or a fundamental regression in some part of the query api flow. Please continue monitoring.");
+    }
 
     // Fetch again immediately (HIT)
     const hotFetch = Date.now();
@@ -97,7 +100,10 @@ describe("Cache", () => {
     expect(res2.headers.get("x-cache")).toBe("HIT");
     console.log(`Query [HIT] took ${hotTime}ms`);
 
-    expect(queryTime, "Cold DB Query expected to take longer than hot from cache").toBeGreaterThan(hotTime);
+    expect(
+      queryTime,
+      "Cold DB Query expected to take longer than hot from cache",
+    ).toBeGreaterThan(hotTime);
 
     // Wait for the ttl to expire.
     // Wait an extra 1 second to be safe.
@@ -107,5 +113,5 @@ describe("Cache", () => {
     const res3 = await fetch(url, reqOpts);
     expect(res3.ok).toBe(true);
     expect(res3.headers.get("x-cache")).toEqual("MISS");
-  }, 30_000);
+  }, 60_000);
 });

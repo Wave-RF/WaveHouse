@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -35,7 +37,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	subjectFilter := ">"
 	tableFilter := r.URL.Query().Get("table")
 	if tableFilter != "" {
-		subjectFilter = "dlq." + tableFilter
+		subjectFilter = "dlq." + query.SafeEncodeNATS(tableFilter)
 	}
 
 	info, err := stream.Info(r.Context(), jetstream.WithSubjectFilter(subjectFilter))
@@ -46,6 +48,11 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 
 	tables := make(map[string]uint64)
 	for subject, count := range info.State.Subjects {
+		// TODO: do we need to break out scopes here?
+		subject, err = query.SafeDecodeNATS(strings.TrimPrefix(subject, "dlq."))
+		if err != nil {
+			continue
+		}
 		tables[subject] = count
 	}
 

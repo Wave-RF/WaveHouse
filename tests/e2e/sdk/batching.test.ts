@@ -36,7 +36,10 @@ describe("Ingest Batching Triggers", () => {
       100,
     );
 
-      const elapsed = Date.now() - startTime;
+        const elapsed = Date.now() - apiEndTime;
+        console.log(
+          `All 500 events uploaded (buffered CH insert) in ${elapsed}ms`,
+        );
     expect(elapsed).toBeLessThan(5000); // Prove it didn't wait for the 5s timer
   });
 
@@ -50,7 +53,9 @@ describe("Ingest Batching Triggers", () => {
       session_id: `session-${runId}`,
       user_id: `user-${runId}`,
     });
-    expect(res.error).toBeNull();
+      const apiEndTime = Date.now();
+      expect(res.error).toBeNull();
+      expect(apiEndTime - startTime).toBeLessThan(2_500);
 
     // Check immediately (should NOT be there yet)
     let r = await chQuery(
@@ -70,7 +75,7 @@ describe("Ingest Batching Triggers", () => {
       500,
     );
 
-    const elapsed = Date.now() - startTime;
+    const elapsed = Date.now() - apiEndTime;
 
     // It should take roughly ~5 seconds for Bento's period trigger to fire
     expect(elapsed).toBeGreaterThanOrEqual(4500);

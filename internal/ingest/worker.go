@@ -216,7 +216,7 @@ func (w *IngestWorker) flush(ctx context.Context, batch []jetstream.Msg) {
 				singleErr := w.insertToClickHouse(ctx, tableName, []parsedMsg{pm})
 				if singleErr != nil {
 					w.logger.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
-					w.sendToDLQ(ctx, tableName, pm)
+					w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
 				} else {
 					w.handleSuccess(ctx, tableName, []parsedMsg{pm})
 				}
@@ -310,10 +310,19 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	}()
 }
 
-func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg) {
+func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
 	subject := "dlq." + pm.natsSafeSubject
 
-	_, pubErr := w.js.Publish(ctx, subject, pm.natsMsg.Data())
+	msg := nats.NewMsg(subject)
+	msg.Data = pm.natsMsg.Data()
+	if msg.Header == nil {
+		msg.Header = make(nats.Header)
+	}
+	msg.Header.Set("X-DLQ-Table", tableName)
+	msg.Header.Set("X-DLQ-Error", errMsg)
+	msg.Header.Set("X-DLQ-Timestamp", time.Now().UTC().Format(time.RFC3339))
+
+	_, pubErr := w.js.PublishMsg(ctx, msg)
 	if pubErr != nil {
 		w.logger.ErrorContext(ctx, "NATS DLQ publish failed", "subject", subject, "error", pubErr)
 	}

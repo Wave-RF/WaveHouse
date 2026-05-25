@@ -30,7 +30,11 @@ func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, queryT
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.Store.List())
+	q := h.Store.List()
+	if q == nil {
+		_ = json.NewEncoder(w).Encode([]string{})
+	}
+	_ = json.NewEncoder(w).Encode(q)
 }
 
 // Get returns a specific named query (admin endpoint).

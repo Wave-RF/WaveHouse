@@ -58,10 +58,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: prevent table-enumeration...
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		slog.WarnContext(ctx, "unknown table requested", "table", table)
-		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
+		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
 		return
 	}
 
@@ -82,6 +83,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// TODO: accept NDJSON
 	var data map[string]any
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()

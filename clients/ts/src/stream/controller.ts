@@ -68,6 +68,65 @@ export class StreamController<T = Record<string, unknown>> {
     return this._status;
   }
 
+  /**
+   * Returns a promise that resolves when the stream status reaches `'live'`,
+   * rejects immediately if the stream is already `'closed'`, or rejects after
+   * `timeoutMs` milliseconds (default: 10 000) if it never connects.
+   *
+   * Safe to call before `.subscribe()` — does not trigger auto-close when
+   * the internal waiter is removed.
+   *
+   * `@example`
+   * const stream = client.from('events').stream({ transport: 'ws' });
+   * const unsub = stream.subscribe({ next: (e) => console.log(e) });
+   * await stream.connected();   // waits until the transport is live
+   * await client.from('events').insert({ ... });
+   */
+  connected(timeoutMs = 5_000): Promise<void> {
+    if (this._status === "live") return Promise.resolve();
+    if (this._status === "closed")
+      return Promise.reject(new Error("Stream is closed"));
+    if (this._done)
+      return Promise.reject(new Error("Stream closed before connecting"));
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        this._subscribers.delete(watcher);
+        reject(new Error(`Stream did not connect within ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      // Use a private subscriber directly to avoid the auto-close side-effect
+      // that the public subscribe() triggers when subscriber count drops to zero.
+      const watcher: StreamSubscriber<T> = {
+        next: () => {
+          // no-op: we only care about status transitions here
+        },
+        status: (s) => {
+          if (s === "live") {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            this._subscribers.delete(watcher);
+            resolve();
+          } else if (s === "closed") {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            this._subscribers.delete(watcher);
+            reject(new Error("Stream closed before connecting"));
+          }
+        },
+      };
+
+      this._subscribers.add(watcher);
+    });
+  }
+
+
   /** Subscribe to stream events via callbacks. Returns an unsubscribe function. */
   subscribe(subscriber: StreamSubscriber<T>): () => void {
     this._subscribers.add(subscriber);

@@ -56,6 +56,11 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Flush headers immediately so the client's EventSource.onopen fires right
+	// away instead of waiting for the first data event.
+	_, _ = fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
 	// Subscribe for live events.
 	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...
 	h.Hub.Subscribe(topic, ch)

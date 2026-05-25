@@ -421,8 +421,6 @@ func run() int {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 		defer shutCancel()
 		cancel()
-		// _ = ingestStream.Stop(shutCtx)
-		_ = ingestCleanup(shutCtx)
 		if err := srv.Shutdown(shutCtx); err != nil {
 			logger.Error("server shutdown error", "error", err)
 		}
@@ -430,6 +428,9 @@ func run() int {
 			if err := promSrv.Shutdown(shutCtx); err != nil {
 				logger.Error("prometheus server shutdown error", "error", err)
 			}
+		}
+		if err := ingestCleanup(shutCtx); err != nil {
+			logger.Error("ingest worker cleanup error", "error", err)
 		}
 	}()
 

@@ -44,9 +44,6 @@ describe("Stress & Concurrency", () => {
       const r = await chQuery(
         `SELECT count() as cnt FROM default.clicks WHERE session_id = 'session-${runId}'`,
       );
-        console.log(
-          `batched insert stress test selection only found ${Number((r[0] as any).cnt)} results, waiting for ${concurrency * insertsPerWorker}`,
-        );
       return Number((r[0] as any).cnt) === concurrency * insertsPerWorker;
     }, 10_000);
 
