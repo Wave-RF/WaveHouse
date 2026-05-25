@@ -252,10 +252,10 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, nil),
+		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil, nil),
-		WS:     NewWSHandler(hub, nil, nil, nil),
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -308,10 +308,10 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	hub := NewHub()
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, nil),
+		Ingest:      NewIngestHandler(reg, pub),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil, nil),
-		WS:          NewWSHandler(hub, nil, nil, nil),
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
@@ -369,10 +369,10 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, nil),
+		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil, nil),
-		WS:     NewWSHandler(hub, nil, nil, nil),
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -420,10 +420,10 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := NewHub()
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, nil),
+		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil, nil),
-		WS:     NewWSHandler(hub, nil, nil, nil),
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -445,10 +445,10 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := NewHub()
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, nil),
+		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil, nil),
-		WS:     NewWSHandler(hub, nil, nil, nil),
+		SSE:    NewSSEHandler(hub, nil),
+		WS:     NewWSHandler(hub, nil, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -543,10 +543,10 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	hub := NewHub()
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub, nil),
+		Ingest:      NewIngestHandler(reg, pub),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil, nil),
-		WS:          NewWSHandler(hub, nil, nil, nil),
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },

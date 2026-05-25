@@ -323,7 +323,8 @@ func run() int {
 
 	// Build handlers.
 	js := embeddedMQ.JetStream()
-	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, policyStore)
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
+	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
@@ -352,9 +353,11 @@ func run() int {
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
 
-	sseHandler := api.NewSSEHandler(hub, js, policyStore)
+	sseHandler := api.NewSSEHandler(hub, js)
+	sseHandler.PolicyStore = policyStore
 
-	wsHandler := api.NewWSHandler(hub, js, policyStore, cfg.Server.CORSAllowedOrigins)
+	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
+	wsHandler.PolicyStore = policyStore
 
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,

@@ -45,7 +45,7 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 func TestIngest_ValidPayload(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
 	w := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestIngest_MissingTable(t *testing.T) {
 			t.Parallel()
 
 			pub := &testutil.MockPublisher{}
-			h := NewIngestHandler(testRegistry(), pub, nil)
+			h := NewIngestHandler(testRegistry(), pub)
 
 			req := httptest.NewRequestWithContext(
 				context.Background(),
@@ -118,7 +118,7 @@ func TestIngest_MissingTable(t *testing.T) {
 func TestIngest_UnknownTable(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 
 	req := ingestRequest(t, "nonexistent", map[string]any{"x": 1})
 	w := httptest.NewRecorder()
@@ -132,7 +132,7 @@ func TestIngest_UnknownTable(t *testing.T) {
 func TestIngest_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table=clicks", bytes.NewReader([]byte("not json")))
 
@@ -146,7 +146,7 @@ func TestIngest_InvalidJSON(t *testing.T) {
 func TestIngest_SchemaValidation_UnknownField(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "nonexistent_field": 42})
 	w := httptest.NewRecorder()
@@ -160,7 +160,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.Dedup = dedup
 	h.IDField = "event_id"
 
@@ -176,7 +176,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.Dedup = dedup
 	h.IDField = "event_id"
 
@@ -202,7 +202,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 func TestIngest_PublishError_503(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("maximum bytes exceeded")}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
@@ -216,7 +216,7 @@ func TestIngest_PublishError_503(t *testing.T) {
 func TestIngest_PublishError_500(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{Err: errors.New("some other error")}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
@@ -230,7 +230,7 @@ func TestIngest_PublishError_500(t *testing.T) {
 func TestIngest_Policy_Forbidden(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -257,7 +257,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 func TestIngest_Policy_ColumnDenied(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -285,7 +285,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -317,7 +317,7 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -350,7 +350,7 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	orgTemplate := "{{ jwt.org_id }}"
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -387,7 +387,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	dedup := testutil.NewMockDeduplicator()
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.Dedup = dedup
 	h.IDField = "event_id"
 
@@ -403,7 +403,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 func TestIngest_Policy_DenyColumns(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {
@@ -430,7 +430,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub, nil)
+	h := NewIngestHandler(testRegistry(), pub)
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {},

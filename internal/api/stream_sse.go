@@ -25,8 +25,8 @@ type SSEHandler struct {
 	PolicyStore *policy.Store
 }
 
-func NewSSEHandler(hub *Hub, js jetstream.JetStream, policyStore *policy.Store) *SSEHandler {
-	return &SSEHandler{Hub: hub, JS: js, PolicyStore: policyStore}
+func NewSSEHandler(hub *Hub, js jetstream.JetStream) *SSEHandler {
+	return &SSEHandler{Hub: hub, JS: js}
 }
 
 func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
