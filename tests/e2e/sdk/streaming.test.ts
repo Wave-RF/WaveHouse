@@ -85,12 +85,11 @@ describe("Streaming", () => {
       const unsub = stream.subscribe({
         // initial: (result) => console.log("Initial SSE result:", result),
         next: (event) => receivedEvents.push(event),
-        // status: (status) => console.log("SSE status:", status),
+        status: (status) => console.log("SSE status:", status),
         error: (err) => console.error("SSE error:", err),
       });
 
-      // TODO: replace with wait for status connected?
-      await new Promise((r) => setTimeout(r, 1000));
+      await stream.connected(10_000);
 
       await whAuth.from("clicks").insert({
         event_id: id,
@@ -164,17 +163,15 @@ describe("Streaming", () => {
       const unsub = stream.subscribe({
         // initial: (result) => console.log("Initial WS result:", result),
         next: (event) => receivedEvents.push(event),
-        // status: (status) => console.log("WS status:", status),
+        status: (status) => console.log("WS status:", status),
         error: (err) => console.error("WS error:", err),
       });
 
-      // TODO: replace with wait for status connected?
-      // Give the WS connection a solid moment to handshake
-      await new Promise((r) => setTimeout(r, 3000));
+      await stream.connected(10_000);
 
       await whAuth.from("events").insert({
         event_id: id,
-        type: "ws_auth_test",
+
         user_id: "ws-auth-user",
         source: "test",
       });

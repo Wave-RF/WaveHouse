@@ -90,6 +90,30 @@ export class StreamController<T = Record<string, unknown>> {
     signal.addEventListener('abort', () => this.close(), { once: true });
   }
 
+  /**
+   * Returns a promise that resolves when the stream status reaches `'live'`,
+   * or rejects after `timeoutMs` milliseconds (default: 10 000).
+   */
+  connected(timeoutMs = 10_000): Promise<void> {
+    if (this._status === 'live') return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsub();
+        reject(new Error(`Stream did not connect within ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const unsub = this.subscribe({
+        status: (s) => {
+          if (s === 'live') {
+            clearTimeout(timer);
+            unsub();
+            resolve();
+          }
+        },
+      });
+    });
+  }
+
   /** Close the stream and release resources. */
   close(): void {
     this._transport.disconnect();
