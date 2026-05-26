@@ -45,7 +45,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `clickhouse.addr` | `WH_CH_ADDR` | `localhost:9000` | ClickHouse native protocol address. |
-| `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by the Bento ingest worker (`internal/ingest`) for bulk INSERT and by the raw-SQL proxy (`POST /v1/admin/query`, `internal/api/query.go`) to forward SQL to ClickHouse. Schema discovery uses the native protocol on `addr` instead. |
+| `clickhouse.http_port` | `WH_CH_HTTP_PORT` | `8123` | ClickHouse HTTP interface port. Used by the ingest worker (`internal/ingest`) for bulk INSERT and by the raw-SQL proxy (`POST /v1/admin/query`, `internal/api/query.go`) to forward SQL to ClickHouse. Schema discovery uses the native protocol on `addr` instead. |
 | `clickhouse.http_scheme` | `WH_CH_HTTP_SCHEME` | `http` | HTTP scheme for the ClickHouse HTTP interface (`http` or `https`). Set to `https` for TLS-encrypted ClickHouse connections. |
 | `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |

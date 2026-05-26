@@ -1,6 +1,6 @@
 package ingest
 
-// BufferConsumerName is the durable consumer name used by the Bento ingest
+// BufferConsumerName is the durable consumer name used by the ingest
 // worker. The Active Sweeper references this to read the AckFloor.
 const BufferConsumerName = "buffer-consumer"
 

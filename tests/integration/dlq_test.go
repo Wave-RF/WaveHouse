@@ -38,12 +38,12 @@ func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 	assert.Equal(t, float64(0), body["total"])
 }
 
-// TestDLQ_PopulatedOnBentoFailure verifies that publishing an event for a
+// TestDLQ_PopulatedOnIngestWorkerFailure verifies that publishing an event for a
 // non-existent table routes the failure into the DLQ. Bypasses the API's
-// schema validation by publishing directly to JetStream — Bento's batch
+// schema validation by publishing directly to JetStream — ingest worker's batch
 // INSERT then fails, fallback fires, and the DLQ output records the entry
 // under `dlq.<table>`.
-func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
+func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 
@@ -63,7 +63,7 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
 	require.NoError(t, err)
 
-	// Bento batches every 5s; 30s upper bound gives generous slack on a
+	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {
@@ -86,11 +86,11 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 	}, 30*time.Second, 500*time.Millisecond, "DLQ should receive failed events within timeout")
 }
 
-func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
+func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 
-	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a NATS subject. This tests that Bento's DLQ can handle subjects that are not valid NATS subjects.
+	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a NATS subject. This tests that ingest worker's DLQ can handle subjects that are not valid NATS subjects.
 	// Per-test suffix keeps tests independent if more DLQ tests get added later.
 
 	rawTableName := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
@@ -107,7 +107,7 @@ func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
 	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
 	require.NoError(t, err)
 
-	// Bento batches every 5s; 30s upper bound gives generous slack on a
+	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {

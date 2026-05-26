@@ -194,7 +194,7 @@ describe("Ingest", () => {
     expect(result.error).toBeNull();
     expect(result.data).toMatchObject({ ok: true });
 
-    // 5. Verify it successfully made it through NATS, Bento, and into ClickHouse
+    // 5. Verify it successfully made it through NATS, ingest worker, and into ClickHouse
     await waitForCondition(async () => {
       const r = await chQuery(
         `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`

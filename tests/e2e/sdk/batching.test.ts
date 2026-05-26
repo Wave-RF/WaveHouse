@@ -77,7 +77,7 @@ describe("Ingest Batching Triggers", () => {
 
     const elapsed = Date.now() - apiEndTime;
 
-    // It should take roughly ~5 seconds for Bento's period trigger to fire
+    // It should take roughly ~5 seconds for ingest worker's period trigger to fire
     expect(elapsed).toBeGreaterThanOrEqual(4500);
   }, 20_000);
 });

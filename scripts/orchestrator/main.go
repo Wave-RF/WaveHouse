@@ -141,7 +141,7 @@ func run() error {
 		"GOCOVERDIR="+coverDir,
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
 		"WH_CH_ADDR="+chAddr,
-		// Without WH_CH_HTTP_PORT, Bento's HTTP path falls back to the
+		// Without WH_CH_HTTP_PORT, ingest worker's HTTP path falls back to the
 		// default :8123 and writes silently land on whatever CH is sitting
 		// on that port (e.g. a `make dev` instance), while tests verify
 		// against the testcontainer's CH which has zero rows.

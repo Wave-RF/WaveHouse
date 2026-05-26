@@ -38,7 +38,7 @@ describe("Stress & Concurrency", () => {
     await Promise.all([...workers, ...readWorkers]);
 
     // Verify all data landed intact
-    // Because we inserted exactly 500 items, Bento should flush immediately,
+    // Because we inserted exactly 500 items, ingest worker should flush immediately,
     // making this relatively fast.
     await waitForCondition(async () => {
       const r = await chQuery(
