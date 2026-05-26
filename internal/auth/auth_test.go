@@ -2,10 +2,13 @@ package auth
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
@@ -194,6 +197,29 @@ func TestMiddleware_JWKSReachableAtBoot_OK(t *testing.T) {
 	mw, err := Middleware(Config{JWKSURL: srv.URL})
 	require.NoError(t, err, "a reachable JWKS endpoint must construct successfully")
 	require.NotNil(t, mw)
+}
+
+func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer srv.Close()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{
+		"role": "admin",
+		"exp":  jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	})
+	signed, err := tok.SignedString(priv)
+	require.NoError(t, err)
+
+	c := run(t, Config{JWKSURL: srv.URL, RoleClaim: "role"}, bearer(signed))
+	assert.Empty(t, c.role, "empty JWKS → no key validates the token → roleless default")
+	assert.False(t, c.hasClaims)
+	assert.True(t, errors.Is(c.authErr, errInvalidToken), "present-but-unverifiable token records invalid-token")
 }
 
 func TestContextHelpers_RoundTrip(t *testing.T) {

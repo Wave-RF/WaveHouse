@@ -23,7 +23,7 @@ For WebSocket and SSE connections where custom headers are not possible, you can
 GET /v1/stream/ws?token=<jwt>
 ```
 
-The `Authorization` header takes precedence when both are provided. The `token` query parameter is stripped from the URL after extraction.
+The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`, WebSocket), so a token in the more log-leakable URL never overrides an explicit header credential. The `token` query parameter is stripped from the URL after extraction so it can't leak into logs.
 
 **Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`).
 

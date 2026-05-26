@@ -62,6 +62,8 @@ const wh = createClient<Database>({
 | `transport` | `'auto' \| 'sse' \| 'ws'` | `'auto'` | Stream transport. Auto = SSE when no auth, WS when auth |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
+> **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` and `WebSocket` APIs can't set headers — as a `?token=` query parameter on streaming connections (SSE and WS). When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+
 ### Type-Safe Tables
 
 Pass a `Database` type to get autocomplete on table names and row types:
