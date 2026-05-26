@@ -98,6 +98,16 @@ build: install-playwright ## Build the docs site for production → dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@$(PNPM) build
 
+# Single-source-of-truth logo pipeline. Edit scripts/branding/mark.svg and run
+# `make branding` (or `make docs-branding` from root) to regenerate favicon
+# .{svg,ico}, apple-touch-icon.png, og.png, and the Starlight nav light/dark
+# SVGs. Requires librsvg (rsvg-convert) + ImageMagick 7 (magick) — `brew install
+# librsvg imagemagick`. Not a `build` prereq: derived assets are committed so
+# contributors don't need the raster toolchain to build docs.
+.PHONY: branding
+branding: ## Regenerate logo/favicon/OG assets from scripts/branding/mark.svg
+	@scripts/branding/generate.sh
+
 # --- Common-verb contract ----------------------------------------------------
 # The root Makefile's `subprojects-<verb>` fan-out expects every subproject to
 # define `test`, `lint`, and `verify`. The docs site doesn't have automated
