@@ -88,7 +88,7 @@ make test-all          # All four suites sequentially + merged coverage gate
 make cov               # Merge whichever covdata exists + gate against total threshold
 
 # CI
-make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk
+make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk + subprojects-{verify,build,test}
                        # Phase 2 (sequential): test-integration + test-e2e + cov
 
 # Analysis (informational, not in CI)
@@ -114,6 +114,12 @@ make clean             # Build outputs only (bin/, dist/, clients/ts/dist/)
 make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
 make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
 make clean-all         # Full reset: above + data/ + docker volumes
+
+# Docs site (Astro + Starlight in docs/, with its own Makefile)
+make docs-dev          # Hot-reload Astro dev server on :4321
+make docs-build        # Production build → docs/dist/
+make docs-preview      # Wrangler preview of the production build (auto-builds if dist/ missing)
+make docs-branding     # Regenerate logo/favicon/OG assets from docs/scripts/branding/mark.svg
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
@@ -123,7 +129,8 @@ Tooling notes:
 
 - Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
 - `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
-- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK and E2E test harnesses both shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
+- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/`, `tests/e2e/sdk/`, and `docs/`.
+- **Subproject Makefiles**: `docs/` has its own `Makefile` so the docs site is self-contained (`cd docs && make build` works directly). The root forwards every `docs-<name>` target via a pattern rule and aggregates the common verbs (`install`, `build`, `test`, `lint`, `verify`, `clean`) through `subprojects-<verb>` fan-outs — so `make ci`, `make tools`, etc. pick up new subprojects automatically. When extracting more subprojects (per-language SDKs, etc.), append the directory to `SUBPROJECTS` at the top of the root `Makefile` — no aggregator edits required.
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 
 ## Testing Conventions
