@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,27 +67,44 @@ func makeEnvelope(t *testing.T, tableName, scope string, data map[string]any) []
 }
 
 // ---------------------------------------------------------------------------
-// StartIngestWorker — constructor
+// StartIngestWorker — constructor argument validation
 // ---------------------------------------------------------------------------
 
-func TestStartIngestWorker_NilNATSConn(t *testing.T) {
+func TestStartIngestWorker_Validation(t *testing.T) {
 	t.Parallel()
-	_, err := StartIngestWorker(context.Background(), nil, &testutil.MockCache{},
-		"localhost", "8123", "http", "user", "pass", "db")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nats connection is nil")
-}
 
-func TestStartIngestWorker_NilCache(t *testing.T) {
-	t.Parallel()
-	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T) (*nats.Conn, cache.Cache)
+		wantErrSub string
+	}{
+		{
+			name:       "nil nats connection",
+			setup:      func(*testing.T) (*nats.Conn, cache.Cache) { return nil, &testutil.MockCache{} },
+			wantErrSub: "nats connection is nil",
+		},
+		{
+			name: "nil cache",
+			setup: func(t *testing.T) (*nats.Conn, cache.Cache) {
+				emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = emb.Close() })
+				return emb.NatsConn(), nil
+			},
+			wantErrSub: "cache is nil",
+		},
+	}
 
-	_, err = StartIngestWorker(context.Background(), emb.NatsConn(), nil,
-		"localhost", "8123", "http", "user", "pass", "db")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cache is nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			nc, c := tt.setup(t)
+			_, err := StartIngestWorker(context.Background(), nc, c,
+				"localhost", "8123", "http", "user", "pass", "db")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrSub)
+		})
+	}
 }
 
 // TestStartIngestWorker_EndToEnd exercises the full happy path:
@@ -364,166 +383,179 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 // handleSuccess — cache invalidation + DoubleAck
 // ---------------------------------------------------------------------------
 
-func TestHandleSuccess_InvalidatesCacheAndAcks(t *testing.T) {
+func TestHandleSuccess(t *testing.T) {
 	t.Parallel()
-	w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
 
-	m1 := &testutil.MockJetStreamMsg{MsgSubject: "org_1"}
-	m2 := &testutil.MockJetStreamMsg{MsgSubject: "org_2"}
-
-	w.handleSuccess(context.Background(), "events", []parsedMsg{
-		{natsMsg: m1, natsSafeSubject: "org_1"},
-		{natsMsg: m2, natsSafeSubject: "org_2"},
-	})
-	wait()
-
-	// Cache should be invalidated with the table name + each unique subject.
-	keys := cache.GetKeys()
-	assert.ElementsMatch(t, []string{"events", "org_1", "org_2"}, keys)
-
-	// Both messages should have been DoubleAcked.
-	assert.True(t, m1.DoubleAcked.Load(), "m1 must be DoubleAcked")
-	assert.True(t, m2.DoubleAcked.Load(), "m2 must be DoubleAcked")
-}
-
-func TestHandleSuccess_DeduplicatesVersionKeys(t *testing.T) {
-	t.Parallel()
-	w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
-
-	// Three messages, but only two distinct subjects.
-	m1 := &testutil.MockJetStreamMsg{MsgSubject: "org_1"}
-	m2 := &testutil.MockJetStreamMsg{MsgSubject: "org_1"} // duplicate scope
-	m3 := &testutil.MockJetStreamMsg{MsgSubject: "org_2"}
-
-	w.handleSuccess(context.Background(), "events", []parsedMsg{
-		{natsMsg: m1, natsSafeSubject: "org_1"},
-		{natsMsg: m2, natsSafeSubject: "org_1"},
-		{natsMsg: m3, natsSafeSubject: "org_2"},
-	})
-	wait()
-
-	keys := cache.GetKeys()
-	// Expect "events" + "org_1" + "org_2" — exactly 3 entries (no duplicate org_1).
-	assert.Len(t, keys, 3)
-	assert.ElementsMatch(t, []string{"events", "org_1", "org_2"}, keys)
-}
-
-func TestHandleSuccess_TableNameAlsoActsAsSubjectKey(t *testing.T) {
-	t.Parallel()
-	// If a parsed msg's NATS-safe subject equals the encoded table name (a
-	// table-scoped publisher), the table key is added once — not twice.
-	w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
-
-	m := &testutil.MockJetStreamMsg{MsgSubject: "events"}
-	w.handleSuccess(context.Background(), "events", []parsedMsg{
-		{natsMsg: m, natsSafeSubject: "events"},
-	})
-	wait()
-
-	keys := cache.GetKeys()
-	assert.Equal(t, []string{"events"}, keys)
-}
-
-func TestHandleSuccess_CacheError_StillAcks(t *testing.T) {
-	t.Parallel()
-	w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
-	cache.InvErr = errors.New("cache backend down")
-
-	m := &testutil.MockJetStreamMsg{MsgSubject: "org_1"}
-	// Should not panic even when cache invalidation fails.
-	w.handleSuccess(context.Background(), "events", []parsedMsg{
-		{natsMsg: m, natsSafeSubject: "org_1"},
-	})
-	wait()
-
-	// Ack still happens; cache failure is logged but non-fatal.
-	assert.True(t, m.DoubleAcked.Load(), "ack must happen even when cache invalidation fails")
-}
-
-func TestHandleSuccess_DoubleAckError_DoesNotPanic(t *testing.T) {
-	t.Parallel()
-	w, _, _, wait := newTestWorker(&testutil.MockRoundTripper{})
-
-	m := &testutil.MockJetStreamMsg{
-		MsgSubject:   "org_1",
-		DoubleAckErr: errors.New("server unavailable"),
+	tests := []struct {
+		name            string
+		table           string
+		subjects        []string // one entry per message; used for both MsgSubject and natsSafeSubject
+		cacheErr        error    // applied via MockCache.InvErr before the call
+		msgDoubleAckErr error    // applied to every MockJetStreamMsg
+		wantCacheKeys   []string // expected (ElementsMatch) keys in cache.GetKeys()
+	}{
+		{
+			name:          "invalidates cache and acks each unique subject",
+			table:         "events",
+			subjects:      []string{"org_1", "org_2"},
+			wantCacheKeys: []string{"events", "org_1", "org_2"},
+		},
+		{
+			// Three messages, two distinct subjects → table + 2 subjects = 3 keys.
+			name:          "deduplicates version keys",
+			table:         "events",
+			subjects:      []string{"org_1", "org_1", "org_2"},
+			wantCacheKeys: []string{"events", "org_1", "org_2"},
+		},
+		{
+			// natsSafeSubject equals the encoded table name → table key added once.
+			name:          "table name doubles as subject key",
+			table:         "events",
+			subjects:      []string{"events"},
+			wantCacheKeys: []string{"events"},
+		},
+		{
+			// Cache failure must not prevent ack — failure is logged, non-fatal.
+			name:          "cache error still acks",
+			table:         "events",
+			subjects:      []string{"org_1"},
+			cacheErr:      errors.New("cache backend down"),
+			wantCacheKeys: []string{"events", "org_1"},
+		},
+		{
+			// DoubleAck error is logged but DoubleAcked flag still flips.
+			name:            "double ack error does not panic",
+			table:           "events",
+			subjects:        []string{"org_1"},
+			msgDoubleAckErr: errors.New("server unavailable"),
+			wantCacheKeys:   []string{"events", "org_1"},
+		},
 	}
-	// DoubleAck error is logged but must not crash the worker.
-	w.handleSuccess(context.Background(), "events", []parsedMsg{
-		{natsMsg: m, natsSafeSubject: "org_1"},
-	})
-	wait()
 
-	assert.True(t, m.DoubleAcked.Load(), "DoubleAck still attempted")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
+			cache.InvErr = tt.cacheErr
+
+			msgs := make([]*testutil.MockJetStreamMsg, len(tt.subjects))
+			parsed := make([]parsedMsg, len(tt.subjects))
+			for i, sub := range tt.subjects {
+				msgs[i] = &testutil.MockJetStreamMsg{
+					MsgSubject:   sub,
+					DoubleAckErr: tt.msgDoubleAckErr,
+				}
+				parsed[i] = parsedMsg{natsMsg: msgs[i], natsSafeSubject: sub}
+			}
+
+			w.handleSuccess(context.Background(), tt.table, parsed)
+			wait()
+
+			assert.ElementsMatch(t, tt.wantCacheKeys, cache.GetKeys())
+			for i, m := range msgs {
+				assert.True(t, m.DoubleAcked.Load(), "msg %d (%q) must be DoubleAcked", i, tt.subjects[i])
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
 // sendToDLQ — DLQ publish + headers + ack-only-on-success
 // ---------------------------------------------------------------------------
 
-func TestSendToDLQ_PublishesWithHeaders(t *testing.T) {
+func TestSendToDLQ(t *testing.T) {
 	t.Parallel()
-	w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})
 
-	original := &testutil.MockJetStreamMsg{MsgData: []byte(`{"bad":"row"}`), MsgSubject: "events"}
-	pm := parsedMsg{
-		natsMsg:         original,
-		natsSafeSubject: "events",
+	tests := []struct {
+		name          string
+		table         string
+		safeSubject   string
+		msgData       []byte
+		msgSubject    string
+		errMsg        string
+		pubErr        error // applied to MockJetStream.PubErr before the call
+		wantPublished int   // expected number of PublishMsg calls recorded
+		wantSubject   string
+		wantData      []byte
+		wantAcked     bool
+		extraCheck    func(t *testing.T, m *nats.Msg)
+	}{
+		{
+			name:          "publishes with headers and acks original",
+			table:         "events",
+			safeSubject:   "events",
+			msgData:       []byte(`{"bad":"row"}`),
+			msgSubject:    "events",
+			errMsg:        "Code: 60. DB::Exception: ...",
+			wantPublished: 1,
+			wantSubject:   "dlq.events",
+			wantData:      []byte(`{"bad":"row"}`),
+			wantAcked:     true,
+			extraCheck: func(t *testing.T, m *nats.Msg) {
+				assert.Equal(t, "events", m.Header.Get("X-DLQ-Table"))
+				assert.Contains(t, m.Header.Get("X-DLQ-Error"), "Code: 60")
+				assert.NotEmpty(t, m.Header.Get("X-DLQ-Timestamp"))
+				_, err := time.Parse(time.RFC3339, m.Header.Get("X-DLQ-Timestamp"))
+				assert.NoError(t, err, "X-DLQ-Timestamp must be RFC3339")
+			},
+		},
+		{
+			// No ack on original — NATS must redeliver until DLQ recovers,
+			// otherwise we'd lose the row.
+			name:          "publish failure means no ack",
+			table:         "events",
+			safeSubject:   "events",
+			msgData:       []byte(`{"bad":"row"}`),
+			msgSubject:    "events",
+			errMsg:        "boom",
+			pubErr:        errors.New("nats unavailable"),
+			wantPublished: 0,
+			wantAcked:     false,
+		},
+		{
+			// The DLQ subject uses the already-NATS-safe subject from the
+			// upstream envelope; we don't re-encode here.
+			name:          "uses already-encoded safe subject",
+			table:         "events.staging",
+			safeSubject:   "events%2Estaging",
+			msgData:       []byte("payload"),
+			errMsg:        "err",
+			wantPublished: 1,
+			wantSubject:   "dlq.events%2Estaging",
+			wantData:      []byte("payload"),
+			wantAcked:     true,
+		},
 	}
 
-	w.sendToDLQ(context.Background(), "events", pm, "Code: 60. DB::Exception: ...")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+			js.PubErr = tt.pubErr
 
-	published := js.Published()
-	require.Len(t, published, 1)
+			original := &testutil.MockJetStreamMsg{
+				MsgData:    tt.msgData,
+				MsgSubject: tt.msgSubject,
+			}
+			pm := parsedMsg{natsMsg: original, natsSafeSubject: tt.safeSubject}
 
-	got := published[0]
-	assert.Equal(t, "dlq.events", got.Subject)
-	assert.Equal(t, []byte(`{"bad":"row"}`), got.Data)
-	assert.Equal(t, "events", got.Header.Get("X-DLQ-Table"))
-	assert.Contains(t, got.Header.Get("X-DLQ-Error"), "Code: 60")
-	assert.NotEmpty(t, got.Header.Get("X-DLQ-Timestamp"))
+			w.sendToDLQ(context.Background(), tt.table, pm, tt.errMsg)
 
-	// Timestamp should parse as RFC3339.
-	_, err := time.Parse(time.RFC3339, got.Header.Get("X-DLQ-Timestamp"))
-	assert.NoError(t, err, "X-DLQ-Timestamp must be RFC3339")
-
-	// Original message acked so NATS stops redelivering the bad row.
-	assert.True(t, original.DoubleAcked.Load(), "original must be DoubleAcked after DLQ publish")
-}
-
-func TestSendToDLQ_PublishFailure_NoAck(t *testing.T) {
-	t.Parallel()
-	w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-	js.PubErr = errors.New("nats unavailable")
-
-	original := &testutil.MockJetStreamMsg{MsgData: []byte(`{"bad":"row"}`), MsgSubject: "events"}
-	pm := parsedMsg{
-		natsMsg:         original,
-		natsSafeSubject: "events",
+			published := js.Published()
+			require.Len(t, published, tt.wantPublished)
+			if tt.wantPublished > 0 {
+				got := published[0]
+				assert.Equal(t, tt.wantSubject, got.Subject)
+				if tt.wantData != nil {
+					assert.Equal(t, tt.wantData, got.Data)
+				}
+				if tt.extraCheck != nil {
+					tt.extraCheck(t, got)
+				}
+			}
+			assert.Equal(t, tt.wantAcked, original.DoubleAcked.Load(), "DoubleAcked flag")
+		})
 	}
-
-	w.sendToDLQ(context.Background(), "events", pm, "boom")
-
-	// No ack on original — NATS must redeliver until DLQ recovers.
-	assert.False(t, original.DoubleAcked.Load(),
-		"original must NOT be acked when DLQ publish fails; otherwise we'd lose the row")
-}
-
-func TestSendToDLQ_EncodedSubject(t *testing.T) {
-	t.Parallel()
-	// The DLQ subject uses the already-NATS-safe subject from the upstream
-	// envelope. We don't re-encode here, so callers must pass safe values.
-	w, js, _, _ := newTestWorker(&testutil.MockRoundTripper{})
-
-	pm := parsedMsg{
-		natsMsg:         &testutil.MockJetStreamMsg{MsgData: []byte("payload")},
-		natsSafeSubject: "events%2Estaging", // already encoded by upstream
-	}
-
-	w.sendToDLQ(context.Background(), "events.staging", pm, "err")
-
-	require.Len(t, js.Published(), 1)
-	assert.Equal(t, "dlq.events%2Estaging", js.Published()[0].Subject)
 }
 
 // ---------------------------------------------------------------------------
