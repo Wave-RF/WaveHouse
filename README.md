@@ -160,6 +160,14 @@ The full documentation site lives at **[wavehouse.dev](https://wavehouse.dev)**.
 * [Development](docs/src/content/docs/development.md) — Building, testing, linting, and project structure
 * [SDK Reference](docs/src/content/docs/sdk.md) — TypeScript client SDK usage and codegen
 
+## 🛡️ Security
+
+Found a vulnerability? **Please don't open a public issue.** Email `security@wave-rf.com` per [SECURITY.md](SECURITY.md) — we acknowledge within 48 hours and aim for an initial assessment in 5 business days.
+
+## 🙋 Support
+
+WaveHouse is in **alpha**. See [SUPPORT.md](SUPPORT.md) for where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now.
+
 ## 📜 License
 
 WaveHouse is open source under the [MIT License](LICENSE).
