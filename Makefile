@@ -171,6 +171,24 @@ help: ## Show this help menu
 			tname = $$0; sub(/:.*/, "", tname); \
 			printf "  $(CYAN)%-18s$(RESET) %s\n", tname, $$2 \
 		}' $(MAKEFILE_LIST)
+	@# Per-subproject sections are auto-generated from $(SUBPROJECTS). Adding
+	@# a subproject (or a `## `-annotated target inside one) shows up here
+	@# automatically — no edit to this target needed. Each sub-Makefile's own
+	@# `help` entry is filtered out (would be redundant with this menu).
+	@for sp in $(SUBPROJECTS); do \
+		name=$$(basename "$$sp"); \
+		awk -v name="$$name" -v y='$(YELLOW)' -v c='$(CYAN)' -v r='$(RESET)' \
+			'BEGIN { \
+				FS = "## "; \
+				title = toupper(substr(name,1,1)) substr(name,2); \
+				printf "\n%s%s%s (%s%s-%%%s)\n", y, title, r, c, name, r \
+			} \
+			/^[a-zA-Z0-9_-]+:.*## / { \
+				tname = $$0; sub(/:.*/, "", tname); \
+				if (tname == "help") next; \
+				printf "  %s%-18s%s %s\n", c, name "-" tname, r, $$2 \
+			}' "$$sp/Makefile"; \
+	done
 	@printf "\nTunable variables are documented at the top of the Makefile.\n"
 
 ##@ Dev
@@ -198,24 +216,6 @@ dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveH
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
 	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
-
-# Docs site dev/preview servers — long-running, blocking. Astro dev defaults
-# to :4321; `wrangler dev` (preview) defaults to :8787, so both coexist with
-# `make dev` on :8080.
-.PHONY: dev-docs
-dev-docs: install-docs-playwright ## Hot-reload docs site dev server (Astro on :4321)
-	@cd $(DOCS_DIR) && $(PNPM) dev
-
-.PHONY: preview-docs
-preview-docs: install-docs-playwright ## Preview the production docs build locally (auto-builds if dist/ is missing)
-	@# Skip the build if `dist/` already exists — running `make build-docs`
-	@# and then `make preview-docs` should serve the existing artifact, not
-	@# rebuild from scratch. Re-run `make build-docs` explicitly to refresh.
-	@if [ ! -d $(DOCS_DIR)/dist ]; then \
-	  echo "$(CYAN)==> No dist/ — building docs first...$(RESET)"; \
-	  cd $(DOCS_DIR) && $(PNPM) build; \
-	fi
-	@cd $(DOCS_DIR) && $(PNPM) preview
 
 # `up -d --wait` blocks until the compose healthcheck transitions to
 # healthy, so callers can chain on success without a polling loop. The
@@ -368,7 +368,7 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 .PHONY: build-all
 build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
-	@$(MAKE) -j 4 build build-sdk build-docs
+	@$(MAKE) -j 4 build build-sdk subprojects-build
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
 # --- TypeScript SDK build / install ------------------------------------------
@@ -381,28 +381,46 @@ SDK_DIR     := clients/ts
 E2E_SDK_DIR := tests/e2e/sdk
 DOCS_DIR    := docs
 
-# install-sdk + install-e2e-sdk + install-docs are intermediate prereqs — they
-# have no doc comment so they don't show in `make help`. User-facing targets
-# below (build-sdk, test-sdk, test-e2e, build-docs, dev-docs, preview-docs)
-# depend on them.
+# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
+# comment so they don't show in `make help`. User-facing targets below
+# (build-sdk, test-sdk, test-e2e) depend on them. The docs project is wired
+# through the subproject orchestration block below (`SUBPROJECTS`, fan-out,
+# per-subproject pattern rule) rather than per-target prereqs here. When the
+# SDK is later extracted into a sibling Makefile, the same pattern absorbs it.
 .PHONY: install-sdk
 install-sdk:
 	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
 
-.PHONY: install-docs
-install-docs:
-	@cd $(DOCS_DIR) && $(PNPM) install --frozen-lockfile
+# --- Subproject orchestration ------------------------------------------------
+# Sub-projects (docs today; per-language SDKs eventually) live in their own
+# directories with their own Makefiles. The root iterates over $(SUBPROJECTS)
+# and fans out the common verbs in parallel — adding a subproject is one line
+# below plus a Makefile in the new directory that implements the verb set
+# (no-op allowed for verbs that don't apply yet).
+#
+# Direct invocation from root: `make <sub>-<name>` (e.g. `make docs-dev`) via
+# the per-subproject pattern rules at the end of this section.
+SUBPROJECTS  := $(DOCS_DIR)
+COMMON_VERBS := install build test lint verify clean
 
-# Playwright Chromium (~130 MB) is required by `rehype-mermaid` (build-time
-# diagram SSR) and `starlight-links-validator`. Kept out of `install-docs` so
-# the top-level `make tools` bootstrap doesn't force every Go-only contributor
-# to download Chromium. Wired into `build-docs` / `dev-docs` instead. The
-# `--with-deps` apt step is $CI-gated since it needs sudo on Linux laptops;
-# CI runners on minimal base images need it. Both steps are idempotent. See
-# docs/src/content/docs/development.md for the full Linux-dev-machine story.
-.PHONY: install-docs-playwright
-install-docs-playwright: install-docs
-	@cd $(DOCS_DIR) && $(PNPM) exec playwright install chromium $${CI:+--with-deps} >/dev/null
+# `<dir>/.<verb>` — hidden phony ticket that recurses into the subproject.
+# Hidden-file shape avoids ever colliding with a real file or directory.
+SUBPROJECT_TICKETS := $(foreach d,$(SUBPROJECTS),$(addprefix $(d)/.,$(COMMON_VERBS)))
+.PHONY: $(SUBPROJECT_TICKETS)
+$(SUBPROJECT_TICKETS):
+	@$(MAKE) -C $(@D) $(patsubst .%,%,$(@F))
+
+# `subprojects-<verb>` — fan-out aggregator. `make -jN subprojects-build` runs
+# each subproject's build concurrently; --output-sync keeps logs readable.
+SUBPROJECT_FANOUTS := $(addprefix subprojects-,$(COMMON_VERBS))
+.PHONY: $(SUBPROJECT_FANOUTS)
+$(SUBPROJECT_FANOUTS): subprojects-%: $(addsuffix /.%,$(SUBPROJECTS))
+
+# Per-subproject pattern rules for direct invocation:
+#   make docs-<name>  → cd docs && make <name>
+# Add one line below per subproject as they're added to SUBPROJECTS.
+docs-%:
+	@$(MAKE) -C $(DOCS_DIR) $*
 
 .PHONY: install-e2e-sdk
 install-e2e-sdk:
@@ -413,18 +431,11 @@ build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by
 	@echo "$(CYAN)==> Building SDK...$(RESET)"
 	@cd $(SDK_DIR) && $(PNPM) build
 
-# Docs site (Astro + Starlight) lives in docs/. Markdown sources are the
-# Starlight content collection itself — no separate convert step.
-.PHONY: build-docs
-build-docs: install-docs-playwright ## Build docs site for production → docs/dist/
-	@echo "$(CYAN)==> Building docs site...$(RESET)"
-	@cd $(DOCS_DIR) && $(PNPM) build
-
 # Single-source-of-truth logo pipeline. Edit scripts/branding/mark.svg (the
 # path) and run `make branding` to regenerate favicon.{svg,ico},
 # apple-touch-icon.png, og.png, and the Starlight nav light/dark SVGs.
 # Requires librsvg (rsvg-convert) + ImageMagick 7 (magick) — `brew install
-# librsvg imagemagick`. Not part of `build-docs`: derived assets are
+# librsvg imagemagick`. Not part of `docs-build`: derived assets are
 # committed so contributors don't need the raster toolchain to build docs.
 .PHONY: branding
 branding: ## Regenerate all logo/favicon/OG assets from scripts/branding/mark.svg
@@ -514,7 +525,7 @@ cov: ## Merge all available covdata + gate against total threshold
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify build build-cover build-sdk build-docs test test-sdk
+ci-parallel: verify subprojects-verify build build-cover build-sdk subprojects-build test test-sdk subprojects-test
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -632,7 +643,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk install-docs ## Install pinned tools, Go modules, pnpm deps, and git hooks
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk subprojects-install ## Install pinned tools, Go modules, pnpm deps, and git hooks
 	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
 	@# `make tools` repeatedly just re-asserts the config. The .githooks/
 	@# directory is committed; this line plumbs git to it. Users can opt out

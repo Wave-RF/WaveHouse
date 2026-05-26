@@ -1,7 +1,7 @@
 /* Visual regression / preview screenshots for the WaveHouse docs site.
  * Run with: pnpm exec node scripts/screenshot.mjs
  * Requires the dev server to be running on http://127.0.0.1:4321
- * (the Astro default, which is also what `make dev-docs` starts). */
+ * (the Astro default, which is also what `make docs-dev` starts). */
 
 import { chromium } from "playwright";
 import { mkdir } from "node:fs/promises";

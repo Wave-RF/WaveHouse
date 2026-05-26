@@ -2,14 +2,33 @@
   // Cloudflare Workers + Static Assets. Astro builds the site to ./dist
   // and the worker in worker/index.ts (using cloudflare-md-router) handles
   // Accept-header / user-agent routing before falling through to ASSETS.
+  //
+  // Deploy is driven by Cloudflare's Workers Builds (the native Git
+  // integration) — no GitHub Action, no API token secret to manage. On
+  // pushes to `main`, CF runs `npx wrangler deploy` from `docs/`; on PR
+  // branches it runs `npx wrangler versions upload`, which produces a
+  // per-version preview URL of the form
+  //   `<version-prefix>-wavehouse-docs.wave-rf.workers.dev`.
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "wavehouse-docs",
   "main": "worker/index.ts",
-  "compatibility_date": "2025-01-01",
+  "compatibility_date": "2025-11-01",
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
     "html_handling": "drop-trailing-slash",
     "run_worker_first": true
-  }
+  },
+  "routes": [
+    { "pattern": "wavehouse.dev", "custom_domain": true }
+  ],
+  // need to keep `*.wave-rf.workers.dev` URL alive for PRs
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "upload_source_maps": true
 }
