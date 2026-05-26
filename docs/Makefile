@@ -87,7 +87,7 @@ preview: install-playwright ## Preview the production build locally via wrangler
 	@# `make build` explicitly to refresh.
 	@if [ ! -d dist ]; then \
 	  echo "$(CYAN)==> No dist/ — building first...$(RESET)"; \
-	  $(PNPM) build; \
+	  $(MAKE) build; \
 	fi
 	@$(PNPM) preview
 
