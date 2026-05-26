@@ -49,10 +49,10 @@ Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/r
 
 ## 3. Ingest an event
 
-Authentication is **disabled by default**, so you can POST straight to `/v1/ingest/{table}`.
+Authentication is **disabled by default**, so you can POST straight to `/v1/ingest?table={table}`.
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
@@ -62,7 +62,7 @@ WaveHouse validates the body against the ClickHouse schema before acknowledging.
 
 ## 4. Query
 
-Queries are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. Note that `/v1/admin/query` is the exception: it's an admin escape hatch that never caches and emits `Cache-Control: no-store`, so every request goes straight to ClickHouse. The cached read paths are `POST /v1/tables/{table}/query` and `GET/POST /v1/pipes/{name}`.
+Queries are cached in-process (L1 Ristretto) with singleflight coalescing — duplicate concurrent queries hit ClickHouse once. Note that `/v1/admin/query` is the exception: it's an admin escape hatch that never caches and emits `Cache-Control: no-store`, so every request goes straight to ClickHouse. The cached read paths are `POST /v1/query?table={table}` and `GET/POST /v1/pipes/{name}`.
 
 ```bash
 # Wait ~5 seconds for the batch flush to ClickHouse, then:

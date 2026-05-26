@@ -68,12 +68,12 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
 
-- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest/{table}`, `/v1/tables/{table}/query` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema/*`, `/v1/dlq/stats`. Admin (admin/service): `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
+- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema`, `/v1/schema/*`, `/v1/dlq/stats`. Admin (admin/service): `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
 - **middleware.go** — JWT auth middleware supporting HMAC and JWKS validation, role extraction from configurable claim path, and dev mode bypass. Controlled by `auth.enabled`.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
-- **structured_query.go** — Handler for `POST /v1/tables/{table}/query`: validates query AST, enforces permissions, builds and executes SQL.
-- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest/{table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`.
+- **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
+- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table{.scope}}`.
 - **query.go** — Executes SQL queries directly against ClickHouse. Results are cached. UUID/DateTime columns are converted to strings.
 - **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Callers select a table with the `?table=` query parameter (required for SSE); WS additionally accepts in-band `{"action":"subscribe","table":"..."}` commands. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Ingest Pipeline, DLQ & Sweeping
 
-- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest/{table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; when authentication is enabled, the `/v1/admin/*` middleware enforces that role check at the API layer, so non-admin callers never reach the proxy. With `auth.enabled=false` (or `auth.dev_mode=true`) the endpoint is intentionally open — the dev/test posture. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table}` NATS subjects when DLQ is enabled.
+- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker validates the table name (via `safeIdentifierRe`) and the payload's presence, then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; when authentication is enabled, the `/v1/admin/*` middleware enforces that role check at the API layer, so non-admin callers never reach the proxy. With `auth.enabled=false` (or `auth.dev_mode=true`) the endpoint is intentionally open — the dev/test posture. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table{.scope}}` NATS subjects when DLQ is enabled.
 - **types.go** — `EventMessage` struct (TableName, Scope, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -142,7 +142,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 ### Ingest Path
 
 ```text
-Client POST /v1/ingest/{table}
+Client POST /v1/ingest?table={table}
   → Optional JWT auth middleware
   → Look up table schema from SchemaRegistry
   → Validate JSON body against schema (type checks, required columns)
@@ -184,7 +184,7 @@ Client POST /v1/admin/query
     authorize predicates), so the role gate is the entire authorization
     story. /v1/admin/query is the only sanctioned surface for non-SELECT
     statements (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…); non-admin callers
-    use `POST /v1/ingest/{table}` for writes and the structured query
+    use `POST /v1/ingest?table={table}` for writes and the structured query
     endpoint or named pipes for reads.
   → Decode {"sql": "..."} from the request body.
   → POST the SQL verbatim to ClickHouse's HTTP interface at

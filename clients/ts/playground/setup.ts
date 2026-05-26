@@ -78,7 +78,7 @@ function randomId(): string {
 }
 
 async function ingest(table: string, data: Record<string, unknown>) {
-  const res = await fetch(`${WH_URL}/v1/ingest/${table}`, {
+  const res = await fetch(`${WH_URL}/v1/ingest?table=${table}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),

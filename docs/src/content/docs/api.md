@@ -191,7 +191,7 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 
 > **Admin / service only.** The route is mounted under `/v1/admin/*`, which sits behind a `RequireRole("admin","service")` gate: callers whose JWT resolves to either role may use it (or any caller when `auth.enabled=false` or `auth.dev_mode=true`, the dev/test postures). Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story — but the role set matches the rest of `/v1/admin/*` rather than carving out a separate tighter gate, because service tokens already hold admin-scoped powers across that whole tree (policy CRUD, pipes CRUD, log-level) and the inconsistency would be a footgun without a real authorization win. The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 
-`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate as `admin` / `service`. (The endpoint moved here from `/v1/query` as part of the admin-lockdown change — the `policy.RolePermissions.raw_sql` field has been removed and `/v1/query` now returns 404.)
+`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate as `admin` / `service`.
 
 **Request:**
 

@@ -130,7 +130,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest/{table}`.
+Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest?table={table}`.
 
 ```ts
 // Single row

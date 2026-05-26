@@ -224,7 +224,7 @@ flowchart TB
     classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
     classDef fail fill:#b91c1c,stroke:#ef4444,color:#fff,stroke-width:2px
 
-    C["Client<br/>POST /v1/ingest/clicks"]:::client
+    C["Client<br/>POST /v1/ingest?table={clicks}"]:::client
     C --> AUTH["JWT auth (optional)"]:::wh
     AUTH --> POL["Policy check<br/>row + column"]:::wh
     POL --> VAL["Schema validation<br/>(system.columns)"]:::wh
@@ -248,7 +248,7 @@ flowchart TB
     classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:2px
     classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
 
-    Q["Client<br/>POST /v1/tables/{table}/query"]:::client
+    Q["Client<br/>POST /v1/query?table={table}"]:::client
     Q --> L1["Ristretto cache<br/>(in-process)"]:::wh
     L1 -. "miss + singleflight" .-> CH[("ClickHouse")]:::store
     L1 -. "hit: ~0.5ms" .-> Q
