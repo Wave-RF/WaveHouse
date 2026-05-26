@@ -30,7 +30,9 @@ type captured struct {
 func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 	t.Helper()
 	var c captured
-	h := Middleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mw, err := Middleware(cfg)
+	require.NoError(t, err)
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.called = true
 		c.role = RoleFromContext(r.Context())
 		c.claims, c.hasClaims = ClaimsFromContext(r.Context())
@@ -152,6 +154,46 @@ func TestMiddleware_InvalidQueryParamToken_FallsBackWithError(t *testing.T) {
 	c := run(t, cfg(), func(r *http.Request) { r.URL.RawQuery = "token=not.a.jwt" })
 	assert.Empty(t, c.role)
 	assert.True(t, errors.Is(c.authErr, errInvalidToken))
+}
+
+func TestMiddleware_NoneAlgToken_Rejected(t *testing.T) {
+	t.Parallel()
+	// A token using "alg": "none" carries claims but no signature. It must never
+	// authenticate — WithValidMethods drops it before keyFunc runs (the classic
+	// JWT alg:none bypass), so even a "role": "admin" claim is ignored.
+	tok := jwt.NewWithClaims(jwt.SigningMethodNone, jwt.MapClaims{"role": "admin"})
+	signed, err := tok.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	require.NoError(t, err)
+	c := run(t, cfg(), bearer(signed))
+	assert.Empty(t, c.role, "alg:none token must not authenticate")
+	assert.False(t, c.hasClaims)
+	assert.True(t, errors.Is(c.authErr, errInvalidToken))
+}
+
+func TestMiddleware_JWKSUnreachableAtBoot_FailsLoud(t *testing.T) {
+	t.Parallel()
+	// A configured JWKS endpoint that errors at startup must fail Middleware
+	// construction — not silently boot into a state where no token can validate.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := Middleware(Config{JWKSURL: srv.URL})
+	require.Error(t, err, "an unreachable/erroring JWKS at boot must fail loudly")
+}
+
+func TestMiddleware_JWKSReachableAtBoot_OK(t *testing.T) {
+	t.Parallel()
+	// A reachable JWKS endpoint (even with an empty key set) constructs cleanly.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer srv.Close()
+
+	mw, err := Middleware(Config{JWKSURL: srv.URL})
+	require.NoError(t, err, "a reachable JWKS endpoint must construct successfully")
+	require.NotNil(t, mw)
 }
 
 func TestContextHelpers_RoundTrip(t *testing.T) {

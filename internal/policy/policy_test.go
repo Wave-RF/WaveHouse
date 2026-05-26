@@ -9,14 +9,15 @@ import (
 
 func TestEvaluate_NilPolicy(t *testing.T) {
 	t.Parallel()
-	// A nil policy (none configured yet, or deleted from KV) fails closed: only
-	// the admin role passes, everyone else is denied — no fail-open allow-all.
+	// A nil policy (none configured yet, or deleted from KV) fails fully closed:
+	// nobody passes, not even the admin role — deleting the policy is a total
+	// lockout. A fresh deployment is bootstrapped from the policy file, not over HTTP.
 	assert.False(t, Evaluate(nil, "viewer", "clicks", "select", nil).Allowed,
 		"nil policy must deny a non-admin role")
 	assert.False(t, Evaluate(nil, "", "clicks", "select", nil).Allowed,
 		"nil policy must deny a roleless request")
-	assert.True(t, Evaluate(nil, "admin", "clicks", "select", nil).Allowed,
-		"nil policy must still admit the default admin role so a first policy can be written")
+	assert.False(t, Evaluate(nil, "admin", "clicks", "select", nil).Allowed,
+		"nil policy must deny even the admin role (total lockout)")
 }
 
 func TestEvaluate_NoTablePolicy_AdminAllowed(t *testing.T) {
@@ -77,6 +78,25 @@ func TestEvaluate_NoMatchingRole_AdminAllowed(t *testing.T) {
 	}
 	perms := Evaluate(p, "admin", "clicks", "select", nil)
 	assert.True(t, perms.Allowed)
+}
+
+func TestEvaluate_ExplicitAdminEntry_AdminStillUnrestricted(t *testing.T) {
+	t.Parallel()
+	// The admin bypass is unconditional: even a policy that names the admin role
+	// with a narrow allow-list must NOT restrict admin. Admin always gets full,
+	// unrestricted access — no column/row scoping is read from such an entry.
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Select: map[string]RolePermissions{
+					"admin": {AllowColumns: []string{"page"}},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "admin", "clicks", "select", nil)
+	assert.True(t, perms.Allowed)
+	assert.Empty(t, perms.AllowColumns, "admin is never column-restricted, even by an explicit admin entry")
 }
 
 func TestEvaluate_UnknownOperation(t *testing.T) {
@@ -457,8 +477,11 @@ func TestResolveRole(t *testing.T) {
 		{"non-empty role unchanged", "", "viewer", "editor", "editor"},
 		{"empty role -> default", "", "viewer", "", "viewer"},
 		{"empty role, no default -> empty", "", "", "", ""},
-		{"empty role, default==admin refused", "", "admin", "", ""},
-		{"empty role, default==custom admin refused", "superuser", "superuser", "", ""},
+		// default_role == admin is honored (a local/dev convenience): a roleless
+		// request resolves to admin. The store warns loudly when such a policy
+		// is adopted; ResolveRole itself does not block it.
+		{"empty role, default==admin resolves to admin", "", "admin", "", "admin"},
+		{"empty role, default==custom admin resolves to it", "superuser", "superuser", "", "superuser"},
 		// Matching is exact and case-sensitive — these are NOT the admin role.
 		{"service default allowed (no longer privileged)", "", "service", "", "service"},
 		{"ADMIN (case) is its own role", "", "ADMIN", "", "ADMIN"},
@@ -535,10 +558,11 @@ func TestEvaluate_DefaultRole_DoesNotClobberRealRole(t *testing.T) {
 	assert.Equal(t, []string{"page", "secret"}, perms.AllowColumns, "editor keeps its own perms")
 }
 
-// TestEvaluate_DefaultRoleAdmin_NotEscalated: even if a policy with a privileged
-// default_role reaches the engine (e.g. hand-edited in KV), ResolveRole refuses
-// it so a roleless request can't become admin.
-func TestEvaluate_DefaultRoleAdmin_NotEscalated(t *testing.T) {
+// TestEvaluate_DefaultRoleAdmin_GrantsAdmin: a default_role equal to the admin
+// role grants a roleless request full admin access. This is the local/dev
+// convenience the store warns loudly about — ResolveRole maps the empty role to
+// admin, and IsAdmin then bypasses the table policy.
+func TestEvaluate_DefaultRoleAdmin_GrantsAdmin(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
 		DefaultRole: "admin",
@@ -551,26 +575,25 @@ func TestEvaluate_DefaultRoleAdmin_NotEscalated(t *testing.T) {
 		},
 	}
 	perms := Evaluate(p, "", "clicks", "select", nil)
-	assert.False(t, perms.Allowed, "default_role=admin must not escalate a roleless request")
+	assert.True(t, perms.Allowed, "default_role=admin grants a roleless request full admin access")
 }
 
-func TestValidate_RejectsDefaultRoleEqualToAdmin(t *testing.T) {
+func TestValidate_AllowsDefaultRoleEqualToAdmin(t *testing.T) {
 	t.Parallel()
-	// Default admin_role ("admin"): a default_role of "admin" would grant every
-	// roleless request admin, so it's refused.
-	err := Validate(&Policy{DefaultRole: "admin", Tables: map[string]TablePolicy{}})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "default_role")
+	// default_role == admin is permitted (a local/dev convenience): it grants
+	// every roleless request admin, and the store warns loudly, but it is not a
+	// validation error. See DefaultRoleGrantsAdmin / TestStore_Put_WarnsDefaultRoleAdmin.
+	assert.NoError(t, Validate(&Policy{DefaultRole: "admin", Tables: map[string]TablePolicy{}}))
 
-	// Same guard tracks a custom admin_role.
-	err = Validate(&Policy{AdminRole: "superuser", DefaultRole: "superuser", Tables: map[string]TablePolicy{}})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "default_role")
+	// Same for a custom admin_role.
+	assert.NoError(t, Validate(&Policy{AdminRole: "superuser", DefaultRole: "superuser", Tables: map[string]TablePolicy{}}))
 
-	// Exact, case-sensitive, no trimming — these are NOT the admin role, so allowed.
+	// DefaultRoleGrantsAdmin pins exactly which values trip the warning: exact,
+	// case-sensitive, no trimming, so these are NOT the admin role.
+	assert.True(t, DefaultRoleGrantsAdmin(&Policy{DefaultRole: "admin"}))
 	for _, dr := range []string{"service", "ADMIN", "Service", "  admin  "} {
-		assert.NoError(t, Validate(&Policy{DefaultRole: dr, Tables: map[string]TablePolicy{}}),
-			"default_role %q is not the admin role and must be allowed", dr)
+		assert.False(t, DefaultRoleGrantsAdmin(&Policy{DefaultRole: dr}),
+			"default_role %q is not the admin role", dr)
 	}
 }
 

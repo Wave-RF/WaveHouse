@@ -90,7 +90,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 ```bash
 # Ingest data (no auth required by default)
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
@@ -210,7 +210,7 @@ Then generate a test token:
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
 export TOKEN=$(jwt encode --secret "my-secret" '{"exp": 9999999999}')
 
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup"}'
@@ -227,13 +227,13 @@ WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
 Then include the dedup field in your ingest body:
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
 # → {"ok":true}
 
 # Same event_id again → deduplicated
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
 # → {"duplicate":true}

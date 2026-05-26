@@ -61,6 +61,7 @@ func NewStore(ctx context.Context, js jetstream.JetStream, bootstrapPath string,
 		s.mu.Lock()
 		s.cached = p
 		s.mu.Unlock()
+		s.warnIfDefaultRoleGrantsAdmin(p)
 	}
 
 	return s, nil
@@ -93,7 +94,21 @@ func (s *Store) Put(ctx context.Context, p *Policy) error {
 	s.mu.Unlock()
 
 	s.logger.Info("policy updated")
+	s.warnIfDefaultRoleGrantsAdmin(p)
 	return nil
+}
+
+// warnIfDefaultRoleGrantsAdmin logs a loud warning when the policy grants admin
+// to every roleless request via default_role == admin_role. The configuration
+// is permitted (handy for local/dev — no token needed to reach admin surfaces)
+// but unsafe in production, so every node that adopts such a policy says so. It
+// runs at each point a policy is taken into the cache: Put, startup load, and a
+// Watch update from a peer node.
+func (s *Store) warnIfDefaultRoleGrantsAdmin(p *Policy) {
+	if DefaultRoleGrantsAdmin(p) {
+		s.logger.Warn("default_role equals admin_role: every unauthenticated/roleless request is granted full admin access, including /v1/admin/* — intended for local/dev only, do NOT use in production",
+			"default_role", p.DefaultRole)
+	}
 }
 
 // Watch subscribes to policy changes in the NATS KV store so all nodes
@@ -127,19 +142,21 @@ func (s *Store) Watch(ctx context.Context) {
 			s.cached = &p
 			s.mu.Unlock()
 			s.logger.Info("policy updated via watch", "revision", entry.Revision())
+			s.warnIfDefaultRoleGrantsAdmin(&p)
 		}
 	}
 }
 
 // handleDelete applies a KV delete/purge by clearing the cache. With no policy,
-// Evaluate fails closed — only the admin role passes — so deleting the policy
-// denies all non-admin traffic until a new one is written. No fail-closed
-// retention is needed: the deny-by-default is structural, not a runtime flag.
+// Evaluate and IsAdmin fail fully closed — nobody passes, not even the admin
+// role — so deleting the policy denies all traffic until a new one is written
+// (bootstrap from the policy file). No fail-closed retention is needed: the
+// deny-by-default is structural, not a runtime flag.
 func (s *Store) handleDelete() {
 	s.mu.Lock()
 	s.cached = nil
 	s.mu.Unlock()
-	s.logger.Warn("policy deleted from KV; cache cleared — non-admin traffic is now denied until a new policy is written")
+	s.logger.Warn("policy deleted from KV; cache cleared — all traffic (including the admin role) is now denied until a new policy is written")
 }
 
 // load reads the current policy from NATS KV.

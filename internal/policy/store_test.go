@@ -1,8 +1,10 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,6 +127,27 @@ func TestStore_Put_ValidationError(t *testing.T) {
 	err = store.Put(t.Context(), bad)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid policy")
+}
+
+// TestStore_Put_WarnsDefaultRoleAdmin: a policy whose default_role equals the
+// admin role is accepted (not a validation error) but logged loudly, since it
+// grants every roleless request full admin. A normal default_role is silent.
+func TestStore_Put_WarnsDefaultRoleAdmin(t *testing.T) {
+	t.Parallel()
+
+	js := testutil.NewJetStream(t)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	store, err := NewStore(t.Context(), js, "", logger)
+	require.NoError(t, err)
+
+	// A normal default_role does not warn.
+	require.NoError(t, store.Put(t.Context(), &Policy{DefaultRole: "viewer", Tables: map[string]TablePolicy{}}))
+	assert.NotContains(t, buf.String(), "default_role equals admin_role")
+
+	// default_role == admin_role is accepted but logged loudly.
+	require.NoError(t, store.Put(t.Context(), &Policy{DefaultRole: "admin", Tables: map[string]TablePolicy{}}))
+	assert.Contains(t, buf.String(), "default_role equals admin_role")
 }
 
 func TestStore_Watch_PropagatesUpdates(t *testing.T) {

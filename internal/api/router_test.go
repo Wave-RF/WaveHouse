@@ -376,8 +376,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
-		// DLQ, Policy, Pipes, StructuredQuery all nil. PolicyStore nil too —
-		// RequireAdmin then uses the default admin role ("admin").
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
 	}
 
 	// Should not panic.

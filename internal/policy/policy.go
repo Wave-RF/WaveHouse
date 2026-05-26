@@ -9,9 +9,10 @@ import (
 // Policy is the top-level access control configuration.
 type Policy struct {
 	// DefaultRole is the role an empty/absent role resolves to (a tokenless or
-	// roleless request). Empty means no public access. It may not equal
-	// AdminRole — refused in ResolveRole and Validate — so a roleless request
-	// can never inherit admin.
+	// roleless request). Empty means no public access. Setting it equal to
+	// AdminRole grants every roleless request full admin — permitted as a
+	// local/dev convenience, but the store warns loudly when such a policy is
+	// adopted (see DefaultRoleGrantsAdmin); avoid it in production.
 	DefaultRole string `json:"default_role" yaml:"default_role"`
 	// AdminRole is the role granted full access and the allowlist bypass.
 	// Configurable per org (case-sensitive, exact match); defaults to "admin"
@@ -68,17 +69,19 @@ var claimTemplateRe = regexp.MustCompile(`\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}`)
 // request with no role — a token without a role claim, or no token at all when
 // public access is configured — is evaluated as the configured default.
 // Matching is exact and case-sensitive (no normalization): roles are opaque
-// strings, mirroring the admin check in IsAdmin. A default_role that is empty
-// or equal to the admin role is refused here (returns "") so the admin bypass
-// can never be reached via the default; Validate also rejects saving such a
-// policy. A non-empty role is returned unchanged — roles do not inherit the
-// default's permissions.
+// strings, mirroring the admin check in IsAdmin. An empty default_role (no
+// public access configured) leaves the role empty so the request fails closed.
+// A default_role equal to the admin role IS honored — a roleless request then
+// resolves to admin and receives full access — which is permitted as a local/dev
+// convenience; the store warns loudly when such a policy is adopted (see
+// DefaultRoleGrantsAdmin). A non-empty role is returned unchanged — roles do not
+// inherit the default's permissions.
 func ResolveRole(p *Policy, role string) string {
 	if role != "" || p == nil {
 		return role
 	}
-	if p.DefaultRole == "" || p.DefaultRole == AdminRole(p) {
-		return "" // fail closed: no default, or a default that resolves to admin
+	if p.DefaultRole == "" {
+		return "" // fail closed: no public default_role configured
 	}
 	return p.DefaultRole
 }
@@ -90,18 +93,30 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	// inherit the default's permissions.
 	role = ResolveRole(p, role)
 
-	// A nil policy (none configured yet, or deleted from KV) fails closed: only
-	// the admin role passes, everyone else is denied. This is what lets the
-	// fail-closed cache hack go away — deleting the policy denies all non-admin
-	// traffic on its own, rather than flipping Evaluate to allow-all.
+	// Admin bypasses all policy: full, unrestricted access regardless of table,
+	// operation, or any explicit per-role entry — an admin is never column- or
+	// row-restricted, even by a policy that names the admin role. This single
+	// early exit is the only admin branch, so every return below is the non-admin
+	// path and denies plainly. It also folds in the nil-policy case: IsAdmin(nil)
+	// is false (a deleted/absent policy is a total lockout — nobody passes, not
+	// even admin; a fresh deployment is bootstrapped from the policy file, not
+	// over HTTP), so a nil policy falls through to the deny just below. Mirrors
+	// RoleAllowed's admin short-circuit on the pipe path.
+	if IsAdmin(p, role) {
+		return &ResolvedPermissions{Allowed: true}
+	}
+
+	// Beyond here the role is non-admin (non-empty only if it carried a concrete
+	// role or matched a real default_role); any failure to find a matching entry
+	// is a plain deny.
 	if p == nil {
-		return &ResolvedPermissions{Allowed: IsAdmin(p, role)}
+		return &ResolvedPermissions{Allowed: false}
 	}
 
 	tp, ok := p.Tables[table]
 	if !ok {
-		// No policy for this table — default deny for non-admin.
-		return &ResolvedPermissions{Allowed: IsAdmin(p, role)}
+		// No policy for this table — default deny.
+		return &ResolvedPermissions{Allowed: false}
 	}
 
 	var rolePerms map[string]RolePermissions
@@ -115,21 +130,21 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	}
 
 	if rolePerms == nil {
-		return &ResolvedPermissions{Allowed: IsAdmin(p, role)}
+		return &ResolvedPermissions{Allowed: false}
 	}
 
 	// An empty/absent role must never match a role entry — a roleless request is
 	// authorized only after ResolveRole maps it to a concrete default_role above,
-	// or via the admin role. A stray "" role key in a policy therefore grants
-	// nothing: the policy-side twin of the empty-AllowedRoles-entry footgun
-	// closed for pipes in #159. Matching is exact — there is no "*" any-role
-	// wildcard.
+	// or via the admin role (handled by the short-circuit at the top). A stray ""
+	// role key in a policy therefore grants nothing: the policy-side twin of the
+	// empty-AllowedRoles-entry footgun closed for pipes in #159. Matching is
+	// exact — there is no "*" any-role wildcard.
 	perms, ok := RolePermissions{}, false
 	if role != "" {
 		perms, ok = rolePerms[role]
 	}
 	if !ok {
-		return &ResolvedPermissions{Allowed: IsAdmin(p, role)}
+		return &ResolvedPermissions{Allowed: false}
 	}
 
 	resolved := &ResolvedPermissions{
@@ -290,12 +305,10 @@ func Validate(p *Policy) error {
 	if p == nil {
 		return fmt.Errorf("policy is nil")
 	}
-	// A default that resolves to the admin role would grant every roleless
-	// (tokenless, or invalid/expired-token) request full admin access. Exact,
-	// case-sensitive match — roles are opaque strings (see IsAdmin/ResolveRole).
-	if p.DefaultRole != "" && p.DefaultRole == AdminRole(p) {
-		return fmt.Errorf("default_role %q must not equal the admin role: it would grant every roleless request full admin access", p.DefaultRole)
-	}
+	// Note: a default_role equal to the admin role is intentionally allowed (it
+	// grants every roleless request full admin — a local/dev convenience). The
+	// store warns loudly when such a policy is adopted (see
+	// DefaultRoleGrantsAdmin); it is not a validation error.
 	for tableName, tp := range p.Tables {
 		for role, perms := range tp.Select {
 			if err := validateRolePerms(tableName, "select", role, perms); err != nil {

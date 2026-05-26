@@ -228,9 +228,10 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // RequireAdmin restricts a route to the policy admin role (policy.AdminRole —
 // configurable via admin_role, "admin" by default). The role established by the
 // auth middleware and the live policy are read per request, so an admin_role
-// change applies without a restart, and a fresh deployment with no policy yet
-// still admits an "admin" token (AdminRole defaults to "admin" for a nil
-// policy) so the first policy can be written.
+// change applies without a restart. A nil policy (none configured yet, or
+// deleted from KV) admits nobody — IsAdmin(nil) is false — so a fresh deployment
+// is bootstrapped from the policy file (loaded server-side), not by writing the
+// first policy over this gate.
 //
 // Authentication is decoupled from this gate: a missing/invalid/expired token
 // resolves to an empty (non-admin) role and is denied here. Denials go through

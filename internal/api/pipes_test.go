@@ -107,7 +107,10 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 				AllowedRoles: tc.AllowedRoles,
 			},
 		)
-		h := NewPipesHandler(store, nil, nil, nil, 0)
+		// A real (non-nil) policy so the default admin role ("admin") is defined
+		// and bypasses the allowlist, per the matrix. With a nil policy nobody is
+		// admin (total lockout) — covered separately in internal/policy tests.
+		h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0)
 
 		w := httptest.NewRecorder()
 		r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
@@ -200,7 +203,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0)
 
 	w := httptest.NewRecorder()
 	// No query params or body — missing "page".
@@ -225,7 +228,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes/by_page/execute?page=/home", nil)
@@ -319,7 +322,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0)
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"page": "/about"}
@@ -364,7 +367,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0)
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)

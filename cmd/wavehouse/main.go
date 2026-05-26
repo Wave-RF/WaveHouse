@@ -359,6 +359,18 @@ func run() int {
 	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
 	wsHandler.PolicyStore = policyStore
 
+	// Build the auth middleware up front so a misconfigured/unreachable JWKS
+	// endpoint fails startup loudly rather than booting into a degraded state.
+	authMW, err := auth.Middleware(auth.Config{
+		JWTSecret: cfg.Auth.JWTSecret,
+		JWKSURL:   cfg.Auth.JWKSURL,
+		RoleClaim: cfg.Auth.RoleClaim,
+	})
+	if err != nil {
+		logger.Error("auth middleware init", "error", err)
+		return 1
+	}
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -370,15 +382,11 @@ func run() int {
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
-		AuthMW: auth.Middleware(auth.Config{
-			JWTSecret: cfg.Auth.JWTSecret,
-			JWKSURL:   cfg.Auth.JWKSURL,
-			RoleClaim: cfg.Auth.RoleClaim,
-		}),
-		PolicyStore: policyStore,
-		JS:          js,
-		CORSOrigins: cfg.Server.CORSAllowedOrigins,
-		LogLevel:    logLevel,
+		AuthMW:          authMW,
+		PolicyStore:     policyStore,
+		JS:              js,
+		CORSOrigins:     cfg.Server.CORSAllowedOrigins,
+		LogLevel:        logLevel,
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,

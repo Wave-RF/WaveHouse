@@ -84,13 +84,13 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. With neither this nor `jwks_url` set, no token can validate, so every request is the policy `default_role`. |
-| `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is tried first, falling back to HMAC secret. |
+| `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored (not a per-token fallback); the endpoint must be reachable at startup or the server fails to boot. |
 | `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
 
 **There is no auth on/off switch.** The JWT middleware always runs. A request with no token, or an invalid/expired one, falls back to the policy `default_role`; elevated access needs a valid token whose role is granted (or equals the policy `admin_role`). The privileged role and public access are **policy** settings, not config flags:
 
 - **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match): the role granted full access and the `/v1/admin/*` gate. There is no separate `service` role.
-- **`default_role`** (policy field): set it to open public (no-token) access — roleless requests are evaluated as that role; remove it to close public access. It may **not** equal `admin_role`. `/v1/admin/*` and the schema/DLQ endpoints are admin-only, and a pipe with no `allowed_roles` authorizes nobody but the admin role.
+- **`default_role`** (policy field): set it to open public (no-token) access — roleless requests are evaluated as that role; remove it to close public access. Setting it equal to `admin_role` is allowed and makes every roleless request admin (including `/v1/admin/*`) — handy for local/dev, logged loudly on every node that loads such a policy, and not for production use. `/v1/admin/*` and the schema/DLQ endpoints are admin-only, and a pipe with no `allowed_roles` authorizes nobody but the admin role.
 
 See [API — Authentication](/api#authentication).
 
