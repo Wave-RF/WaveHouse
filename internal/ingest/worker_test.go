@@ -17,6 +17,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -64,6 +65,27 @@ func makeEnvelope(t *testing.T, tableName, scope string, data map[string]any) []
 	out, err := json.Marshal(env)
 	require.NoError(t, err)
 	return out
+}
+
+// newIngestMsg builds a MockJetStreamMsg shaped exactly the way the
+// /v1/ingest producer (internal/api/ingest.go) publishes events:
+//
+//	subject  = "ingest." + SafeEncodeNATS(table)                     // scopeless
+//	subject  = "ingest." + SafeEncodeNATS(table) + "." + SafeEncodeNATS(scope)
+//	envelope = { table_name: table, scope: scope, ... }              // raw, not encoded
+//
+// Tests should use this helper instead of hand-rolling MsgSubject/MsgData pairs
+// so the subject and envelope can't silently drift from the producer's contract.
+func newIngestMsg(t *testing.T, table, scope string, data map[string]any) *testutil.MockJetStreamMsg {
+	t.Helper()
+	subj := "ingest." + query.SafeEncodeNATS(table)
+	if scope != "" {
+		subj += "." + query.SafeEncodeNATS(scope)
+	}
+	return &testutil.MockJetStreamMsg{
+		MsgSubject: subj,
+		MsgData:    makeEnvelope(t, table, scope, data),
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +179,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	envelope := makeEnvelope(t, "events", "org_42", map[string]any{"id": 1, "v": "x"})
 	js, err := jetstream.New(emb.NatsConn())
 	require.NoError(t, err)
-	_, err = js.Publish(ctx, "ingest.events", envelope)
+	_, err = js.Publish(ctx, "ingest.events.org_42", envelope)
 	require.NoError(t, err)
 
 	// ── Wait for the worker to insert + ack ──
@@ -182,7 +204,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 			if k == "events" {
 				hasTable = true
 			}
-			if k == "events" || k == "events%2Eorg_42" || k == "events.org_42" {
+			if k == "events.org_42" {
 				hasSubject = true
 			}
 		}
@@ -386,49 +408,66 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 func TestHandleSuccess(t *testing.T) {
 	t.Parallel()
 
+	// natsSafeSubject is what the worker derives by stripping "ingest." from
+	// the NATS subject the producer publishes to (see internal/api/ingest.go).
+	// In production that is always "<SafeEncodeNATS(table)>[.<SafeEncodeNATS(scope)>]",
+	// so e.g. table "events" + scope "org_1" yields natsSafeSubject "events.org_1".
+	// handleSuccess invalidates the encoded table key + each unique scoped key,
+	// deduping when the scopeless subject already equals the table key.
+
 	tests := []struct {
-		name            string
-		table           string
-		subjects        []string // one entry per message; used for both MsgSubject and natsSafeSubject
-		cacheErr        error    // applied via MockCache.InvErr before the call
-		msgDoubleAckErr error    // applied to every MockJetStreamMsg
-		wantCacheKeys   []string // expected (ElementsMatch) keys in cache.GetKeys()
+		name             string
+		table            string
+		natsSafeSubjects []string // realistic shape: "<encoded_table>[.<encoded_scope>]"
+		cacheErr         error    // applied via MockCache.InvErr before the call
+		msgDoubleAckErr  error    // applied to every MockJetStreamMsg
+		wantCacheKeys    []string // expected (ElementsMatch) keys in cache.GetKeys()
 	}{
 		{
-			name:          "invalidates cache and acks each unique subject",
-			table:         "events",
-			subjects:      []string{"org_1", "org_2"},
-			wantCacheKeys: []string{"events", "org_1", "org_2"},
+			name:             "invalidates table + each unique scope",
+			table:            "events",
+			natsSafeSubjects: []string{"events.org_1", "events.org_2"},
+			wantCacheKeys:    []string{"events", "events.org_1", "events.org_2"},
 		},
 		{
-			// Three messages, two distinct subjects → table + 2 subjects = 3 keys.
-			name:          "deduplicates version keys",
-			table:         "events",
-			subjects:      []string{"org_1", "org_1", "org_2"},
-			wantCacheKeys: []string{"events", "org_1", "org_2"},
+			// 3 msgs, 2 distinct scoped subjects → table + 2 scoped = 3 keys.
+			name:             "deduplicates repeated scope keys",
+			table:            "events",
+			natsSafeSubjects: []string{"events.org_1", "events.org_1", "events.org_2"},
+			wantCacheKeys:    []string{"events", "events.org_1", "events.org_2"},
 		},
 		{
-			// natsSafeSubject equals the encoded table name → table key added once.
-			name:          "table name doubles as subject key",
-			table:         "events",
-			subjects:      []string{"events"},
-			wantCacheKeys: []string{"events"},
+			// Scopeless: producer publishes to "ingest.<table>", so
+			// natsSafeSubject equals the encoded table → one key.
+			name:             "scopeless subject dedups against table key",
+			table:            "events",
+			natsSafeSubjects: []string{"events"},
+			wantCacheKeys:    []string{"events"},
+		},
+		{
+			// Table name containing a '.' is percent-encoded on both sides of
+			// the version key — keys must use the encoded form for cache hits
+			// to line up with the reader (internal/api/structured_query.go).
+			name:             "table with special chars is percent-encoded",
+			table:            "events.staging",
+			natsSafeSubjects: []string{"events%2Estaging.org_1"},
+			wantCacheKeys:    []string{"events%2Estaging", "events%2Estaging.org_1"},
 		},
 		{
 			// Cache failure must not prevent ack — failure is logged, non-fatal.
-			name:          "cache error still acks",
-			table:         "events",
-			subjects:      []string{"org_1"},
-			cacheErr:      errors.New("cache backend down"),
-			wantCacheKeys: []string{"events", "org_1"},
+			name:             "cache error still acks",
+			table:            "events",
+			natsSafeSubjects: []string{"events.org_1"},
+			cacheErr:         errors.New("cache backend down"),
+			wantCacheKeys:    []string{"events", "events.org_1"},
 		},
 		{
 			// DoubleAck error is logged but DoubleAcked flag still flips.
-			name:            "double ack error does not panic",
-			table:           "events",
-			subjects:        []string{"org_1"},
-			msgDoubleAckErr: errors.New("server unavailable"),
-			wantCacheKeys:   []string{"events", "org_1"},
+			name:             "double ack error does not panic",
+			table:            "events",
+			natsSafeSubjects: []string{"events.org_1"},
+			msgDoubleAckErr:  errors.New("server unavailable"),
+			wantCacheKeys:    []string{"events", "events.org_1"},
 		},
 	}
 
@@ -438,13 +477,12 @@ func TestHandleSuccess(t *testing.T) {
 			w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
 			cache.InvErr = tt.cacheErr
 
-			msgs := make([]*testutil.MockJetStreamMsg, len(tt.subjects))
-			parsed := make([]parsedMsg, len(tt.subjects))
-			for i, sub := range tt.subjects {
-				msgs[i] = &testutil.MockJetStreamMsg{
-					MsgSubject:   sub,
-					DoubleAckErr: tt.msgDoubleAckErr,
-				}
+			msgs := make([]*testutil.MockJetStreamMsg, len(tt.natsSafeSubjects))
+			parsed := make([]parsedMsg, len(tt.natsSafeSubjects))
+			for i, sub := range tt.natsSafeSubjects {
+				// MsgSubject intentionally left blank — handleSuccess reads
+				// natsSafeSubject off parsedMsg, not the NATS msg itself.
+				msgs[i] = &testutil.MockJetStreamMsg{DoubleAckErr: tt.msgDoubleAckErr}
 				parsed[i] = parsedMsg{natsMsg: msgs[i], natsSafeSubject: sub}
 			}
 
@@ -453,7 +491,8 @@ func TestHandleSuccess(t *testing.T) {
 
 			assert.ElementsMatch(t, tt.wantCacheKeys, cache.GetKeys())
 			for i, m := range msgs {
-				assert.True(t, m.DoubleAcked.Load(), "msg %d (%q) must be DoubleAcked", i, tt.subjects[i])
+				assert.True(t, m.DoubleAcked.Load(),
+					"msg %d (natsSafeSubject=%q) must be DoubleAcked", i, tt.natsSafeSubjects[i])
 			}
 		})
 	}
@@ -582,14 +621,8 @@ func TestFlush_SingleTable_HappyPath(t *testing.T) {
 	}
 	w, _, cache, wait := newTestWorker(rt)
 
-	m1 := &testutil.MockJetStreamMsg{
-		MsgSubject: "ingest.events",
-		MsgData:    makeEnvelope(t, "events", "org_1", map[string]any{"id": 1}),
-	}
-	m2 := &testutil.MockJetStreamMsg{
-		MsgSubject: "ingest.events",
-		MsgData:    makeEnvelope(t, "events", "org_1", map[string]any{"id": 2}),
-	}
+	m1 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 1})
+	m2 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 2})
 
 	w.flush(context.Background(), []jetstream.Msg{m1, m2})
 	wait()
@@ -601,8 +634,43 @@ func TestFlush_SingleTable_HappyPath(t *testing.T) {
 	assert.True(t, m1.DoubleAcked.Load())
 	assert.True(t, m2.DoubleAcked.Load())
 
-	// Cache invalidated for the table.
-	assert.Contains(t, cache.GetKeys(), "events")
+	// Cache invalidation: table-level + the shared scoped key.
+	assert.ElementsMatch(t,
+		[]string{"events", "events.org_1"},
+		cache.GetKeys(),
+	)
+}
+
+// TestFlush_MultiScope_InvalidatesPerScope covers the multi-scope batching path:
+// distinct scopes for the same table get grouped into one HTTP insert (per-table
+// grouping), but each unique scope still gets its own cache version key bumped
+// alongside the global table key.
+func TestFlush_MultiScope_InvalidatesPerScope(t *testing.T) {
+	t.Parallel()
+	rt := &testutil.MockRoundTripper{
+		Fn: func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
+		},
+	}
+	w, _, cache, wait := newTestWorker(rt)
+
+	msgs := []jetstream.Msg{
+		newIngestMsg(t, "events", "org_1", map[string]any{"id": 1}),
+		newIngestMsg(t, "events", "org_2", map[string]any{"id": 2}),
+		newIngestMsg(t, "events", "org_1", map[string]any{"id": 3}),
+	}
+
+	w.flush(context.Background(), msgs)
+	wait()
+
+	// Per-table grouping → one HTTP request despite multiple scopes.
+	assert.Equal(t, int32(1), rt.Hits())
+
+	// Cache: table key + each unique scope key, deduped.
+	assert.ElementsMatch(t,
+		[]string{"events", "events.org_1", "events.org_2"},
+		cache.GetKeys(),
+	)
 }
 
 func TestFlush_MalformedEnvelope_DropsAndContinues(t *testing.T) {
@@ -617,14 +685,13 @@ func TestFlush_MalformedEnvelope_DropsAndContinues(t *testing.T) {
 	}
 	w, _, _, wait := newTestWorker(rt)
 
+	// Bad message: intentionally malformed envelope, can't go through
+	// newIngestMsg because that helper builds a valid envelope.
 	bad := &testutil.MockJetStreamMsg{
 		MsgSubject: "ingest.events",
 		MsgData:    []byte("not valid json"),
 	}
-	good := &testutil.MockJetStreamMsg{
-		MsgSubject: "ingest.events",
-		MsgData:    makeEnvelope(t, "events", "", map[string]any{"id": 2}),
-	}
+	good := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 
 	w.flush(context.Background(), []jetstream.Msg{bad, good})
 	wait()
@@ -648,9 +715,9 @@ func TestFlush_MultipleTables_GroupedPerTable(t *testing.T) {
 	w, _, cache, wait := newTestWorker(rt)
 
 	msgs := []jetstream.Msg{
-		&testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})},
-		&testutil.MockJetStreamMsg{MsgSubject: "ingest.users", MsgData: makeEnvelope(t, "users", "", map[string]any{"id": 2})},
-		&testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 3})},
+		newIngestMsg(t, "events", "", map[string]any{"id": 1}),
+		newIngestMsg(t, "users", "", map[string]any{"id": 2}),
+		newIngestMsg(t, "events", "", map[string]any{"id": 3}),
 	}
 
 	w.flush(context.Background(), msgs)
@@ -690,8 +757,8 @@ func TestFlush_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	}
 	w, js, _, wait := newTestWorker(rt)
 
-	m1 := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
-	m2 := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 2})}
+	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	m2 := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 
 	w.flush(context.Background(), []jetstream.Msg{m1, m2})
 	wait()
@@ -737,9 +804,9 @@ func TestFlush_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	}
 	w, js, _, wait := newTestWorker(rt)
 
-	goodA := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 1})}
-	poison := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 2, "poison": true})}
-	goodB := &testutil.MockJetStreamMsg{MsgSubject: "ingest.events", MsgData: makeEnvelope(t, "events", "", map[string]any{"id": 3})}
+	goodA := newIngestMsg(t, "events", "", map[string]any{"id": 1})
+	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
+	goodB := newIngestMsg(t, "events", "", map[string]any{"id": 3})
 
 	w.flush(context.Background(), []jetstream.Msg{goodA, poison, goodB})
 	wait()
@@ -772,10 +839,7 @@ func TestFlush_StripsIngestPrefixFromSubject(t *testing.T) {
 	}
 	w, _, cache, wait := newTestWorker(rt)
 
-	m := &testutil.MockJetStreamMsg{
-		MsgSubject: "ingest.events.org_42",
-		MsgData:    makeEnvelope(t, "events", "org_42", map[string]any{"id": 1}),
-	}
+	m := newIngestMsg(t, "events", "org_42", map[string]any{"id": 1})
 	w.flush(context.Background(), []jetstream.Msg{m})
 	wait()
 
