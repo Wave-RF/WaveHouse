@@ -369,13 +369,13 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub),
-		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
-		Health: &HealthHandler{},
-		Schema: NewSchemaHandler(reg),
-		AuthMW: func(next http.Handler) http.Handler { return next },
+		Ingest:      NewIngestHandler(reg, pub),
+		Query:       &QueryHandler{},
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
+		Health:      &HealthHandler{},
+		Schema:      NewSchemaHandler(reg),
+		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
 	}
 

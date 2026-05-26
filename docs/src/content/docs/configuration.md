@@ -87,6 +87,8 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored (not a per-token fallback); the endpoint must be reachable at startup or the server fails to boot. |
 | `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
 
+WaveHouse accepts only the signing algorithms matching the active verifier — `HS256`/`HS384`/`HS512` for the HMAC secret, or the asymmetric family (`RS*`/`ES*`/`PS*`/`EdDSA`) for JWKS — and validates the token's `alg` before any key is used, so your IdP must sign with one of these and `alg: none` is always rejected.
+
 **There is no auth on/off switch.** The JWT middleware always runs. A request with no token, or an invalid/expired one, falls back to the policy `default_role`; elevated access needs a valid token whose role is granted (or equals the policy `admin_role`). The privileged role and public access are **policy** settings, not config flags:
 
 - **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match): the role granted full access and the `/v1/admin/*` gate. There is no separate `service` role.
