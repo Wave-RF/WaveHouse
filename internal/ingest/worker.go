@@ -45,6 +45,13 @@ func StartIngestWorker(
 	ctx context.Context, nc *nats.Conn, cache cache.Cache,
 	chHost, chHTTPPort, chHTTPScheme, chUser, chPassword, chDB string,
 ) (func(context.Context) error, error) {
+	if nc == nil {
+		return nil, fmt.Errorf("nats connection is nil")
+	}
+	if cache == nil {
+		return nil, fmt.Errorf("cache is nil")
+	}
+
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("initialize JetStream: %w", err)
@@ -66,11 +73,20 @@ func StartIngestWorker(
 	}
 
 	// Tune the HTTP Transport for high-throughput ClickHouse ingestion
-	customTransport := http.DefaultTransport.(*http.Transport).Clone()
-	customTransport.MaxIdleConns = 100
-	customTransport.MaxIdleConnsPerHost = 100
-	customTransport.MaxConnsPerHost = 100
-	customTransport.IdleConnTimeout = 90 * time.Second
+	customTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       100,
+	}
 
 	worker := &IngestWorker{
 		js: js,
@@ -324,7 +340,7 @@ func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parse
 
 	_, pubErr := w.js.PublishMsg(ctx, msg)
 	if pubErr != nil {
-		w.logger.ErrorContext(ctx, "NATS DLQ publish failed, this data will likely be retried and introduce a duplicate in your database if no merge engines are setup for this table", "table", tableName, "subject", subject, "error", pubErr)
+		w.logger.ErrorContext(ctx, "NATS DLQ publish failed, this data will continue retrying insertion indefinitely until the DLQ recovers", "table", tableName, "subject", subject, "error", pubErr)
 		return
 	}
 

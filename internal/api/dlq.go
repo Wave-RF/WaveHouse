@@ -49,11 +49,11 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	tables := make(map[string]uint64)
 	for subject, count := range info.State.Subjects {
 		// TODO: do we need to break out scopes here?
-		subject, err = query.SafeDecodeNATS(strings.TrimPrefix(subject, "dlq."))
+		decodedSubject, err := query.SafeDecodeNATS(strings.TrimPrefix(subject, "dlq."))
 		if err != nil {
 			continue
 		}
-		tables[subject] = count
+		tables[decodedSubject] = count
 	}
 
 	w.Header().Set("Content-Type", "application/json")

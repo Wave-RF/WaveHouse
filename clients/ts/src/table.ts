@@ -59,6 +59,7 @@ export class TableRef<Row = Record<string, unknown>> {
         }),
       );
 
+      // TODO: with NDJSON/array version, need to rework how to show errors if only some/one fail
       const results = await Promise.all(promises);
 
       // Check if any of the concurrent requests failed
