@@ -280,7 +280,7 @@ func run() int {
 	go policyStore.Watch(ctx)
 
 	// Start batch consumer → ClickHouse.
-	ingestStream, err := ingest.StartIngestWorker(
+	ingestCleanup, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
 		cache,
@@ -290,10 +290,6 @@ func run() int {
 		cfg.ClickHouse.Username,
 		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,
-		func(fatalErr error) {
-			slog.Error("ingest worker died, initiating graceful shutdown", "error", fatalErr)
-			cancel()
-		},
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)
@@ -432,7 +428,6 @@ func run() int {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 		defer shutCancel()
 		cancel()
-		_ = ingestStream.Stop(shutCtx)
 		if err := srv.Shutdown(shutCtx); err != nil {
 			logger.Error("server shutdown error", "error", err)
 		}
@@ -440,6 +435,9 @@ func run() int {
 			if err := promSrv.Shutdown(shutCtx); err != nil {
 				logger.Error("prometheus server shutdown error", "error", err)
 			}
+		}
+		if err := ingestCleanup(shutCtx); err != nil {
+			logger.Error("ingest worker cleanup error", "error", err)
 		}
 	}()
 

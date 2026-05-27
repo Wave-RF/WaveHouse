@@ -21,11 +21,11 @@ type Cache interface {
 	// TODO: AST query builder needs to give us a deterministic key or bypass cache entirely
 
 	// Version Registry
-	// Version operations accept a scope (e.g., "org_id:123")
+	// Version operations accept a scope (e.g., "org_123")
 	// If scope is empty, it bumps the global table version
 
-	// InvalidateCache invalidates the cache for a given table and set of scopes. If scopes is empty, it invalidates the global table version.
-	InvalidateCache(ctx context.Context, table string, scopes map[string]struct{}) (uint64, error)
+	// InvalidateCache invalidates the cache for a given list of versionKeys
+	InvalidateCache(ctx context.Context, versionKeys []string) (uint64, error)
 
 	// TODO: for local cache, we can just store the versions in memory, but for distributed/L2 cache, we will need to be able to either have stored procedures/pipelines etc to query them and attach them to a query, or sync them to each edge api server.
 
@@ -54,27 +54,9 @@ func QueryTimeToTTL(queryTime time.Duration) time.Duration {
 	return ttl
 }
 
-func generateInvalidationKeys(table string, scopes map[string]struct{}) []string {
-	var keys []string
-
-	keys = append(keys, table) // always include the global table as invalidated
-	for scope := range scopes {
-		if scope == "" {
-			continue // we already manually add this case, so skip it here so we don't double invalidate
-		}
-		keys = append(keys, generateVersionKey(table, scope))
-	}
-	return keys
-}
-
-func generateVersionKey(table string, scope string) string {
+func generateVersionKey(namespace string, scope string) string {
 	if scope == "" {
-		return table
+		return namespace
 	}
-	return fmt.Sprintf("%s.%s", table, scope)
-}
-
-type TableScope struct {
-	TableName string
-	Scope     string // e.g., "org_id:123" or "" for global
+	return fmt.Sprintf("%s.%s", namespace, scope)
 }

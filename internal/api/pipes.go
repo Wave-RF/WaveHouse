@@ -33,7 +33,11 @@ func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.Store.List())
+	q := h.Store.List()
+	if q == nil {
+		q = []*pipes.NamedQuery{}
+	}
+	_ = json.NewEncoder(w).Encode(q)
 }
 
 // Get returns a specific named query (admin endpoint).
@@ -132,7 +136,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	scope := ""
 	safePipeName := query.SafeEncodeNATS(name)
 
-	// TODO: current pipe impl doesn't have a list of tables/scopes, so bento ingest cannot invalidate it
+	// TODO: current pipe impl doesn't have a list of tables/scopes, so ingest worker cannot invalidate it
 
 	// Cache.
 	cacheKey := queryCacheKey(sql, params)

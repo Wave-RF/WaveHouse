@@ -208,7 +208,8 @@ func formatParamValue(v any) string {
 	case float64:
 		// JSON numbers are float64; if it's a whole number, format as integer.
 		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
+			return strconv.FormatInt(int64(val), 10)
+			// return fmt.Sprintf("%d", int64(val))
 		}
 		return fmt.Sprintf("%g", val)
 	case float32:

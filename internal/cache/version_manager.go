@@ -25,8 +25,8 @@ func NewVersionManager(conn *nats.Conn) *VersionManager {
 	}
 }
 
-func (vm *VersionManager) GetCacheKey(queryHash, table, scope string) string {
-	versionKey := generateVersionKey(table, scope)
+func (vm *VersionManager) GetCacheKey(queryHash, namespace, scope string) string {
+	versionKey := generateVersionKey(namespace, scope)
 	version := vm.GetVersion(versionKey)
 	return fmt.Sprintf("%s.%d:%s", versionKey, version, queryHash)
 }

@@ -6,11 +6,6 @@
 // package via env(). Each test creates its own ClickHouse table for data
 // isolation; the shared infra avoids the per-test container churn that drove
 // flakes and slow runs in the previous monolithic file.
-//
-// The single-process constraint is non-negotiable: Bento's
-// service.RegisterInput / service.RegisterBatchOutput are package-globals
-// behind a sync.Once, so only one StartIngestWorker can be wired per
-// process. TestMain wires it once.
 package tests
 
 import (
@@ -59,8 +54,7 @@ type testEnv struct {
 var sharedEnv *testEnv
 
 // env returns the package-shared environment. Tests must call this rather
-// than build their own — Bento's global registration only allows one
-// IngestWorker per process.
+// than build their own.
 func env(t *testing.T) *testEnv {
 	t.Helper()
 	if sharedEnv == nil {
@@ -181,9 +175,6 @@ func setup() (int, func()) {
 		testCHUser,
 		testCHPassword,
 		testCHDatabase,
-		func(err error) {
-			logger.Error("fatal error in integration test ingest worker", "error", err)
-		},
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: ingest worker: %v\n", err)
 		return 1, cleanup
@@ -222,7 +213,7 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 
 // startClickHouse starts a ClickHouse testcontainer and returns it plus a
 // connected native-protocol driver, the host:port the driver dials, and the
-// mapped HTTP port (Bento talks to ClickHouse over HTTP for INSERTs).
+// mapped HTTP port.
 //
 // ClickHouse opens 9000/tcp early in startup — before it can accept native
 // queries. Waiting only on the listening port produced flakes where the

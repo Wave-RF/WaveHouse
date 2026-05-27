@@ -50,13 +50,11 @@ func (l *LocalCache) Set(_ context.Context, key string, namespace string, scope 
 	return nil
 }
 
-func (l *LocalCache) InvalidateCache(_ context.Context, table string, scopes map[string]struct{}) (uint64, error) {
-	keys := generateInvalidationKeys(table, scopes)
-
-	for _, key := range keys {
+func (l *LocalCache) InvalidateCache(_ context.Context, versionKeys []string) (uint64, error) {
+	for _, key := range versionKeys {
 		l.versionManager.IncrementVersion(key)
 	}
-	return uint64(len(keys)), nil
+	return uint64(len(versionKeys)), nil
 }
 
 // Wait blocks until all buffered writes have been applied.

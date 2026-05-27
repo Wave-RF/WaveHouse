@@ -110,7 +110,7 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-WH_CH_HTTP_PORT=8123                # Port for Bento HTTP inserts + /v1/admin/query proxy (default: 8123)
+WH_CH_HTTP_PORT=8123                # Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
 # Schema discovery
@@ -154,7 +154,7 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
-- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the Bento → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
+- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose files in `deployments/compose/standalone.yaml`, `tests/e2e/compose.yaml`, and `clients/ts/playground/compose.yaml` set `WH_DATA_DIR=/app/data` and bind a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data/nats`, `/app/data/pebble`, and `/app/pipes` owned by the nonroot user (UID 65532).
