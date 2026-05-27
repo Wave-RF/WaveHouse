@@ -8,19 +8,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/go-chi/chi/v5"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// IngestHandler handles POST /v1/ingest/{table}.
+// IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	Registry    *discovery.SchemaRegistry
 	Dedup       dedupe.Deduplicator // nil if dedup disabled
@@ -34,7 +35,8 @@ func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *Ing
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	table := chi.URLParam(r, "table")
+	now := time.Now().UTC()
+	table := r.URL.Query().Get("table")
 
 	// Force the use of the GLOBAL provider
 	tracer := otel.GetTracerProvider().Tracer("internal/api")
@@ -45,9 +47,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Add a standard log to prove we are inside the span logic
-	slog.InfoContext(ctx, "debug: span started for ingest", "table", table)
+	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
 
 	r = r.WithContext(ctx)
+
+	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
 
 	if table == "" {
 		slog.ErrorContext(ctx, "missing table parameter in request")
@@ -55,23 +59,37 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: prevent table-enumeration...
 	schema := h.Registry.Get(table)
 	if schema == nil {
 		slog.WarnContext(ctx, "unknown table requested", "table", table)
-		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
+		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
 		return
 	}
 
+	// FAST AUTH: Table-level policy check (Before spending CPU parsing JSON)
+	var perms *policy.ResolvedPermissions
+	var role string
+
+	if h.PolicyStore != nil {
+		p := h.PolicyStore.Get()
+		role = policy.ResolveRole(p, auth.RoleFromContext(ctx))
+		claims, _ := auth.ClaimsFromContext(ctx)
+		perms = policy.Evaluate(p, role, table, "insert", claims)
+		if !perms.Allowed {
+			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
+			writeAuthzDenied(w, r, role)
+			return
+		}
+	}
+
+	// TODO: accept NDJSON
 	var data map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
 		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-
-	if _, exists := data["received_timestamp"]; exists {
-		slog.WarnContext(ctx, "payload contains reserved field", "field", "received_timestamp", "table", table)
-		writeJSONError(w, http.StatusBadRequest, "payload cannot contain reserved field 'received_timestamp'")
 		return
 	}
 
@@ -81,17 +99,8 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Policy enforcement for inserts.
+	// DEEP AUTH: Column-level & check clauses
 	if h.PolicyStore != nil {
-		role := RoleFromContext(ctx)
-		claims, _ := ClaimsFromContext(ctx)
-		p := h.PolicyStore.Get()
-		perms := policy.Evaluate(p, role, table, "insert", claims)
-		if !perms.Allowed {
-			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			writeJSONError(w, http.StatusForbidden, "forbidden")
-			return
-		}
 		// Check column permissions — reject disallowed columns.
 		for col := range data {
 			if !perms.IsColumnAllowed(col) {
@@ -134,12 +143,16 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	now := time.Now().UTC()
+	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
+	scope := ""
+
 	evt := ingest.EventMessage{
 		TableName:         table,
+		Scope:             scope,
 		ReceivedTimestamp: now.Format(time.RFC3339Nano),
-		Data:              data,
+		Data:              data, // Put the data back in the envelope
 	}
+
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
@@ -147,7 +160,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject := "ingest." + table
+	subject := "ingest." + query.SafeEncodeNATS(table)
+	if scope != "" {
+		subject += "." + query.SafeEncodeNATS(scope)
+	}
+
+	slog.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
 			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)

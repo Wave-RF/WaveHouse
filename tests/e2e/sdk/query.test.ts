@@ -96,9 +96,11 @@ describe("Query", () => {
   });
 
   it("raw SQL query", async () => {
-    // Scope to seededIds so the SQL string is unique per run — avoids
-    // colliding with admin.test.ts's identical-SQL count which can cache
-    // a stale 0 in /v1/query when it runs first.
+    // Scope to seededIds so the SQL string is unique per run. /v1/admin/query
+    // itself never caches (Cache-Control: no-store on every response) — the
+    // uniqueness here avoids confusing test output when this and admin.test.ts
+    // each independently SELECT count() from the same table and the suites
+    // race, not a cache concern.
     const admin = adminClient();
     const result = await admin.sql(
       `SELECT count() as cnt FROM default.clicks WHERE event_id IN ('${seededIds.join("','")}')`,
@@ -113,5 +115,112 @@ describe("Query", () => {
     const result = await wh.from("no_such_table").fetch();
     expect(result.error).not.toBeNull();
     expect(result.error!.status).toBe(404);
+  });
+
+  it("queries a table with special characters in its name", async () => {
+    const admin = adminClient();
+    const weirdName = "read-test; 2026";
+
+    // 1. Create table and refresh schema
+    await chQuery(`CREATE TABLE IF NOT EXISTS \`${weirdName}\` (id String, received_timestamp DateTime) ENGINE = Memory`);
+    await admin.schema.refresh();
+
+    // 2. Add it to the policy
+    const currentPolicyRes = await admin.policy.get();
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        [weirdName]: {
+          select: { viewer: { allow_columns: ["*"] } },
+        },
+      },
+    });
+
+    // 3. Query it using the SDK
+    const result = await wh.from(weirdName).fetch();
+    expect(result.error).toBeNull();
+
+    await chQuery(`DROP TABLE IF EXISTS \`${weirdName}\``);
+  });
+
+  it("rejects queries to unauthorized tables (403)", async () => {
+    const admin = adminClient();
+
+    // Create a table but DO NOT add it to the policy
+    await chQuery(`CREATE TABLE IF NOT EXISTS top_secret_data (id String) ENGINE = Memory`);
+    await admin.schema.refresh();
+
+    // The dataClient (viewer role) should be blocked completely
+    const result = await wh.from("top_secret_data").fetch();
+    expect(result.error).not.toBeNull();
+    expect(result.error!.status).toBe(403);
+
+    await chQuery(`DROP TABLE IF EXISTS top_secret_data`);
+  });
+
+  it("rejects queries requesting unauthorized columns (403)", async () => {
+    const admin = adminClient();
+    const currentPolicyRes = await admin.policy.get();
+
+    // Assert it's not null so the test fails cleanly if something goes wrong
+    expect(currentPolicyRes.data).not.toBeNull();
+
+    // Temporarily restrict the 'clicks' table so 'user_id' cannot be selected
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        clicks: {
+          ...((currentPolicyRes.data as any).tables.clicks || {}),
+          select: {
+            viewer: { allow_columns: ["page", "duration_ms"] }
+          }
+        }
+      }
+    });
+
+    // Try to explicitly select the forbidden column
+    const result = await wh.from("clicks").select("user_id").fetch();
+    expect(result.error).not.toBeNull();
+    expect(result.error!.status).toBe(403);
+
+    // Restore the baseline policy using the non-null assertion (!)
+    await admin.policy.set(currentPolicyRes.data!);
+  });
+
+  it("enforces max_execution_time_ms policy limit", async () => {
+    const admin = adminClient();
+    const currentPolicyRes = await admin.policy.get();
+
+    // Temporarily restrict viewer queries to an impossibly fast 1ms timeout
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        clicks: {
+          ...((currentPolicyRes.data as any).tables.clicks || {}),
+          select: {
+            viewer: {
+              allow_columns: ["*"],
+              max_execution_time_ms: 1, // 1 millisecond limit
+            },
+          },
+        },
+      },
+    });
+
+    try {
+      // The query will hit the Go context deadline exceeded error
+      // IMPORTANT: Make the query unique so it doesn't get served instantly from the cache!
+      const result = await wh
+        .from("clicks")
+        .select("*")
+        .where("event_id", "=", testId())
+        .limit(999)
+        .fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(500);
+    } finally {
+      // Restore policy even if test fails so that others don't too
+      await admin.policy.set(currentPolicyRes.data!);
+    }
   });
 });

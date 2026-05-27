@@ -22,26 +22,31 @@ describe('sql', () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it('POSTs to /v1/query with sql field', async () => {
+  it('POSTs to /v1/admin/query with sql field', async () => {
     const result = await sql(makeCtx(), 'SELECT count() FROM clicks');
 
     expect(result.data).toEqual([{ count: 10 }]);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/v1/query');
+    expect(url).toContain('/v1/admin/query');
     expect(JSON.parse(init.body)).toEqual({ sql: 'SELECT count() FROM clicks' });
   });
 
-  it('includes params when provided', async () => {
-    await sql(makeCtx(), 'SELECT * FROM clicks WHERE page = ?', ['/home']);
+  // The proxy endpoint doesn't accept positional `?` params — ClickHouse's
+  // HTTP interface uses a different binding model entirely. The SDK no
+  // longer accepts a params array; callers inline literals or use
+  // ClickHouse's named-param syntax in the SQL string. This test pins that
+  // contract: the request body never carries a `params` field, even if the
+  // SQL string itself contains a `?` (which would now be passed to
+  // ClickHouse verbatim and trigger a parse error there — the admin's
+  // responsibility).
+  it('never sends a params field', async () => {
+    // Use SQL that actually contains `?` so the test exercises what its
+    // comment claims — that the SDK passes the `?` through to ClickHouse
+    // verbatim instead of trying to bind it to a missing params array.
+    await sql(makeCtx(), 'SELECT ?');
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.params).toEqual(['/home']);
-  });
-
-  it('omits params when empty', async () => {
-    await sql(makeCtx(), 'SELECT 1');
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body).toEqual({ sql: 'SELECT ?' });
     expect(body.params).toBeUndefined();
   });
 

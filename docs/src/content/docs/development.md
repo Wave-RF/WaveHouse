@@ -82,7 +82,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no external cache needed
-- **Auth disabled** by default — no JWT needed
+- **No JWT secret** by default — requests resolve to the policy `default_role`
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
 
@@ -90,7 +90,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 ```bash
 # Ingest data (no auth required by default)
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
@@ -98,8 +98,10 @@ curl -s -X POST http://localhost:8080/v1/ingest/clicks \
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
-# Query events (wait a few seconds for the batch flush)
-curl -s -X POST http://localhost:8080/v1/query \
+# Query events (wait a few seconds for the batch flush). `/v1/admin/query` is
+# admin-only: send a valid JWT whose role is the policy `admin_role`
+# ("admin" by default) via `Authorization: Bearer <jwt>`.
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
@@ -134,7 +136,7 @@ dev: deps-up $(AIR)
 **While `make dev` is running you get:**
 
 - WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
-- Auth disabled by default — every request goes through. Override with env vars (see below).
+- No JWT secret set by default, so every request resolves to the policy `default_role`. Override with env vars (see below).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` (or `config.yaml`) triggers a debounced rebuild + restart. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
@@ -155,15 +157,32 @@ when you need to poke at ClickHouse:
 
 **Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
 
+### Running with observability
+
+WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
+
+You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
+
+They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear them down and clean up the container.
+
+| Target | What it does | UI URL |
+| ------ | ------------ | ------ |
+| `make obs-aspire` | Boots the Aspire dashboard. Extremely fast, in-memory only, and requires no login. Ideal for quick trace and log debugging. | `http://localhost:18888` |
+| `make obs-grafana` | Boots Grafana LGTM (Loki, Grafana, Tempo, Prometheus). Pre-configured to bypass login. Best for advanced UI charting and trace-to-log correlation. | `http://localhost:3000` |
+| `make obs-front` | Boots OTel-Front for a basic, alternative trace viewer. | `http://localhost:8000` |
+
+**Typical Workflow:**
+
+1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
+2. Open Tab 2: run `make dev` (or `make test-e2e`)
+3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
+
 ### Using the SDK playground against `make dev`
 
-The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse with auth enabled in dev mode and the secret `sdk-dev-secret`. To match those defaults under `make dev`:
+The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse signing JWTs with the secret `sdk-dev-secret`. To match under `make dev`:
 
 ```bash
-WH_AUTH_ENABLED=true \
-WH_AUTH_DEV_MODE=true \
-WH_AUTH_JWT_SECRET=sdk-dev-secret \
-make dev
+WH_AUTH_JWT_SECRET=sdk-dev-secret make dev
 ```
 
 Then in another terminal:
@@ -177,12 +196,12 @@ npx tsx playground/public.ts         # SDK demo against the live server
 
 Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
 
-### Enable Auth (Optional)
+### Validating tokens
 
-Set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=my-secret` to require JWT tokens:
+There is no auth on/off switch — the JWT middleware always runs. Set `WH_AUTH_JWT_SECRET` so tokens can be validated; without it, every request resolves to the policy `default_role`. Mint a JWT signed with that secret (role == the policy `admin_role`) to reach admin/elevated endpoints:
 
 ```bash
-WH_AUTH_ENABLED=true WH_AUTH_JWT_SECRET=my-secret make dev
+WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
 Then generate a test token:
@@ -191,7 +210,7 @@ Then generate a test token:
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
 export TOKEN=$(jwt encode --secret "my-secret" '{"exp": 9999999999}')
 
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup"}'
@@ -208,13 +227,13 @@ WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
 Then include the dedup field in your ingest body:
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
 # → {"ok":true}
 
 # Same event_id again → deduplicated
-curl -s -X POST http://localhost:8080/v1/ingest/clicks \
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
 # → {"duplicate":true}
@@ -288,14 +307,14 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 ### Test Structure
 
 | Category | Location | Docker? | Command |
-|----------|----------|---------|---------|
+| -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
 | SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-sdk` |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
 - **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. The `setupTestEnv` helper starts a ClickHouse testcontainer, embedded NATS, Bento ingest worker, and a full API router via `httptest.Server`. Subtests run sequentially because Bento's global registrations are one-time-per-process. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second Bento batch window.
+- **Integration tests** use the `//go:build integration` build tag. The `setupTestEnv` helper starts a ClickHouse testcontainer, embedded NATS, ingest worker, and a full API router via `httptest.Server`. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window.
 
 Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()` for silencing embedded NATS output).
 
@@ -311,6 +330,7 @@ Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()`
 The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
 
 **Architecture**:
+
 - `tests/e2e/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app`, so you can also point the suite at a hot-reload `make dev` instance instead.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
@@ -416,6 +436,10 @@ Run `make help` to see all targets. Key ones:
 | `make deps-logs` | Tail ClickHouse logs |
 | `make deps-shell` | `clickhouse-client` REPL on the running container |
 | `make deps-wipe` | Stop ClickHouse AND destroy its data volume (DESTRUCTIVE) |
+| **Observability** | |
+| `make obs-aspire` | Prebuilt 0-config o11y UI to show WaveHouse metrics, logs, and traces locally |
+| `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
+| `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
 | **Static checks** | |
 | `make fmt` | Check formatting (run `make fix` to apply) |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
@@ -491,7 +515,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
 
-```
+```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
 ```
 

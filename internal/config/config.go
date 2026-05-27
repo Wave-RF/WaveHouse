@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -87,12 +88,13 @@ type Server struct {
 }
 
 type ClickHouse struct {
-	Addr       string `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
-	HTTPPort   string `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
-	HTTPScheme string `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
-	Database   string `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
-	Username   string `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
-	Password   string `yaml:"password" env:"WH_CH_PASSWORD"`
+	Addr         string        `yaml:"addr" env:"WH_CH_ADDR" env-default:"localhost:9000"`
+	HTTPPort     string        `yaml:"http_port" env:"WH_CH_HTTP_PORT" env-default:"8123"`
+	HTTPScheme   string        `yaml:"http_scheme" env:"WH_CH_HTTP_SCHEME" env-default:"http"`
+	Database     string        `yaml:"database" env:"WH_CH_DATABASE" env-default:"default"`
+	Username     string        `yaml:"username" env:"WH_CH_USERNAME" env-default:"default"`
+	Password     string        `yaml:"password" env:"WH_CH_PASSWORD"`
+	QueryTimeout time.Duration `yaml:"query_timeout" env:"WH_CH_QUERY_TIMEOUT" env-default:"30s"`
 }
 
 type MQ struct {
@@ -107,21 +109,35 @@ type Dedupe struct {
 
 type Cache struct {
 	L1MaxCost              int64 `yaml:"l1_max_cost" env:"WH_CACHE_L1_MAX_COST" env-default:"67108864"`
-	DefaultTTL             int   `yaml:"default_ttl" env:"WH_CACHE_DEFAULT_TTL" env-default:"300"`
 	TimestampBucketSeconds int   `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
 }
 
+// Auth configures JWT validation. There is no on/off switch: the middleware
+// always runs. A request with no token, or an invalid/expired one, falls back
+// to the policy default_role; elevated access requires a valid token whose role
+// claim matches a granted role (or the policy admin_role). With neither
+// JWTSecret nor JWKSURL set, no token can validate, so every request is the
+// default role — a pure public deployment.
 type Auth struct {
-	Enabled   bool   `yaml:"enabled" env:"WH_AUTH_ENABLED" env-default:"false"`
 	JWTSecret string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	JWKSURL   string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
 	RoleClaim string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
-	DevMode   bool   `yaml:"dev_mode" env:"WH_AUTH_DEV_MODE" env-default:"false"`
 }
 
 // Policy configures the access control policy engine.
+//
+// FilePath has no default on purpose. When set, the file MUST exist and parse
+// cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
+// missing mount surfaces as a refused boot instead of a silent fail-closed
+// (every request 403s, including admin). When left empty, the store comes up
+// with no cached policy and the operator seeds via PUT /v1/admin/policy.
+//
+// A baked-in default like "policy.yaml" would re-introduce the silent-lockout
+// failure mode for any deployment that didn't ship that exact file at CWD,
+// and it would imply a convention the operator never opted into — keep the
+// path an explicit choice.
 type Policy struct {
-	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH" env-default:"policy.yaml"`
+	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH"`
 }
 
 // Pipes configures named query pipes.
@@ -160,16 +176,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.shutdown_timeout must be non-negative")
 	}
 
-	if c.Auth.Enabled && !c.Auth.DevMode && c.Auth.JWTSecret == "" && c.Auth.JWKSURL == "" {
-		return fmt.Errorf("auth.enabled requires at least one of jwt_secret or jwks_url (or enable dev_mode)")
-	}
-
 	if c.Schema.RefreshInterval < 1 {
 		return fmt.Errorf("schema.refresh_interval must be >= 1 second")
 	}
 
-	if c.Cache.DefaultTTL < 0 {
-		return fmt.Errorf("cache.default_ttl must be non-negative")
+	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
+		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
 	}
 
 	if c.MQ.GapWindowMinutes < 0 {

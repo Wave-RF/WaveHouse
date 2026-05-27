@@ -16,6 +16,51 @@ linters:
     - noctx
     - errorlint
     - tparallel
+    # new additions below, commented out to fix for now, double commented as not working or big fixes
+    # - canonicalheader
+    # # - clickhouselint  # installed when `golangci-lint help linters` but not make version
+    # - containedctx
+    # - contextcheck
+    # - copyloopvar
+    # - cyclop
+    # - dupl
+    - dupword
+    - durationcheck
+    # # - err113  # want this, but a lot to change...
+    # - errchkjson
+    - exhaustive
+    - exptostd
+    - fatcontext
+    # # - forcetypeassert
+    # - funlen
+    - gocheckcompilerdirectives
+    # - gochecknoglobals
+    # - gocognit
+    # - goconst
+    # - gocyclo
+    # - goprintffuncname
+    - iface
+    # - intrange
+    # - maintidx
+    - makezero
+    # # - mnd
+    # # - modernize
+    # - nestif
+    # - nilerr
+    - noctx
+    - nolintlint
+    # - perfsprint
+    # - prealloc
+    - promlinter
+    # - sloglint
+    - spancheck
+    # - testifylint
+    # - thelper
+    - unconvert
+    # - unparam
+    # - usestdlibvars
+    - usetesting
+    - wastedassign
   settings:
     revive:
       # Opt in to specific rules only; skip the default set's noisy
@@ -42,11 +87,17 @@ linters:
         - name: superfluous-else
         - name: unreachable-code
         - name: redefines-builtin-id
+  exclusions:
+    paths:
+      - .worktrees/
 
 formatters:
   enable:
     - gofumpt
     - goimports
+  exclusions:
+    paths:
+      - .worktrees/
 
 run:
   timeout: 5m

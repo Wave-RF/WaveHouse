@@ -2,7 +2,7 @@ package cache
 
 import (
 	"context"
-	"sync"
+	"fmt"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
@@ -10,47 +10,51 @@ import (
 
 // LocalCache is an L1 in-process cache backed by Ristretto.
 type LocalCache struct {
-	cache *ristretto.Cache[string, []byte]
-	ttls  sync.Map // key -> expiry time.Time
+	cache          *ristretto.Cache[string, []byte]
+	versionManager *VersionManager
 }
 
 // NewLocal creates a new Ristretto-backed local cache.
 func NewLocal(maxCost int64) (*LocalCache, error) {
-	c, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
-		NumCounters: maxCost / 100 * 10,
+	cache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+		NumCounters: max(maxCost/10, 1000),
 		MaxCost:     maxCost,
 		BufferItems: 64,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &LocalCache{cache: c}, nil
+	vm := NewVersionManager(nil)
+	return &LocalCache{cache: cache, versionManager: vm}, nil
 }
 
-func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
-	val, found := l.cache.Get(key)
-	if !found {
+func (l *LocalCache) Get(_ context.Context, key string, namespace string, scope string) ([]byte, time.Duration, error) {
+	cacheKey := l.versionManager.GetCacheKey(key, namespace, scope)
+
+	val, foundVal := l.cache.Get(cacheKey)
+	if !foundVal {
 		return nil, 0, nil
 	}
+	remaining, _ := l.cache.GetTTL(cacheKey)
 
-	var remaining time.Duration
-	if exp, ok := l.ttls.Load(key); ok {
-		remaining = time.Until(exp.(time.Time))
-		if remaining <= 0 {
-			l.cache.Del(key)
-			l.ttls.Delete(key)
-			return nil, 0, nil
-		}
-	}
 	return val, remaining, nil
 }
 
-func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
-	l.cache.SetWithTTL(key, value, int64(len(value)), ttl)
-	if ttl > 0 {
-		l.ttls.Store(key, time.Now().Add(ttl))
+func (l *LocalCache) Set(_ context.Context, key string, namespace string, scope string, value []byte, ttl time.Duration) error {
+	cacheKey := l.versionManager.GetCacheKey(key, namespace, scope)
+
+	// set cost = 0 for dynamic cost evaluation
+	if ok := l.cache.SetWithTTL(cacheKey, value, int64(len(value)), ttl); !ok {
+		return fmt.Errorf("cache admission rejected for key %q", cacheKey)
 	}
 	return nil
+}
+
+func (l *LocalCache) InvalidateCache(_ context.Context, versionKeys []string) (uint64, error) {
+	for _, key := range versionKeys {
+		l.versionManager.IncrementVersion(key)
+	}
+	return uint64(len(versionKeys)), nil
 }
 
 // Wait blocks until all buffered writes have been applied.
@@ -60,7 +64,7 @@ func (l *LocalCache) Wait() {
 }
 
 func (l *LocalCache) Close() error {
-	l.cache.Wait()
+	l.Wait()
 	l.cache.Close()
 	return nil
 }

@@ -5,24 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
-
-// validTableNameRe matches safe table identifiers and — critically — rejects
-// the NATS subject wildcards `*` and `>`. The `?table=` value is concatenated
-// into a NATS FilterSubject in the gap-fill path; without this guard,
-// `?table=>` would build `ingest.>` and replay every ingest subject.
-// Matches the same shape as ingest.safeIdentifierRe / query.validIdentifierRe.
-var validTableNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // SSEHandler handles GET /v1/stream/sse.
 type SSEHandler struct {
@@ -47,19 +41,30 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: table")
 		return
 	}
-	if !validTableNameRe.MatchString(table) {
-		writeJSONError(w, http.StatusBadRequest, "invalid table name")
-		return
-	}
-	topic := "ingest." + table
 
-	// Resolve stream permissions for this request.
-	role := RoleFromContext(r.Context())
-	claims, _ := ClaimsFromContext(r.Context())
+	// Resolve stream permissions for this request. Evaluate maps an empty role
+	// to the policy default_role per event (applyStreamPolicy), so the raw role
+	// from context is what we keep here.
+	role := auth.RoleFromContext(r.Context())
+	claims, _ := auth.ClaimsFromContext(r.Context())
+
+	// TODO: impl scope
+	scope := ""
+	topic := "ingest." + query.SafeEncodeNATS(table)
+	if scope != "" {
+		topic += "." + query.SafeEncodeNATS(scope)
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
+	// Flush headers immediately so the client's EventSource.onopen fires right
+	// away instead of waiting for the first data event.
+	if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
 
 	// Subscribe for live events.
 	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...
@@ -151,6 +156,7 @@ func extractEventTimestamp(data []byte) string {
 // applyStreamPolicy transforms raw event data for the client, filtering columns
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
 func (h *SSEHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
+	// Scope should be applied before getting here, so we ignore it here
 	var evt ingest.EventMessage
 	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
 		// Not an EventMessage — pass through if valid JSON, skip otherwise.

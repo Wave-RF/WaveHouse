@@ -73,8 +73,8 @@ func TestDLQStats_ReturnsCorrectCounts(t *testing.T) {
 
 	tables, ok := resp["tables"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, float64(3), tables["dlq.events"])
-	assert.Equal(t, float64(2), tables["dlq.users"])
+	assert.Equal(t, float64(3), tables["events"])
+	assert.Equal(t, float64(2), tables["users"])
 	assert.Equal(t, float64(5), resp["total"])
 }
 
@@ -104,7 +104,7 @@ func TestDLQStats_SingleTable(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
 	tables := resp["tables"].(map[string]any)
-	assert.Equal(t, float64(1), tables["dlq.orders"])
+	assert.Equal(t, float64(1), tables["orders"])
 	assert.Equal(t, float64(1), resp["total"])
 }
 

@@ -7,29 +7,37 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store      *pipes.Store
-	CHConn     driver.Conn
-	Cache      *cache.TieredCache
-	DefaultTTL time.Duration
-	sf         singleflight.Group
+	Store           *pipes.Store
+	PolicyStore     *policy.Store // resolves empty role to default_role; may be nil
+	CHConn          driver.Conn
+	Cache           cache.Cache
+	sf              singleflight.Group
+	maxQueryTimeout time.Duration
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c *cache.TieredCache, defaultTTL time.Duration) *PipesHandler {
-	return &PipesHandler{Store: store, CHConn: conn, Cache: c, DefaultTTL: defaultTTL}
+func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
 }
 
 // List returns all named queries (admin endpoint).
 func (h *PipesHandler) List(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.Store.List())
+	q := h.Store.List()
+	if q == nil {
+		q = []*pipes.NamedQuery{}
+	}
+	_ = json.NewEncoder(w).Encode(q)
 }
 
 // Get returns a specific named query (admin endpoint).
@@ -83,22 +91,23 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check role permissions.
-	if len(q.AllowedRoles) > 0 {
-		role := RoleFromContext(r.Context())
-		if role != "" {
-			allowed := false
-			for _, ar := range q.AllowedRoles {
-				if ar == role || ar == "*" {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
-		}
+	// Authorization is allowlist membership (policy.RoleAllowed): the caller's
+	// role — a tokenless or roleless request first mapped to the configured
+	// default_role — must appear in allowed_roles by exact match. There is no
+	// "*" any-role wildcard and empty entries are ignored, so a stray "" can't
+	// authorize an empty role. The admin role bypasses every pipe's allowlist by
+	// design, not oversight: admins author pipes and can run arbitrary SQL via
+	// /v1/admin/query, so allowed_roles is never a confidentiality boundary
+	// against them (mirrors Evaluate's admin bypass). A pipe with no
+	// allowed_roles therefore authorizes nobody but admin (fails closed).
+	var p *policy.Policy
+	if h.PolicyStore != nil {
+		p = h.PolicyStore.Get()
+	}
+	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
+	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
+		writeAuthzDenied(w, r, role)
+		return
 	}
 
 	// Gather parameters from query string and/or JSON body.
@@ -123,10 +132,16 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: scope impl
+	scope := ""
+	safePipeName := query.SafeEncodeNATS(name)
+
+	// TODO: current pipe impl doesn't have a list of tables/scopes, so ingest worker cannot invalidate it
+
 	// Cache.
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safePipeName, scope); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -136,22 +151,28 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
-		queryCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 		defer cancel()
 
-		qh := &QueryHandler{CHConn: h.CHConn}
-		rows, err := qh.executeQuery(queryCtx, sql, params)
+		start := time.Now()
+
+		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
+		queryDuration := time.Since(start)
 		if err != nil {
+			// TODO: depending on the error, we may actually want to cache it
 			return nil, err
 		}
 
 		data, err := json.Marshal(rows)
 		if err != nil {
+			// TODO: eventually we want CSV support etc
 			return nil, err
 		}
 
+		ttl := cache.QueryTimeToTTL(queryDuration)
+
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, data, h.DefaultTTL)
+			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, ttl)
 		}
 		return data, nil
 	})

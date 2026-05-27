@@ -7,13 +7,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"net/url"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
-	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,11 +38,8 @@ func ingestRequest(t *testing.T, table string, body any) *http.Request {
 	t.Helper()
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest/"+table, bytes.NewReader(data))
 
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("table", table)
-	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table="+url.QueryEscape(table), bytes.NewReader(data))
 }
 
 func TestIngest_ValidPayload(t *testing.T) {
@@ -66,19 +63,56 @@ func TestIngest_ValidPayload(t *testing.T) {
 
 func TestIngest_MissingTable(t *testing.T) {
 	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub)
 
-	// No chi URL param → empty table.
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest/", bytes.NewReader([]byte(`{}`)))
-	rctx := chi.NewRouteContext()
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "no query string at all",
+			url:  "/v1/ingest",
+		},
+		{
+			name: "trailing slash without query",
+			url:  "/v1/ingest/",
+		},
+		{
+			name: "empty query symbol",
+			url:  "/v1/ingest?",
+		},
+		{
+			name: "table parameter provided but empty",
+			url:  "/v1/ingest?table=",
+		},
+		{
+			name: "completely wrong query parameter",
+			url:  "/v1/ingest?not_the_right_param=clicks",
+		},
+	}
 
-	w := httptest.NewRecorder()
-	h.Handle(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "missing table")
-	assertJSONErrorResponse(t, w)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(), pub)
+
+			req := httptest.NewRequestWithContext(
+				context.Background(),
+				http.MethodPost,
+				tt.url,
+				bytes.NewReader([]byte(`{}`)),
+			)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			// Assertions remain identical for all error cases
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "missing table")
+			testutil.AssertJSONErrorResponse(t, w)
+		})
+	}
 }
 
 func TestIngest_UnknownTable(t *testing.T) {
@@ -92,7 +126,7 @@ func TestIngest_UnknownTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "unknown table")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_InvalidJSON(t *testing.T) {
@@ -100,16 +134,13 @@ func TestIngest_InvalidJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub)
 
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest/clicks", bytes.NewReader([]byte("not json")))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("table", "clicks")
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ingest?table=clicks", bytes.NewReader([]byte("not json")))
 
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_SchemaValidation_UnknownField(t *testing.T) {
@@ -179,7 +210,7 @@ func TestIngest_PublishError_503(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "30", w.Header().Get("Retry-After"))
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_PublishError_500(t *testing.T) {
@@ -193,7 +224,7 @@ func TestIngest_PublishError_500(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "publish failed")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_Forbidden(t *testing.T) {
@@ -212,7 +243,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 	})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "viewer")
+	ctx := auth.WithRole(req.Context(), "viewer")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -220,7 +251,7 @@ func TestIngest_Policy_Forbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_ColumnDenied(t *testing.T) {
@@ -241,7 +272,7 @@ func TestIngest_Policy_ColumnDenied(t *testing.T) {
 
 	// Try to insert 'button' which is not in AllowColumns.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "button": "signup"})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "writer")
+	ctx := auth.WithRole(req.Context(), "writer")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -272,8 +303,8 @@ func TestIngest_Policy_CheckClause_Mismatch(t *testing.T) {
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "wrong-org"})
 	claims := jwt.MapClaims{"org_id": "correct-org"}
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
-	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -305,8 +336,8 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	// org_id in body matches JWT claim — should pass.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "my-org"})
 	claims := jwt.MapClaims{"org_id": "my-org"}
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
-	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -338,8 +369,8 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	// org_id NOT in body — should be auto-injected from JWT claim.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	claims := jwt.MapClaims{"org_id": "injected-org"}
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "user")
-	ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -386,7 +417,7 @@ func TestIngest_Policy_DenyColumns(t *testing.T) {
 	})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 42})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "writer")
+	ctx := auth.WithRole(req.Context(), "writer")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -407,33 +438,11 @@ func TestIngest_AdminRole_NoPolicy(t *testing.T) {
 	})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
-	ctx := context.WithValue(req.Context(), ContextKeyRole, "admin")
+	ctx := auth.WithRole(req.Context(), "admin")
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestIngest_ReservedFieldRejected(t *testing.T) {
-	t.Parallel()
-	pub := &testutil.MockPublisher{}
-	h := NewIngestHandler(testRegistry(), pub)
-
-	// Create a payload that illegally includes the reserved field
-	payload := map[string]any{
-		"page":               "/home",
-		"received_timestamp": "2026-05-11T12:00:00Z",
-	}
-
-	req := ingestRequest(t, "clicks", payload)
-	w := httptest.NewRecorder()
-
-	h.Handle(w, req)
-
-	require.Equal(t, http.StatusBadRequest, w.Code, "Expected 400 Bad Request when reserved field is present")
-
-	expectedJSON := `{"error":"payload cannot contain reserved field 'received_timestamp'"}`
-	assert.JSONEq(t, expectedJSON, strings.TrimSpace(w.Body.String()), "Expected specific JSON error message")
 }

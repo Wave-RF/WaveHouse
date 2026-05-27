@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -24,7 +26,7 @@ func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
 // Supports optional ?table= query parameter to filter by table name.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	stream, err := h.JS.Stream(r.Context(), mq.DLQStreamName())
-	if err != nil {
+	if err != nil { // TODO: catch by error type
 		// Stream may not exist yet if no failures have occurred.
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"tables": map[string]any{}, "total": 0})
@@ -35,7 +37,7 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	subjectFilter := ">"
 	tableFilter := r.URL.Query().Get("table")
 	if tableFilter != "" {
-		subjectFilter = "dlq." + tableFilter
+		subjectFilter = "dlq." + query.SafeEncodeNATS(tableFilter)
 	}
 
 	info, err := stream.Info(r.Context(), jetstream.WithSubjectFilter(subjectFilter))
@@ -46,7 +48,12 @@ func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 
 	tables := make(map[string]uint64)
 	for subject, count := range info.State.Subjects {
-		tables[subject] = count
+		// TODO: do we need to break out scopes here?
+		decodedSubject, err := query.SafeDecodeNATS(strings.TrimPrefix(subject, "dlq."))
+		if err != nil {
+			continue
+		}
+		tables[decodedSubject] = count
 	}
 
 	w.Header().Set("Content-Type", "application/json")

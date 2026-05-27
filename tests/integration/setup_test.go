@@ -6,11 +6,6 @@
 // package via env(). Each test creates its own ClickHouse table for data
 // isolation; the shared infra avoids the per-test container churn that drove
 // flakes and slow runs in the previous monolithic file.
-//
-// The single-process constraint is non-negotiable: Bento's
-// service.RegisterInput / service.RegisterBatchOutput are package-globals
-// behind a sync.Once, so only one StartIngestWorker can be wired per
-// process. TestMain wires it once.
 package tests
 
 import (
@@ -32,10 +27,12 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -57,8 +54,7 @@ type testEnv struct {
 var sharedEnv *testEnv
 
 // env returns the package-shared environment. Tests must call this rather
-// than build their own — Bento's global registration only allows one
-// IngestWorker per process.
+// than build their own.
 func env(t *testing.T) *testEnv {
 	t.Helper()
 	if sharedEnv == nil {
@@ -162,25 +158,29 @@ func setup() (int, func()) {
 		return 1, cleanup
 	}
 
+	localCache, err := cache.NewLocal(1 << 30) // 1 GB
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration setup: cache initialization: %v\n", err)
+		return 1, cleanup
+	}
+	cleanups.push(func() { _ = localCache.Close() })
+
 	if _, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		ch.conn,
+		localCache,
 		ch.nativeAddr(),
 		ch.httpPort,
 		"http",
 		testCHUser,
 		testCHPassword,
 		testCHDatabase,
-		func(err error) {
-			logger.Error("fatal error in integration test ingest worker", "error", err)
-		},
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: ingest worker: %v\n", err)
 		return 1, cleanup
 	}
 
-	server, err := buildServer(ch.conn, embeddedMQ, registry, logger)
+	server, err := buildServer(ch, embeddedMQ, registry, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration setup: build server: %v\n", err)
 		return 1, cleanup
@@ -213,7 +213,7 @@ func (c *chInstance) httpURL() string    { return fmt.Sprintf("http://%s:%s", c.
 
 // startClickHouse starts a ClickHouse testcontainer and returns it plus a
 // connected native-protocol driver, the host:port the driver dials, and the
-// mapped HTTP port (Bento talks to ClickHouse over HTTP for INSERTs).
+// mapped HTTP port.
 //
 // ClickHouse opens 9000/tcp early in startup — before it can accept native
 // queries. Waiting only on the listening port produced flakes where the
@@ -298,29 +298,38 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 }
 
 // buildServer wires the same handler set as cmd/wavehouse/main.go but
-// against the test ClickHouse + embedded NATS, with auth disabled so tests
-// can hit endpoints without minting JWTs. Auth-enforcement coverage lives
-// in the unit tests for middleware.go and the e2e SDK suite.
-func buildServer(chConn driver.Conn, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
+// against the test ClickHouse + embedded NATS. There is no auth on/off switch
+// anymore, so the test AuthMW stamps every request with the admin role — the
+// integration suite exercises functionality as a privileged caller and can hit
+// admin-gated endpoints without minting JWTs. Auth-enforcement coverage lives
+// in the internal/auth unit tests and the e2e SDK suite.
+//
+// The RequireAdmin gate resolves that stamped role against PolicyStore, so the
+// server is wired with an in-memory policy whose admin_role is "admin". A nil
+// store would deny every admin-gated route (IsAdmin(nil) is false by design).
+func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
 	hub := api.NewHub()
-	l1, err := cache.NewLocal(1024 * 1024)
-	if err != nil {
-		return nil, fmt.Errorf("local cache: %w", err)
-	}
-	tiered := cache.NewTiered(l1, nil)
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ),
-		Query:  api.NewQueryHandler(chConn, tiered, 5*time.Second),
-		SSE:    api.NewSSEHandler(hub, js),
-		WS:     api.NewWSHandler(hub, js, nil),
-		Health: api.NewHealthHandler(chConn),
-		Schema: api.NewSchemaHandler(registry),
-		DLQ:    api.NewDLQHandler(js, logger),
-		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
-		JS:     js,
+		// /v1/admin/query proxies straight to ClickHouse's HTTP interface,
+		// so the handler needs the HTTP URL + creds rather than the
+		// native-protocol driver.Conn other handlers use.
+		Query:       api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
+		SSE:         api.NewSSEHandler(hub, js),
+		WS:          api.NewWSHandler(hub, js, nil),
+		Health:      api.NewHealthHandler(ch.conn),
+		Schema:      api.NewSchemaHandler(registry),
+		DLQ:         api.NewDLQHandler(js, logger),
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}),
+		AuthMW: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))
+			})
+		},
+		JS: js,
 	}
 
 	server := httptest.NewServer(api.NewRouter(deps))

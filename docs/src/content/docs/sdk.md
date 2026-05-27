@@ -62,6 +62,8 @@ const wh = createClient<Database>({
 | `transport` | `'auto' \| 'sse' \| 'ws'` | `'auto'` | Stream transport. Auto = SSE when no auth, WS when auth |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
+> **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` and `WebSocket` APIs can't set headers — as a `?token=` query parameter on streaming connections (SSE and WS). When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+
 ### Type-Safe Tables
 
 Pass a `Database` type to get autocomplete on table names and row types:
@@ -130,7 +132,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest/{table}`.
+Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest?table={table}`.
 
 ```ts
 // Single row
@@ -260,10 +262,6 @@ clicks.select('page').timeRange('received_timestamp', '1h')
 clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
 ```
 
-#### `.cacheTTL(seconds)`
-
-Override the server's default cache TTL for this query.
-
 ```ts
 clicks.select('page').count().cacheTTL(300) // cache for 5 minutes
 ```
@@ -307,19 +305,15 @@ while (result.hasMore && result.next) {
 
 ---
 
-## Raw SQL — `wh.sql(query, params?, opts?)`
+## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. Requires admin/service role when access control policy is active.
+Execute a raw SQL query. `/v1/admin/query` is admin-only: the caller's JWT must resolve to the policy admin role (`admin_role`, `"admin"` by default). A request with no token, or an invalid/expired one, falls back to the `default_role` and is rejected.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
-
-// With positional parameters
-const { data } = await wh.sql(
-  'SELECT * FROM clicks WHERE page = ? LIMIT ?',
-  ['/home', 100],
-);
 ```
+
+> **No parameter binding through the SDK.** Positional `?` substitution is not supported, and the SDK has no way to forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and `wh.sql()` doesn't expose a hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder (`wh.from(table)…`).
 
 ---
 
@@ -345,7 +339,7 @@ Open a live stream. See [Streaming](#streaming).
 
 ## Pipes Admin — `wh.pipes`
 
-Manage named query pipes. Requires admin/service role.
+Manage named query pipes. Requires the admin role (`policy.admin_role`).
 
 ```ts
 // List all pipes
@@ -387,7 +381,7 @@ Individual table schema is also available via `wh.from('clicks').schema()`.
 
 ## Policy — `wh.policy`
 
-Manage Hasura-style access control policies. Requires admin/service role.
+Manage Hasura-style access control policies. Requires the admin role (`policy.admin_role`).
 
 ```ts
 // Get current policy
@@ -663,7 +657,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .get(name) → Promise<Result<Pipe>>
 │   ├── .set(name, def) → Promise<Result<void>>
 │   └── .delete(name) → Promise<Result<void>>
-├── .sql(query, params?) → Promise<Result<Row[]>>
+├── .sql(query, opts?) → Promise<Result<Row[]>>
 ├── .schema
 │   ├── .list() → Promise<Result<Schemas>>
 │   └── .refresh() → Promise<Result<void>>

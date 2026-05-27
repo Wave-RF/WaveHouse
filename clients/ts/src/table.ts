@@ -48,21 +48,30 @@ export class TableRef<Row = Record<string, unknown>> {
     opts?: { signal?: AbortSignal },
   ): Promise<Result<InsertResult>> {
     if (Array.isArray(data)) {
-      for (const row of data) {
-        const { error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
-          method: 'POST',
-          path: `/v1/ingest/${encodeURIComponent(this._table)}`,
+      // TODO: Switch to NDJSON
+      // FAST: Fire all HTTP requests concurrently instead of waiting for each one
+      const promises = data.map((row) =>
+        request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
+          method: "POST",
+          path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
           body: row,
           signal: opts?.signal,
-        });
-        if (error) return err(error);
+        }),
+      );
+
+      // TODO: with NDJSON/array version, need to rework how to show errors if only some/one fail
+      const results = await Promise.all(promises);
+
+      // Check if any of the concurrent requests failed
+      for (const res of results) {
+        if (res.error) return err(res.error);
       }
       return ok({ ok: true });
     }
 
     const { data: res, error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
       method: 'POST',
-      path: `/v1/ingest/${encodeURIComponent(this._table)}`,
+      path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
       body: data,
       signal: opts?.signal,
     });
@@ -77,7 +86,7 @@ export class TableRef<Row = Record<string, unknown>> {
   async schema(opts?: { signal?: AbortSignal }): Promise<Result<TableSchema>> {
     const { data, error } = await request<TableSchema>(this._ctx, {
       method: 'GET',
-      path: `/v1/schema/${encodeURIComponent(this._table)}`,
+      path: `/v1/schema?table=${encodeURIComponent(this._table)}`,
       signal: opts?.signal,
     });
     if (error) return err(error);

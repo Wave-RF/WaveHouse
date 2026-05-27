@@ -43,6 +43,7 @@ clickhouse:
   database: default
   username: default
   password: ""
+  query_timeout: 30s
 
 mq:
   gap_window_minutes: 15
@@ -54,15 +55,17 @@ dedupe:
 
 cache:
   l1_max_cost: 67108864
-  default_ttl: 300
   timestamp_bucket_seconds: 60
 
+# Auth has no on/off switch — the JWT middleware always runs. A request with no
+# token, or an invalid/expired one, falls back to the policy default_role;
+# elevated access needs a valid token whose role_claim matches a granted role
+# (or the policy admin_role). With neither jwt_secret nor jwks_url set, no token
+# can validate, so every request is the default_role — a pure public deployment.
 auth:
-  enabled: false
   jwt_secret: change-me-in-production
   jwks_url: ""
   role_claim: role
-  dev_mode: false
 
 schema:
   refresh_interval: 60
@@ -70,8 +73,6 @@ schema:
 dlq:
   enabled: true
 
-policy:
-  file_path: policy.yaml
 
 # Optional bootstrap source for named query pipes. When set, .sql files in
 # this directory are loaded into the NATS KV pipe store on startup. Empty

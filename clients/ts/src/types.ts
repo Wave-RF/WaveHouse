@@ -77,7 +77,6 @@ export interface StructuredQuery {
   order_by?: OrderClause[];
   limit?: number;
   time_range?: TimeRange;
-  cache_ttl?: number;
 }
 
 export interface Aggregation {
@@ -182,7 +181,6 @@ export interface RolePermissions {
   denied_aggregations?: string[];
   max_rows?: number;
   max_execution_time_ms?: number;
-  raw_sql?: boolean;
 }
 
 export interface PolicyFilter {

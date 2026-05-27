@@ -30,7 +30,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 
 # Ingest data (no auth required by default)
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
@@ -110,8 +110,8 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-WH_CH_HTTP_PORT=8123                # Port for Bento HTTP inserts (default: 8123)
-WH_CH_HTTP_SCHEME=http              # Scheme for Bento HTTP inserts (http/https)
+WH_CH_HTTP_PORT=8123                # Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
 # Schema discovery
 WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
@@ -122,14 +122,16 @@ WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 # controls *which origins can read responses*, not cookie scope.
 WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 
-# Optional auth
-WH_AUTH_ENABLED=true
+# Auth (the JWT middleware always runs — set a secret/JWKS to validate tokens;
+# without one, every request resolves to the policy default_role)
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 WH_AUTH_ROLE_CLAIM=app_metadata.role
-# WH_AUTH_DEV_MODE=true            # Dev only — skips JWT validation
 
-# Access control & pipes
+# Access control & pipes — both bootstrap paths are opt-in (no default). When
+# WH_POLICY_FILE_PATH is set, the file MUST exist and parse or the process
+# refuses to boot (silent fail-closed is the alternative). Leave unset to skip
+# bootstrap and seed via PUT /v1/admin/policy.
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 
@@ -152,7 +154,7 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
-- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the Bento → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
+- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose files in `deployments/compose/standalone.yaml`, `tests/e2e/compose.yaml`, and `clients/ts/playground/compose.yaml` set `WH_DATA_DIR=/app/data` and bind a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data/nats`, `/app/data/pebble`, and `/app/pipes` owned by the nonroot user (UID 65532).
@@ -161,7 +163,7 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
 
-```
+```text
 WARN  data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.
 ```
 
@@ -189,7 +191,7 @@ volumes:
 
 Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
 
-```
+```text
 ERROR  mq init failed  error="..."  path=/app/data/nats  hint="if running in a container with a host bind mount, the host directory must be owned by UID 65532..."
 ```
 
@@ -244,7 +246,7 @@ This means:
 
 - The binary itself no longer exits and crash-loops every ~10s under a supervisor. Process state is preserved across CH outages.
 - An operator can `curl /health` and read the exact failure mode instead of grepping a restart-loop log.
-- `/v1/ingest/{table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
+- `/v1/ingest?table={table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
 
 **Important — orchestrator restart semantics.** `/health` returning 503 during the retry window is what most LB / `depends_on` setups want (route around the unready instance, hold dependents), but a Kubernetes `livenessProbe` pointed at `/health` will still mark the pod unhealthy and restart it after `failureThreshold × periodSeconds` elapses (default ~30s) — effectively re-creating the restart loop at a slower cadence. Use a `startupProbe` to gate liveness/readiness until the first successful schema discovery (see the K8s example below). Docker `HEALTHCHECK` marks the container `(unhealthy)` but does not restart it by default, so docker-compose deployments don't need a separate startupProbe-equivalent — the `HEALTHCHECK`'s `--start-period=15s` plus `service_healthy` dependency wait covers the same idea at a smaller scale.
 
@@ -326,7 +328,7 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 When `dlq.enabled` is `true` (default), failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
 
-## Observability (SigNoz)
+## Observability
 
 Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. Each signal can be toggled independently — see `docs/configuration.md` for the full table of knobs.
 
@@ -352,15 +354,31 @@ By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API se
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
 
-`deployments/signoz/` is a self-contained Docker Compose setup for running SigNoz locally (ClickHouse + query service + OTel collector at `:4317`). Bring it up:
+### Local Observability Stack
+
+We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.
+
+The underlying Docker run scripts live in `scripts/otel/` and are invoked via Make:
 
 ```bash
-docker compose -f deployments/signoz/docker-compose.yaml up -d
+make obs-aspire   # Simplest, in-memory, no login
+make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
+make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
 ```
 
-ClickHouse credentials inside the SigNoz stack default to `default` / `password`. To override, copy `deployments/signoz/.env.example` to `deployments/signoz/.env` and set `SIGNOZ_CH_USER` / `SIGNOZ_CH_PASSWORD`. The `.env` file is gitignored.
+All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the default environment variable `WH_OTEL_ADDR=127.0.0.1:4317` will route telemetry to these containers automatically.
 
-The SigNoz UI is exposed on `http://localhost:3301`. Point WaveHouse at the collector with `WH_OTEL_ADDR=127.0.0.1:4317` (the default).
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment variables to reach the host-bound collector: `WH_OTEL_ADDR=host.docker.internal:4317`.
+
+### Dashboards
+
+Because we use ephemeral, single-container observability tools for local development, we no longer maintain strict, version-controlled JSON dashboards in this repository.
+
+- If you use `make obs-aspire`, the UI is pre-built and requires zero configuration.
+- If you use `make obs-grafana`, it is pre-configured to automatically provision the internal data sources and bypass the login screen. You can use Grafana's "Explore" tab to quickly jump between logs and traces.
+- If you use `make obs-front`, it allows custom and comparison dashboards like grafana, but is simpler and easier to configure like aspire.
+
+For production deployments, you should construct dashboards specific to your telemetry vendor (Datadog, Honeycomb, New Relic, etc.) based on the standard OpenTelemetry metrics and traces WaveHouse emits.
 
 ## Resetting Data in Development
 

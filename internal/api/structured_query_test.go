@@ -6,24 +6,26 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
-	"github.com/go-chi/chi/v5"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func structuredQueryRequest(t *testing.T, table string, sq query.StructuredQuery) *http.Request {
 	t.Helper()
-	body, _ := json.Marshal(sq)
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tables/"+table+"/query", bytes.NewReader(body))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("table", table)
-	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	body, err := json.Marshal(sq)
+	require.NoError(t, err)
+
+	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table="+url.QueryEscape(table), bytes.NewReader(body))
 }
 
 func newStructuredQueryHandler() *StructuredQueryHandler {
@@ -37,22 +39,62 @@ func newStructuredQueryHandler() *StructuredQueryHandler {
 			},
 		},
 	})
-	return NewStructuredQueryHandler(nil, nil, 5*time.Second, reg, nil, 60)
+	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second)
 }
 
 func TestStructuredQuery_MissingTable(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
-	body, _ := json.Marshal(query.StructuredQuery{Columns: []string{"page"}})
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tables//query", bytes.NewReader(body))
-	rctx := chi.NewRouteContext()
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
-	w := httptest.NewRecorder()
-	h.Handle(w, r)
 
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "missing table")
-	assertJSONErrorResponse(t, w)
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "no query string at all",
+			url:  "/v1/query",
+		},
+		{
+			name: "trailing slash without query",
+			url:  "/v1/query/",
+		},
+		{
+			name: "empty query symbol",
+			url:  "/v1/query?",
+		},
+		{
+			name: "table parameter provided but empty",
+			url:  "/v1/query?table=",
+		},
+		{
+			name: "completely wrong query parameter",
+			url:  "/v1/query?invalid_param=clicks",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newStructuredQueryHandler()
+
+			body, err := json.Marshal(query.StructuredQuery{Columns: []string{"page"}})
+			require.NoError(t, err)
+
+			req := httptest.NewRequestWithContext(
+				context.Background(),
+				http.MethodPost,
+				tt.url,
+				bytes.NewReader(body),
+			)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "missing table")
+			testutil.AssertJSONErrorResponse(t, w)
+		})
+	}
 }
 
 func TestStructuredQuery_UnknownTable(t *testing.T) {
@@ -64,22 +106,19 @@ func TestStructuredQuery_UnknownTable(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "unknown table")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	h := newStructuredQueryHandler()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tables/clicks/query", bytes.NewReader([]byte(`{bad}`)))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("table", "clicks")
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table=clicks", bytes.NewReader([]byte(`{bad}`)))
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_PolicyForbidden(t *testing.T) {
@@ -98,8 +137,8 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+	ctx := auth.WithRole(r.Context(), "viewer")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -107,7 +146,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "forbidden")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
@@ -127,8 +166,8 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	// Request "count" column which is not in AllowColumns.
 	sq := query.StructuredQuery{Columns: []string{"count"}}
 	r := structuredQueryRequest(t, "clicks", sq)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+	ctx := auth.WithRole(r.Context(), "viewer")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -137,7 +176,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "column")
 	assert.Contains(t, w.Body.String(), "not allowed")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
@@ -163,8 +202,8 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 		},
 	}
 	r := structuredQueryRequest(t, "clicks", sq)
-	ctx := context.WithValue(r.Context(), ContextKeyRole, "viewer")
-	ctx = context.WithValue(ctx, ContextKeyClaims, jwt.MapClaims{})
+	ctx := auth.WithRole(r.Context(), "viewer")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
 	r = r.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -173,7 +212,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "aggregation")
 	assert.Contains(t, w.Body.String(), "not allowed")
-	assertJSONErrorResponse(t, w)
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {

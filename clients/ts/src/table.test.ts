@@ -32,7 +32,7 @@ describe('TableRef', () => {
 
     expect(result.data).toEqual([{ page: '/home' }]);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/v1/tables/clicks/query');
+    expect(url).toContain('/v1/query?table=clicks');
     const body = JSON.parse(init.body);
     expect(body.limit).toBe(1000);
   });
@@ -55,7 +55,7 @@ describe('TableRef', () => {
 
   // --- insert ---
 
-  it('insert() single row sends POST to /v1/ingest/{table}', async () => {
+  it('insert() single row sends POST to /v1/ingest?table={table}', async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), { status: 200 }),
     );
@@ -64,7 +64,7 @@ describe('TableRef', () => {
 
     expect(result.data).toEqual({ ok: true });
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/v1/ingest/clicks');
+    expect(url).toContain('/v1/ingest?table=clicks');
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body)).toEqual({ page: '/home', score: 42 });
   });
@@ -108,7 +108,7 @@ describe('TableRef', () => {
 
   // --- schema ---
 
-  it('schema() sends GET to /v1/schema/{table}', async () => {
+  it('schema() sends GET to /v1/schema?table={table}', async () => {
     const schema = {
       name: 'clicks',
       columns: [{ name: 'page', type: 'String', is_nullable: false, has_default: false }],
@@ -120,7 +120,7 @@ describe('TableRef', () => {
     const result = await table().schema();
 
     expect(result.data).toEqual(schema);
-    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/schema/clicks');
+    expect(fetchSpy.mock.calls[0][0]).toContain('/v1/schema?table=clicks');
   });
 
   // --- stream ---

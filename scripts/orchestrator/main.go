@@ -141,24 +141,24 @@ func run() error {
 		"GOCOVERDIR="+coverDir,
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
 		"WH_CH_ADDR="+chAddr,
-		// Without WH_CH_HTTP_PORT, Bento's HTTP path falls back to the
+		// Without WH_CH_HTTP_PORT, ingest worker's HTTP path falls back to the
 		// default :8123 and writes silently land on whatever CH is sitting
 		// on that port (e.g. a `make dev` instance), while tests verify
 		// against the testcontainer's CH which has zero rows.
 		"WH_CH_HTTP_PORT="+chHTTPPort.Port(),
 		"WH_DATA_DIR="+dataDir,
 		"WH_MQ_MAX_BYTES_GB=1",
-		"WH_AUTH_ENABLED=true",
+		"WH_POLICY_FILE_PATH="+filepath.Join(repoRoot, "tests", "e2e", "fixtures", "policy.yaml"),
 		"WH_AUTH_JWT_SECRET=sdk-dev-secret",
-		"WH_AUTH_DEV_MODE=false",
 		"WH_AUTH_ROLE_CLAIM=role",
-		"WH_DEDUPE_ENABLED=false",
+		"WH_DEDUPE_ENABLED=true",
+		"WH_DEDUPE_ID_FIELD=event_id",
 		"WH_SCHEMA_REFRESH_INTERVAL=5",
 		"WH_DLQ_ENABLED=true",
 		"WH_SERVER_CORS_ALLOWED_ORIGINS=*",
 		// Exercise the OTel branch in coverage. gRPC exporters are lazy
 		// (no collector needs to be reachable for init to succeed), so
-		// this is safe in the e2e harness even without a SigNoz instance.
+		// this is safe in the e2e harness even without an o11y instance.
 		"WH_OTEL_ENABLED=true",
 		"WH_OTEL_ADDR=127.0.0.1:4317",
 	)
@@ -183,7 +183,7 @@ func run() error {
 	if err := waitForHealth(ctx, whURL+"/health", 30*time.Second); err != nil {
 		_ = whCmd.Process.Signal(syscall.SIGINT)
 		<-whDone
-		dumpLogTail(whLogPath, "wavehouse never became healthy")
+		dumpLogHeadTail(whLogPath, "wavehouse never became healthy")
 		return fmt.Errorf("wavehouse not healthy: %w", err)
 	}
 	log.Println("✓ WaveHouse healthy")
@@ -231,7 +231,7 @@ func run() error {
 	}
 
 	if vitestErr != nil && !verbose {
-		dumpLogTail(whLogPath, "vitest failed; tailing wavehouse logs for context")
+		dumpLogHeadTail(whLogPath, "vitest failed; showing some wavehouse logs for context")
 	}
 	return vitestErr
 }
@@ -255,10 +255,10 @@ func pickFreePort(ctx context.Context) (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// dumpLogTail prints the last N lines of `path` to stderr so a CI
+// dumpLogHeadTail prints the last N lines of `path` to stderr so a CI
 // failure is debuggable without re-running with V=1.
-func dumpLogTail(path, banner string) {
-	const lines = 80
+func dumpLogHeadTail(path, banner string) {
+	const lines = 40
 	f, err := os.Open(path) // #nosec G304 — path is the orchestrator's own log file.
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  (could not read %s: %v)\n", path, err)
@@ -266,22 +266,71 @@ func dumpLogTail(path, banner string) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Slurp lines into a ring buffer so the tail comes out in order.
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	head := make([]string, 0, lines)
 	ring := make([]string, 0, lines)
+	lineCount := 0
+
 	for scanner.Scan() {
+		lineCount++
+		text := scanner.Text()
+
+		// Capture the first N lines
+		if len(head) < lines {
+			head = append(head, text)
+		}
+
+		// Slurp lines into a ring buffer for the tail
 		if len(ring) == lines {
 			ring = ring[1:]
 		}
-		ring = append(ring, scanner.Text())
+		ring = append(ring, text)
 	}
 
-	fmt.Fprintf(os.Stderr, "\n──── %s (last %d lines of %s) ────\n", banner, len(ring), path)
-	for _, line := range ring {
-		fmt.Fprintln(os.Stderr, line)
+	// Meta Header: Always prints total lines and the retrieval path first
+	fmt.Fprintf(os.Stderr, "\n==== %s ====\n", banner)
+	fmt.Fprintf(os.Stderr, "Total Log Lines: %d\n", lineCount)
+	fmt.Fprintf(os.Stderr, "Full Log Path:   %s\n", path)
+	fmt.Fprintln(os.Stderr, "=========================================")
+
+	if lineCount > lines*2 {
+		// Case 1: Large file (Lines are actually skipped)
+		fmt.Fprintf(os.Stderr, "\n>>> Printing the first %d lines:\n", lines)
+		for _, line := range head {
+			fmt.Fprintln(os.Stderr, line)
+		}
+
+		// Heavy middle break highlighting skipped content and location
+		skipped := lineCount - (lines * 2)
+		fmt.Fprintf(os.Stderr, "\n\n[... SKIPPED %d LINES ...]\n[... View full artifact at: %s ...]\n\n\n", skipped, path)
+
+		fmt.Fprintf(os.Stderr, ">>> Printing the last %d lines:\n", lines)
+		for _, line := range ring {
+			fmt.Fprintln(os.Stderr, line)
+		}
+
+	} else {
+		// Case 2: The entire file fits completely. Seamlessly print everything.
+		fmt.Fprintf(os.Stderr, "\n>>> Printing the entire file (%d lines total):\n", lineCount)
+
+		// Print the first chunk
+		for _, line := range head {
+			fmt.Fprintln(os.Stderr, line)
+		}
+
+		// If the file was larger than a single `lines` buffer but smaller than the max budget,
+		// append the remaining unique lines from the ring buffer without any visual break.
+		if lineCount > lines {
+			toPrint := lineCount - lines
+			for _, line := range ring[len(ring)-toPrint:] {
+				fmt.Fprintln(os.Stderr, line)
+			}
+		}
 	}
-	fmt.Fprintln(os.Stderr, "──── end of wavehouse log tail ────")
+
+	fmt.Fprintf(os.Stderr, "\n==== End of %s log ====\n", banner)
 }
 
 func waitForHealth(ctx context.Context, url string, timeout time.Duration) error {
