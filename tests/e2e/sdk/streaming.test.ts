@@ -35,8 +35,7 @@ describe("Streaming", () => {
   });
 
   describe("SSE", () => {
-    // TODO: re-enable after #172 merged
-    it.skip("receives events after insert (public/anon)", async () => {
+    it("receives events after insert (public/anon)", async () => {
       const whPublic = publicClient();
       const whAuth = dataClient();
       const receivedEvents: any[] = [];
@@ -114,8 +113,7 @@ describe("Streaming", () => {
   });
 
   describe("WebSocket", () => {
-    // TODO: re-enable after #172 merged
-    it.skip("receives events after insert (public/anon)", async () => {
+    it("receives events after insert (public/anon)", async () => {
       const whPublic = publicClient();
       const whAuth = dataClient();
       const receivedEvents: any[] = [];

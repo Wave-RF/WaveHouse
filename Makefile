@@ -279,7 +279,7 @@ fmt: ## Check formatting (run `make fix` to apply)
 .PHONY: lint
 lint: $(GOLANGCI_LINT) go-mod-download ## Run golangci-lint (run `make fix` to apply --fix)
 	@echo "$(CYAN)==> Running linters...$(RESET)"
-	@$(GOLANGCI_LINT) run ./...
+	@$(GOLANGCI_LINT) run ./... --allow-parallel-runners
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
@@ -309,7 +309,7 @@ fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint
 	@go mod tidy
 	@$(GOFUMPT) -w $(GO_DIRS)
 	@$(GOIMPORTS) -w $(GO_DIRS)
-	@$(GOLANGCI_LINT) run --fix ./...
+	@$(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
 	@echo "$(GREEN)==> Done$(RESET)"
 
 .PHONY: verify
