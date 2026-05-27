@@ -73,8 +73,6 @@ schema:
 dlq:
   enabled: true
 
-policy:
-  file_path: policy.yaml
 
 # Optional bootstrap source for named query pipes. When set, .sql files in
 # this directory are loaded into the NATS KV pipe store on startup. Empty

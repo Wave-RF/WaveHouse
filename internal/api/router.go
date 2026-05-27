@@ -249,7 +249,7 @@ func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			writeAuthzDenied(w, r, role)
+			writeAuthzDenied(w, r, role, nil)
 		})
 	}
 }

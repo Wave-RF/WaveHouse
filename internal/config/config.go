@@ -125,8 +125,19 @@ type Auth struct {
 }
 
 // Policy configures the access control policy engine.
+//
+// FilePath has no default on purpose. When set, the file MUST exist and parse
+// cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
+// missing mount surfaces as a refused boot instead of a silent fail-closed
+// (every request 403s, including admin). When left empty, the store comes up
+// with no cached policy and the operator seeds via PUT /v1/admin/policy.
+//
+// A baked-in default like "policy.yaml" would re-introduce the silent-lockout
+// failure mode for any deployment that didn't ship that exact file at CWD,
+// and it would imply a convention the operator never opted into — keep the
+// path an explicit choice.
 type Policy struct {
-	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH" env-default:"policy.yaml"`
+	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH"`
 }
 
 // Pipes configures named query pipes.

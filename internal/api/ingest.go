@@ -83,8 +83,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(ctx)
 		perms := policy.Evaluate(p, role, table, "insert", claims)
 		if !perms.Allowed {
-			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			writeAuthzDenied(w, r, role)
+			writeAuthzDenied(w, r, role, nil)
 			return
 		}
 		// Check column permissions — reject disallowed columns.

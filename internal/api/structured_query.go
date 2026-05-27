@@ -70,7 +70,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		writeAuthzDenied(w, r, role)
+		writeAuthzDenied(w, r, role, nil)
 		return
 	}
 

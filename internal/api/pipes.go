@@ -102,7 +102,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
-		writeAuthzDenied(w, r, role)
+		writeAuthzDenied(w, r, role, q.AllowedRoles)
 		return
 	}
 
