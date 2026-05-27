@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Question or "how do I…?" — GitHub Discussions
+    url: https://github.com/Wave-RF/WaveHouse/discussions/categories/q-a
+    about: Usage questions belong in Discussions → Q&A, not Issues. Filing a bug report for a usage question will get redirected here.
+  - name: Idea or open-ended proposal — GitHub Discussions
+    url: https://github.com/Wave-RF/WaveHouse/discussions/categories/ideas
+    about: Want to gauge interest or shape a proposal before filing a concrete feature request? Start here.
   - name: Security vulnerability
     url: https://github.com/Wave-RF/WaveHouse/security/policy
     about: Do NOT open a public issue for security vulnerabilities. See SECURITY.md for the private reporting process.

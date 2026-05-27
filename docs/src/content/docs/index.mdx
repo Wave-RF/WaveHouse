@@ -1,8 +1,18 @@
 ---
-title: WaveHouse
+title: Real-time API gateway for ClickHouse
 description: The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.
 template: splash
+# Homepage-only structured data: lets Google/GitHub attach the canonical
+# SoftwareSourceCode + Organization entities to the project's root URL.
+# Inner doc pages don't need this — it'd just dilute the signal.
+head:
+  - tag: script
+    attrs:
+      type: application/ld+json
+    content: |
+      {"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://wave-rf.com/#org","name":"Wave RF","url":"https://wave-rf.com","email":"hello@wave-rf.com","sameAs":["https://github.com/Wave-RF"]},{"@type":"SoftwareSourceCode","@id":"https://wavehouse.dev/#project","name":"WaveHouse","description":"The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.","codeRepository":"https://github.com/Wave-RF/WaveHouse","programmingLanguage":["Go","TypeScript"],"license":"https://opensource.org/license/mit/","image":"https://wavehouse.dev/og.png","url":"https://wavehouse.dev","author":{"@id":"https://wave-rf.com/#org"}}]}
 hero:
+  title: WaveHouse
   tagline: The open-source real-time API gateway for ClickHouse. Schema-aware ingest, async batching, real-time streaming, and tiered query caching — in a single binary.
   actions:
     - text: Get started
@@ -132,5 +142,26 @@ Five minutes from `git clone` to a live event stream. See the [Getting Started](
 		title="Deployment"
 		description="Docker images, releases, environment variables, and health checks."
 		href="/deployment"
+	/>
+</CardGrid>
+
+## Project policies
+
+WaveHouse is in **alpha** — what we ship is built openly with honest expectations.
+
+<CardGrid>
+	<LinkCard
+		title="Security"
+		description="Report vulnerabilities privately to security@wave-rf.com. Acknowledged within 48 hours; initial assessment within 5 business days. Do not open a public issue."
+		href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md"
+		target="_blank"
+		rel="noopener noreferrer"
+	/>
+	<LinkCard
+		title="Support"
+		description="Where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now."
+		href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md"
+		target="_blank"
+		rel="noopener noreferrer"
 	/>
 </CardGrid>
