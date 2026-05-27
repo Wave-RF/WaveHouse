@@ -3,6 +3,8 @@ package mq
 import (
 	"context"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // Message represents a message received from the queue.
@@ -49,9 +51,22 @@ func (m *Message) Nak() error {
 	return nil
 }
 
+// PublishOpt defines a functional option for modifying a NATS message before publishing.
+type PublishOpt func(*nats.Msg)
+
+// WithHeader adds a key-value pair to the NATS message headers.
+func WithHeader(key, value string) PublishOpt {
+	return func(msg *nats.Msg) {
+		if msg.Header == nil {
+			msg.Header = make(nats.Header)
+		}
+		msg.Header.Add(key, value)
+	}
+}
+
 // Publisher publishes messages to a subject.
 type Publisher interface {
-	Publish(ctx context.Context, subject string, data []byte) error
+	Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error
 	Close() error
 }
 

@@ -53,7 +53,7 @@ describe("Cache", () => {
         `SELECT event_id FROM default.clicks WHERE event_id = '${eventId}'`,
       );
       return r.length === 1;
-    }, 15_000);
+    }, 10_000);
 
     // 5. Fetch a third time (MISS - cache was invalidated)
     const res3 = await fetch(url, reqOpts);
@@ -78,23 +78,40 @@ describe("Cache", () => {
 
     const url = `${WH_URL}/v1/query?table=clicks`;
 
-    // Prime the cache (MISS)
+    // Prime the cache (MISS) and test how long the query takes
+    const start = Date.now();
     const res1 = await fetch(url, reqOpts);
     if (!res1.ok) throw new Error(`Query failed: ${await res1.text()}`);
+    const queryTime = Date.now() - start;
     expect(res1.ok).toBe(true);
     expect(res1.headers.get("x-cache")).toEqual("MISS");
 
-    // Fetch again immediately (HIT)
-    const res2 = await fetch(url, reqOpts);
-    expect(res2.headers.get("x-cache")).toBe("HIT");
+    const ttl = Math.max(10_000, queryTime * 1000); // queryTime * 1000 is what our cache.QueryTimeToTTL does
+    console.log(`Query [MISS] took ${queryTime}ms, so expected TTL: ${ttl}`);
+    if (ttl > 20_000) {
+      console.warn("Query took a longer time than expected, this could be flakiness or a fundamental regression in some part of the query api flow. Please continue monitoring.");
+    }
 
-    // Wait for the minTTL to expire.
-    // Assuming minTTL is 10s, we wait 11s to be safe.
-    await new Promise((resolve) => setTimeout(resolve, 11_000));
+    // Fetch again immediately (HIT)
+    const hotFetch = Date.now();
+    const res2 = await fetch(url, reqOpts);
+    if (!res2.ok) throw new Error(`Query failed: ${await res2.text()}`);
+    const hotTime = Date.now() - hotFetch;
+    expect(res2.headers.get("x-cache")).toBe("HIT");
+    console.log(`Query [HIT] took ${hotTime}ms`);
+
+    expect(
+      queryTime,
+      "Cold DB Query expected to take longer than hot from cache",
+    ).toBeGreaterThan(hotTime);
+
+    // Wait for the ttl to expire.
+    // Wait an extra 1 second to be safe.
+    await new Promise((resolve) => setTimeout(resolve, ttl + 1000));
 
     // Fetch a third time (MISS - cache naturally expired)
     const res3 = await fetch(url, reqOpts);
     expect(res3.ok).toBe(true);
     expect(res3.headers.get("x-cache")).toEqual("MISS");
-  }, 20_000); // Increase Vitest timeout for this specific block to 20s
+  }, 60_000);
 });

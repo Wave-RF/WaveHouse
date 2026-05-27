@@ -40,11 +40,19 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         { tag: "link", attrs: { rel: "icon", type: "image/svg+xml", href: "/favicon.svg", sizes: "any" } },
         { tag: "link", attrs: { rel: "icon", type: "image/x-icon", sizes: "16x16 32x32 48x48", href: "/favicon.ico" } },
         { tag: "link", attrs: { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" } },
-        // Open Graph
+        // Open Graph — Starlight already emits og:title, og:type, og:url,
+        // og:locale, og:description, og:site_name, twitter:card. These are
+        // the bits it doesn't, applied site-wide so every shareable page
+        // carries them. og:image:alt doubles as accessibility text for
+        // screen readers and the fallback string platforms render when the
+        // image fails to load.
         { tag: "meta", attrs: { property: "og:image", content: "https://wavehouse.dev/og.png" } },
+        { tag: "meta", attrs: { property: "og:image:type", content: "image/png" } },
         { tag: "meta", attrs: { property: "og:image:width", content: "1200" } },
         { tag: "meta", attrs: { property: "og:image:height", content: "630" } },
+        { tag: "meta", attrs: { property: "og:image:alt", content: "WaveHouse — open-source real-time API gateway for ClickHouse" } },
         { tag: "meta", attrs: { name: "twitter:image", content: "https://wavehouse.dev/og.png" } },
+        { tag: "meta", attrs: { name: "twitter:image:alt", content: "WaveHouse — open-source real-time API gateway for ClickHouse" } },
       ],
       logo: {
         light: "./src/assets/branding/wavehouse-mark-light.svg",

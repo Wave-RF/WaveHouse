@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerate every WaveHouse logo / favicon / social-card asset from a single
-# source: scripts/branding/mark.svg.
+# source: docs/scripts/branding/mark.svg.
 #
 # Outputs:
 #   docs/public/favicon.svg              browser favicon, CSS-swaps light/dark
@@ -10,9 +10,10 @@
 #   docs/src/assets/branding/wavehouse-mark-light.svg   Starlight nav logo (light theme)
 #   docs/src/assets/branding/wavehouse-mark-dark.svg    Starlight nav logo (dark theme)
 #
-# Edit scripts/branding/mark.svg (one or more SVG elements, single line, using
-# `stroke="currentColor"` for any element that should pick up the brand color)
-# or the COLOR_* variables below, then run `make branding`.
+# Edit docs/scripts/branding/mark.svg (one or more SVG elements, single line,
+# using `stroke="currentColor"` for any element that should pick up the brand
+# color) or the COLOR_* variables below, then run `make docs-branding` from
+# the repo root (or `make branding` from inside docs/).
 #
 # Requires rsvg-convert (librsvg) and magick (ImageMagick 7+) on PATH:
 #   brew install librsvg imagemagick
@@ -21,8 +22,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
-# shellcheck source=scripts/_colors.sh
+# Repo root via git rather than a hard-coded relative climb — survives if the
+# script ever gets moved again (e.g. into a different subproject).
+ROOT="$(git -C "$HERE" rev-parse --show-toplevel)"
+# shellcheck source=../../../scripts/_colors.sh
 source "$ROOT/scripts/_colors.sh"
 
 # --- Branding configuration ---------------------------------------------------

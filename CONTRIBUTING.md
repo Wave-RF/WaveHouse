@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to WaveHouse! This guide will help you get started.
 
+> Looking for help instead of contributing code? See [SUPPORT.md](SUPPORT.md) for where to ask questions, report bugs, and what the alpha-stage response cadence is. Found a security issue? Use the private channel in [SECURITY.md](SECURITY.md), not a public issue.
+
 ## Getting Started
 
 1. [Fork the repository](https://github.com/Wave-RF/WaveHouse/fork) and clone your fork.

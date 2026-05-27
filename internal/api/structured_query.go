@@ -54,7 +54,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	schema := h.Registry.Get(table)
 	if schema == nil {
-		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("unknown table: %s", table))
+		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
 		return
 	}
 

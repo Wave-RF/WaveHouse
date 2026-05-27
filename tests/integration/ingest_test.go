@@ -17,8 +17,8 @@ import (
 )
 
 // TestIngest_FlowsToClickHouseWithoutDLQ exercises the happy path: POST
-// /v1/ingest?table={table} is acknowledged synchronously, Bento batches the event
-// to ClickHouse, and the DLQ stays empty for that table.
+// /v1/ingest?table={table} is acknowledged synchronously, ingest worker
+// batches the event to ClickHouse, and the DLQ stays empty for that table.
 func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
@@ -42,7 +42,7 @@ func TestIngest_FlowsToClickHouseWithoutDLQ(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&ingestResp))
 	assert.Equal(t, true, ingestResp["ok"])
 
-	// 30s upper bound for Bento's 5s batch window plus loaded-runner slack.
+	// 30s upper bound for ingest worker's 5s batch window plus loaded-runner slack.
 	assert.Eventually(t, func() bool {
 		var count uint64
 		err := e.chConn.QueryRow(ctx,

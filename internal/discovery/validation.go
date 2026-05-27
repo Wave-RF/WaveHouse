@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -13,12 +14,16 @@ func Validate(schema *TableSchema, data map[string]any) error {
 		colMap[col.Name] = col
 	}
 
+	// TODO: the unknown field rejection can technically be controlled with `input_format_skip_unknown_fields = 1` I think, which would mean this is a false negative in some cases...
+
 	// Reject unknown fields.
 	for key := range data {
 		if _, ok := colMap[key]; !ok {
 			return fmt.Errorf("unknown column %q for table %q", key, schema.Name)
 		}
 	}
+
+	// TODO: I think clickhouse actually implicitly has defaults for strings, numbers etc like "" and 0 – so (if true) then omitting that column, even if the schema doesn't set that column to nullable or have a default, clickhouse will still set the implicit value if one – so technically we then shouldn't reject missing columns and this is a false negative? But that get's quite a bit messier...
 
 	// Check type compatibility and required columns.
 	for _, col := range schema.Columns {
@@ -45,39 +50,77 @@ func Validate(schema *TableSchema, data map[string]any) error {
 
 // isTypeCompatible checks whether a Go/JSON value can be stored in the given ClickHouse type.
 func isTypeCompatible(chType string, val any) bool {
-	// Unwrap Nullable.
-	if strings.HasPrefix(chType, "Nullable(") && strings.HasSuffix(chType, ")") {
-		chType = chType[9 : len(chType)-1]
-	}
-
-	// Unwrap LowCardinality.
-	if strings.HasPrefix(chType, "LowCardinality(") && strings.HasSuffix(chType, ")") {
-		chType = chType[15 : len(chType)-1]
+	// Robustly unwrap nested modifiers (e.g., LowCardinality(Nullable(String)))
+	for {
+		if strings.HasPrefix(chType, "Nullable(") && strings.HasSuffix(chType, ")") {
+			chType = chType[9 : len(chType)-1]
+			continue
+		}
+		if strings.HasPrefix(chType, "LowCardinality(") && strings.HasSuffix(chType, ")") {
+			chType = chType[15 : len(chType)-1]
+			continue
+		}
+		break
 	}
 
 	switch {
-	// String-compatible types accept JSON strings.
+	// String-compatible types accept Strings, Numbers (coerced), and Bools
 	case chType == "String",
 		strings.HasPrefix(chType, "FixedString("),
-		chType == "UUID",
-		strings.HasPrefix(chType, "DateTime"),
-		strings.HasPrefix(chType, "Date"),
-		strings.HasPrefix(chType, "Enum8("),
-		strings.HasPrefix(chType, "Enum16("),
-		chType == "IPv4",
-		chType == "IPv6":
-		_, ok := val.(string)
-		return ok
+		chType == "UUID":
+		switch val.(type) {
+		case string, float64, json.Number, bool:
+			return true
+		default:
+			return false
+		}
 
-	// Numeric types accept JSON numbers (float64 from json.Unmarshal).
+	// Dates/Times accept Strings and Numbers (Unix timestamps)
+	case strings.HasPrefix(chType, "DateTime"),
+		strings.HasPrefix(chType, "Date"):
+		switch val.(type) {
+		case string, float64, json.Number:
+			return true
+		default:
+			return false
+		}
+
+	// Enums accept Strings (names) and Numbers (integer mappings)
+	case strings.HasPrefix(chType, "Enum8("),
+		strings.HasPrefix(chType, "Enum16("):
+		switch val.(type) {
+		case string, float64, json.Number:
+			return true
+		default:
+			return false
+		}
+
+	// IPs accept Strings and Numbers (UInt32 representations)
+	case chType == "IPv4", chType == "IPv6":
+		switch val.(type) {
+		case string, float64, json.Number:
+			return true
+		default:
+			return false
+		}
+
+	// Bools accept actual bools, numbers (0/1), and strings ("true"/"false")
 	case chType == "Bool":
-		_, okBool := val.(bool)
-		_, okNum := val.(float64)
-		return okBool || okNum
+		switch val.(type) {
+		case bool, float64, json.Number, string:
+			return true
+		default:
+			return false
+		}
 
+	// Numerics accept Numbers and Strings (to prevent JS precision loss)
 	case isNumericType(chType):
-		_, ok := val.(float64)
-		return ok
+		switch val.(type) {
+		case float64, json.Number, string:
+			return true
+		default:
+			return false
+		}
 
 	// Array types accept JSON arrays.
 	case strings.HasPrefix(chType, "Array("):
