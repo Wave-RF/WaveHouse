@@ -416,9 +416,26 @@ SUBPROJECT_FANOUTS := $(addprefix subprojects-,$(COMMON_VERBS))
 .PHONY: $(SUBPROJECT_FANOUTS)
 $(SUBPROJECT_FANOUTS): subprojects-%: $(addsuffix /.%,$(SUBPROJECTS))
 
-# Per-subproject pattern rules for direct invocation:
+# Per-subproject targets for direct invocation:
 #   make docs-<name>  → cd docs && make <name>
-# Add one line below per subproject as they're added to SUBPROJECTS.
+#
+# The static pattern rule below enumerates docs-<name> aliases as literal,
+# explicit, phony targets. That gives us two things:
+#   1. zsh `_make` completion parses the Makefile to enumerate targets — it
+#      can't expand `%`, so without literal names `make docs-<TAB>` falls back
+#      to filename completion and surfaces the `docs/` directory contents.
+#   2. `.PHONY` coverage means a stray file or directory named e.g.
+#      `docs-build` can't shadow the target (and the implicit-rule search is
+#      skipped, so phony targets need an explicit recipe — that's what the
+#      static pattern rule provides).
+# The catch-all pattern rule at the bottom keeps the "add a target in
+# docs/Makefile, free fanout from root" property — newly-added recipes work
+# immediately, just without tab-completion or phony coverage until promoted
+# into the literal list.
+.PHONY: docs-install docs-install-playwright docs-dev docs-preview docs-build docs-branding docs-test docs-lint docs-verify docs-clean docs-clean-tools
+docs-install docs-install-playwright docs-dev docs-preview docs-build docs-branding docs-test docs-lint docs-verify docs-clean docs-clean-tools: docs-%:
+	@$(MAKE) -C $(DOCS_DIR) $*
+
 docs-%:
 	@$(MAKE) -C $(DOCS_DIR) $*
 
