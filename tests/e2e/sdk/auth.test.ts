@@ -61,10 +61,14 @@ describe("Auth", () => {
     expect(result.error!.status).toBe(401);
   });
 
-  it("unauthenticated request is rejected", async () => {
+  it("no-token request is forbidden when no default_role grants access", async () => {
+    // A request with no token resolves to the policy default_role. The e2e
+    // policy sets none, so the roleless request matches nothing and is denied
+    // with 403 — not 401, since there's no bad token to report (unlike the
+    // expired/invalid cases above, which fail loud with 401).
     const wh = publicClient();
     const result = await wh.from("clicks").fetch({ limit: 1 });
     expect(result.error).not.toBeNull();
-    expect(result.error!.status).toBe(401);
+    expect(result.error!.status).toBe(403);
   });
 });

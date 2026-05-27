@@ -23,7 +23,9 @@ services:
       # owned by the nonroot user; bind-mount any persistent volume here.
       WH_CH_HTTP_SCHEME: http
       WH_DATA_DIR: /app/data
-      WH_AUTH_ENABLED: "false"
+      # No auth on/off switch: set WH_AUTH_JWT_SECRET to validate tokens;
+      # without it, every request resolves to the policy default_role.
+      # WH_AUTH_JWT_SECRET: "change-me"
       WH_DEDUPE_ENABLED: "false"
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"

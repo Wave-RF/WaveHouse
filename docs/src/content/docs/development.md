@@ -82,7 +82,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no external cache needed
-- **Auth disabled** by default — no JWT needed
+- **No JWT secret** by default — requests resolve to the policy `default_role`
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
 
@@ -98,9 +98,9 @@ curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
-# Query events (wait a few seconds for the batch flush). `/v1/admin/query`
-# requires admin/service when auth is on — fine here because `make dev`
-# runs with `auth.enabled=false`.
+# Query events (wait a few seconds for the batch flush). `/v1/admin/query` is
+# admin-only: send a valid JWT whose role is the policy `admin_role`
+# ("admin" by default) via `Authorization: Bearer <jwt>`.
 curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
@@ -136,7 +136,7 @@ dev: deps-up $(AIR)
 **While `make dev` is running you get:**
 
 - WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
-- Auth disabled by default — every request goes through. Override with env vars (see below).
+- No JWT secret set by default, so every request resolves to the policy `default_role`. Override with env vars (see below).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` (or `config.yaml`) triggers a debounced rebuild + restart. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
@@ -179,13 +179,10 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 
 ### Using the SDK playground against `make dev`
 
-The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse with auth enabled in dev mode and the secret `sdk-dev-secret`. To match those defaults under `make dev`:
+The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse signing JWTs with the secret `sdk-dev-secret`. To match under `make dev`:
 
 ```bash
-WH_AUTH_ENABLED=true \
-WH_AUTH_DEV_MODE=true \
-WH_AUTH_JWT_SECRET=sdk-dev-secret \
-make dev
+WH_AUTH_JWT_SECRET=sdk-dev-secret make dev
 ```
 
 Then in another terminal:
@@ -199,12 +196,12 @@ npx tsx playground/public.ts         # SDK demo against the live server
 
 Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
 
-### Enable Auth (Optional)
+### Validating tokens
 
-Set `WH_AUTH_ENABLED=true` and `WH_AUTH_JWT_SECRET=my-secret` to require JWT tokens:
+There is no auth on/off switch — the JWT middleware always runs. Set `WH_AUTH_JWT_SECRET` so tokens can be validated; without it, every request resolves to the policy `default_role`. Mint a JWT signed with that secret (role == the policy `admin_role`) to reach admin/elevated endpoints:
 
 ```bash
-WH_AUTH_ENABLED=true WH_AUTH_JWT_SECRET=my-secret make dev
+WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
 Then generate a test token:

@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,7 +29,18 @@ type Store struct {
 }
 
 // NewStore creates a policy store backed by NATS KV.
-// If bootstrapPath is non-empty and the file exists, its contents seed the KV store.
+//
+// Bootstrap semantics:
+//   - If KV already holds a policy, it wins — the file is a seed, not the
+//     source of truth, so subsequent runs ignore bootstrapPath entirely.
+//     Runtime updates flow in via Put and KV Watch.
+//   - If KV is empty and bootstrapPath is set, the file MUST exist, parse,
+//     validate, and persist; any failure is fatal so a misconfigured deployment
+//     refuses to start instead of silently running fail-closed (every request
+//     denied, including the admin role) until an operator notices.
+//   - If KV is empty and bootstrapPath is "", the store starts with no policy
+//     and the operator must seed via Put — every request fails closed in the
+//     meantime, which we log loudly.
 func NewStore(ctx context.Context, js jetstream.JetStream, bootstrapPath string, logger *slog.Logger) (*Store, error) {
 	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  kvBucket,
@@ -40,29 +52,34 @@ func NewStore(ctx context.Context, js jetstream.JetStream, bootstrapPath string,
 
 	s := &Store{kv: kv, logger: logger}
 
-	// Bootstrap from file if KV is empty.
-	_, err = kv.Get(ctx, kvKey)
-	if err != nil {
-		if bootstrapPath != "" {
-			if p, loadErr := loadPolicyFile(bootstrapPath); loadErr == nil {
-				if putErr := s.Put(ctx, p); putErr != nil {
-					logger.Warn("policy bootstrap write failed", "error", putErr)
-				} else {
-					logger.Info("bootstrapped policy from file", "path", bootstrapPath)
-				}
-			} else if !os.IsNotExist(loadErr) {
-				logger.Warn("policy file load failed", "path", bootstrapPath, "error", loadErr)
-			}
-		}
-	}
-
-	// Load current policy into cache.
-	if p, err := s.load(ctx); err == nil {
+	// KV is authoritative when populated. Only ErrKeyNotFound is treated as
+	// "empty"; any other error (network blip, corrupt JSON, etc.) propagates
+	// — silently falling through to bootstrap would mask broken state.
+	switch p, err := s.load(ctx); {
+	case err == nil:
 		s.mu.Lock()
 		s.cached = p
 		s.mu.Unlock()
+		s.warnIfDefaultRoleGrantsAdmin(p)
+		return s, nil
+	case !errors.Is(err, jetstream.ErrKeyNotFound):
+		return nil, fmt.Errorf("read policy from kv: %w", err)
 	}
 
+	if bootstrapPath == "" {
+		logger.Warn("policy KV is empty and no bootstrap file is configured — every request will be denied (fail-closed, including the admin role) until a policy is PUT via the API")
+		return s, nil
+	}
+
+	p, err := loadPolicyFile(bootstrapPath)
+	if err != nil {
+		return nil, fmt.Errorf("load policy bootstrap file %q: %w", bootstrapPath, err)
+	}
+	// Put validates, writes to KV, caches, and warns about default_role==admin.
+	if err := s.Put(ctx, p); err != nil {
+		return nil, fmt.Errorf("bootstrap policy from %q: %w", bootstrapPath, err)
+	}
+	logger.Info("bootstrapped policy from file", "path", bootstrapPath)
 	return s, nil
 }
 
@@ -93,7 +110,21 @@ func (s *Store) Put(ctx context.Context, p *Policy) error {
 	s.mu.Unlock()
 
 	s.logger.Info("policy updated")
+	s.warnIfDefaultRoleGrantsAdmin(p)
 	return nil
+}
+
+// warnIfDefaultRoleGrantsAdmin logs a loud warning when the policy grants admin
+// to every roleless request via default_role == admin_role. The configuration
+// is permitted (handy for local/dev — no token needed to reach admin surfaces)
+// but unsafe in production, so every node that adopts such a policy says so. It
+// runs at each point a policy is taken into the cache: Put, startup load, and a
+// Watch update from a peer node.
+func (s *Store) warnIfDefaultRoleGrantsAdmin(p *Policy) {
+	if DefaultRoleGrantsAdmin(p) {
+		s.logger.Warn("default_role equals admin_role: every unauthenticated/roleless request is granted full admin access, including /v1/admin/* — intended for local/dev only, do NOT use in production",
+			"default_role", p.DefaultRole)
+	}
 }
 
 // Watch subscribes to policy changes in the NATS KV store so all nodes
@@ -115,10 +146,7 @@ func (s *Store) Watch(ctx context.Context) {
 				continue
 			}
 			if entry.Operation() == jetstream.KeyValueDelete || entry.Operation() == jetstream.KeyValuePurge {
-				s.mu.Lock()
-				s.cached = nil
-				s.mu.Unlock()
-				s.logger.Info("policy deleted")
+				s.handleDelete()
 				continue
 			}
 			var p Policy
@@ -130,8 +158,21 @@ func (s *Store) Watch(ctx context.Context) {
 			s.cached = &p
 			s.mu.Unlock()
 			s.logger.Info("policy updated via watch", "revision", entry.Revision())
+			s.warnIfDefaultRoleGrantsAdmin(&p)
 		}
 	}
+}
+
+// handleDelete applies a KV delete/purge by clearing the cache. With no policy,
+// Evaluate and IsAdmin fail fully closed — nobody passes, not even the admin
+// role — so deleting the policy denies all traffic until a new one is written
+// (bootstrap from the policy file). No fail-closed retention is needed: the
+// deny-by-default is structural, not a runtime flag.
+func (s *Store) handleDelete() {
+	s.mu.Lock()
+	s.cached = nil
+	s.mu.Unlock()
+	s.logger.Warn("policy deleted from KV; cache cleared — all traffic (including the admin role) is now denied until a new policy is written")
 }
 
 // load reads the current policy from NATS KV.

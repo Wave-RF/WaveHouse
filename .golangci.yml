@@ -87,11 +87,17 @@ linters:
         - name: superfluous-else
         - name: unreachable-code
         - name: redefines-builtin-id
+  exclusions:
+    paths:
+      - .worktrees/
 
 formatters:
   enable:
     - gofumpt
     - goimports
+  exclusions:
+    paths:
+      - .worktrees/
 
 run:
   timeout: 5m

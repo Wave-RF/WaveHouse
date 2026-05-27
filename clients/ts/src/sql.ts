@@ -5,12 +5,12 @@ import { ok, err } from './errors.js';
 /**
  * Execute a raw SQL query against ClickHouse.
  *
- * Backed by `POST /v1/admin/query`, which is gated on `admin` / `service` —
- * the same role set as the rest of `/v1/admin/*`. When authentication is
- * enabled, callers must hold a JWT with one of those roles. With
- * `auth.enabled=false` or `auth.dev_mode=true` (both dev/test postures)
- * the endpoint is open. Non-admin use cases should use the structured
- * query builder (`wh.from(table)...`) instead.
+ * Backed by `POST /v1/admin/query`, which requires the admin role — the same
+ * gate as the rest of `/v1/admin/*`. Callers must hold a JWT whose role is the
+ * configured `admin_role` (`"admin"` by default); there is no separate
+ * `service` role. The JWT middleware always runs, so a request with no token
+ * or an invalid one is denied, never granted. Non-admin use cases should use
+ * the structured query builder (`wh.from(table)...`) instead.
  *
  * The server proxies the SQL string verbatim to ClickHouse's HTTP interface,
  * so any ClickHouse-accepted statement works — including multi-statement

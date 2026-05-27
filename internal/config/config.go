@@ -112,17 +112,32 @@ type Cache struct {
 	TimestampBucketSeconds int   `yaml:"timestamp_bucket_seconds" env:"WH_CACHE_TIMESTAMP_BUCKET_SECONDS" env-default:"60"`
 }
 
+// Auth configures JWT validation. There is no on/off switch: the middleware
+// always runs. A request with no token, or an invalid/expired one, falls back
+// to the policy default_role; elevated access requires a valid token whose role
+// claim matches a granted role (or the policy admin_role). With neither
+// JWTSecret nor JWKSURL set, no token can validate, so every request is the
+// default role — a pure public deployment.
 type Auth struct {
-	Enabled   bool   `yaml:"enabled" env:"WH_AUTH_ENABLED" env-default:"false"`
 	JWTSecret string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
 	JWKSURL   string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
 	RoleClaim string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
-	DevMode   bool   `yaml:"dev_mode" env:"WH_AUTH_DEV_MODE" env-default:"false"`
 }
 
 // Policy configures the access control policy engine.
+//
+// FilePath has no default on purpose. When set, the file MUST exist and parse
+// cleanly — policy.NewStore returns a fatal error otherwise, so a typo or a
+// missing mount surfaces as a refused boot instead of a silent fail-closed
+// (every request 403s, including admin). When left empty, the store comes up
+// with no cached policy and the operator seeds via PUT /v1/admin/policy.
+//
+// A baked-in default like "policy.yaml" would re-introduce the silent-lockout
+// failure mode for any deployment that didn't ship that exact file at CWD,
+// and it would imply a convention the operator never opted into — keep the
+// path an explicit choice.
 type Policy struct {
-	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH" env-default:"policy.yaml"`
+	FilePath string `yaml:"file_path" env:"WH_POLICY_FILE_PATH"`
 }
 
 // Pipes configures named query pipes.
@@ -159,10 +174,6 @@ func (c *Config) Validate() error {
 
 	if c.Server.ShutdownTimeout < 0 {
 		return fmt.Errorf("server.shutdown_timeout must be non-negative")
-	}
-
-	if c.Auth.Enabled && !c.Auth.DevMode && c.Auth.JWTSecret == "" && c.Auth.JWKSURL == "" {
-		return fmt.Errorf("auth.enabled requires at least one of jwt_secret or jwks_url (or enable dev_mode)")
 	}
 
 	if c.Schema.RefreshInterval < 1 {

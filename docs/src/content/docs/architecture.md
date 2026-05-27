@@ -68,8 +68,8 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
 
-- **router.go** — Route definitions. Public: `/health`, `/ready`. Protected: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`, `/v1/schema`, `/v1/schema/*`, `/v1/dlq/stats`. Admin (admin/service): `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
-- **middleware.go** — JWT auth middleware supporting HMAC and JWKS validation, role extraction from configurable claim path, and dev mode bypass. Controlled by `auth.enabled`.
+- **router.go** — Route definitions. Public: `/health`, `/ready`. Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`. Admin-only (`RequireAdmin`, role == `policy.admin_role`): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
+- **`internal/auth`** — JWT auth middleware supporting HMAC and JWKS validation and role extraction from a configurable claim path. It always runs (no on/off flag) and never rejects: a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
@@ -105,7 +105,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 
 ### `ingest/` — Ingest Pipeline, DLQ & Sweeping
 
-- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin/service role — see the Query Path section below; when authentication is enabled, the `/v1/admin/*` middleware enforces that role check at the API layer, so non-admin callers never reach the proxy. With `auth.enabled=false` (or `auth.dev_mode=true`) the endpoint is intentionally open — the dev/test posture. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table{.scope}}` NATS subjects when DLQ is enabled.
+- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream input (`jsInput`) reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull consumer, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/admin/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. Failed batches are routed to a DLQ output (`dlqOutput`) which publishes the inner data payload (`{"id":"abc","field":...}`) to `dlq.{table{.scope}}` NATS subjects when DLQ is enabled.
 - **types.go** — `EventMessage` struct (TableName, Scope, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
@@ -161,10 +161,10 @@ Ingest worker pipeline (StartIngestWorker):
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
   {table_name, scope, received_timestamp, data}; non-insert mutations
-  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query — when
-  authentication is enabled, the /v1/admin/* role gate rejects non-admin
-  callers at the API layer (with auth.enabled=false or auth.dev_mode=true
-  the endpoint is intentionally open).)
+  DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query — the
+  /v1/admin/* RequireAdmin gate rejects non-admin callers at the API layer, so
+  a no/invalid-token request (resolved to default_role, not admin in a
+  production config) cannot reach the proxy.)
 
 Active Sweeper (async goroutine, every 60s):
   → Read buffer consumer's AckFloor (highest contiguous ACKed seq)
@@ -177,9 +177,9 @@ Active Sweeper (async goroutine, every 60s):
 
 ```text
 Client POST /v1/admin/query
-  → Optional JWT auth middleware
-  → /v1/admin RequireRole(admin, service) — single gate shared with the
-    rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Raw SQL has
+  → JWT auth middleware (always runs; no/invalid token → empty role)
+  → /v1/admin RequireAdmin (role == policy.admin_role) — single gate shared
+    with the rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Raw SQL has
     no per-statement scope check (a full SQL parser would be needed to
     authorize predicates), so the role gate is the entire authorization
     story. /v1/admin/query is the only sanctioned surface for non-SELECT

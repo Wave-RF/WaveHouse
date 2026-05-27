@@ -2,58 +2,89 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRequireRole_AllowedRole(t *testing.T) {
+func TestRequireAdmin_AdminAllowed(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole(true, "admin", "service")
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-
-	ctx := context.WithValue(context.Background(), ContextKeyRole, "admin")
+	ctx := auth.WithRole(context.Background(), "admin")
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
-
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestRequireRole_DeniedRole(t *testing.T) {
+func TestRequireAdmin_NonAdminForbidden(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole(true, "admin", "service")
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
-
-	ctx := context.WithValue(context.Background(), ContextKeyRole, "viewer")
+	ctx := auth.WithRole(context.Background(), "viewer")
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
-
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
-func TestRequireRole_NoRole_Passthrough(t *testing.T) {
+// TestRequireAdmin_NoRoleForbidden: a roleless request (no token, or an
+// invalid/expired one that fell back to an empty role) must never reach an
+// admin route — fail closed with 403.
+func TestRequireAdmin_NoRoleForbidden(t *testing.T) {
 	t.Parallel()
-	mw := RequireRole(false, "admin")
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	handler := RequireAdmin(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("handler should not be called - a roleless request must not reach an admin route")
 	}))
-
-	// No role in context — auth disabled scenario → passthrough.
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestRequireAdmin_CustomAdminRole: the configured admin_role passes; the
+// literal "admin" is an ordinary (denied) role under a custom admin_role.
+func TestRequireAdmin_CustomAdminRole(t *testing.T) {
+	t.Parallel()
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"})
+	handler := RequireAdmin(store)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	for role, want := range map[string]int{"superuser": http.StatusOK, "admin": http.StatusForbidden} {
+		ctx := auth.WithRole(context.Background(), role)
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		assert.Equal(t, want, w.Code, "role %q", role)
+	}
+}
+
+// TestRequireAdmin_InvalidTokenFailsLoud: a request whose token failed to
+// validate fell back to an empty role; the gate must surface the token reason
+// (401) rather than a bare 403.
+func TestRequireAdmin_InvalidTokenFailsLoud(t *testing.T) {
+	t.Parallel()
+	handler := RequireAdmin(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+	ctx := auth.WithAuthError(context.Background(), errors.New("token expired"))
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "token expired")
 }
 
 func TestCORSMiddleware_Preflight(t *testing.T) {
@@ -239,8 +270,11 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	}{
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
-		{http.MethodGet, "/v1/schema", http.StatusOK},
-		{http.MethodGet, "/v1/schema?table=events", http.StatusOK},
+		// Schema is admin-only (see TestNewRouter_SchemaAdminOnly); a roleless
+		// request is denied 403 — the route still exists, which is what this
+		// registration test asserts (not 404/405).
+		{http.MethodGet, "/v1/schema", http.StatusForbidden},
+		{http.MethodGet, "/v1/schema?table=events", http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
@@ -258,11 +292,10 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 
 // TestNewRouter_RawSQLAdminGate pins the contract for POST /v1/admin/query:
 //
-//	admin role          → reaches handler
-//	service role        → reaches handler (same gate as the rest of /v1/admin/*)
-//	viewer role         → 403
-//	no role, auth off   → reaches handler (dev/test posture)
-//	no role, auth on    → 401
+//	admin role   → reaches handler
+//	service role → 403 (no longer privileged)
+//	viewer role  → 403
+//	no role      → 403 (a roleless request never reaches an admin route)
 //
 // A regression that re-mounted the route under the top-level /v1 auth
 // middleware (the pre-move state) would let viewer through — the viewer
@@ -274,23 +307,21 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := NewHub()
 
-	build := func(authEnabled bool) http.Handler {
-		return NewRouter(Dependencies{
-			Ingest:      NewIngestHandler(reg, pub),
-			Query:       &QueryHandler{},
-			SSE:         NewSSEHandler(hub, nil),
-			WS:          NewWSHandler(hub, nil, nil),
-			Health:      &HealthHandler{},
-			Schema:      NewSchemaHandler(reg),
-			AuthMW:      func(next http.Handler) http.Handler { return next },
-			AuthEnabled: authEnabled,
-		})
-	}
+	router := NewRouter(Dependencies{
+		Ingest:      NewIngestHandler(reg, pub),
+		Query:       &QueryHandler{},
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
+		Health:      &HealthHandler{},
+		Schema:      NewSchemaHandler(reg),
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+	})
 
-	post := func(router http.Handler, role string) *httptest.ResponseRecorder {
+	post := func(role string) *httptest.ResponseRecorder {
 		ctx := context.Background()
 		if role != "" {
-			ctx = context.WithValue(ctx, ContextKeyRole, role)
+			ctx = auth.WithRole(ctx, role)
 		}
 		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/admin/query", nil)
 		rec := httptest.NewRecorder()
@@ -303,53 +334,29 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		// nil driver.Conn would panic inside executeQuery, but the handler
 		// returns 400 before that on a missing body — which is enough to
 		// confirm the gate let the request through.
-		rec := post(build(true), "admin")
+		rec := post("admin")
 		assert.NotEqual(t, http.StatusNotFound, rec.Code, "admin must reach the handler")
 		assert.NotEqual(t, http.StatusForbidden, rec.Code, "admin must not be 403'd")
 		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "admin must not be 401'd")
 		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "admin path must remain POST-mounted")
 	})
 
-	t.Run("service reaches handler", func(t *testing.T) {
+	t.Run("service is 403 (no longer privileged)", func(t *testing.T) {
 		t.Parallel()
-		// /v1/admin/query shares the /v1/admin/* gate — admin and
-		// service both pass. Service tokens already have admin-scoped
-		// powers across the rest of the admin tree (policy CRUD, pipes
-		// CRUD, log-level), so excluding them just for raw SQL would be
-		// inconsistency without a real authorization win.
-		rec := post(build(true), "service")
-		assert.NotEqual(t, http.StatusNotFound, rec.Code)
-		assert.NotEqual(t, http.StatusForbidden, rec.Code)
-		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
-		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code)
+		assert.Equal(t, http.StatusForbidden, post("service").Code)
 	})
 
 	t.Run("viewer is 403", func(t *testing.T) {
 		t.Parallel()
-		rec := post(build(true), "viewer")
+		rec := post("viewer")
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		testutil.AssertJSONErrorResponse(t, rec)
 	})
 
-	t.Run("auth disabled passthrough for no role", func(t *testing.T) {
+	t.Run("no role is 403", func(t *testing.T) {
 		t.Parallel()
-		// Auth disabled = role middleware passes through (dev/test posture).
-		// The endpoint is still reachable so the handler can decide. Pin
-		// negative assertions for the four statuses that would indicate
-		// a routing/auth regression: 404 (route missing), 403 (role gate
-		// firing despite auth being off), 401 (auth middleware rejecting
-		// despite auth being off), 405 (POST no longer mounted on this path).
-		rec := post(build(false), "")
-		assert.NotEqual(t, http.StatusNotFound, rec.Code)
-		assert.NotEqual(t, http.StatusForbidden, rec.Code)
-		assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
-		assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code)
-	})
-
-	t.Run("auth enabled rejects no role with 401", func(t *testing.T) {
-		t.Parallel()
-		rec := post(build(true), "")
-		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		rec := post("")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
 		testutil.AssertJSONErrorResponse(t, rec)
 	})
 }
@@ -362,26 +369,29 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub),
-		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
-		Health: &HealthHandler{},
-		Schema: NewSchemaHandler(reg),
-		AuthMW: func(next http.Handler) http.Handler { return next },
-		// DLQ, Policy, Pipes, StructuredQuery all nil.
+		Ingest:      NewIngestHandler(reg, pub),
+		Query:       &QueryHandler{},
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
+		Health:      &HealthHandler{},
+		Schema:      NewSchemaHandler(reg),
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
 	}
 
 	// Should not panic.
 	router := NewRouter(deps)
 
-	// Admin pipes route should 404 when pipes is nil.
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/admin/pipes", nil)
+	// Admin pipes route should 404 when pipes is nil. Send it as admin so the
+	// /v1/admin gate passes and we observe the route being absent (the gate
+	// runs before sub-route matching, so a roleless request would 403 first).
+	req := httptest.NewRequestWithContext(auth.WithRole(context.Background(), "admin"), http.MethodGet, "/v1/admin/pipes", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	// DLQ stats should 404 when DLQ is nil.
+	// DLQ stats should 404 when DLQ is nil (the route — and its admin gate —
+	// is never registered, so no role is needed to observe the 404).
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dlq/stats", nil)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -400,26 +410,6 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
-}
-
-func TestRequireRole_NoRole_FailClosed(t *testing.T) {
-	t.Parallel()
-
-	// Empty context is REJECTED
-	mw := RequireRole(true, "admin")
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Fatal("handler should not be called - security should have blocked this!")
-	}))
-
-	// Create a request with NO role in the context
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "unauthorized")
-	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
@@ -539,4 +529,53 @@ func TestJSONRecoverer_PanicAfterPartialWriteDoesNotCorrupt(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "status already committed before panic must not be overwritten")
 	assert.Equal(t, "text/plain", rec.Header().Get("Content-Type"), "headers already flushed must not be rewritten")
 	assert.Equal(t, "partial body", rec.Body.String(), "JSON 500 body must not be appended after a partial write")
+}
+
+// TestNewRouter_SchemaAdminOnly confirms schema discovery is admin-only: a
+// tokenless/non-admin request is denied (403), while an admin reaches the
+// handler. Schema carries no policy/allowlist gate of its own, so the admin
+// gate is its entire authorization story.
+func TestNewRouter_SchemaAdminOnly(t *testing.T) {
+	t.Parallel()
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	pub := &testutil.MockPublisher{}
+	hub := NewHub()
+
+	router := NewRouter(Dependencies{
+		Ingest:      NewIngestHandler(reg, pub),
+		Query:       &QueryHandler{},
+		SSE:         NewSSEHandler(hub, nil),
+		WS:          NewWSHandler(hub, nil, nil),
+		Health:      &HealthHandler{},
+		Schema:      NewSchemaHandler(reg),
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+	})
+
+	get := func(path, role string) *httptest.ResponseRecorder {
+		ctx := context.Background()
+		if role != "" {
+			ctx = auth.WithRole(ctx, role)
+		}
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, path := range []string{"/v1/schema", "/v1/schema?table=events"} {
+		t.Run(path+" tokenless 403", func(t *testing.T) {
+			t.Parallel()
+			rec := get(path, "")
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"tokenless request to %s must be denied (schema is admin-only)", path)
+			testutil.AssertJSONErrorResponse(t, rec)
+		})
+		t.Run(path+" admin reaches handler", func(t *testing.T) {
+			t.Parallel()
+			rec := get(path, "admin")
+			assert.NotEqual(t, http.StatusForbidden, rec.Code, "admin must reach schema")
+			assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+		})
+	}
 }

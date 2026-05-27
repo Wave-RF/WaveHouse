@@ -5,8 +5,28 @@
  * Run: npx tsx playground/setup.ts
  */
 
+import { createHmac } from 'node:crypto';
+
 const WH_URL = process.env.WH_URL ?? 'http://localhost:8080';
 const CH_URL = process.env.CH_URL ?? 'http://localhost:8123';
+
+// Setup hits admin-only endpoints (schema refresh, policy, ingest seeding), so
+// it signs an admin JWT with the dev secret the playground server validates.
+function makeJWT(claims: Record<string, unknown>): string {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const payload = {
+    ...claims,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  };
+  const encode = (obj: unknown) =>
+    Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const unsigned = `${encode(header)}.${encode(payload)}`;
+  const sig = createHmac('sha256', 'sdk-dev-secret').update(unsigned).digest('base64url');
+  return `${unsigned}.${sig}`;
+}
+const ADMIN_AUTH = () =>
+  `Bearer ${makeJWT({ sub: 'playground-setup', role: 'admin', tenant_id: 'acme' })}`;
 
 // ── ClickHouse table creation (via HTTP interface) ──────────────────────────
 
@@ -80,7 +100,7 @@ function randomId(): string {
 async function ingest(table: string, data: Record<string, unknown>) {
   const res = await fetch(`${WH_URL}/v1/ingest?table=${table}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: ADMIN_AUTH() },
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -94,8 +114,11 @@ async function seedData() {
   // Give WaveHouse time to discover the new tables
   await new Promise((r) => setTimeout(r, 6000));
 
-  // Trigger schema refresh
-  await fetch(`${WH_URL}/v1/schema/refresh`, { method: 'POST' });
+  // Trigger schema refresh (admin-only)
+  await fetch(`${WH_URL}/v1/schema/refresh`, {
+    method: 'POST',
+    headers: { Authorization: ADMIN_AUTH() },
+  });
   await new Promise((r) => setTimeout(r, 2000));
 
   const userIds = Array.from({ length: 20 }, () => randomId());
@@ -157,12 +180,40 @@ async function waitForService(url: string, label: string, maxAttempts = 30) {
   process.exit(1);
 }
 
+// Grant the three demo personas: `public` (the default_role public.ts relies
+// on — no token), and `viewer` (auth.ts). `admin` (admin.ts) is the built-in
+// admin_role and needs no policy entry.
+async function bootstrapPolicy(): Promise<void> {
+  const perms = () => ({
+    public: { allow_columns: ['*'] },
+    viewer: { allow_columns: ['*'] },
+  });
+  const policy = {
+    default_role: 'public',
+    tables: {
+      clicks: { select: perms(), insert: perms() },
+      events: { select: perms(), insert: perms() },
+      users: { select: perms(), insert: perms() },
+    },
+  };
+  const res = await fetch(`${WH_URL}/v1/admin/policy`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Authorization: ADMIN_AUTH() },
+    body: JSON.stringify(policy),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to bootstrap policy: ${res.status} ${await res.text()}`);
+  }
+  console.log('  ✓ policy bootstrapped (default_role=public, viewer)');
+}
+
 async function main() {
   try {
     await waitForService(CH_URL, 'ClickHouse');
     await waitForService(`${WH_URL}/health`, 'WaveHouse');
     console.log(' ready');
     await createTables();
+    await bootstrapPolicy();
     await seedData();
   } catch (e) {
     console.error('Setup failed:', e);

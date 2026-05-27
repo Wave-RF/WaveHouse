@@ -8,8 +8,9 @@
  *   docker compose -f playground/compose.yaml up -d
  *   npx tsx playground/setup.ts
  *
- * Note: The compose file enables auth with dev_mode=true,
- * so any JWT signed with "sdk-dev-secret" is accepted.
+ * Note: this runs as a real `viewer` (the JWT below, signed with
+ * "sdk-dev-secret"). setup.ts grants `viewer` table access; raw SQL is
+ * admin-only, so step 6 degrades gracefully for a viewer.
  */
 
 import { createClient } from '../src/index.js';
