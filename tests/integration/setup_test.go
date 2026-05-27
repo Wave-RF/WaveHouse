@@ -32,10 +32,12 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -305,9 +307,15 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 }
 
 // buildServer wires the same handler set as cmd/wavehouse/main.go but
-// against the test ClickHouse + embedded NATS, with auth disabled so tests
-// can hit endpoints without minting JWTs. Auth-enforcement coverage lives
-// in the unit tests for middleware.go and the e2e SDK suite.
+// against the test ClickHouse + embedded NATS. There is no auth on/off switch
+// anymore, so the test AuthMW stamps every request with the admin role — the
+// integration suite exercises functionality as a privileged caller and can hit
+// admin-gated endpoints without minting JWTs. Auth-enforcement coverage lives
+// in the internal/auth unit tests and the e2e SDK suite.
+//
+// The RequireAdmin gate resolves that stamped role against PolicyStore, so the
+// server is wired with an in-memory policy whose admin_role is "admin". A nil
+// store would deny every admin-gated route (IsAdmin(nil) is false by design).
 func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
@@ -318,14 +326,19 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		// /v1/admin/query proxies straight to ClickHouse's HTTP interface,
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
-		Query:  api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
-		SSE:    api.NewSSEHandler(hub, js),
-		WS:     api.NewWSHandler(hub, js, nil),
-		Health: api.NewHealthHandler(ch.conn),
-		Schema: api.NewSchemaHandler(registry),
-		DLQ:    api.NewDLQHandler(js, logger),
-		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{Enabled: false}),
-		JS:     js,
+		Query:       api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
+		SSE:         api.NewSSEHandler(hub, js),
+		WS:          api.NewWSHandler(hub, js, nil),
+		Health:      api.NewHealthHandler(ch.conn),
+		Schema:      api.NewSchemaHandler(registry),
+		DLQ:         api.NewDLQHandler(js, logger),
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}),
+		AuthMW: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))
+			})
+		},
+		JS: js,
 	}
 
 	server := httptest.NewServer(api.NewRouter(deps))

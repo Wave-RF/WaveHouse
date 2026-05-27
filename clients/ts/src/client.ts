@@ -73,8 +73,9 @@ export class WaveHouseClient<DB extends Database = Database> {
   }
 
   /**
-   * Execute a raw SQL query against ClickHouse. Requires admin/service role
-   * when auth is active. The endpoint proxies straight to ClickHouse's HTTP
+   * Execute a raw SQL query against ClickHouse. Requires the admin role (the
+   * configured `admin_role`, `"admin"` by default; there is no separate
+   * `service` role). The endpoint proxies straight to ClickHouse's HTTP
    * interface so any ClickHouse-accepted SQL works; positional `?` param
    * binding is NOT supported — inline literals or use the structured query
    * builder for safe binding. See sql.ts for details.

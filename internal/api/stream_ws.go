@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/observability"
@@ -63,9 +64,10 @@ func (h *WSHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = conn.CloseNow() }()
 
-	// Resolve stream permissions for this request.
-	role := RoleFromContext(r.Context())
-	claims, _ := ClaimsFromContext(r.Context())
+	// Resolve stream permissions for this request. Evaluate maps an empty role
+	// to the policy default_role per event, so the raw role from context is kept.
+	role := auth.RoleFromContext(r.Context())
+	claims, _ := auth.ClaimsFromContext(r.Context())
 
 	ctx := r.Context()
 

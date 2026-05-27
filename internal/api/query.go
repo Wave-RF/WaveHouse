@@ -14,7 +14,7 @@ import (
 
 // QueryHandler handles POST /v1/admin/query.
 //
-// Authorization is enforced at the router (the /v1/admin/* RequireRole gate
+// Authorization is enforced at the router (the /v1/admin/* RequireAdmin gate
 // in NewRouter). The handler trusts any caller that reaches it. See
 // internal/api/router.go for the role-gate rationale.
 //

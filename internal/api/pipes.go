@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
@@ -17,14 +19,15 @@ import (
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
 	Store           *pipes.Store
+	PolicyStore     *policy.Store // resolves empty role to default_role; may be nil
 	CHConn          driver.Conn
 	Cache           cache.Cache
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
 }
 
-func NewPipesHandler(store *pipes.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
-	return &PipesHandler{Store: store, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
+func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
 }
 
 // List returns all named queries (admin endpoint).
@@ -84,22 +87,23 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check role permissions.
-	if len(q.AllowedRoles) > 0 {
-		role := RoleFromContext(r.Context())
-		if role != "" {
-			allowed := false
-			for _, ar := range q.AllowedRoles {
-				if ar == role || ar == "*" {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
-		}
+	// Authorization is allowlist membership (policy.RoleAllowed): the caller's
+	// role — a tokenless or roleless request first mapped to the configured
+	// default_role — must appear in allowed_roles by exact match. There is no
+	// "*" any-role wildcard and empty entries are ignored, so a stray "" can't
+	// authorize an empty role. The admin role bypasses every pipe's allowlist by
+	// design, not oversight: admins author pipes and can run arbitrary SQL via
+	// /v1/admin/query, so allowed_roles is never a confidentiality boundary
+	// against them (mirrors Evaluate's admin bypass). A pipe with no
+	// allowed_roles therefore authorizes nobody but admin (fails closed).
+	var p *policy.Policy
+	if h.PolicyStore != nil {
+		p = h.PolicyStore.Get()
+	}
+	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
+	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
+		writeAuthzDenied(w, r, role)
+		return
 	}
 
 	// Gather parameters from query string and/or JSON body.
