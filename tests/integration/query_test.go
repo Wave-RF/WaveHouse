@@ -99,7 +99,7 @@ func TestQuery_MutationsReturnEmptyArray(t *testing.T) {
 				"ORDER BY id",
 			)
 
-			// Seed the table via /v1/ingest/{table}. We seed at least one
+			// Seed the table via /v1/ingest?table={table}. We seed at least one
 			// row so the post-check can prove the mutation actually ran —
 			// otherwise a no-op "mutation on empty table returns []"
 			// assertion would also pass against a regression that swallows

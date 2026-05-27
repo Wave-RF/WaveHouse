@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -41,9 +42,11 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve stream permissions for this request.
-	role := RoleFromContext(r.Context())
-	claims, _ := ClaimsFromContext(r.Context())
+	// Resolve stream permissions for this request. Evaluate maps an empty role
+	// to the policy default_role per event (applyStreamPolicy), so the raw role
+	// from context is what we keep here.
+	role := auth.RoleFromContext(r.Context())
+	claims, _ := auth.ClaimsFromContext(r.Context())
 
 	// TODO: impl scope
 	scope := ""
@@ -55,6 +58,13 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
+	// Flush headers immediately so the client's EventSource.onopen fires right
+	// away instead of waiting for the first data event.
+	if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
 
 	// Subscribe for live events.
 	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...

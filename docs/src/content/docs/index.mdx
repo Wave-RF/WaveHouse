@@ -94,7 +94,7 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Ingest an event
-curl -X POST http://localhost:8080/v1/ingest/events \
+curl -X POST http://localhost:8080/v1/ingest?table=events \
   -H 'content-type: application/json' \
   -d '{"event_type":"page_view","user_id":"u_42","ts":"2026-05-15T12:00:00Z"}'
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/Wave-RF/WaveHouse/internal/api"
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -66,15 +67,15 @@ func run() int {
 		return 1
 	}
 
-	// Validate auth config.
-	if cfg.Auth.Enabled {
-		switch cfg.Auth.JWTSecret {
-		case "":
-			logger.Error("FATAL: WH_AUTH_JWT_SECRET is required when auth is enabled")
-			return 1
-		case "change-me-in-production":
-			logger.Warn("WH_AUTH_JWT_SECRET is using default insecure value")
-		}
+	// Validate auth config. There is no on/off switch — the JWT middleware
+	// always runs. With neither a secret nor a JWKS URL no token can validate,
+	// so every request falls back to the policy default_role (a pure public
+	// deployment). That's a valid posture, so warn rather than fail.
+	switch {
+	case cfg.Auth.JWTSecret == "" && cfg.Auth.JWKSURL == "":
+		logger.Warn("no auth.jwt_secret or auth.jwks_url set: no token can be validated, so every request resolves to the policy default_role (public access)")
+	case cfg.Auth.JWTSecret == "change-me-in-production":
+		logger.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
 	ctx := context.Background()
@@ -279,7 +280,7 @@ func run() int {
 	go policyStore.Watch(ctx)
 
 	// Start batch consumer → ClickHouse.
-	ingestStream, err := ingest.StartIngestWorker(
+	ingestCleanup, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
 		cache,
@@ -289,10 +290,6 @@ func run() int {
 		cfg.ClickHouse.Username,
 		cfg.ClickHouse.Password,
 		cfg.ClickHouse.Database,
-		func(fatalErr error) {
-			slog.Error("ingest worker died, initiating graceful shutdown", "error", fatalErr)
-			cancel()
-		},
 	)
 	if err != nil {
 		logger.Error("ingest worker init", "error", err)
@@ -358,6 +355,18 @@ func run() int {
 	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
 	wsHandler.PolicyStore = policyStore
 
+	// Build the auth middleware up front so a misconfigured/unreachable JWKS
+	// endpoint fails startup loudly rather than booting into a degraded state.
+	authMW, err := auth.Middleware(auth.Config{
+		JWTSecret: cfg.Auth.JWTSecret,
+		JWKSURL:   cfg.Auth.JWKSURL,
+		RoleClaim: cfg.Auth.RoleClaim,
+	})
+	if err != nil {
+		logger.Error("auth middleware init", "error", err)
+		return 1
+	}
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -367,19 +376,13 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
+		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
-		AuthMW: api.JWTAuthMiddleware(api.AuthConfig{
-			Enabled:   cfg.Auth.Enabled,
-			JWTSecret: cfg.Auth.JWTSecret,
-			JWKSURL:   cfg.Auth.JWKSURL,
-			RoleClaim: cfg.Auth.RoleClaim,
-			DevMode:   cfg.Auth.DevMode,
-		}),
-		AuthEnabled: cfg.Auth.Enabled,
-		JS:          js,
-		CORSOrigins: cfg.Server.CORSAllowedOrigins,
-		LogLevel:    logLevel,
+		AuthMW:          authMW,
+		PolicyStore:     policyStore,
+		JS:              js,
+		CORSOrigins:     cfg.Server.CORSAllowedOrigins,
+		LogLevel:        logLevel,
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,
@@ -425,7 +428,6 @@ func run() int {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeout)*time.Second)
 		defer shutCancel()
 		cancel()
-		_ = ingestStream.Stop(shutCtx)
 		if err := srv.Shutdown(shutCtx); err != nil {
 			logger.Error("server shutdown error", "error", err)
 		}
@@ -433,6 +435,9 @@ func run() int {
 			if err := promSrv.Shutdown(shutCtx); err != nil {
 				logger.Error("prometheus server shutdown error", "error", err)
 			}
+		}
+		if err := ingestCleanup(shutCtx); err != nil {
+			logger.Error("ingest worker cleanup error", "error", err)
 		}
 	}()
 

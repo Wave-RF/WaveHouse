@@ -71,8 +71,8 @@ curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
 curl -s http://localhost:8080/v1/schema | jq
 
 # Query data (wait ~5s for the batch flush to ClickHouse).
-# /v1/admin/query requires the admin or service role when auth is on. With
-# auth.enabled=false (the default for the quickstart) it's open.
+# /v1/admin/query is admin-only: send a valid JWT whose role is the policy
+# admin_role ("admin" by default) via `Authorization: Bearer <jwt>`.
 curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'

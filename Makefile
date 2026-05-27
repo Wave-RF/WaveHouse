@@ -259,9 +259,12 @@ obs-front: ## Start local OTel Front UI
 
 ##@ Code Quality
 
+# Dynamically find all directories containing Go files, safely ignoring hidden folders like .worktrees
+GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
+
 .PHONY: fmt
 fmt: ## Check formatting (run `make fix` to apply)
-	@if ! OUT=$$($(GOFUMPT) -l .); then \
+	@if ! OUT=$$($(GOFUMPT) -l $(GO_DIRS)); then \
 		echo "$(RED)==> gofumpt failed$(RESET)"; \
 		exit 1; \
 	fi; \
@@ -304,8 +307,8 @@ tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint --fix)
 	@echo "$(CYAN)==> Applying all auto-fixes...$(RESET)"
 	@go mod tidy
-	@$(GOFUMPT) -w .
-	@$(GOIMPORTS) -w .
+	@$(GOFUMPT) -w $(GO_DIRS)
+	@$(GOIMPORTS) -w $(GO_DIRS)
 	@$(GOLANGCI_LINT) run --fix ./...
 	@echo "$(GREEN)==> Done$(RESET)"
 

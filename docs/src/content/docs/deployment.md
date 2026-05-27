@@ -30,7 +30,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 
 # Ingest data (no auth required by default)
-curl -X POST http://localhost:8080/v1/ingest/clicks \
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
@@ -110,7 +110,7 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-WH_CH_HTTP_PORT=8123                # Port for Bento HTTP inserts + /v1/admin/query proxy (default: 8123)
+WH_CH_HTTP_PORT=8123                # Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
 # Schema discovery
@@ -122,14 +122,16 @@ WH_SCHEMA_REFRESH_INTERVAL=60      # Seconds between schema refreshes
 # controls *which origins can read responses*, not cookie scope.
 WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 
-# Optional auth
-WH_AUTH_ENABLED=true
+# Auth (the JWT middleware always runs — set a secret/JWKS to validate tokens;
+# without one, every request resolves to the policy default_role)
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 WH_AUTH_ROLE_CLAIM=app_metadata.role
-# WH_AUTH_DEV_MODE=true            # Dev only — skips JWT validation
 
-# Access control & pipes
+# Access control & pipes — both bootstrap paths are opt-in (no default). When
+# WH_POLICY_FILE_PATH is set, the file MUST exist and parse or the process
+# refuses to boot (silent fail-closed is the alternative). Leave unset to skip
+# bootstrap and seed via PUT /v1/admin/policy.
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 
@@ -152,7 +154,7 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
-- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the Bento → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
+- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose files in `deployments/compose/standalone.yaml`, `tests/e2e/compose.yaml`, and `clients/ts/playground/compose.yaml` set `WH_DATA_DIR=/app/data` and bind a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data/nats`, `/app/data/pebble`, and `/app/pipes` owned by the nonroot user (UID 65532).
@@ -244,7 +246,7 @@ This means:
 
 - The binary itself no longer exits and crash-loops every ~10s under a supervisor. Process state is preserved across CH outages.
 - An operator can `curl /health` and read the exact failure mode instead of grepping a restart-loop log.
-- `/v1/ingest/{table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
+- `/v1/ingest?table={table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
 
 **Important — orchestrator restart semantics.** `/health` returning 503 during the retry window is what most LB / `depends_on` setups want (route around the unready instance, hold dependents), but a Kubernetes `livenessProbe` pointed at `/health` will still mark the pod unhealthy and restart it after `failureThreshold × periodSeconds` elapses (default ~30s) — effectively re-creating the restart loop at a slower cadence. Use a `startupProbe` to gate liveness/readiness until the first successful schema discovery (see the K8s example below). Docker `HEALTHCHECK` marks the container `(unhealthy)` but does not restart it by default, so docker-compose deployments don't need a separate startupProbe-equivalent — the `HEALTHCHECK`'s `--start-period=15s` plus `service_healthy` dependency wait covers the same idea at a smaller scale.
 

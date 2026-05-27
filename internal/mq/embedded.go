@@ -108,9 +108,14 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 	return &EmbeddedNATS{server: ns, conn: nc, js: js}, nil
 }
 
-func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte) error {
+func (e *EmbeddedNATS) Publish(ctx context.Context, subject string, data []byte, opts ...PublishOpt) error {
 	msg := nats.NewMsg(subject)
 	msg.Data = data
+
+	// Apply any optional configurations (like headers) to the message
+	for _, opt := range opts {
+		opt(msg)
+	}
 
 	observability.InjectNATS(ctx, msg)
 	_, err := e.js.PublishMsg(ctx, msg)

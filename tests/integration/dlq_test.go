@@ -38,34 +38,34 @@ func TestDLQ_StatsEmptyOnFreshStart(t *testing.T) {
 	assert.Equal(t, float64(0), body["total"])
 }
 
-// TestDLQ_PopulatedOnBentoFailure verifies that publishing an event for a
+// TestDLQ_PopulatedOnIngestWorkerFailure verifies that publishing an event for a
 // non-existent table routes the failure into the DLQ. Bypasses the API's
-// schema validation by publishing directly to JetStream — Bento's batch
+// schema validation by publishing directly to JetStream — ingest worker's batch
 // INSERT then fails, fallback fires, and the DLQ output records the entry
 // under `dlq.<table>`.
-func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
+func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 
 	// A table name that intentionally doesn't exist in ClickHouse. Per-test
 	// suffix keeps tests independent if more DLQ tests get added later.
-	table := fmt.Sprintf("nonexistent_table_%d", time.Now().UnixNano())
+	rawTableName := fmt.Sprintf("nonexistent_table_%d", time.Now().UnixNano())
+	safeTableName := query.SafeEncodeNATS(rawTableName)
 
 	evt := map[string]any{
-		"table_name":         table,
+		"table_name":         rawTableName,
 		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
 		"data":               map[string]any{"key": "value"},
 	}
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.SafeEncodeNATS(table), payload)
+	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
 	require.NoError(t, err)
 
-	// Bento batches every 5s; 30s upper bound gives generous slack on a
+	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
-	dlqSubject := "dlq." + table
 	assert.Eventually(t, func() bool {
 		resp, err := http.Get(e.server.URL + "/v1/dlq/stats")
 		if err != nil {
@@ -81,34 +81,33 @@ func TestDLQ_PopulatedOnBentoFailure(t *testing.T) {
 		if !ok {
 			return false
 		}
-		_, present := tables[dlqSubject]
+		_, present := tables[rawTableName]
 		return present
 	}, 30*time.Second, 500*time.Millisecond, "DLQ should receive failed events within timeout")
 }
 
-func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
+func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	e := env(t)
 	ctx := context.Background()
 
-	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a NATS subject. This tests that Bento's DLQ can handle subjects that are not valid NATS subjects.
+	// A table name that intentionally doesn't exist in ClickHouse AND is invalid as a NATS subject. This tests that ingest worker's DLQ can handle subjects that are not valid NATS subjects.
 	// Per-test suffix keeps tests independent if more DLQ tests get added later.
 
-	table := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
+	rawTableName := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
+	safeTableName := query.SafeEncodeNATS(rawTableName)
 
 	evt := map[string]any{
-		"table_name":         table,
+		"table_name":         rawTableName,
 		"received_timestamp": time.Now().UTC().Format(time.RFC3339Nano),
 		"data":               map[string]any{"key": "value"},
 	}
 	payload, err := json.Marshal(evt)
 	require.NoError(t, err)
 
-	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+query.SafeEncodeNATS(table), payload)
+	_, err = e.embeddedMQ.JetStream().Publish(ctx, "ingest."+safeTableName, payload)
 	require.NoError(t, err)
 
-	dlqSubject := "dlq." + table
-
-	// Bento batches every 5s; 30s upper bound gives generous slack on a
+	// Ingest worker batches every 5s; 30s upper bound gives generous slack on a
 	// loaded CI runner. The condition polls the API rather than the
 	// stream so this also exercises the read path.
 	assert.Eventually(t, func() bool {
@@ -126,13 +125,7 @@ func TestDLQ_PopulatedOnBentoFailureWithBadName(t *testing.T) {
 		if !ok {
 			return false
 		}
-		// iterate over all table names to try query.DecodeTable()
-		for k := range tables {
-			rawTable, err := query.SafeDecodeNATS(k)
-			if err == nil && rawTable == dlqSubject {
-				return true
-			}
-		}
-		return false
+		_, exists := tables[rawTableName]
+		return exists
 	}, 30*time.Second, 500*time.Millisecond, "DLQ should receive failed events within timeout")
 }

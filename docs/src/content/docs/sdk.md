@@ -62,6 +62,8 @@ const wh = createClient<Database>({
 | `transport` | `'auto' \| 'sse' \| 'ws'` | `'auto'` | Stream transport. Auto = SSE when no auth, WS when auth |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
+> **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` and `WebSocket` APIs can't set headers — as a `?token=` query parameter on streaming connections (SSE and WS). When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+
 ### Type-Safe Tables
 
 Pass a `Database` type to get autocomplete on table names and row types:
@@ -130,7 +132,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest/{table}`.
+Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest?table={table}`.
 
 ```ts
 // Single row
@@ -305,7 +307,7 @@ while (result.hasMore && result.next) {
 
 ## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. When authentication is enabled (`auth.enabled=true`), the caller's JWT must resolve to the `admin` or `service` role. With `auth.enabled=false` or `auth.dev_mode=true` (both dev/test postures), the endpoint is open.
+Execute a raw SQL query. `/v1/admin/query` is admin-only: the caller's JWT must resolve to the policy admin role (`admin_role`, `"admin"` by default). A request with no token, or an invalid/expired one, falls back to the `default_role` and is rejected.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
@@ -337,7 +339,7 @@ Open a live stream. See [Streaming](#streaming).
 
 ## Pipes Admin — `wh.pipes`
 
-Manage named query pipes. Requires admin/service role.
+Manage named query pipes. Requires the admin role (`policy.admin_role`).
 
 ```ts
 // List all pipes
@@ -379,7 +381,7 @@ Individual table schema is also available via `wh.from('clicks').schema()`.
 
 ## Policy — `wh.policy`
 
-Manage Hasura-style access control policies. Requires admin/service role.
+Manage Hasura-style access control policies. Requires the admin role (`policy.admin_role`).
 
 ```ts
 // Get current policy

@@ -3,447 +3,279 @@ package ingest
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 )
 
-// ---------------------------------------------------------------------------
-// Mock types — embed the real interfaces so we only override methods we need.
-// Calls to unimplemented methods will panic (acceptable in unit tests).
-// ---------------------------------------------------------------------------
-
-type mockJetStream struct {
-	jetstream.JetStream
-	streamFn   func(ctx context.Context, name string) (jetstream.Stream, error)
-	consumerFn func(ctx context.Context, stream, consumer string) (jetstream.Consumer, error)
-}
-
-func (m *mockJetStream) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
-	return m.streamFn(ctx, name)
-}
-
-func (m *mockJetStream) Consumer(ctx context.Context, stream, consumer string) (jetstream.Consumer, error) {
-	return m.consumerFn(ctx, stream, consumer)
-}
-
-type mockStream struct {
-	jetstream.Stream
-	infoVal  *jetstream.StreamInfo
-	infoErr  error
-	msgs     map[uint64]*jetstream.RawStreamMsg
-	getMsgFn func(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error)
-	purged   []jetstream.StreamPurgeOpt
-	purgeErr error
-}
-
-func (m *mockStream) Info(ctx context.Context, opts ...jetstream.StreamInfoOpt) (*jetstream.StreamInfo, error) {
-	return m.infoVal, m.infoErr
-}
-
-func (m *mockStream) GetMsg(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-	if m.getMsgFn != nil {
-		return m.getMsgFn(ctx, seq, opts...)
-	}
-	msg, ok := m.msgs[seq]
-	if !ok {
-		return nil, errors.New("message not found")
-	}
-	return msg, nil
-}
-
-func (m *mockStream) Purge(ctx context.Context, opts ...jetstream.StreamPurgeOpt) error {
-	m.purged = append(m.purged, opts...)
-	return m.purgeErr
-}
-
-type mockConsumer struct {
-	jetstream.Consumer
-	infoVal *jetstream.ConsumerInfo
-	infoErr error
-}
-
-func (m *mockConsumer) Info(ctx context.Context) (*jetstream.ConsumerInfo, error) {
-	return m.infoVal, m.infoErr
-}
-
-// nopLogger returns a no-op logger for tests.
-func nopLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+// Shared JetStream mocks live in internal/testutil/mocks.go — see
+// testutil.MockJetStream / MockStream / MockConsumer.
 
 // ---------------------------------------------------------------------------
 // sweep() tests
 // ---------------------------------------------------------------------------
 
-func TestSweep_GapSeqIsBottleneck(t *testing.T) {
+func TestSweep(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	gapWindow := 5 * time.Minute
+	defaultGapWindow := 5 * time.Minute
+	cutoff := now.Add(-defaultGapWindow)
 
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 200},
-		},
-		msgs: map[uint64]*jetstream.RawStreamMsg{
-			1:   {Time: now.Add(-10 * time.Minute)},
-			100: {Time: now.Add(-6 * time.Minute)},
-			101: {Time: now.Add(-4 * time.Minute)},
-			200: {Time: now},
-		},
-		getMsgFn: func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			cutoff := now.Add(-gapWindow)
-			// Simulate: seqs 1-100 are before cutoff, 101+ are within window.
-			if seq <= 100 {
+	// expiredBelow returns a GetMsgFn where seqs <= threshold are before the
+	// cutoff and seqs above are within the gap window.
+	expiredBelow := func(threshold uint64) func(context.Context, uint64, ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		return func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+			if seq <= threshold {
 				return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Second)}, nil
 			}
 			return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Second)}, nil
+		}
+	}
+	allWithinWindow := func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		return &jetstream.RawStreamMsg{Time: now.Add(-1 * time.Minute)}, nil
+	}
+	allExpired := func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		return &jetstream.RawStreamMsg{Time: now.Add(-10 * time.Minute)}, nil
+	}
+
+	tests := []struct {
+		name            string
+		gapWindow       time.Duration // 0 → defaultGapWindow
+		streamErr       error         // if non-nil, StreamFn returns this (no MockStream is constructed)
+		streamInfo      *jetstream.StreamInfo
+		getMsgFn        func(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error)
+		purgeErr        error
+		consumerErr     error // if non-nil, ConsumerFn returns this (no MockConsumer is constructed)
+		consumerInfo    *jetstream.ConsumerInfo
+		consumerInfoErr error
+		wantPurgeCount  int
+	}{
+		{
+			// gapSeq ~101, ackFloor+1 = 151 → target = min(151, 101) = 101
+			name:           "gap sequence is the bottleneck",
+			streamInfo:     &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 200}},
+			getMsgFn:       expiredBelow(100),
+			consumerInfo:   &jetstream.ConsumerInfo{AckFloor: jetstream.SequenceInfo{Stream: 150}},
+			wantPurgeCount: 1,
+		},
+		{
+			// gapSeq ~51, ackFloor+1 = 31 → target = min(31, 51) = 31
+			name:           "ack floor is the bottleneck",
+			streamInfo:     &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 200}},
+			getMsgFn:       expiredBelow(50),
+			consumerInfo:   &jetstream.ConsumerInfo{AckFloor: jetstream.SequenceInfo{Stream: 30}},
+			wantPurgeCount: 1,
+		},
+		{
+			name:           "no purge when all messages within window",
+			gapWindow:      10 * time.Minute,
+			streamInfo:     &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 50}},
+			getMsgFn:       allWithinWindow,
+			consumerInfo:   &jetstream.ConsumerInfo{AckFloor: jetstream.SequenceInfo{Stream: 50}},
+			wantPurgeCount: 0,
+		},
+		{
+			name:           "no purge when consumer not found",
+			streamInfo:     &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 50}},
+			consumerErr:    errors.New("consumer not found"),
+			wantPurgeCount: 0,
+		},
+		{
+			name:      "no purge when stream lookup fails (must not panic)",
+			streamErr: errors.New("stream unavailable"),
+		},
+		{
+			// ackFloor+1 = 1, gapSeq = large → target = min(1, X) = 1 → skip
+			name:           "no purge when target <= 1",
+			streamInfo:     &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 10}},
+			getMsgFn:       allExpired,
+			consumerInfo:   &jetstream.ConsumerInfo{AckFloor: jetstream.SequenceInfo{Stream: 0}},
+			wantPurgeCount: 0,
+		},
+		{
+			name:            "no purge when consumer info fails",
+			streamInfo:      &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 50}},
+			consumerInfoErr: errors.New("info unavailable"),
+			wantPurgeCount:  0,
+		},
+		{
+			// Purge call is still recorded by the mock; sweep must not panic on the error.
+			name:           "purge error is logged",
+			streamInfo:     &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 200}},
+			getMsgFn:       expiredBelow(50),
+			purgeErr:       errors.New("purge failed"),
+			consumerInfo:   &jetstream.ConsumerInfo{AckFloor: jetstream.SequenceInfo{Stream: 100}},
+			wantPurgeCount: 1,
 		},
 	}
 
-	mc := &mockConsumer{
-		infoVal: &jetstream.ConsumerInfo{
-			AckFloor: jetstream.SequenceInfo{Stream: 150},
-		},
-	}
-
-	js := &mockJetStream{
-		streamFn:   func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
-	}
-
-	s := NewSweeper(js, gapWindow, nopLogger())
-	s.sweep(context.Background())
-
-	// gapSeq ~101, ackFloor+1 = 151 → target = min(151, 101) = 101
-	assert.Len(t, ms.purged, 1, "should have called Purge once")
-}
-
-func TestSweep_AckFloorIsBottleneck(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	gapWindow := 5 * time.Minute
-
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 200},
-		},
-		getMsgFn: func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			cutoff := now.Add(-gapWindow)
-			if seq <= 50 {
-				return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Second)}, nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gw := tt.gapWindow
+			if gw == 0 {
+				gw = defaultGapWindow
 			}
-			return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Second)}, nil
-		},
-	}
 
-	mc := &mockConsumer{
-		infoVal: &jetstream.ConsumerInfo{
-			AckFloor: jetstream.SequenceInfo{Stream: 30},
-		},
-	}
-
-	js := &mockJetStream{
-		streamFn:   func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
-	}
-
-	s := NewSweeper(js, gapWindow, nopLogger())
-	s.sweep(context.Background())
-
-	// gapSeq ~51, ackFloor+1 = 31 → target = min(31, 51) = 31
-	assert.Len(t, ms.purged, 1, "should have called Purge once")
-}
-
-func TestSweep_AllWithinWindow_NoPurge(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	gapWindow := 10 * time.Minute
-
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 50},
-		},
-		getMsgFn: func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			return &jetstream.RawStreamMsg{Time: now.Add(-1 * time.Minute)}, nil
-		},
-	}
-
-	mc := &mockConsumer{
-		infoVal: &jetstream.ConsumerInfo{
-			AckFloor: jetstream.SequenceInfo{Stream: 50},
-		},
-	}
-
-	js := &mockJetStream{
-		streamFn:   func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
-	}
-
-	s := NewSweeper(js, gapWindow, nopLogger())
-	s.sweep(context.Background())
-
-	assert.Empty(t, ms.purged, "no purge when all messages within gap window")
-}
-
-func TestSweep_ConsumerNotFound_NoPurge(t *testing.T) {
-	t.Parallel()
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 50},
-		},
-	}
-
-	js := &mockJetStream{
-		streamFn: func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) {
-			return nil, errors.New("consumer not found")
-		},
-	}
-
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
-	s.sweep(context.Background())
-
-	assert.Empty(t, ms.purged, "no purge when consumer not found")
-}
-
-func TestSweep_StreamError_NoPurge(t *testing.T) {
-	t.Parallel()
-	js := &mockJetStream{
-		streamFn: func(context.Context, string) (jetstream.Stream, error) {
-			return nil, errors.New("stream unavailable")
-		},
-	}
-
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
-	// Should not panic.
-	s.sweep(context.Background())
-}
-
-func TestSweep_TargetLessOrEqualOne_NoPurge(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	gapWindow := 5 * time.Minute
-
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 10},
-		},
-		getMsgFn: func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			return &jetstream.RawStreamMsg{Time: now.Add(-10 * time.Minute)}, nil
-		},
-	}
-
-	mc := &mockConsumer{
-		infoVal: &jetstream.ConsumerInfo{
-			AckFloor: jetstream.SequenceInfo{Stream: 0},
-		},
-	}
-
-	js := &mockJetStream{
-		streamFn:   func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
-	}
-
-	s := NewSweeper(js, gapWindow, nopLogger())
-	s.sweep(context.Background())
-
-	// ackFloor+1 = 1, gapSeq = some large number → target = min(1, X) = 1 → skip
-	assert.Empty(t, ms.purged, "no purge when target <= 1")
-}
-
-func TestSweep_ConsumerInfoError_NoPurge(t *testing.T) {
-	t.Parallel()
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 50},
-		},
-	}
-
-	mc := &mockConsumer{infoErr: errors.New("info unavailable")}
-
-	js := &mockJetStream{
-		streamFn:   func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
-	}
-
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
-	s.sweep(context.Background())
-
-	assert.Empty(t, ms.purged, "no purge when consumer info fails")
-}
-
-func TestSweep_PurgeError_Logged(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	gapWindow := 5 * time.Minute
-
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 200},
-		},
-		getMsgFn: func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			cutoff := now.Add(-gapWindow)
-			if seq <= 50 {
-				return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Second)}, nil
+			var ms *testutil.MockStream
+			if tt.streamErr == nil {
+				ms = &testutil.MockStream{
+					InfoVal:  tt.streamInfo,
+					GetMsgFn: tt.getMsgFn,
+					PurgeErr: tt.purgeErr,
+				}
 			}
-			return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Second)}, nil
-		},
-		purgeErr: errors.New("purge failed"),
-	}
+			var mc *testutil.MockConsumer
+			if tt.consumerErr == nil {
+				mc = &testutil.MockConsumer{
+					InfoVal: tt.consumerInfo,
+					InfoErr: tt.consumerInfoErr,
+				}
+			}
+			js := &testutil.MockJetStream{
+				StreamFn: func(context.Context, string) (jetstream.Stream, error) {
+					if tt.streamErr != nil {
+						return nil, tt.streamErr
+					}
+					return ms, nil
+				},
+				ConsumerFn: func(context.Context, string, string) (jetstream.Consumer, error) {
+					if tt.consumerErr != nil {
+						return nil, tt.consumerErr
+					}
+					return mc, nil
+				},
+			}
 
-	mc := &mockConsumer{
-		infoVal: &jetstream.ConsumerInfo{
-			AckFloor: jetstream.SequenceInfo{Stream: 100},
-		},
-	}
+			s := NewSweeper(js, gw, testutil.NopLogger())
+			s.sweep(context.Background())
 
-	js := &mockJetStream{
-		streamFn:   func(context.Context, string) (jetstream.Stream, error) { return ms, nil },
-		consumerFn: func(context.Context, string, string) (jetstream.Consumer, error) { return mc, nil },
+			if ms != nil {
+				assert.Len(t, ms.Purged, tt.wantPurgeCount)
+			}
+		})
 	}
-
-	s := NewSweeper(js, gapWindow, nopLogger())
-	// Should not panic even when purge fails.
-	s.sweep(context.Background())
 }
 
 // ---------------------------------------------------------------------------
 // findGapSequence() tests
 // ---------------------------------------------------------------------------
 
-func TestFindGapSequence_EmptyStream(t *testing.T) {
-	t.Parallel()
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 0, LastSeq: 0},
-		},
-	}
-
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
-	seq, err := s.findGapSequence(context.Background(), ms)
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(0), seq)
-}
-
-func TestFindGapSequence_FirstSeqGTLastSeq(t *testing.T) {
-	t.Parallel()
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 10, LastSeq: 5},
-		},
-	}
-
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
-	seq, err := s.findGapSequence(context.Background(), ms)
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(0), seq)
-}
-
-func TestFindGapSequence_AllWithinWindow(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100},
-		},
-		getMsgFn: func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			return &jetstream.RawStreamMsg{Time: now.Add(-1 * time.Minute)}, nil
-		},
-	}
-
-	s := NewSweeper(nil, 10*time.Minute, nopLogger())
-	seq, err := s.findGapSequence(context.Background(), ms)
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(0), seq, "all messages within window → 0")
-}
-
-func TestFindGapSequence_AllExpired(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100},
-		},
-		getMsgFn: func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			return &jetstream.RawStreamMsg{Time: now.Add(-20 * time.Minute)}, nil
-		},
-	}
-
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
-	seq, err := s.findGapSequence(context.Background(), ms)
-	assert.NoError(t, err)
-	// All expired → result should be last+1 = 101 (binary search default)
-	assert.Equal(t, uint64(101), seq)
-}
-
-func TestFindGapSequence_BoundaryDetection(t *testing.T) {
+func TestFindGapSequence(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	gapWindow := 5 * time.Minute
 	cutoff := now.Add(-gapWindow)
 
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100},
+	allWithinWindow := func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		return &jetstream.RawStreamMsg{Time: now.Add(-1 * time.Minute)}, nil
+	}
+	allExpired := func(_ context.Context, _ uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		return &jetstream.RawStreamMsg{Time: now.Add(-20 * time.Minute)}, nil
+	}
+	// boundary at seq 60: seqs 1..60 are before cutoff, 61..100 are within window.
+	boundaryAt60 := func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		if seq <= 60 {
+			return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Duration(61-seq) * time.Second)}, nil
+		}
+		return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Duration(int64(seq-60)) * time.Second)}, nil //nolint:gosec // test-only, values are small
+	}
+	// seqs 40..60 missing (already purged), <40 are old, >60 are within window.
+	sparseSequences := func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
+		if seq >= 40 && seq <= 60 {
+			return nil, errors.New("not found")
+		}
+		if seq < 40 {
+			return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Minute)}, nil
+		}
+		return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Minute)}, nil
+	}
+
+	tests := []struct {
+		name          string
+		gapWindow     time.Duration
+		streamInfo    *jetstream.StreamInfo
+		streamInfoErr error
+		getMsgFn      func(ctx context.Context, seq uint64, opts ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error)
+		wantSeq       uint64
+		wantErrSub    string // substring of expected error; "" means no error
+	}{
+		{
+			name:       "empty stream",
+			gapWindow:  5 * time.Minute,
+			streamInfo: &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 0, LastSeq: 0}},
+			wantSeq:    0,
 		},
-		getMsgFn: func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			// seqs 1-60 are before cutoff, 61-100 are within window
-			if seq <= 60 {
-				return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Duration(61-seq) * time.Second)}, nil
-			}
-			return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Duration(int64(seq-60)) * time.Second)}, nil //nolint:gosec // test-only, values are small
+		{
+			name:       "first seq greater than last seq",
+			gapWindow:  5 * time.Minute,
+			streamInfo: &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 10, LastSeq: 5}},
+			wantSeq:    0,
+		},
+		{
+			name:       "all messages within window → 0",
+			gapWindow:  10 * time.Minute,
+			streamInfo: &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100}},
+			getMsgFn:   allWithinWindow,
+			wantSeq:    0,
+		},
+		{
+			// All expired → result should be last+1 = 101 (binary search default).
+			name:       "all expired → returns last+1",
+			gapWindow:  5 * time.Minute,
+			streamInfo: &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100}},
+			getMsgFn:   allExpired,
+			wantSeq:    101,
+		},
+		{
+			name:       "boundary detection finds first seq within window",
+			gapWindow:  gapWindow,
+			streamInfo: &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100}},
+			getMsgFn:   boundaryAt60,
+			wantSeq:    61,
+		},
+		{
+			// Binary search skips missing seqs; first available within window is 61.
+			name:       "sparse sequences",
+			gapWindow:  gapWindow,
+			streamInfo: &jetstream.StreamInfo{State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100}},
+			getMsgFn:   sparseSequences,
+			wantSeq:    61,
+		},
+		{
+			name:          "stream info error",
+			gapWindow:     5 * time.Minute,
+			streamInfoErr: errors.New("stream info unavailable"),
+			wantErrSub:    "stream info",
 		},
 	}
 
-	s := NewSweeper(nil, gapWindow, nopLogger())
-	seq, err := s.findGapSequence(context.Background(), ms)
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(61), seq, "first seq within gap window should be 61")
-}
-
-func TestFindGapSequence_SparseSequences(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	gapWindow := 5 * time.Minute
-	cutoff := now.Add(-gapWindow)
-
-	ms := &mockStream{
-		infoVal: &jetstream.StreamInfo{
-			State: jetstream.StreamState{FirstSeq: 1, LastSeq: 100},
-		},
-		getMsgFn: func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
-			// Seqs 40-60 are "purged" (missing). Seqs before 40 are old, after 60 are within window.
-			if seq >= 40 && seq <= 60 {
-				return nil, errors.New("not found")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ms := &testutil.MockStream{
+				InfoVal:  tt.streamInfo,
+				InfoErr:  tt.streamInfoErr,
+				GetMsgFn: tt.getMsgFn,
 			}
-			if seq < 40 {
-				return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Minute)}, nil
+
+			s := NewSweeper(nil, tt.gapWindow, testutil.NopLogger())
+			seq, err := s.findGapSequence(context.Background(), ms)
+
+			if tt.wantErrSub != "" {
+				assert.Error(t, err)
+				if err != nil {
+					assert.Contains(t, err.Error(), tt.wantErrSub)
+				}
+				return
 			}
-			return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Minute)}, nil
-		},
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantSeq, seq)
+		})
 	}
-
-	s := NewSweeper(nil, gapWindow, nopLogger())
-	seq, err := s.findGapSequence(context.Background(), ms)
-	assert.NoError(t, err)
-	// With sparse seqs, binary search skips missing seqs.
-	// The first available seq within window should be 61.
-	assert.Equal(t, uint64(61), seq)
-}
-
-func TestFindGapSequence_StreamInfoError(t *testing.T) {
-	t.Parallel()
-	ms := &mockStream{infoErr: errors.New("stream info unavailable")}
-
-	s := NewSweeper(nil, 5*time.Minute, nopLogger())
-	_, err := s.findGapSequence(context.Background(), ms)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "stream info")
 }
 
 // ---------------------------------------------------------------------------
@@ -452,13 +284,13 @@ func TestFindGapSequence_StreamInfoError(t *testing.T) {
 
 func TestStart_ContextCancellation(t *testing.T) {
 	t.Parallel()
-	js := &mockJetStream{
-		streamFn: func(context.Context, string) (jetstream.Stream, error) {
+	js := &testutil.MockJetStream{
+		StreamFn: func(context.Context, string) (jetstream.Stream, error) {
 			return nil, errors.New("not used")
 		},
 	}
 
-	s := NewSweeper(js, 5*time.Minute, nopLogger())
+	s := NewSweeper(js, 5*time.Minute, testutil.NopLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately.
 
