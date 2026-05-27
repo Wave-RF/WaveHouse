@@ -28,15 +28,23 @@ func simplePolicy() *Policy {
 	}
 }
 
+// TestStore_NewStore_EmptyKV: with no bootstrap file configured, an empty KV
+// is accepted (operator opted out of file bootstrap and will seed via Put);
+// the cache stays nil and every request will fail closed in the meantime.
+// We also assert the loud operator-facing warning so a misconfigured silent
+// lockout is caught by stdout log scraping.
 func TestStore_NewStore_EmptyKV(t *testing.T) {
 	t.Parallel()
 
 	js := testutil.NewJetStream(t)
-	ctx := t.Context()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
-	store, err := NewStore(ctx, js, "", testutil.NopLogger())
+	store, err := NewStore(t.Context(), js, "", logger)
 	require.NoError(t, err)
 	assert.Nil(t, store.Get(), "policy should be nil when KV is empty and no bootstrap file")
+	assert.Contains(t, buf.String(), "policy KV is empty and no bootstrap file is configured",
+		"operator should see a loud warning so a silent fail-closed lockout is obvious in logs")
 }
 
 func TestStore_NewStore_BootstrapFromFile(t *testing.T) {
@@ -63,15 +71,21 @@ tables:
 	assert.Contains(t, p.Tables, "clicks")
 }
 
-func TestStore_NewStore_BootstrapMissingFileIsNotFatal(t *testing.T) {
+// TestStore_NewStore_BootstrapMissingFileIsFatal: when a bootstrap path is
+// configured but the file is absent, startup MUST fail. The earlier
+// "missing file is not fatal" behavior silently swallowed misconfiguration
+// — operators saw the process come up healthy but every request was denied
+// (Evaluate/IsAdmin fail closed on nil policy), and we only noticed when the
+// e2e harness pointed at a path that didn't exist. Failing loud at startup
+// makes the misconfiguration obvious instead.
+func TestStore_NewStore_BootstrapMissingFileIsFatal(t *testing.T) {
 	t.Parallel()
 
 	js := testutil.NewJetStream(t)
-	// Non-existent bootstrap path should not error out — NewStore falls
-	// through with an empty cache.
-	store, err := NewStore(t.Context(), js, "/nonexistent/policy.yaml", testutil.NopLogger())
-	require.NoError(t, err)
-	assert.Nil(t, store.Get())
+	_, err := NewStore(t.Context(), js, "/nonexistent/policy.yaml", testutil.NopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "load policy bootstrap file")
+	assert.Contains(t, err.Error(), "/nonexistent/policy.yaml")
 }
 
 func TestStore_NewStore_BootstrapJSON(t *testing.T) {
@@ -86,6 +100,87 @@ func TestStore_NewStore_BootstrapJSON(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, data, 0o600))
 
 	store, err := NewStore(t.Context(), js, path, testutil.NopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, store.Get())
+	assert.Equal(t, "viewer", store.Get().DefaultRole)
+}
+
+// TestStore_NewStore_BootstrapInvalidYAMLIsFatal: a file that exists but is
+// malformed YAML must abort startup. Anything else silently leaves the cache
+// empty and every request fails closed — exactly the failure mode we want to
+// avoid.
+func TestStore_NewStore_BootstrapInvalidYAMLIsFatal(t *testing.T) {
+	t.Parallel()
+
+	js := testutil.NewJetStream(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("tables:\n  clicks:\n    select: [this isn't a map"), 0o600))
+
+	_, err := NewStore(t.Context(), js, path, testutil.NopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse policy yaml")
+}
+
+// TestStore_NewStore_BootstrapInvalidJSONIsFatal: the JSON branch of the
+// loader has the same contract as the YAML branch — a malformed file aborts
+// startup rather than degrading to a silent lockout.
+func TestStore_NewStore_BootstrapInvalidJSONIsFatal(t *testing.T) {
+	t.Parallel()
+
+	js := testutil.NewJetStream(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"tables": {`), 0o600))
+
+	_, err := NewStore(t.Context(), js, path, testutil.NopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse policy json")
+}
+
+// TestStore_NewStore_BootstrapInvalidPolicyIsFatal: the file parses but
+// Validate rejects it (negative max_rows here). Bootstrap routes through
+// Store.Put, which applies Validate, so an invalid policy aborts startup
+// instead of being persisted to KV.
+func TestStore_NewStore_BootstrapInvalidPolicyIsFatal(t *testing.T) {
+	t.Parallel()
+
+	js := testutil.NewJetStream(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+tables:
+  clicks:
+    select:
+      viewer:
+        max_rows: -1
+`), 0o600))
+
+	_, err := NewStore(t.Context(), js, path, testutil.NopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bootstrap policy")
+	assert.Contains(t, err.Error(), "invalid policy")
+}
+
+// TestStore_NewStore_KVTakesPrecedenceOverFile: when KV already has a policy
+// (a restart after the first run), the bootstrap file is irrelevant — even
+// pointing at a missing path. The file is a one-shot seed; KV is the source
+// of truth once populated, so operators can move/delete the seed file after
+// the first run without breaking restarts.
+func TestStore_NewStore_KVTakesPrecedenceOverFile(t *testing.T) {
+	t.Parallel()
+
+	js := testutil.NewJetStream(t)
+
+	// Seed KV by writing a policy through one store instance.
+	seeder, err := NewStore(t.Context(), js, "", testutil.NopLogger())
+	require.NoError(t, err)
+	require.NoError(t, seeder.Put(t.Context(), simplePolicy()))
+
+	// A fresh store pointed at a NON-EXISTENT bootstrap file must still come
+	// up cleanly because KV already wins. This is the "subsequent restart"
+	// path that the strict bootstrap behavior must not break.
+	store, err := NewStore(t.Context(), js, "/nonexistent/policy.yaml", testutil.NopLogger())
 	require.NoError(t, err)
 	require.NotNil(t, store.Get())
 	assert.Equal(t, "viewer", store.Get().DefaultRole)

@@ -28,7 +28,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.False(t, cfg.Dedupe.Enabled)
 	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
 	assert.True(t, cfg.DLQ.Enabled)
-	assert.Equal(t, "policy.yaml", cfg.Policy.FilePath)
+	assert.Empty(t, cfg.Policy.FilePath, "no default bootstrap file — operators opt in explicitly so a missing file never produces a silent fail-closed boot")
 	assert.Equal(t, "", cfg.Pipes.Dir)
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)

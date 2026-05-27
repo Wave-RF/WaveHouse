@@ -106,7 +106,7 @@ See [API — Authentication](/api#authentication).
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `policy.file_path` | `WH_POLICY_FILE_PATH` | `policy.yaml` | Path to a YAML/JSON policy file. Used to bootstrap the policy store on first startup if no policy exists in NATS KV. |
+| `policy.file_path` | `WH_POLICY_FILE_PATH` | *(empty)* | Optional path to a YAML/JSON policy file used to seed the policy store on first startup (when NATS KV is empty). **When set, the file MUST exist and parse — WaveHouse refuses to boot otherwise**, so a typo or missing mount surfaces immediately instead of silently denying every request (`Evaluate` fails closed on a `nil` policy, including the admin role). Empty default — no implicit `policy.yaml` lookup — so operators opt into the bootstrap file explicitly; without one, seed the policy via `PUT /v1/admin/policy`. Once KV is populated, the file is ignored on subsequent boots (KV is the source of truth; runtime updates flow through the API and KV Watch). |
 
 ### Named Pipes
 
@@ -188,7 +188,7 @@ dlq:
   enabled: true
 
 policy:
-  file_path: policy.yaml
+  file_path: ""          # empty = skip bootstrap (seed via PUT /v1/admin/policy); set to a path and the file MUST exist or boot fails
 
 pipes:
   dir: ""                # empty = skip bootstrap; set + read-only mount to seed pipes

@@ -128,7 +128,10 @@ WH_AUTH_JWT_SECRET=<strong-random-secret>
 WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 WH_AUTH_ROLE_CLAIM=app_metadata.role
 
-# Access control & pipes
+# Access control & pipes — both bootstrap paths are opt-in (no default). When
+# WH_POLICY_FILE_PATH is set, the file MUST exist and parse or the process
+# refuses to boot (silent fail-closed is the alternative). Leave unset to skip
+# bootstrap and seed via PUT /v1/admin/policy.
 WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 WH_PIPES_DIR=/etc/wavehouse/pipes
 

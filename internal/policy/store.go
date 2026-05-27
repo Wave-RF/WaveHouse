@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,7 +29,18 @@ type Store struct {
 }
 
 // NewStore creates a policy store backed by NATS KV.
-// If bootstrapPath is non-empty and the file exists, its contents seed the KV store.
+//
+// Bootstrap semantics:
+//   - If KV already holds a policy, it wins — the file is a seed, not the
+//     source of truth, so subsequent runs ignore bootstrapPath entirely.
+//     Runtime updates flow in via Put and KV Watch.
+//   - If KV is empty and bootstrapPath is set, the file MUST exist, parse,
+//     validate, and persist; any failure is fatal so a misconfigured deployment
+//     refuses to start instead of silently running fail-closed (every request
+//     denied, including the admin role) until an operator notices.
+//   - If KV is empty and bootstrapPath is "", the store starts with no policy
+//     and the operator must seed via Put — every request fails closed in the
+//     meantime, which we log loudly.
 func NewStore(ctx context.Context, js jetstream.JetStream, bootstrapPath string, logger *slog.Logger) (*Store, error) {
 	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  kvBucket,
@@ -40,30 +52,34 @@ func NewStore(ctx context.Context, js jetstream.JetStream, bootstrapPath string,
 
 	s := &Store{kv: kv, logger: logger}
 
-	// Bootstrap from file if KV is empty.
-	_, err = kv.Get(ctx, kvKey)
-	if err != nil {
-		if bootstrapPath != "" {
-			if p, loadErr := loadPolicyFile(bootstrapPath); loadErr == nil {
-				if putErr := s.Put(ctx, p); putErr != nil {
-					logger.Warn("policy bootstrap write failed", "error", putErr)
-				} else {
-					logger.Info("bootstrapped policy from file", "path", bootstrapPath)
-				}
-			} else if !os.IsNotExist(loadErr) {
-				logger.Warn("policy file load failed", "path", bootstrapPath, "error", loadErr)
-			}
-		}
-	}
-
-	// Load current policy into cache.
-	if p, err := s.load(ctx); err == nil {
+	// KV is authoritative when populated. Only ErrKeyNotFound is treated as
+	// "empty"; any other error (network blip, corrupt JSON, etc.) propagates
+	// — silently falling through to bootstrap would mask broken state.
+	switch p, err := s.load(ctx); {
+	case err == nil:
 		s.mu.Lock()
 		s.cached = p
 		s.mu.Unlock()
 		s.warnIfDefaultRoleGrantsAdmin(p)
+		return s, nil
+	case !errors.Is(err, jetstream.ErrKeyNotFound):
+		return nil, fmt.Errorf("read policy from kv: %w", err)
 	}
 
+	if bootstrapPath == "" {
+		logger.Warn("policy KV is empty and no bootstrap file is configured — every request will be denied (fail-closed, including the admin role) until a policy is PUT via the API")
+		return s, nil
+	}
+
+	p, err := loadPolicyFile(bootstrapPath)
+	if err != nil {
+		return nil, fmt.Errorf("load policy bootstrap file %q: %w", bootstrapPath, err)
+	}
+	// Put validates, writes to KV, caches, and warns about default_role==admin.
+	if err := s.Put(ctx, p); err != nil {
+		return nil, fmt.Errorf("bootstrap policy from %q: %w", bootstrapPath, err)
+	}
+	logger.Info("bootstrapped policy from file", "path", bootstrapPath)
 	return s, nil
 }
 
