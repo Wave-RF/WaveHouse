@@ -26,7 +26,7 @@ func NewDLQHandler(js jetstream.JetStream, logger *slog.Logger) *DLQHandler {
 // Supports optional ?table= query parameter to filter by table name.
 func (h *DLQHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	stream, err := h.JS.Stream(r.Context(), mq.DLQStreamName())
-	if err != nil {
+	if err != nil { // TODO: catch by error type
 		// Stream may not exist yet if no failures have occurred.
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"tables": map[string]any{}, "total": 0})
