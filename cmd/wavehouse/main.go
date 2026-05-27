@@ -349,11 +349,8 @@ func run() int {
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
 
-	sseHandler := api.NewSSEHandler(hub, js)
-	sseHandler.PolicyStore = policyStore
-
-	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
-	wsHandler.PolicyStore = policyStore
+	streamHandler := api.NewStreamHandler(hub, js)
+	streamHandler.PolicyStore = policyStore
 
 	// Build the auth middleware up front so a misconfigured/unreachable JWKS
 	// endpoint fails startup loudly rather than booting into a degraded state.
@@ -370,8 +367,7 @@ func run() int {
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
-		SSE:             sseHandler,
-		WS:              wsHandler,
+		SSE:             streamHandler,
 		Health:          healthHandler,
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
@@ -402,7 +398,7 @@ func run() int {
 				Handler:           mux,
 				ReadHeaderTimeout: 10 * time.Second,
 				// Full Read/Write timeouts are safe here — unlike the main API
-				// server (SSE/WebSocket), the Prometheus sidecar serves only
+				// server (SSE), the Prometheus sidecar serves only
 				// single-shot scrape requests, so an unbounded slow client has
 				// no legitimate reason to hold a connection.
 				ReadTimeout:  30 * time.Second,

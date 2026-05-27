@@ -21,8 +21,7 @@ import (
 type Dependencies struct {
 	Ingest          *IngestHandler
 	Query           *QueryHandler
-	SSE             *SSEHandler
-	WS              *WSHandler
+	SSE             *StreamHandler
 	Health          *HealthHandler
 	Schema          *SchemaHandler
 	DLQ             *DLQHandler
@@ -30,12 +29,10 @@ type Dependencies struct {
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
 	AuthMW          func(http.Handler) http.Handler
-	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
-	// is read live from the policy, so admin_role changes apply without a restart.
-	PolicyStore *policy.Store
-	JS          jetstream.JetStream // for SSE/WS gap-fill
-	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
-	LogLevel    *slog.LevelVar
+	PolicyStore     *policy.Store
+	JS              jetstream.JetStream // for SSE gap-fill
+	CORSOrigins     []string            // allowed CORS origins; ["*"] = allow all
+	LogLevel        *slog.LevelVar
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -67,9 +64,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip span creation on infra/probe paths:
-			//   /v1/stream/*  — long-lived streams (SSE/WS); the standard
+			//   /v1/stream/*  — long-lived streams (SSE); the standard
 			//                   HTTP tracer would emit one span per stream
-			//                   that lives until the client disconnects.
+			//                   that lives until the client disconnects. // TODO: do we not want this behavior for SSE?
 			//   prometheus    — scrape every ~15s would produce ~4 spans/min
 			//                   of pure infra cardinality, and creates a
 			//                   self-loop when the same backend stores both
@@ -109,8 +106,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		requireAdmin := RequireAdmin(deps.PolicyStore)
 
 		r.Post("/ingest", deps.Ingest.Handle)
-		r.Get("/stream/sse", deps.SSE.Handle)
-		r.Get("/stream/ws", deps.WS.Handle)
+		r.Get("/stream", deps.SSE.Handle)
 
 		// Schema discovery — admin-only (no policy gate of its own).
 		r.With(requireAdmin).Get("/schema", deps.Schema.Get)

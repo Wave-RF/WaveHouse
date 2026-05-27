@@ -53,7 +53,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   }
 
   private async _doConnect(): Promise<void> {
-    const url = new URL("/v1/stream/sse", this._opts.baseURL);
+    const url = new URL("/v1/stream", this._opts.baseURL);
     url.searchParams.set("table", this._opts.table);
     if (this._opts.since) {
       url.searchParams.set("since", this._opts.since);

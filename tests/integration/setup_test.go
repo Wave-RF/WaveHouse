@@ -318,8 +318,7 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
 		Query:       api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
-		SSE:         api.NewSSEHandler(hub, js),
-		WS:          api.NewWSHandler(hub, js, nil),
+		SSE:         api.NewStreamHandler(hub, js),
 		Health:      api.NewHealthHandler(ch.conn),
 		Schema:      api.NewSchemaHandler(registry),
 		DLQ:         api.NewDLQHandler(js, logger),

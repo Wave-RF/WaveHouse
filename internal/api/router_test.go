@@ -254,8 +254,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
+		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -310,8 +309,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil),
-		WS:          NewWSHandler(hub, nil, nil),
+		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
@@ -371,8 +369,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	deps := Dependencies{
 		Ingest:      NewIngestHandler(reg, pub),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil),
-		WS:          NewWSHandler(hub, nil, nil),
+		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
@@ -421,8 +418,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
+		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -446,8 +442,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
+		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
@@ -544,8 +539,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil),
-		WS:          NewWSHandler(hub, nil, nil),
+		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },

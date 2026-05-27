@@ -17,7 +17,6 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/cockroachdb/pebble v1.1.5
-	github.com/coder/websocket v1.8.14
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-jwt/jwt/v5 v5.3.1
