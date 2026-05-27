@@ -558,7 +558,14 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@# it ignores untracked files unless something is also tracked-and-changed,
 	@# which gives the wrong answer for "new .go file + make ci + commit + push".)
 	@mkdir -p tmp
-	@tmp_idx=$$(mktemp); \
+	@# `set -euo pipefail` bails on the first failure rather than chaining
+	@# through with broken state. mktemp failure → bail before any git command
+	@# touches the real index. (Empty GIT_INDEX_FILE errors with "unable to
+	@# write new index file" on modern git, so the real index is safe either
+	@# way — but failing earlier produces a cleaner error than three layered
+	@# git fatals.)
+	@set -euo pipefail; \
+	  tmp_idx=$$(mktemp); \
 	  trap "rm -f '$$tmp_idx'" EXIT; \
 	  git read-tree --reset HEAD --index-output="$$tmp_idx" >/dev/null 2>&1; \
 	  GIT_INDEX_FILE="$$tmp_idx" git add -A >/dev/null 2>&1; \
