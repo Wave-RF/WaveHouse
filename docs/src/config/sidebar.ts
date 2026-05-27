@@ -35,6 +35,16 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
         attrs: { target: "_blank", rel: "noopener" },
       },
       {
+        label: "Discussions",
+        link: "https://github.com/Wave-RF/WaveHouse/discussions",
+        attrs: { target: "_blank", rel: "noopener" },
+      },
+      {
+        label: "Support",
+        link: "https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md",
+        attrs: { target: "_blank", rel: "noopener" },
+      },
+      {
         label: "Security Policy",
         link: "https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md",
         attrs: { target: "_blank", rel: "noopener" },

@@ -88,7 +88,7 @@ make test-all          # All four suites sequentially + merged coverage gate
 make cov               # Merge whichever covdata exists + gate against total threshold
 
 # CI
-make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk
+make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk + subprojects-{verify,build,test}
                        # Phase 2 (sequential): test-integration + test-e2e + cov
 
 # Analysis (informational, not in CI)
@@ -115,6 +115,12 @@ make clean             # Build outputs only (bin/, dist/, clients/ts/dist/)
 make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
 make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
 make clean-all         # Full reset: above + data/ + docker volumes
+
+# Docs site (Astro + Starlight in docs/, with its own Makefile)
+make docs-dev          # Hot-reload Astro dev server on :4321
+make docs-build        # Production build → docs/dist/
+make docs-preview      # Wrangler preview of the production build (auto-builds if dist/ missing)
+make docs-branding     # Regenerate logo/favicon/OG assets from docs/scripts/branding/mark.svg
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
@@ -124,7 +130,8 @@ Tooling notes:
 
 - Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
 - `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
-- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK and E2E test harnesses both shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/` and `tests/e2e/sdk/`.
+- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/`, `tests/e2e/sdk/`, and `docs/`.
+- **Subproject Makefiles**: `docs/` has its own `Makefile` so the docs site is self-contained (`cd docs && make build` works directly). The root forwards every `docs-<name>` target via a pattern rule and aggregates the common verbs (`install`, `build`, `test`, `lint`, `verify`, `clean`) through `subprojects-<verb>` fan-outs — so `make ci`, `make tools`, etc. pick up new subprojects automatically. When extracting more subprojects (per-language SDKs, etc.), append the directory to `SUBPROJECTS` at the top of the root `Makefile` — no aggregator edits required.
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 - **Worktrunk** (the team's `wt` CLI) reads `.config/wt.toml` — the project-level, committed config that applies to all teammates. On `wt switch --create <branch>`, `post-start` first runs `wt step copy-ignored` (copies gitignored caches/builds/`node_modules`/`.bin/` from the main worktree, skipping `tmp/` and `data/` runtime dirs) then `make tools` (idempotent — verifies + installs `core.hooksPath`). A fresh worktree is ready in seconds instead of waiting for `pnpm install` × 3 + golangci-lint download. Personal overrides live in `~/.config/worktrunk/config.toml`.
 
@@ -404,6 +411,7 @@ docs/                   → Project documentation
   - **Gemini Code Assist App** configured via `.gemini/styleguide.md`.
   - **Claude PR review** (`claude-review.yml`) runs only on manual trigger: `@claude` or `/review` from a trusted commenter on a PR, or `workflow_dispatch`. Gated on the HEAD commit's author or committer having ≥read permission so a comment on a fork PR can't run untrusted code with write tokens. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
 - **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Patch/minor bypass `Admin approval` (the workflow + CI passing is the trust model); major bumps fall through to admin review like any human PR — this closed a hole where a bot's APPROVED review (e.g. CodeRabbit) could merge a major bump without admin involvement (see #130).
+- **Docs site deploy** (`wavehouse.dev`): driven by Cloudflare's Workers Builds (the native Git integration on the CF side), not a GitHub Actions workflow — so no `CLOUDFLARE_API_TOKEN` lives in the repo. Push to `main` runs `npx wrangler deploy` from `docs/` and updates `wavehouse.dev` within ~2 minutes; pushes to PR branches run `npx wrangler versions upload`, which publishes a per-version preview at `<version-prefix>-wavehouse-docs.wave-rf.workers.dev`. Wrangler config (custom domain, observability, source maps, preview URLs) lives in `docs/wrangler.jsonc`; the build command (`pnpm install --frozen-lockfile && pnpm build`) and `docs/` root directory are configured on the CF dashboard side. The worker (`docs/worker/index.ts`, delegating to `cloudflare-md-router`) deploys alongside the static assets so `Accept: text/markdown` content negotiation works in production.
 
 ## Governance Files
 
@@ -412,3 +420,4 @@ docs/                   → Project documentation
   - `housekeeping.yml` — requests review from a non-author admin on PR open / ready-for-review via the `assign-and-request-review` composite. Task Board placement is handled by native Projects v2 workflows configured in the project UI.
 - **`CLAUDE.md`** and **`.gemini/styleguide.md`**: thin pointer files to AGENTS.md. Keep those pointers short; never duplicate content.
 - **`CONTRIBUTING.md`**: the Conventional Commits type list must stay in sync with the regex in `housekeeping.yml`. The title linter validates squash-merge commit messages.
+- **`SUPPORT.md`** (alpha-stage public triage policy): the externally-promised cadence is **best-effort, 1–2 business days for an initial response** on bugs / features / usage questions; **security reports are prioritized** with the 48-hour acknowledge / 5-business-day initial-assessment targets in `SECURITY.md`. Usage questions ("how do I…") are routed to [GitHub Discussions → Q&A](https://github.com/Wave-RF/WaveHouse/discussions/categories/q-a) — do not file them as bug-report Issues; bug-reporters who use the wrong template get redirected. There is no Discord/Slack. Don't quietly let threads slip — if one sits longer than a week, that's a miss. **Out-of-scope items publicly stated in `SUPPORT.md` are only "Older releases" and "Non-ClickHouse backends"**. When tweaking the policy, update `SUPPORT.md` first and keep this paragraph in sync. The docs footer (`docs/src/components/Footer.astro`) and sidebar (`docs/src/config/sidebar.ts`) cross-link Discussions, `SUPPORT.md`, and `SECURITY.md` so they're one click from anywhere on `wavehouse.dev`; `README.md`, `CONTRIBUTING.md`, and both issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) also link out — change those together if the policy moves.
