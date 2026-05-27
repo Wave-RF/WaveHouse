@@ -558,19 +558,24 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@# it ignores untracked files unless something is also tracked-and-changed,
 	@# which gives the wrong answer for "new .go file + make ci + commit + push".)
 	@mkdir -p tmp
-	@# `set -euo pipefail` bails on the first failure rather than chaining
-	@# through with broken state. mktemp failure → bail before any git command
-	@# touches the real index. (Empty GIT_INDEX_FILE errors with "unable to
-	@# write new index file" on modern git, so the real index is safe either
-	@# way — but failing earlier produces a cleaner error than three layered
-	@# git fatals.)
-	@set -euo pipefail; \
+	@# The marker exists to gate `git push` from a developer machine. GitHub
+	@# Actions doesn't push from the CI runner, so writing it there is dead
+	@# work — and the throwaway-index dance can hit surprising fatals on
+	@# `bash -e` runners (the very same runners that have already validated
+	@# the tree by running this target). Skip the write when $$CI is set
+	@# (GitHub Actions / GitLab / CircleCI / Buildkite all export this).
+	@if [ -z "$${CI:-}" ]; then \
+	  set -euo pipefail; \
 	  tmp_idx=$$(mktemp); \
+	  rm -f "$$tmp_idx"; \
 	  trap "rm -f '$$tmp_idx'" EXIT; \
-	  git read-tree --reset HEAD --index-output="$$tmp_idx" >/dev/null 2>&1; \
-	  GIT_INDEX_FILE="$$tmp_idx" git add -A >/dev/null 2>&1; \
-	  tree_sha=$$(GIT_INDEX_FILE="$$tmp_idx" git write-tree); \
-	  touch "tmp/ci-passed-tree-$$tree_sha"
+	  export GIT_INDEX_FILE="$$tmp_idx"; \
+	  git read-tree HEAD; \
+	  git add -A; \
+	  tree_sha=$$(git write-tree); \
+	  unset GIT_INDEX_FILE; \
+	  touch "tmp/ci-passed-tree-$$tree_sha"; \
+	fi
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
