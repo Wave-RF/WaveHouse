@@ -37,11 +37,11 @@ Two scripts, both committed to the repo:
 | Hook | Behavior |
 | ---- | -------- |
 | `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Then emits informational stderr nudges for likely doc-sync and SDK-sync misses (see AGENTS.md §Documentation Sync and §SDK Sync). Nudges don't block. |
-| `pre-push` | Checks for `tmp/ci-passed-<HEAD-sha>` marker. The `make ci` target writes this marker on success. **Blocks** if absent — Claude (or you) runs `make ci`, sees output, fixes failures, retries push. |
+| `pre-push` | Checks for a `tmp/ci-passed-tree-<TREE-sha>` marker. The `make ci` target writes this marker on success, keyed by the **tree SHA** of the working dir at the time it ran (computed via a throwaway `GIT_INDEX_FILE` — seed from HEAD, `git add -A`, `git write-tree`). **Blocks** if absent — Claude (or you) runs `make ci`, sees output, fixes failures, retries push. |
 
 **Humans** can bypass with `git commit --no-verify` / `git push --no-verify` for intentional WIP / draft pushes. **Agents cannot** — `--no-verify` is blocked, the obvious marker-write idioms are denied at the permission layer, and the rest is an honest-agent rule (see [Agent PR Discipline](#agent-pr-discipline)).
 
-The marker invalidates on every commit (HEAD SHA changes), so `make ci` re-runs after each new commit before pushing. That's the AGENTS.md rule made literal.
+Tree-keying (rather than commit-keying) means the standard `make ci → git add → git commit → git push` flow doesn't spuriously re-block when the post-commit tree matches what CI just validated. Editing the tree (or staging a different subset than CI saw) still requires a re-run. The `make ci` target skips the marker write entirely when `$CI` is set, since CI runners don't push and the marker is purely a local-push gate.
 
 ## What's in `.claude/` and `.config/`
 
