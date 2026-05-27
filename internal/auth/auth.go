@@ -114,6 +114,15 @@ func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
+				// Intentionally no else/return: jwt.Parse yields jwt.MapClaims
+				// when no custom claims type is supplied (as here), so this !ok
+				// branch is effectively unreachable. Were it ever true, falling
+				// through to the fail-safe below is exactly right — a verified
+				// token whose claims we can't read is treated as unverifiable
+				// (roleless + invalid-token), never promoted to a role. Parse
+				// errors and !Valid tokens converge on that same fail-safe: this
+				// middleware records the reason rather than rejecting the request,
+				// because authentication is decoupled from authorization.
 			}
 
 			// Fail-safe default: present-but-unverifiable token. Fall back to the

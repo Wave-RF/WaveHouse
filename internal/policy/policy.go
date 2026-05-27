@@ -80,9 +80,6 @@ func ResolveRole(p *Policy, role string) string {
 	if role != "" || p == nil {
 		return role
 	}
-	if p.DefaultRole == "" {
-		return "" // fail closed: no public default_role configured
-	}
 	return p.DefaultRole
 }
 
