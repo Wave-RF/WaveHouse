@@ -42,35 +42,38 @@ describe("Streaming", () => {
       const id = testId();
 
       const stream = whPublic.from("clicks").stream({ transport: "sse" });
-      const unsub = stream.subscribe({
-        // initial: (result) => console.log("Initial SSE result:", result),
-        next: (event) => receivedEvents.push(event),
-        // status: (status) => console.log("SSE status:", status),
-        error: (err) => console.error("SSE error:", err),
-      });
+      let unsub: (() => void) | undefined;
+      try {
+        unsub = stream.subscribe({
+          // initial: (result) => console.log("Initial SSE result:", result),
+          next: (event) => receivedEvents.push(event),
+          // status: (status) => console.log("SSE status:", status),
+          error: (err) => console.error("SSE error:", err),
+        });
 
-      await stream.connected(5_000);
+        await stream.connected(5_000);
 
-      await whAuth.from("clicks").insert({
-        event_id: id,
-        page: "/sse-public-test",
-        user_id: "public-user",
-        session_id: "sse-sess",
-        country: "US",
-        duration_ms: 99,
-      });
+        await whAuth.from("clicks").insert({
+          event_id: id,
+          page: "/sse-public-test",
+          user_id: "public-user",
+          session_id: "sse-sess",
+          country: "US",
+          duration_ms: 99,
+        });
 
-      await waitForCondition(
-        () => receivedEvents.some((e) => e.data?.event_id === id),
-        10_000,
-      );
+        await waitForCondition(
+          () => receivedEvents.some((e) => e.data?.event_id === id),
+          10_000,
+        );
 
-      const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
-      expect(matchedEvent).toBeDefined();
-      expect(matchedEvent?.data.user_id).toBe("public-user");
-
-      unsub();
-      stream.close();
+        const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
+        expect(matchedEvent).toBeDefined();
+        expect(matchedEvent?.data.user_id).toBe("public-user");
+      } finally {
+        if (unsub) unsub();
+        stream.close();
+      }
     });
 
     it("receives events after insert (authenticated via ?token=)", async () => {
@@ -80,35 +83,39 @@ describe("Streaming", () => {
 
       // The SDK should automatically append the JWT as ?token= here
       const stream = whAuth.from("clicks").stream({ transport: "sse" });
-      const unsub = stream.subscribe({
-        initial: (result) => console.log("Initial SSE result:", result),
-        next: (event) => receivedEvents.push(event),
-        status: (status) => console.log("SSE status:", status),
-        error: (err) => console.error("SSE error:", err),
-      });
 
-      await stream.connected(20_000);
+      let unsub: (() => void) | undefined;
+      try {
+        unsub = stream.subscribe({
+          // initial: (result) => console.log("Initial SSE result:", result),
+          next: (event) => receivedEvents.push(event),
+          // status: (status) => console.log("SSE status:", status),
+          error: (err) => console.error("SSE error:", err),
+        });
 
-      await whAuth.from("clicks").insert({
-        event_id: id,
-        page: "/sse-auth-test",
-        user_id: "auth-user",
-        session_id: "sse-sess",
-        country: "US",
-        duration_ms: 99,
-      });
+        await stream.connected(20_000);
 
-      await waitForCondition(
-        () => receivedEvents.some((e) => e.data?.event_id === id),
-        10_000,
-      );
+        await whAuth.from("clicks").insert({
+          event_id: id,
+          page: "/sse-auth-test",
+          user_id: "auth-user",
+          session_id: "sse-sess",
+          country: "US",
+          duration_ms: 99,
+        });
 
-      const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
-      expect(matchedEvent).toBeDefined();
-      expect(matchedEvent?.data.user_id).toBe("auth-user");
+        await waitForCondition(
+          () => receivedEvents.some((e) => e.data?.event_id === id),
+          10_000,
+        );
 
-      unsub();
-      stream.close();
+        const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
+        expect(matchedEvent).toBeDefined();
+        expect(matchedEvent?.data.user_id).toBe("auth-user");
+      } finally {
+        if (unsub) unsub();
+        stream.close();
+      }
     });
   });
 });
