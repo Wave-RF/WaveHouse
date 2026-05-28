@@ -134,5 +134,3 @@ describe('WaveHouseClient.sql()', () => {
     expect(callWithLegacyParams).toThrow(/client\.sql\(sql, params\) was removed/);
   });
 });
-
-// TODO: our method for checking ws vs sse streams was just async vs sync connection hack which no longer works with async for sse as well with auth. Removed for now + dropped coverage to let CI pass, but will need to revist as part of larger test case cleanup/improved coverage effort.

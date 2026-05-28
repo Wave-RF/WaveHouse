@@ -41,7 +41,7 @@ describe("Streaming", () => {
       const receivedEvents: any[] = [];
       const id = testId();
 
-      const stream = whPublic.from("clicks").stream({ transport: "sse" });
+      const stream = whPublic.from("clicks").stream();
       let unsub: (() => void) | undefined;
       try {
         unsub = stream.subscribe({
@@ -82,7 +82,7 @@ describe("Streaming", () => {
       const id = testId();
 
       // The SDK should automatically append the JWT as ?token= here
-      const stream = whAuth.from("clicks").stream({ transport: "sse" });
+      const stream = whAuth.from("clicks").stream();
 
       let unsub: (() => void) | undefined;
       try {

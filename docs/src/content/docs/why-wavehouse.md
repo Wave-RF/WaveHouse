@@ -204,7 +204,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Dead letter queue | ✗ | Custom | Partial | ✓ `WAVEHOUSE_DLQ` |
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
 | Exact-once dedup | ✗ | Custom | ✓ | ✓ optional |
-| Real-time push (SSE/WS) | ✗ | Custom service | Partial | ✓ native, gap-fill |
+| Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
 | Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |
 | Named parameterized pipes | ✗ | Custom | ✓ | ✓ stored in NATS KV |
@@ -262,7 +262,7 @@ flowchart TB
 | API auth + validation | < 1 ms | ~3 ms |
 | NATS JetStream publish | ~1 ms | ~5 ms |
 | API `200 OK` to client | ~2 ms | ~8 ms |
-| Hub broadcast to SSE/WS subscriber | ~1 ms | ~10 ms |
+| Hub broadcast to SSE subscriber | ~1 ms | ~10 ms |
 | Batch flush to ClickHouse | 5 s (configurable) | 5 s + ClickHouse insert time |
 | Query cache hit (L1) | < 0.5 ms | ~1 ms |
 | Query cache miss → ClickHouse | depends on query | depends on query |

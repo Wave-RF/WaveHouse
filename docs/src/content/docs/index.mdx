@@ -40,7 +40,7 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
   </div>
   <div class="wh-stat">
     <span class="wh-stat__value">SSE</span>
-    <span class="wh-stat__unit">+ WS</span>
+    <span class="wh-stat__unit">+ polling fallback</span>
     <span class="wh-stat__label">real-time push, gap-filled</span>
   </div>
   <div class="wh-stat">
@@ -99,7 +99,7 @@ curl -X POST http://localhost:8080/v1/ingest?table=events \
   -d '{"event_type":"page_view","user_id":"u_42","ts":"2026-05-15T12:00:00Z"}'
 
 # Subscribe to the live stream
-curl -N "http://localhost:8080/v1/stream/sse?table=events"
+curl -N "http://localhost:8080/v1/stream?table=events"
 ```
 
 Five minutes from `git clone` to a live event stream. See the [Getting Started](/getting-started) walkthrough for the full guided tour.

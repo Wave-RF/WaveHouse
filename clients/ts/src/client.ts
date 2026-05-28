@@ -99,8 +99,8 @@ export class WaveHouseClient<DB extends Database = Database> {
     opts?: StreamOptions,
   ): StreamController<T> {
 
-    // Double-check EventSource just in case the user explicitly forced transport: 'sse' in Node.js
     if (typeof EventSource === 'undefined') {
+      // TODO: fallback method? polling?
       throw new Error(
         "[WaveHouse SDK] Native EventSource is not available in this environment. " +
         "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`)."

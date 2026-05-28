@@ -298,7 +298,7 @@ func run() int {
 	// Start active sweeper.
 	go sweeper.Start(ctx)
 
-	// Hub bridge: MQ → broadcast to connected SSE/WS clients.
+	// Hub bridge: MQ → broadcast to connected SSE clients.
 	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {

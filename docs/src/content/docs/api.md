@@ -20,7 +20,7 @@ The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS end
 For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
 
 ```text
-GET /v1/stream/ws?token=<jwt>
+GET /v1/stream?token=<jwt>
 ```
 
 The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`), so a token in the more log-leakable URL never overrides an explicit header credential. The `token` query parameter is stripped from the URL after extraction so it can't leak into logs.

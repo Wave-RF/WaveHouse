@@ -91,8 +91,8 @@ describe('StreamController', () => {
       ctrl.subscribe({ next: vi.fn(), error });
       const err: WaveHouseError = {
         status: 0,
-        code: 'WS_ERROR',
-        message: 'WebSocket error',
+        code: 'STREAM_ERROR',
+        message: 'Stream error',
         retryable: true,
       };
       t.fireError(err);

@@ -64,9 +64,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip span creation on infra/probe paths:
-			//   /v1/stream/*  — long-lived streams (SSE); the standard
+			//   /v1/stream    — long-lived streams (SSE); the standard
 			//                   HTTP tracer would emit one span per stream
-			//                   that lives until the client disconnects. // TODO: do we not want this behavior for SSE?
+			//                   that lives until the client disconnects. // TODO: do we not want this behavior?
 			//   prometheus    — scrape every ~15s would produce ~4 spans/min
 			//                   of pure infra cardinality, and creates a
 			//                   self-loop when the same backend stores both
@@ -74,7 +74,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			//   /health, /ready — liveness/readiness probes inflate span
 			//                   counts and skew latency percentiles.
 			p := r.URL.Path
-			if strings.HasPrefix(p, "/v1/stream/") || p == "/health" || p == "/ready" ||
+			if strings.HasPrefix(p, "/v1/stream") || p == "/health" || p == "/ready" ||
 				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return

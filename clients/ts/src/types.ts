@@ -56,8 +56,6 @@ export interface ClientConfig<DB extends Database = Database> {
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */
   auth?: () => Promise<string> | string;
-  /** Stream transport selection. Default: 'auto' (SSE if no auth, WS if auth). */
-  transport?: 'auto' | 'sse' | 'ws';
   /** Additional client options. */
   options?: ClientOptions;
 }

@@ -46,7 +46,6 @@ import type { Database } from './my-types'; // optional hand-written types
 const wh = createClient<Database>({
   baseURL: 'https://wavehouse.example.com',
   auth: async () => myAuthProvider.getToken(),
-  transport: 'auto', // 'auto' | 'sse' | 'ws'
   options: {
     maxRetries: 2,
   },
@@ -59,7 +58,6 @@ const wh = createClient<Database>({
 |-------|------|---------|-------------|
 | `baseURL` | `string` | — | WaveHouse server URL (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
-| `transport` | `'auto' \| 'sse' \| 'ws'` | `'auto'` | Stream transport. Auto = SSE when no auth, WS when auth |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
 > **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
@@ -503,7 +501,7 @@ Current connection status: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
 ### `StreamOptions`
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `since` | `string` | RFC3339 timestamp for gap-fill replay |
 | `signal` | `AbortSignal` | Cancel/close the stream. Wired via `attachSignal()` internally. |
 
@@ -519,9 +517,11 @@ interface StreamEvent<T> {
 
 ### Transport Behavior
 
-| Transport | Auth Required | Reconnect | Protocol |
-|-----------|---------------|-----------|----------|
-| SSE | No | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
+| Transport | Reconnect | Protocol |
+| --------- | --------- | -------- |
+| SSE | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
+<!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
+<!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
 > **SSE connection limit:** The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
 

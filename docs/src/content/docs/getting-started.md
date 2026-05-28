@@ -81,10 +81,10 @@ Every ingested event is broadcast to SSE subscribers **before** it's flushed to 
 
 ```bash
 # Specific table (?table= is required)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
+curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 # With historical replay (RFC 3339 timestamp)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
 ## Next steps

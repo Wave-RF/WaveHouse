@@ -106,10 +106,10 @@ curl -s -X POST http://localhost:8080/v1/admin/query \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
 # Open an SSE stream for a specific table (Ctrl+C to stop)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
+curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 # With gap-fill (replays events since the given timestamp, then switches to live)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 
 # Health check (no auth required)
 curl http://localhost:8080/health
@@ -278,7 +278,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed.
 
-All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE/WS hubs) — the race detector catches data races that would panic in production.
+All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
 ### Quick Reference
 

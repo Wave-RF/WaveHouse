@@ -29,7 +29,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     if (typeof EventSource === 'undefined') {
       throw new Error(
         '[wavehouse] EventSource is not available in this environment. ' +
-          'Use transport: "ws" for Node.js, or install an EventSource polyfill.',
+          "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`).",
       );
     }
 

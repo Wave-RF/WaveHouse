@@ -134,7 +134,7 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			target := "/v1/stream/sse"
+			target := "/v1/stream"
 			if tc.table != "" {
 				target += "?table=" + url.QueryEscape(tc.table)
 			}
@@ -155,7 +155,7 @@ func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	// the live-stream select loop immediately instead of blocking the test.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream/sse?table=clicks", nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 	// Past the validation gate — header set to text/event-stream, not the

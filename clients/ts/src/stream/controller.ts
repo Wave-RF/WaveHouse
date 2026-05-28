@@ -77,7 +77,7 @@ export class StreamController<T = Record<string, unknown>> {
    * the internal waiter is removed.
    *
    * `@example`
-   * const stream = client.from('events').stream({ transport: 'ws' });
+   * const stream = client.from('events').stream();
    * const unsub = stream.subscribe({ next: (e) => console.log(e) });
    * await stream.connected();   // waits until the transport is live
    * await client.from('events').insert({ ... });
