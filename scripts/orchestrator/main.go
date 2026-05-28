@@ -137,8 +137,17 @@ func run() error {
 	// #nosec G204 — binPath is filepath.Join(repoRoot, "bin", "wavehouse-cov"),
 	// not user-controlled. The test harness must launch the cover binary.
 	whCmd := exec.CommandContext(ctx, binPath)
+	// Pin cwd so the fixture's relative paths (policy.file_path, etc.)
+	// resolve from the repo root regardless of where the orchestrator
+	// itself was launched from.
+	whCmd.Dir = repoRoot
+	// Static config knobs (auth, dedupe, otel, mq, schema, dlq, cors, ...) live
+	// in tests/e2e/fixtures/config.yaml — edit them there, not here. The vars
+	// below are the per-run dynamic overrides (ports, addresses, scratch
+	// paths) plus GOCOVERDIR and WH_CONFIG, which can't live in YAML.
 	whCmd.Env = append(os.Environ(),
 		"GOCOVERDIR="+coverDir,
+		"WH_CONFIG="+filepath.Join(repoRoot, "tests", "e2e", "fixtures", "config.yaml"),
 		"WH_SERVER_PORT="+strconv.Itoa(whPort),
 		"WH_CH_ADDR="+chAddr,
 		// Without WH_CH_HTTP_PORT, ingest worker's HTTP path falls back to the
@@ -147,20 +156,6 @@ func run() error {
 		// against the testcontainer's CH which has zero rows.
 		"WH_CH_HTTP_PORT="+chHTTPPort.Port(),
 		"WH_DATA_DIR="+dataDir,
-		"WH_MQ_MAX_BYTES_GB=1",
-		"WH_POLICY_FILE_PATH="+filepath.Join(repoRoot, "tests", "e2e", "fixtures", "policy.yaml"),
-		"WH_AUTH_JWT_SECRET=sdk-dev-secret",
-		"WH_AUTH_ROLE_CLAIM=role",
-		"WH_DEDUPE_ENABLED=true",
-		"WH_DEDUPE_ID_FIELD=event_id",
-		"WH_SCHEMA_REFRESH_INTERVAL=5",
-		"WH_DLQ_ENABLED=true",
-		"WH_SERVER_CORS_ALLOWED_ORIGINS=*",
-		// Exercise the OTel branch in coverage. gRPC exporters are lazy
-		// (no collector needs to be reachable for init to succeed), so
-		// this is safe in the e2e harness even without an o11y instance.
-		"WH_OTEL_ENABLED=true",
-		"WH_OTEL_ADDR=127.0.0.1:4317",
 	)
 	if verbose {
 		whCmd.Stdout = io.MultiWriter(whLog, os.Stdout)
