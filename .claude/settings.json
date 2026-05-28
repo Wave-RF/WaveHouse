@@ -18,43 +18,12 @@
       "Bash(gh release delete:*)",
       "Bash(gh workflow disable:*)",
       "Bash(gh secret delete:*)",
-      "Bash(make deps-wipe:*)",
-      "Bash(make clean-all:*)",
 
       "Bash(gh pr ready:*)",
       "Bash(gh pr review --approve:*)",
       "Bash(gh pr review -a:*)",
       "Bash(gh pr review --request-changes:*)",
-      "Bash(gh pr review -r:*)",
-
-      "Bash(git push --no-verify:*)",
-      "Bash(git commit --no-verify:*)",
-
-      "Bash(touch tmp/ci-passed:*)",
-      "Bash(touch tmp/review-passed:*)",
-      "Write(tmp/ci-passed-*)",
-      "Write(tmp/review-passed-*)",
-      "Edit(tmp/ci-passed-*)",
-      "Edit(tmp/review-passed-*)",
-      "MultiEdit(tmp/ci-passed-*)",
-      "MultiEdit(tmp/review-passed-*)",
-
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(./secrets/**)",
-      "Read(.env)",
-      "Read(.env.*)",
-      "Read(secrets/**)"
-    ]
-  },
-
-  "worktree": {
-    "baseRef": "fresh",
-    "symlinkDirectories": [
-      "node_modules",
-      ".bin",
-      "tmp",
-      "data"
+      "Bash(gh pr review -r:*)"
     ]
   },
 
