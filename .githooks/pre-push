@@ -1,51 +1,21 @@
 #!/usr/bin/env bash
-# pre-push: enforces AGENTS.md §Local-First Validation — `make ci` must have
-# passed locally for the exact HEAD being pushed. Checked via marker file
-# `tmp/ci-passed-<HEAD-sha>` which is written by the `ci` Makefile target.
-#
-# Bypass: `git push --no-verify` (per AGENTS.md, only when explicitly intentional —
-# e.g., draft PR push where you'll iterate; CI will still gate the merge).
-# Installed by `make tools` via `git config core.hooksPath .githooks`.
+# Blocks `git push` unless `make ci` validated the tree of each ref tip.
+# Tree-keyed. Bypass: `git push --no-verify` (humans only).
 
 set -uo pipefail
-
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-# Git invokes pre-push with refspec lines on stdin: `<local_ref> <local_sha> <remote_ref> <remote_sha>`.
-# Validate the marker for each commit actually being pushed (which may not be HEAD
-# if the user is pushing a non-current branch like `git push origin other-branch`).
-# Deletion pushes (local_sha = 40 zeros) and missing-SHA lines are skipped.
-missing_sha=""
-while read -r local_ref local_sha remote_ref remote_sha; do
+while read -r _ local_sha _ _; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
-  if [ ! -f "tmp/ci-passed-${local_sha}" ]; then
-    missing_sha="$local_sha"
-    break
+  marker=$(scripts/ci-marker.sh path-for-commit "$local_sha" 2>/dev/null) || {
+    echo "🛑 pre-push: can't resolve tree for ${local_sha:0:8}." >&2; exit 1
+  }
+  if [ ! -f "$marker" ]; then
+    tree="${marker#tmp/ci-passed-tree-}"
+    echo "🛑 pre-push: 'make ci' has not been run for ${local_sha:0:8} (tree ${tree:0:8}). Run 'make ci' or 'git push --no-verify'." >&2
+    exit 1
   fi
 done
 
-# All pushed refs are gated, or stdin was empty (some test invocations).
-if [ -z "$missing_sha" ]; then
-  exit 0
-fi
-
-head_sha="$missing_sha"
-short_sha=${head_sha:0:8}
-
-cat >&2 <<EOF
-
-🛑 pre-push: 'make ci' has not been run for HEAD (${short_sha}).
-
-Per AGENTS.md §"Local-First Validation", every push must have passing local
-CI for the exact commit being published. Run:
-
-    make ci
-
-…then push again. (\`make ci\` takes ~2min warm, ~5-8min cold.)
-
-Bypass: for an intentional WIP / draft push, use `git push --no-verify`
-(humans only — agents are blocked from --no-verify by
-.claude/hooks/agent-bash-gate.sh).
-EOF
-exit 1
+exit 0
