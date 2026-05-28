@@ -36,8 +36,15 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 // Pass the role AFTER default-role resolution so forbiddenForRole's empty-role
 // message is accurate. allowedRoles is the set the gate would have accepted (a
 // pipe's allowed_roles); the gates with no flat role list — the /v1/admin gate
-// and the policy-evaluator paths (ingest, structured query) — pass nil.
-func writeAuthzDenied(w http.ResponseWriter, r *http.Request, role string, allowedRoles []string) {
+// and the policy-evaluator paths (ingest, structured query) — pass nil. attrs
+// are gate-specific structured fields appended to the WARN: each gate tags a
+// "gate" (admin / policy / pipe) so a denial is attributable to the check that
+// raised it (the route pattern alone can't — /v1/schema runs the admin gate,
+// not a policy one), and the policy paths add the table + action they evaluated.
+// logger is the calling gate's injected logger (each handler holds one; main
+// wires it, tests pass their own) — the denial WARN goes there, not to a
+// package global.
+func writeAuthzDenied(w http.ResponseWriter, r *http.Request, logger *slog.Logger, role string, allowedRoles []string, attrs ...slog.Attr) {
 	authErr := auth.AuthErrorFromContext(r.Context())
 
 	// reason tracks the response: a present-but-invalid token fails loud (401)
@@ -52,7 +59,7 @@ func writeAuthzDenied(w http.ResponseWriter, r *http.Request, role string, allow
 		reason = "no role and no default_role configured"
 	}
 
-	logAuthzDenied(r, reason, role, allowedRoles, status)
+	logAuthzDenied(logger, r, reason, role, allowedRoles, status, attrs...)
 
 	if authErr != nil {
 		writeJSONError(w, http.StatusUnauthorized, authErr.Error())
@@ -68,12 +75,14 @@ func writeAuthzDenied(w http.ResponseWriter, r *http.Request, role string, allow
 // a non-empty role_resolved means the caller presented no role and was mapped to
 // default_role; roles_allowed is populated only by the pipe gate (a pipe's
 // allowed_roles) and is empty for the /v1/admin gate and the policy-evaluator
-// paths (ingest, structured query).
+// paths (ingest, structured query). attrs carry each gate's own fields (the
+// "gate" tag, plus table + action on the policy paths) so the records stay
+// distinguishable beyond the route.
 //
 // slog escapes control characters in string values, so the request-derived
 // fields (route, method, role) carry no log-injection risk despite originating
 // in an *http.Request scope.
-func logAuthzDenied(r *http.Request, reason, resolvedRole string, allowedRoles []string, status int) {
+func logAuthzDenied(logger *slog.Logger, r *http.Request, reason, resolvedRole string, allowedRoles []string, status int, attrs ...slog.Attr) {
 	// Prefer the matched route template (e.g. /v1/pipes/{name}) over the raw
 	// path: it keeps the field low-cardinality and avoids logging concrete path
 	// params. Falls back to the path when there's no chi route context (a gate
@@ -84,7 +93,7 @@ func logAuthzDenied(r *http.Request, reason, resolvedRole string, allowedRoles [
 			route = pattern
 		}
 	}
-	slog.LogAttrs(r.Context(), slog.LevelWarn, "authorization denied",
+	fields := []slog.Attr{
 		slog.String("reason", reason),
 		slog.String("role_observed", auth.RoleFromContext(r.Context())),
 		slog.String("role_resolved", resolvedRole),
@@ -92,7 +101,9 @@ func logAuthzDenied(r *http.Request, reason, resolvedRole string, allowedRoles [
 		slog.String("route", route),
 		slog.String("method", r.Method),
 		slog.Int("status", status),
-	)
+	}
+
+	logger.LogAttrs(r.Context(), slog.LevelWarn, "authorization denied", append(fields, attrs...)...)
 }
 
 // forbiddenForRole returns the 403 message body for a policy/allowlist denial.
@@ -106,4 +117,15 @@ func forbiddenForRole(role string) string {
 		return "forbidden: request has no role and no public default_role is configured"
 	}
 	return "forbidden"
+}
+
+// loggerOrDefault returns l, or slog.Default() when l is nil, so the handler
+// constructors (and RequireAdmin) can accept an optional *slog.Logger without
+// each repeating the nil check — a nil logger would panic the first time the
+// handler logs.
+func loggerOrDefault(l *slog.Logger) *slog.Logger {
+	if l == nil {
+		return slog.Default()
+	}
+	return l
 }

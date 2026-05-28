@@ -36,6 +36,9 @@ type Dependencies struct {
 	JS          jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
 	LogLevel    *slog.LevelVar
+	// Logger is the request-path logger the denial gates use (RequireAdmin and
+	// the handlers that call writeAuthzDenied). nil falls back to slog.Default().
+	Logger *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -106,7 +109,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		// is policy.AdminRole (configurable via admin_role, "admin" by default),
 		// read live from the policy store so changes apply without a restart.
 		// Declaring it once keeps the gate consistent across the tree.
-		requireAdmin := RequireAdmin(deps.PolicyStore)
+		requireAdmin := RequireAdmin(deps.PolicyStore, deps.Logger)
 
 		r.Post("/ingest", deps.Ingest.Handle)
 		r.Get("/stream/sse", deps.SSE.Handle)
@@ -237,7 +240,8 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // resolves to an empty (non-admin) role and is denied here. Denials go through
 // writeAuthzDenied, so a present-but-invalid token fails loud (401 + token
 // reason) rather than as a bare 403.
-func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
+func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) http.Handler {
+	logger = loggerOrDefault(logger)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *policy.Policy
@@ -249,7 +253,7 @@ func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			writeAuthzDenied(w, r, role, nil)
+			writeAuthzDenied(w, r, logger, role, nil, slog.String("gate", "admin"))
 		})
 	}
 }

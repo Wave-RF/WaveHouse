@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -24,10 +25,11 @@ type PipesHandler struct {
 	Cache           cache.Cache
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
+	logger          *slog.Logger
 }
 
-func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration) *PipesHandler {
-	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout}
+func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, logger *slog.Logger) *PipesHandler {
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, logger: loggerOrDefault(logger)}
 }
 
 // List returns all named queries (admin endpoint).
@@ -106,7 +108,10 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 	if !policy.RoleAllowed(p, role, q.AllowedRoles) {
-		writeAuthzDenied(w, r, role, q.AllowedRoles)
+		writeAuthzDenied(w, r, h.logger, role, q.AllowedRoles,
+			slog.String("gate", "pipe"),
+			slog.String("pipe", q.Name),
+		)
 		return
 	}
 
