@@ -36,7 +36,7 @@ Two scripts, both committed to the repo:
 
 | Hook | Behavior |
 | ---- | -------- |
-| `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Then emits informational stderr nudges for likely doc-sync and SDK-sync misses (see AGENTS.md §Documentation Sync and §SDK Sync). Nudges don't block. |
+| `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). |
 | `pre-push` | Checks for `tmp/ci-passed-tree-<TREE-sha>` written by `make ci`. **Blocks** if absent — run `make ci`, fix failures, retry push. |
 
 `--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
@@ -199,7 +199,7 @@ Not committed at project level. Personal preference — put in `.claude/settings
 ## Daily workflow
 
 1. Write code (gofumpt-on-save formats Go files as you go).
-2. `git commit` → pre-commit hook runs `make verify` + sync nudges. Fix anything that fails.
+2. `git commit` → pre-commit hook runs `make verify` (or skips if `make ci` already validated this tree). Fix anything that fails.
 3. `git push` (first time on a feature branch) → pre-push hook blocks until `make ci` passed for HEAD. Run `make ci`, fix, retry push.
 4. Open the PR with `gh pr create --draft` (agents required to use `--draft`; humans flip to ready when ready).
 5. **Subsequent pushes** → agent-bash-gate hook ALSO requires `pre-push-reviewer` subagent to have run (fresh context) and returned `VERDICT: ship_it`. Invoke the subagent → on Ship it, marker auto-writes → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.

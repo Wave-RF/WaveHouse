@@ -164,7 +164,7 @@ If `make ci` passes locally, your commit has crossed the same gates CI will run.
 
 `make tools` installs team-wide git hooks via `git config core.hooksPath .githooks`. They apply to humans and Claude Code alike:
 
-- **`.githooks/pre-commit`** runs `make verify` (~30s) on every commit; blocks on failure. Also emits informational nudges for likely doc-sync / SDK-sync misses (see §Documentation Sync, §SDK Sync).
+- **`.githooks/pre-commit`** runs `make verify` (~30s) on every commit; blocks on failure. Skipped if `make ci` or `make verify` already ran for the current tree state (cached marker). See §Documentation Sync / §SDK Sync for what to update by hand.
 - **`.githooks/pre-push`** checks for `tmp/ci-passed-tree-<TREE-sha>` written by `make ci`. Tree-keyed (not commit-keyed) so `make ci → commit → push` works without a re-run when the tree is unchanged. Editing the tree (or staging a different subset than CI saw) requires a re-run. `make ci` skips the marker write entirely when `$CI` is set (CI runners don't push).
 
 Bypass with `git commit --no-verify` / `git push --no-verify` only when explicitly intentional (WIP / draft pushes where you accept the consequences). Don't disable the hooks globally; that defeats the gate.
@@ -329,7 +329,7 @@ The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) is the canonical client a
 | Policy / access-control change | Update `clients/ts/src/policy.ts` |
 | ClickHouse schema-driven type changes | Re-run the SDK codegen CLI; commit regenerated types |
 
-Internal-only backend changes (middleware refactors, observability internals, dedup implementation, sweeper logic, NATS plumbing) generally don't need SDK updates. The `pre-commit` hook can't tell internal-only from public-surface from staged paths alone, so it'll nudge on anything in `internal/api/`. Ignore the nudge for internal-only changes; act on it for anything user-visible.
+Internal-only backend changes (middleware refactors, observability internals, dedup implementation, sweeper logic, NATS plumbing) generally don't need SDK updates. Use judgement — table above is the source of truth; nothing automated nudges you.
 
 **The decision test**: would a `@wavehouse/sdk` user's *code* need to change to take advantage of (or be compatible with) this change? If yes, SDK update needed. If no (purely internal optimization), no.
 

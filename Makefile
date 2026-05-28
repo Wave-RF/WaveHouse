@@ -314,6 +314,7 @@ fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint
 
 .PHONY: verify
 verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -j verify`)
+	@scripts/ci-marker.sh write-verify
 	@echo "$(GREEN)==> All static checks passed$(RESET)"
 
 ##@ Build

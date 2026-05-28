@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Pre-push CI marker logic. Called by Makefile (write) and .githooks/pre-push
-# (path-for-commit). Tree-keyed: marker name encodes the tree SHA `make ci`
-# validated, so commit-then-push doesn't invalidate it.
+# Tree-keyed validation markers. Two flavors:
+#   tmp/ci-passed-tree-<TREE>      — full `make ci` passed
+#   tmp/verify-passed-tree-<TREE>  — just `make verify` passed (subset of ci)
+# `make ci` writes both (it runs verify); `make verify` writes only the verify
+# marker. Pre-commit skips re-running verify when the marker is current;
+# pre-push consults the ci marker. Skipped on CI runners.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" 2>/dev/null || exit 1
 
-usage() { echo "usage: $0 {write|path-for-commit <sha>}" >&2; exit 2; }
+usage() {
+  echo "usage: $0 {write|write-verify|has-verify-marker|path-for-commit <sha>}" >&2
+  exit 2
+}
 
 # Tree SHA of "what `git add -A && git commit` would produce now" — computed
 # against a throwaway index so the real index/working dir stay untouched.
@@ -22,10 +28,20 @@ tree_of_working_dir() {
 
 case "${1:-}" in
   write)
-    # CI runners don't push — skip the marker write there.
     [ -n "${CI:-}" ] && exit 0
     mkdir -p tmp
-    touch "tmp/ci-passed-tree-$(tree_of_working_dir)"
+    tree=$(tree_of_working_dir)
+    touch "tmp/ci-passed-tree-$tree" "tmp/verify-passed-tree-$tree"
+    ;;
+  write-verify)
+    [ -n "${CI:-}" ] && exit 0
+    mkdir -p tmp
+    touch "tmp/verify-passed-tree-$(tree_of_working_dir)"
+    ;;
+  has-verify-marker)
+    tree=$(tree_of_working_dir)
+    [ -f "tmp/verify-passed-tree-$tree" ] && exit 0
+    exit 1
     ;;
   path-for-commit)
     [ -n "${2:-}" ] || usage
