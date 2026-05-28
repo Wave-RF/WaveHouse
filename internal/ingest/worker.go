@@ -25,7 +25,6 @@ import (
 type parsedMsg struct {
 	natsMsg         jetstream.Msg
 	natsSafeSubject string
-	tableName       string // routing key for per-table batchers; raw, not encoded
 	scope           string
 	rawJSON         []byte
 }
@@ -39,16 +38,8 @@ type IngestWorker struct {
 	user       string
 	password   string
 	db         string
-	maxBatch   int
-	maxWait    time.Duration
 	wg         sync.WaitGroup
 }
-
-// Production defaults; overridable on the struct for tests.
-const (
-	defaultMaxBatch = 500
-	defaultMaxWait  = 5 * time.Second
-)
 
 func StartIngestWorker(
 	ctx context.Context, nc *nats.Conn, cache cache.Cache,
@@ -109,8 +100,6 @@ func StartIngestWorker(
 		user:     chUser,
 		password: chPassword,
 		db:       chDB,
-		maxBatch: defaultMaxBatch,
-		maxWait:  defaultMaxWait,
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
@@ -136,22 +125,13 @@ func StartIngestWorker(
 	return stopFunc, nil
 }
 
-// runLoop owns the JetStream consume side and demultiplexes every incoming
-// envelope to a per-table goroutine (lazily spawned on first sight of a
-// table). The runLoop itself does no batching — it parses the envelope
-// just enough to extract the table name and forwards the parsed message
-// to that table's tableLoop, which owns its own batch + timer + at-most-1
-// in-flight flush. This means a low-volume table can't strand events from
-// a high-volume table behind its 5s maxWait timer: each table's size
-// trigger fires on its own row count.
-//
-// Malformed envelopes are ack'd-and-dropped synchronously here — the same
-// poison-pill drop the legacy flush() path did, just earlier in the
-// pipeline so the per-table fanout never sees them.
 func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 	defer w.wg.Done()
 
-	msgChan := make(chan jetstream.Msg, w.maxBatch*2)
+	const maxBatch = 500
+	const maxWait = 5 * time.Second
+
+	msgChan := make(chan jetstream.Msg, maxBatch*2)
 
 	// Push-based consumer (much faster/more efficient than iterators)
 	consumeCtx, err := cons.Consume(func(msg jetstream.Msg) {
@@ -163,255 +143,104 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 	}
 	defer consumeCtx.Stop()
 
-	tableChans := make(map[string]chan parsedMsg)
-	var tableWg sync.WaitGroup
-
-	// shutdown drains every per-table goroutine. Closing each tableChan
-	// signals the tableLoop to consume any parsedMsgs still buffered in
-	// its channel, flush its local batch via a detached context, and
-	// exit. Anything sitting in msgChan past ctx.Done is left for NATS
-	// to redeliver.
-	shutdown := func() {
-		for _, ch := range tableChans {
-			close(ch)
-		}
-		tableWg.Wait()
+	var batch []jetstream.Msg
+	timer := time.NewTimer(maxWait)
+	if !timer.Stop() {
+		<-timer.C
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			shutdown()
+			w.flush(context.WithoutCancel(ctx), batch)
 			return
+		case <-timer.C:
+			w.flush(ctx, batch)
+			batch = nil
 		case m := <-msgChan:
-			pm, ok := w.parseMsg(ctx, m)
-			if !ok {
-				// Malformed — already ack'd-and-dropped inside parseMsg.
-				continue
-			}
-			ch, exists := tableChans[pm.tableName]
-			if !exists {
-				ch = make(chan parsedMsg, w.maxBatch)
-				tableChans[pm.tableName] = ch
-				tableWg.Add(1)
-				go w.tableLoop(ctx, pm.tableName, ch, &tableWg)
-			}
-			// The per-table channel is bounded; if a table backs up enough
-			// to fill it, propagate that into the consume side via blocking
-			// here — NATS' MaxAckPending takes over as the eventual cap.
-			select {
-			case ch <- pm:
-			case <-ctx.Done():
-				shutdown()
-				return
-			}
-		}
-	}
-}
-
-// tableLoop owns one table's batching pipeline. State machine:
-//
-//   - Accumulate incoming parsedMsgs into `batch`.
-//   - On len(batch) == maxBatch OR maxWait elapsed since the first row of
-//     the current batch, flush.
-//   - At most one in-flight flush per table. If a second batch is ready
-//     while a flush is in progress, COALESCE: keep accumulating, and the
-//     flush completion path kicks off the next one. This bounds the
-//     "too many parts" pressure on ClickHouse (one POST per table at a
-//     time) while still letting the next batch fill during the current
-//     batch's CH round trip — i.e. pipelined fill + flush.
-//
-// Shutdown is driven exclusively by `in` being closed (runLoop's shutdown()
-// path on ctx.Done). The tableLoop drains any parsedMsgs still buffered in
-// the channel into `batch`, waits on any in-flight flush, and does a final
-// synchronous flush of whatever remains using a detached context. There is
-// deliberately no `case <-ctx.Done()` arm: relying on the channel close
-// gives deterministic drain ordering and prevents a select race that would
-// otherwise abandon channel-buffered msgs to NATS redelivery.
-func (w *IngestWorker) tableLoop(ctx context.Context, tableName string, in <-chan parsedMsg, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	var (
-		batch    []parsedMsg
-		inFlight chan struct{} // closed when the active flush goroutine exits; nil when idle
-	)
-
-	timer := time.NewTimer(w.maxWait)
-	if !timer.Stop() {
-		<-timer.C
-	}
-
-	startFlush := func(toFlush []parsedMsg) chan struct{} {
-		done := make(chan struct{})
-		// If ctx is already cancelled, runLoop is draining us toward
-		// exit — detach so the in-progress POST still completes and acks
-		// instead of failing fast and provoking a NATS redelivery.
-		flushCtx := ctx
-		if ctx.Err() != nil {
-			flushCtx = context.WithoutCancel(ctx)
-		}
-		go func() {
-			defer close(done)
-			w.flushTable(flushCtx, tableName, toFlush)
-		}()
-		return done
-	}
-
-	tryFlush := func() {
-		if len(batch) == 0 || inFlight != nil {
-			// Coalesce: if a flush is already running for this table we
-			// keep accumulating in `batch`; the inFlight completion arm
-			// kicks off the next flush.
-			return
-		}
-		toFlush := batch
-		batch = nil
-		// Timer was tied to `toFlush`; re-arm it when a new batch starts.
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		inFlight = startFlush(toFlush)
-	}
-
-	for {
-		select {
-		case pm, ok := <-in:
-			if !ok {
-				// runLoop closed our channel — drain any in-flight flush,
-				// do a final synchronous flush via a detached ctx, exit.
-				if inFlight != nil {
-					<-inFlight
-				}
-				if len(batch) > 0 {
-					w.flushTable(context.WithoutCancel(ctx), tableName, batch)
-				}
-				return
-			}
 			if len(batch) == 0 {
-				// First row of a new batch — arm the deadline timer.
+				timer.Reset(maxWait)
+			}
+			batch = append(batch, m)
+			if len(batch) >= maxBatch {
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
 					default:
 					}
 				}
-				timer.Reset(w.maxWait)
-			}
-			batch = append(batch, pm)
-			if len(batch) >= w.maxBatch {
-				tryFlush()
-			}
-
-		case <-timer.C:
-			tryFlush()
-
-		case <-inFlight:
-			// Active flush completed — clear the slot and, if a batch
-			// has accumulated during the flush, kick off the next one.
-			inFlight = nil
-			if len(batch) > 0 {
-				tryFlush()
+				w.flush(ctx, batch)
+				batch = nil
 			}
 		}
 	}
 }
 
-// parseMsg unmarshals one envelope. On a malformed envelope it ack'd-
-// and-dropped (poison pill) and returns ok=false so the caller skips it.
-// This mirrors the legacy flush() path; moving it into the dispatch
-// layer means per-table goroutines never see malformed input.
-func (w *IngestWorker) parseMsg(ctx context.Context, m jetstream.Msg) (parsedMsg, bool) {
-	natsSafeSubject := strings.TrimPrefix(m.Subject(), "ingest.")
-
-	var envelope struct {
-		UnsafeTableName   string          `json:"table_name"`
-		UnsafeScope       string          `json:"scope"`
-		ReceivedTimestamp string          `json:"received_timestamp"`
-		Data              json.RawMessage `json:"data"`
-	}
-
-	if err := json.Unmarshal(m.Data(), &envelope); err != nil {
-		w.logger.ErrorContext(ctx, "failed to parse event envelope", "error", err)
-		_ = m.DoubleAck(ctx)
-		return parsedMsg{}, false
-	}
-
-	return parsedMsg{
-		natsMsg:         m,
-		natsSafeSubject: natsSafeSubject,
-		tableName:       envelope.UnsafeTableName,
-		scope:           envelope.UnsafeScope,
-		rawJSON:         envelope.Data,
-	}, true
-}
-
-// flush parses every msg in `batch`, groups them by table, and dispatches
-// each group to flushTable in parallel. It is no longer invoked from
-// runLoop (which routes per-table via tableLoop) — it survives as the
-// unit-test surface for the parse → group → insert → ack pipeline.
-//
-// The runLoop / tableLoop path parses earlier (in runLoop's intake), so
-// per-table goroutines never see malformed input. flush() still has to
-// do that parse here, with the same poison-pill drop semantics.
 func (w *IngestWorker) flush(ctx context.Context, batch []jetstream.Msg) {
 	if len(batch) == 0 {
 		return
 	}
 
 	groups := make(map[string][]parsedMsg)
+
 	for _, m := range batch {
-		pm, ok := w.parseMsg(ctx, m)
-		if !ok {
+		natsSafeSubject := strings.TrimPrefix(m.Subject(), "ingest.")
+
+		var envelope struct {
+			UnsafeTableName   string          `json:"table_name"`
+			UnsafeScope       string          `json:"scope"`
+			ReceivedTimestamp string          `json:"received_timestamp"`
+			Data              json.RawMessage `json:"data"`
+		}
+
+		if err := json.Unmarshal(m.Data(), &envelope); err != nil {
+			w.logger.ErrorContext(ctx, "failed to parse event envelope", "error", err)
+			_ = m.DoubleAck(ctx)
 			continue
 		}
-		groups[pm.tableName] = append(groups[pm.tableName], pm)
+
+		groups[envelope.UnsafeTableName] = append(groups[envelope.UnsafeTableName], parsedMsg{
+			natsMsg:         m,
+			natsSafeSubject: natsSafeSubject,
+			scope:           envelope.UnsafeScope,
+			rawJSON:         envelope.Data, // Pass only the inner payload to ClickHouse
+		})
 	}
 
 	var tableWg sync.WaitGroup
+
 	for tableName, msgs := range groups {
 		tableWg.Add(1)
+
 		go func(tableName string, msgs []parsedMsg) {
 			defer tableWg.Done()
-			w.flushTable(ctx, tableName, msgs)
+
+			// Attempt bulk insert
+			err := w.insertToClickHouse(ctx, tableName, msgs)
+
+			if err == nil {
+				// Success – Ack the batch
+				w.handleSuccess(ctx, tableName, msgs)
+				return
+			}
+
+			w.logger.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "table", tableName, "error", err)
+
+			// ISOLATE & DLQ: Attempt 1-by-1 insertion to isolate the bad row
+			// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
+			for _, pm := range msgs {
+				singleErr := w.insertToClickHouse(ctx, tableName, []parsedMsg{pm})
+				if singleErr != nil {
+					w.logger.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
+					w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
+				} else {
+					w.handleSuccess(ctx, tableName, []parsedMsg{pm})
+				}
+			}
 		}(tableName, msgs)
 	}
+
 	tableWg.Wait()
-}
-
-// flushTable POSTs one table's batch to ClickHouse. On bulk failure, falls
-// back to 1-by-1 isolation: each row that re-inserts successfully gets the
-// normal handleSuccess path; each row that fails again is DLQ'd.
-//
-// Called from both the legacy flush() (which groups by table) and from
-// tableLoop (which already has a per-table batch). Safe to call concurrently
-// for different tables; tableLoop ensures only one concurrent call per
-// (worker, table).
-func (w *IngestWorker) flushTable(ctx context.Context, tableName string, msgs []parsedMsg) {
-	if len(msgs) == 0 {
-		return
-	}
-
-	err := w.insertToClickHouse(ctx, tableName, msgs)
-	if err == nil {
-		w.handleSuccess(ctx, tableName, msgs)
-		return
-	}
-	w.logger.WarnContext(ctx, "bulk insert failed, falling back to 1-by-1 isolation", "table", tableName, "error", err)
-
-	// ISOLATE & DLQ: re-insert one row at a time so a single poison row
-	// can't sink the whole batch.
-	// TODO: potentially could try a binary search or something eventually maybe? unclear if faster...
-	for _, pm := range msgs {
-		if singleErr := w.insertToClickHouse(ctx, tableName, []parsedMsg{pm}); singleErr != nil {
-			w.logger.ErrorContext(ctx, "isolated bad row, sending to DLQ", "table", tableName, "error", singleErr)
-			w.sendToDLQ(ctx, tableName, pm, singleErr.Error())
-		} else {
-			w.handleSuccess(ctx, tableName, []parsedMsg{pm})
-		}
-	}
 }
 
 func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string, msgs []parsedMsg) error {

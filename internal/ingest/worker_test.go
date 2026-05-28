@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -265,123 +264,6 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 
 	err = stopFn(shutCtx)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
-}
-
-// TestRunLoop_PerTableBatching_NoCrossTableContamination reproduces the
-// flake described in #191: when the worker uses a single global batch for
-// every table, a low-volume publisher to table A immediately followed by a
-// maxBatch-sized publish to table B "leaks" A's events into B's batch.
-// The size trigger then fires on `(A + part of B)`, stranding the last few
-// B events in a fresh batch that only flushes when maxWait elapses.
-//
-// Sequence (priorMsgs=2, triggerMsgs=maxBatch=5):
-//
-//	old global batch:                       new per-table batch:
-//	  [A1 A2 B1 B2 B3] → size trigger         tableA: [A1 A2]       (waits maxWait)
-//	  [B4 B5]          → maxWait timer        tableB: [B1..B5]      → size trigger
-//	                                                                   (flushes now)
-//
-// The assertion polls for B's count to hit triggerMsgs within
-// `maxWait - epsilon`. The old code's last two B rows can only land after
-// the maxWait timer expires, so the assertion deterministically fails;
-// per-table batching lets B hit its own size trigger and flush immediately.
-func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
-	t.Parallel()
-
-	const (
-		smallBatch  = 5
-		smallWait   = 2 * time.Second
-		priorMsgs   = 2 // events on tableA published first
-		triggerMsgs = smallBatch
-		// Poll window. Must be < smallWait so the old code's maxWait-bound
-		// flush of the leftover B rows can't sneak in and mask the failure.
-		assertDeadline = smallWait - 500*time.Millisecond
-	)
-
-	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = emb.Close() })
-
-	// CH stub: count rows (newlines in the JSONEachRow body) per target table.
-	var (
-		mu          sync.Mutex
-		rowsByTable = map[string]int{}
-	)
-	chSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		table := r.URL.Query().Get("param_target_table")
-		mu.Lock()
-		rowsByTable[table] += bytes.Count(body, []byte("\n"))
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(chSrv.Close)
-
-	u, err := url.Parse(chSrv.URL)
-	require.NoError(t, err)
-	host, port, err := net.SplitHostPort(u.Host)
-	require.NoError(t, err)
-
-	js, err := jetstream.New(emb.NatsConn())
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	cons, err := js.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
-		Durable:       BufferConsumerName,
-		FilterSubject: "ingest.>",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		MaxAckPending: 1000,
-	})
-	require.NoError(t, err)
-
-	// Build worker directly so we can dial maxBatch / maxWait small enough
-	// to reproduce the contamination in ~2s instead of the production 5s.
-	worker := &IngestWorker{
-		js:         js,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		cache:      &testutil.MockCache{},
-		logger:     testutil.NopLogger(),
-		chURL:      fmt.Sprintf("http://%s:%s", host, port),
-		user:       "u",
-		password:   "p",
-		db:         "db",
-		maxBatch:   smallBatch,
-		maxWait:    smallWait,
-	}
-	worker.wg.Add(1)
-	go worker.runLoop(ctx, cons)
-	t.Cleanup(func() {
-		cancel()
-		worker.wg.Wait()
-	})
-
-	// 1. Prime table A — too few events to hit either trigger on its own.
-	for i := 0; i < priorMsgs; i++ {
-		_, err = js.Publish(ctx, "ingest.tableA",
-			makeEnvelope(t, "tableA", "", map[string]any{"id": i}))
-		require.NoError(t, err)
-	}
-
-	// 2. Then publish exactly maxBatch events to table B — should hit B's
-	//    own size trigger and flush immediately, regardless of what A did.
-	for i := 0; i < triggerMsgs; i++ {
-		_, err = js.Publish(ctx, "ingest.tableB",
-			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
-		require.NoError(t, err)
-	}
-
-	// All triggerMsgs B rows must reach ClickHouse within maxWait − epsilon.
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return rowsByTable["tableB"] >= triggerMsgs
-	}, assertDeadline, 25*time.Millisecond,
-		"table B should flush %d rows within %s of being published "+
-			"(table A's prior events must not strand B rows in a batch "+
-			"that waits for the maxWait timer)",
-		triggerMsgs, assertDeadline,
-	)
 }
 
 // ---------------------------------------------------------------------------
