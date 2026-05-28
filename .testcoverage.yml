@@ -25,9 +25,9 @@ threshold:
 # percentage each suite must hit before it counts as passing.
 #
 suites:
-  unit: 70
-  integration: 12
-  e2e: 50
+  unit: 80
+  integration: 20
+  e2e: 60
   sdk: 40 # statements (vitest gates via --coverage.thresholds.statements)
 
 exclude:
