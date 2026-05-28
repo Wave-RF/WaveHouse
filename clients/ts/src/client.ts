@@ -8,8 +8,6 @@ import { DLQNamespace } from './dlq.js';
 import { SysNamespace } from './sys.js';
 import { StreamController } from './stream/controller.js';
 import { SSETransport } from './stream/sse.js';
-import { WSTransport } from './stream/ws.js';
-import { SharedWSManager } from './stream/ws-manager.js';
 
 type TableName<DB> = DB extends Database ? Extract<keyof DB, string> : string;
 type RowType<DB, T extends string> = DB extends Database
@@ -22,8 +20,6 @@ export class WaveHouseClient<DB extends Database = Database> {
   /** @internal */
   readonly _ctx: HttpContext;
   private readonly _config: ClientConfig<DB>;
-  /** @internal Shared WebSocket manager for multiplexed streams. */
-  private _wsManager: SharedWSManager | null = null;
 
   /** Schema introspection namespace. */
   readonly schema: SchemaNamespace;
@@ -102,68 +98,12 @@ export class WaveHouseClient<DB extends Database = Database> {
     table: string,
     opts?: StreamOptions,
   ): StreamController<T> {
-    const transportType = opts?.transport ?? this._config.transport ?? 'auto';
 
-    // The Smart 'auto' Logic
-    let useWS = transportType === 'ws';
-
-    if (transportType === 'auto') {
-      if (this._ctx.auth ) {
-        // Authenticated streams ALWAYS use WS for multiplexing
-        useWS = true;
-      } else if (typeof EventSource === 'undefined') {
-        // Node.js environments lack native EventSource. Fallback to WS safely.
-        useWS = true;
-      } else {
-        // Browsers/Deno/Bun have EventSource. Use SSE for public streams.
-        useWS = false;
-      }
-    }
-
-    if (useWS) {
-      // SAFETY GUARD: Check if WebSocket actually exists before using it
-      if (typeof WebSocket === 'undefined') {
-        throw new Error(
-          "[WaveHouse SDK] Native WebSocket is not available in this environment. " +
-          "If you are using Node.js, please upgrade to Node.js 22+ or provide a global polyfill (e.g., `globalThis.WebSocket = require('ws')`)."
-        );
-      }
-
-      // Use SharedWSManager for multiplexed WebSocket connections.
-      if (!this._wsManager) {
-        this._wsManager = new SharedWSManager(this._ctx.baseURL, this._ctx.auth);
-      }
-      const mgr = this._wsManager;
-      const transport: import('./stream/controller.js').StreamTransport<T> = {
-        onEvent: null,
-        onStatus: null,
-        onError: null,
-        connect() {
-          // Subscribe to the manager; forward events to the transport callbacks.
-          const unsub = mgr.subscribe<T>(
-            table,
-            (event) => this.onEvent?.(event),
-            (status) => this.onStatus?.(status),
-            (error) => this.onError?.(error),
-          );
-          // Store unsubscribe so disconnect() can call it.
-          (this as any)._unsub = unsub;
-        },
-        disconnect() {
-          (this as any)._unsub?.();
-        },
-      };
-      const controller = new StreamController<T>(transport);
-      if (opts?.signal) controller.attachSignal(opts.signal);
-      return controller;
-    }
-
-    // Since we know useWS is false, we must be using SSE.
     // Double-check EventSource just in case the user explicitly forced transport: 'sse' in Node.js
     if (typeof EventSource === 'undefined') {
       throw new Error(
         "[WaveHouse SDK] Native EventSource is not available in this environment. " +
-        "Please use `transport: 'ws'` or provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`)."
+        "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`)."
       );
     }
 

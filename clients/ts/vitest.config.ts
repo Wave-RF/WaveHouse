@@ -20,9 +20,6 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: [
         "src/**/*.test.ts",
-        "src/index.ts",
-        "src/stream/sse.ts",
-        "src/stream/ws.ts",
       ],
     },
   },

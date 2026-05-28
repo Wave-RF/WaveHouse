@@ -14,7 +14,6 @@ export { PolicyNamespace } from './policy.js';
 export { DLQNamespace } from './dlq.js';
 export { SysNamespace } from './sys.js';
 export { StreamController } from './stream/controller.js';
-export { SharedWSManager } from './stream/ws-manager.js';
 export { LiveQuery } from './stream/live-query.js';
 
 // --- Types ---

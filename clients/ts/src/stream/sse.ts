@@ -59,7 +59,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       url.searchParams.set("since", this._opts.since);
     }
 
-    // Inject auth token for WebSocket upgrade
+    // Inject auth token for upgrade
     if (this._opts.auth) {
       const token = await this._opts.auth();
       if (token) {
@@ -71,8 +71,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     if (activeSSEConnections > SSE_WARN_THRESHOLD) {
       console.warn(
         `[wavehouse] ${activeSSEConnections} SSE connections open. ` +
-          `Browsers limit HTTP/1.1 to 6 connections per domain. ` +
-          `Consider using WebSocket transport instead.`,
+          `Browsers limit HTTP/1.1 to 6 connections per domain.`
       );
     }
 

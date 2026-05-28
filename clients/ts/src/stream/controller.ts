@@ -1,6 +1,6 @@
 import type { WaveHouseError, StreamEvent, StreamStatus, StreamSubscriber } from '../types.js';
 
-/** @internal Transport abstraction for SSE and WebSocket backends. */
+/** @internal Transport abstraction for SSE backend. */
 export interface StreamTransport<T = Record<string, unknown>> {
   connect(): void;
   disconnect(): void;

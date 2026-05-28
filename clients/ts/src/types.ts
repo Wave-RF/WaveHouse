@@ -207,7 +207,6 @@ export interface FetchOptions {
 export interface StreamOptions {
   since?: string;
   signal?: AbortSignal;
-  transport?: 'auto' | 'sse' | 'ws';
 }
 
 // --- Internal HTTP context ---
