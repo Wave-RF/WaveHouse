@@ -133,7 +133,7 @@ Tooling notes:
 - `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/`, `tests/e2e/sdk/`, and `docs/`.
 - **Subproject Makefiles**: `docs/` has its own `Makefile` so the docs site is self-contained (`cd docs && make build` works directly). The root forwards every `docs-<name>` target via a pattern rule and aggregates the common verbs (`install`, `build`, `test`, `lint`, `verify`, `clean`) through `subprojects-<verb>` fan-outs — so `make ci`, `make tools`, etc. pick up new subprojects automatically. When extracting more subprojects (per-language SDKs, etc.), append the directory to `SUBPROJECTS` at the top of the root `Makefile` — no aggregator edits required.
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
-- **Worktrunk** (the team's `wt` CLI) reads `.config/wt.toml` — the project-level, committed config that applies to all teammates. On `wt switch --create <branch>`, `post-start` first runs `wt step copy-ignored` (copies gitignored caches/builds/`node_modules`/`.bin/` from the main worktree, skipping `tmp/` and `data/` runtime dirs) then `make tools` (idempotent — verifies + installs `core.hooksPath`). A fresh worktree is ready in seconds instead of waiting for `pnpm install` × 3 + golangci-lint download. Personal overrides live in `~/.config/worktrunk/config.toml`.
+- **Worktrunk** (`wt`) reads `.config/wt.toml`. On `wt switch --create <branch>`, post-start runs `wt step copy-ignored` (seeds `.bin/` + `node_modules/` from main) then `make tools` to finish bootstrap. Personal overrides in `~/.config/worktrunk/config.toml`.
 
 ## Testing Conventions
 
@@ -165,7 +165,7 @@ If `make ci` passes locally, your commit has crossed the same gates CI will run.
 `make tools` installs team-wide git hooks via `git config core.hooksPath .githooks`. They apply to humans and Claude Code alike:
 
 - **`.githooks/pre-commit`** runs `make verify` (~30s) on every commit; blocks on failure. Also emits informational nudges for likely doc-sync / SDK-sync misses (see §Documentation Sync, §SDK Sync).
-- **`.githooks/pre-push`** checks for a `tmp/ci-passed-tree-<TREE-sha>` marker — written by `make ci` on success. Blocks the push if `make ci` hasn't been run for the tree being pushed. The marker is keyed by the **tree SHA** of the working dir at the time `make ci` ran (computed via a throwaway `GIT_INDEX_FILE` — seed from HEAD, `git add -A`, `git write-tree` — so untracked files are captured too without touching the real index), not the commit SHA. The standard `make ci → git add → git commit → git push` flow doesn't spuriously re-block when the post-commit tree matches what CI just validated; editing the tree (or staging a different subset of changes than CI saw) requires a re-run.
+- **`.githooks/pre-push`** checks for `tmp/ci-passed-tree-<TREE-sha>` written by `make ci`. Tree-keyed (not commit-keyed) so `make ci → commit → push` works without a re-run when the tree is unchanged. Editing the tree (or staging a different subset than CI saw) requires a re-run. `make ci` skips the marker write entirely when `$CI` is set (CI runners don't push).
 
 Bypass with `git commit --no-verify` / `git push --no-verify` only when explicitly intentional (WIP / draft pushes where you accept the consequences). Don't disable the hooks globally; that defeats the gate.
 
@@ -231,7 +231,7 @@ See also: `.claude/skills/pr-sync-with-main/SKILL.md` for the same workflow in C
 
 ## Agent PR Discipline
 
-These rules apply to AI agents (Claude Code etc.) working on WaveHouse PRs. Humans keep the standard git/gh affordances; agents have additional gating, enforced by `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) plus deny rules in `.claude/settings.json`.
+Agents follow the same universal git hooks as humans (pre-commit + pre-push in `.githooks/`). On top of that, four PR-workflow rules have no human analog and are checked by `.claude/hooks/agent-bash-gate.sh`. The gate is a *guard rail against accidents*, not adversarial enforcement — an agent that wants to bypass can edit the gate itself. The rules below are policy; follow them.
 
 ### Drafts only
 
@@ -268,11 +268,12 @@ When the subagent's response ends with the parseable line `VERDICT: ship_it`, `.
 
 The orchestrator agent cannot override the subagent's system prompt (it's the fixed file content of `.claude/agents/pre-push-reviewer.md`), and the subagent runs in a clean conversation context, so it doesn't share the orchestrator's bias toward its own work.
 
-### No bypass for agents
+### Don't bypass the gates
 
-- `git push --no-verify` and `git commit --no-verify` are blocked at the `.claude/hooks/agent-bash-gate.sh` PreToolUse layer for agents. Humans retain `--no-verify` for explicit intentional bypass (see §"Local-First Validation").
-- The obvious tool-level writes to `tmp/ci-passed-*` or `tmp/review-passed-*` are denied at the `.claude/settings.json` permission layer (`Bash(touch tmp/ci-passed:*)`, `Write(tmp/ci-passed-*)`, `Edit(tmp/ci-passed-*)`, and the review-passed equivalents). The `tmp/ci-passed-*` glob covers both legacy commit-SHA markers and the current `tmp/ci-passed-tree-<TREE>` form.
-- **Markers are written exclusively by `make ci` (ci-passed, tree-keyed) and the `pre-push-reviewer` SubagentStop hook (review-passed, commit-keyed). You do not write a marker file by any other means — period.** Bash can write a file by a dozen paths and the deny list does not enumerate all of them; this is an honest-agent rule, not an adversarial gate. If you ever feel tempted to write a marker, stop: the marker is wrong-shaped if you're the one writing it. Run `make ci`, invoke the subagent, get the verdict — that's the path.
+- `--no-verify` on `git commit` / `git push` exists for human WIP / draft pushes. Agents should not use it.
+- Markers (`tmp/ci-passed-tree-*`, `tmp/review-passed-*`) are written by `make ci` and the `pre-push-reviewer` SubagentStop hook. Don't `touch` / `Write` / `Edit` them by hand — if you feel tempted, the marker is wrong-shaped for the situation you're in. Run `make ci`, invoke the subagent, get the verdict.
+
+These are policy, not mechanically enforced. Bash can write a file a dozen ways; an agent can edit `.claude/hooks/agent-bash-gate.sh` itself. Trust beats whack-a-mole regex.
 
 ### Reviewing someone else's PR locally
 

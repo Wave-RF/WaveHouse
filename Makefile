@@ -545,37 +545,7 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
-	@# Marker file for the pre-push git hook: confirms `make ci` passed for the
-	@# tree state being pushed. tmp/ is gitignored. Keyed by **tree SHA**
-	@# (working dir snapshot at the moment ci ran), not commit SHA, so the
-	@# common flow `make ci → git add → git commit → git push` doesn't
-	@# spuriously invalidate the marker when the post-commit tree matches what
-	@# ci just validated. Re-edit the tree → re-run ci.
-	@#
-	@# We compute the tree the same way `git add -A && git write-tree` would,
-	@# but against a throwaway index seeded from HEAD — so the real index and
-	@# working dir are untouched. (`git stash create` was the obvious choice but
-	@# it ignores untracked files unless something is also tracked-and-changed,
-	@# which gives the wrong answer for "new .go file + make ci + commit + push".)
-	@mkdir -p tmp
-	@# The marker exists to gate `git push` from a developer machine. GitHub
-	@# Actions doesn't push from the CI runner, so writing it there is dead
-	@# work — and the throwaway-index dance can hit surprising fatals on
-	@# `bash -e` runners (the very same runners that have already validated
-	@# the tree by running this target). Skip the write when $$CI is set
-	@# (GitHub Actions / GitLab / CircleCI / Buildkite all export this).
-	@if [ -z "$${CI:-}" ]; then \
-	  set -euo pipefail; \
-	  tmp_idx=$$(mktemp); \
-	  rm -f "$$tmp_idx"; \
-	  trap "rm -f '$$tmp_idx'" EXIT; \
-	  export GIT_INDEX_FILE="$$tmp_idx"; \
-	  git read-tree HEAD; \
-	  git add -A; \
-	  tree_sha=$$(git write-tree); \
-	  unset GIT_INDEX_FILE; \
-	  touch "tmp/ci-passed-tree-$$tree_sha"; \
-	fi
+	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
