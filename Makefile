@@ -314,6 +314,7 @@ fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint
 
 .PHONY: verify
 verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -j verify`)
+	@scripts/ci-marker.sh write-verify
 	@echo "$(GREEN)==> All static checks passed$(RESET)"
 
 ##@ Build
@@ -545,10 +546,7 @@ ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverag
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
-	@# Marker file for the pre-push git hook: confirms `make ci` passed for the
-	@# exact HEAD being pushed. tmp/ is gitignored. New commits invalidate the
-	@# marker (different SHA), so `make ci` must re-run before the next push.
-	@mkdir -p tmp && touch "tmp/ci-passed-$$(git rev-parse HEAD)"
+	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
 
 ##@ Analysis
