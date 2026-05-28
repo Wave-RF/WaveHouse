@@ -39,13 +39,9 @@ type IngestWorker struct {
 	user       string
 	password   string
 	db         string
-	// maxBatch and maxWait gate flushes per table. maxBatch fires a flush the
-	// instant a table's accumulating batch hits the limit; maxWait fires after
-	// the first row in a fresh batch has been waiting that long. Production
-	// defaults are set in StartIngestWorker; tests override them on the struct.
-	maxBatch int
-	maxWait  time.Duration
-	wg       sync.WaitGroup
+	maxBatch   int
+	maxWait    time.Duration
+	wg         sync.WaitGroup
 }
 
 // Production defaults; overridable on the struct for tests.
@@ -170,10 +166,11 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 	tableChans := make(map[string]chan parsedMsg)
 	var tableWg sync.WaitGroup
 
-	// shutdown waits for the per-table goroutines to drain whatever they
-	// already accepted (using a non-cancelable context so the final flush
-	// still runs). Anything sitting in msgChan past ctx.Done is left for
-	// NATS to redeliver — same behaviour as the pre-refactor runLoop.
+	// shutdown drains every per-table goroutine. Closing each tableChan
+	// signals the tableLoop to consume any parsedMsgs still buffered in
+	// its channel, flush its local batch via a detached context, and
+	// exit. Anything sitting in msgChan past ctx.Done is left for NATS
+	// to redeliver.
 	shutdown := func() {
 		for _, ch := range tableChans {
 			close(ch)
@@ -224,10 +221,13 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 //     time) while still letting the next batch fill during the current
 //     batch's CH round trip — i.e. pipelined fill + flush.
 //
-// Shutdown: when `in` is closed (runLoop on ctx.Done), drain any in-flight
-// flush, then do a final synchronous flush of whatever remains, using a
-// context detached from `ctx` so the flush itself isn't immediately
-// cancelled.
+// Shutdown is driven exclusively by `in` being closed (runLoop's shutdown()
+// path on ctx.Done). The tableLoop drains any parsedMsgs still buffered in
+// the channel into `batch`, waits on any in-flight flush, and does a final
+// synchronous flush of whatever remains using a detached context. There is
+// deliberately no `case <-ctx.Done()` arm: relying on the channel close
+// gives deterministic drain ordering and prevents a select race that would
+// otherwise abandon channel-buffered msgs to NATS redelivery.
 func (w *IngestWorker) tableLoop(ctx context.Context, tableName string, in <-chan parsedMsg, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -243,27 +243,30 @@ func (w *IngestWorker) tableLoop(ctx context.Context, tableName string, in <-cha
 
 	startFlush := func(toFlush []parsedMsg) chan struct{} {
 		done := make(chan struct{})
+		// If ctx is already cancelled, runLoop is draining us toward
+		// exit — detach so the in-progress POST still completes and acks
+		// instead of failing fast and provoking a NATS redelivery.
+		flushCtx := ctx
+		if ctx.Err() != nil {
+			flushCtx = context.WithoutCancel(ctx)
+		}
 		go func() {
 			defer close(done)
-			w.flushTable(ctx, tableName, toFlush)
+			w.flushTable(flushCtx, tableName, toFlush)
 		}()
 		return done
 	}
 
 	tryFlush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		if inFlight != nil {
-			// Coalesce: another flush is running for this table. Keep
-			// accumulating in `batch`; we'll flush it from the inFlight
-			// completion path.
+		if len(batch) == 0 || inFlight != nil {
+			// Coalesce: if a flush is already running for this table we
+			// keep accumulating in `batch`; the inFlight completion arm
+			// kicks off the next flush.
 			return
 		}
 		toFlush := batch
 		batch = nil
-		// Timer was tied to `toFlush`; we'll re-arm it when a new batch
-		// starts accumulating.
+		// Timer was tied to `toFlush`; re-arm it when a new batch starts.
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -275,20 +278,10 @@ func (w *IngestWorker) tableLoop(ctx context.Context, tableName string, in <-cha
 
 	for {
 		select {
-		case <-ctx.Done():
-			// Wait for any in-flight flush, then flush whatever's left
-			// using a non-cancellable context so the final POST runs.
-			if inFlight != nil {
-				<-inFlight
-			}
-			if len(batch) > 0 {
-				w.flushTable(context.WithoutCancel(ctx), tableName, batch)
-			}
-			return
-
 		case pm, ok := <-in:
 			if !ok {
-				// Drain complete — same cleanup as ctx.Done.
+				// runLoop closed our channel — drain any in-flight flush,
+				// do a final synchronous flush via a detached ctx, exit.
 				if inFlight != nil {
 					<-inFlight
 				}
