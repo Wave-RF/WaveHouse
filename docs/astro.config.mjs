@@ -9,6 +9,11 @@ import rehypeMermaid from "rehype-mermaid";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { sidebar } from "./src/config/sidebar.ts";
+import {
+  fixMermaidOutput,
+  rehypeMermaidOptions,
+  remarkInjectMermaidClassdefs,
+} from "./src/integrations/mermaid.mjs";
 
 export default defineConfig({
   site: "https://wavehouse.dev",
@@ -18,8 +23,8 @@ export default defineConfig({
   },
   markdown: {
     syntaxHighlight: { excludeLangs: ["mermaid"] },
-    remarkPlugins: [remarkMath],
-    rehypePlugins: [[rehypeMermaid, { strategy: "inline-svg" }], rehypeKatex],
+    remarkPlugins: [remarkMath, remarkInjectMermaidClassdefs],
+    rehypePlugins: [[rehypeMermaid, rehypeMermaidOptions], rehypeKatex],
   },
   integrations: [
     starlight({
@@ -107,5 +112,6 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         }),
       ],
     }),
+    fixMermaidOutput(),
   ],
 });

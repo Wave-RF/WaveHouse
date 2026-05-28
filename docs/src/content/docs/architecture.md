@@ -13,7 +13,7 @@ WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the 
 
 ```mermaid
 flowchart TD
-    Clients["Clients<br/>(REST API, SSE, WebSocket)"]
+    Clients["Clients<br/>(REST API, SSE, WebSocket)"]:::client
 
     Clients --> IH
     Clients --> QH
@@ -25,7 +25,7 @@ flowchart TD
         SR --> DD["Dedupe (optional)"]
         DD --> MQ["MQ (NATS)"]
         MQ --> BC["Buffer Consumer<br/>(batch flush)"]
-        BC -.->|failed inserts| DLQ["DLQ"]
+        BC -.->|failed inserts| DLQ["DLQ"]:::fail
 
         QH["Query Handler"] --> Cache["Cache<br/>(Ristretto + singleflight)"]
 
@@ -37,7 +37,7 @@ flowchart TD
         NATS["NATS JetStream retains messages<br/>for SSE/WS gap-fill<br/>via DeliverByStartTime"]
     end
 
-    BC --> CH[("ClickHouse<br/>(analytics storage)")]
+    BC --> CH[("ClickHouse<br/>(analytics storage)")]:::store
     Cache --> CH
 
     style NATS fill:none,stroke-dasharray:5 5,stroke:#888,color:#888

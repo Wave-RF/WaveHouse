@@ -41,6 +41,18 @@
 
 /* ---------- Semantic tokens (dark mode is default) ---------- */
 
+/* Brand Charcoal Gray mirrored at :root. The four other brand colors
+   already have mode-aware semantic siblings (--wh-accent, --wh-sky,
+   --wh-olive, --wh-terracotta) defined below, so they're not duplicated
+   here — but Charcoal had no equivalent, so it lived only inside the
+   Tailwind-only @theme block and couldn't be referenced by SVG vars.
+   Slightly tilted toward slate (Tailwind gray-800) so it reads as
+   present on light backgrounds; pure #2E2E2E was visually flat next
+   to the saturated brand fills. */
+:root {
+  --wh-charcoal: #1F2937;
+}
+
 :root {
   --wh-bg: #0A0B0E;
   --wh-bg-grid: #0E1014;
@@ -78,6 +90,42 @@
     0 18px 48px -16px rgba(6, 176, 191, 0.45);
 
   --wh-section-accent: var(--wh-accent);
+
+  /* Mermaid theme tokens — consumed by the SVGs after the
+     fix-mermaid-output build hook swaps their inline-CSS hex colors
+     for these var() references. Per-diagram classDef colors in the
+     source markdown stay untouched (they use different hex values). */
+  --wh-mermaid-surface: var(--wh-surface);
+  --wh-mermaid-surface-2: var(--wh-surface-elevated);
+  --wh-mermaid-surface-3: var(--wh-surface-overlay);
+  --wh-mermaid-surface-fade: color-mix(in oklab, var(--wh-surface) 50%, transparent);
+  --wh-mermaid-border: var(--wh-border-strong);
+  --wh-mermaid-ink: var(--wh-ink);
+  --wh-mermaid-ink-muted: var(--wh-ink-muted);
+  --wh-mermaid-line: color-mix(in oklab, var(--wh-accent) 18%, var(--wh-ink-muted));
+  --wh-mermaid-cluster-bg: color-mix(in oklab, var(--wh-accent) 6%, transparent);
+  --wh-mermaid-cluster-border: color-mix(in oklab, var(--wh-accent) 30%, transparent);
+
+  /* classDef → brand-derived palette, locked to values that pass WCAG
+     AA contrast (>= 4.5:1) with white text in BOTH modes. The brand
+     colors are the starting point (Electric Blue, Olive, Terracotta,
+     Charcoal-tilted-toward-slate) but the lightness was pulled down
+     where needed so text reads clearly — pure brand teal #06B0BF
+     fails AA against white (~2.5:1), pure brand olive #708D57 fails
+     too (~4.0:1). Borders are brighter than fills for clean
+     definition and to carry the brand-bright signature. */
+  --wh-mermaid-wh-bg:        #086D77;   /* AA: 5.8:1 vs white */
+  --wh-mermaid-wh-border:    #1DC9D8;   /* bright cyan rim */
+  --wh-mermaid-win-bg:       #4F6A3B;   /* AA: 5.9:1 */
+  --wh-mermaid-win-border:   #8FA975;   /* lifted olive rim */
+  --wh-mermaid-pain-bg:      #8A4729;   /* AAA: 7.0:1 */
+  --wh-mermaid-pain-border:  #C9785C;   /* lifted terracotta rim */
+  --wh-mermaid-fail-bg:      #5C2F1B;   /* AAA: 11:1 */
+  --wh-mermaid-fail-border:  #A0573B;   /* brand terracotta rim */
+  --wh-mermaid-neutral-bg:   #1F2937;   /* AAA: 17:1 (slate-tilted charcoal) */
+  --wh-mermaid-neutral-border: #4B5563;
+  --wh-mermaid-infra-bg:     #0F1721;   /* AAA: 20:1 (deeper slate) */
+  --wh-mermaid-infra-border: #374151;
 }
 
 :root[data-theme="light"] {
@@ -172,6 +220,244 @@
   --sl-color-gray-5: #C2C9D1;
   --sl-color-gray-6: var(--wh-border);
   --sl-color-gray-7: var(--wh-surface-elevated);
+}
+
+/* ---------- Mermaid diagram polish ----------
+   These rules live at the document level (not in each SVG's inline
+   <style>) because SVG-internal CSS rules don't reach the HTML content
+   inside foreignObject for direct selector matches — only via inherited
+   properties like `color`. The pill treatments, transforms, and
+   typography below all target HTML elements rendered inside Mermaid's
+   foreignObject wrappers, so they must be document-scoped. We scope
+   them via the mermaid aria-roledescription so they don't catch
+   anything else. */
+
+/* Size handling for mermaid diagrams:
+   - Desktop: let each diagram render at its NATURAL viewBox size so
+     small diagrams (e.g. query path with 3 nodes) don't get blown up
+     and wide diagrams (e.g. DIY vs WaveHouse comparison) get full
+     reach. No min-width here.
+   - Mobile (viewport <= 768px): force min-width so labels stay
+     readable, and the parent wrapper allows horizontal scroll.
+   Margin-inline: auto centers the SVG horizontally on the page. */
+svg[aria-roledescription^="flowchart"],
+svg[aria-roledescription^="sequence"],
+svg[aria-roledescription^="class"],
+svg[aria-roledescription^="state"] {
+  display: block;
+  margin-inline: auto;
+}
+
+@media (max-width: 768px) {
+  svg[aria-roledescription^="flowchart"],
+  svg[aria-roledescription^="sequence"],
+  svg[aria-roledescription^="class"],
+  svg[aria-roledescription^="state"] {
+    min-width: 540px;
+  }
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="flowchart"]),
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]) {
+    overflow-x: auto;
+    overflow-y: visible;
+    scroll-padding-inline: 1rem;
+    scrollbar-width: thin;
+  }
+}
+
+/* Responsive 2-up container for paired mermaid diagrams. Default is
+   vertical stack (better on mobile and the common 1200–1400px laptop
+   widths where two diagrams side-by-side would each be tiny). On
+   genuinely wide viewports (≥1500px) we switch to a flex row so the
+   two diagrams sit alongside each other. */
+.sl-markdown-content .diagram-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  margin-block: 1.5rem;
+  align-items: center;
+}
+.sl-markdown-content .diagram-pair > p {
+  margin: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+@media (min-width: 1500px) {
+  .sl-markdown-content .diagram-pair {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 2rem;
+  }
+  .sl-markdown-content .diagram-pair > p {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+/* Mermaid foreignObject content — typography. The aria-role scoping
+   means these only target real mermaid SVGs.
+   line-height MUST stay at 1.5 (Mermaid's measurement default) so
+   multi-line labels don't overflow their boxes. Without this, the
+   global `.sl-markdown-content p { line-height: 1.7 }` rule bleeds
+   into the <p> elements inside foreignObject, and 3-line labels
+   overflow the box by ~8px at the bottom (descenders into the page). */
+svg[aria-roledescription^="flowchart"] .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .cluster-label .nodeLabel p,
+svg[aria-roledescription^="flowchart"] foreignObject p {
+  font-weight: 500 !important;
+  letter-spacing: -0.005em !important;
+  line-height: 1.5 !important;
+}
+
+/* ClassDef'd node labels keep white text on saturated brand fills, even
+   though the build hook strips Mermaid's inline color:#fff so default-
+   theme labels can pick up the theme-aware ink. */
+svg[aria-roledescription^="flowchart"] .node.wh .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.win .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.pain .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.fail .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.neutral .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.client .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.infra .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.store .nodeLabel,
+svg[aria-roledescription^="flowchart"] .node.wh .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.win .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.pain .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.fail .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.neutral .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.client .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.infra .nodeLabel p,
+svg[aria-roledescription^="flowchart"] .node.store .nodeLabel p {
+  color: #fff !important;
+  fill: #fff !important;
+}
+
+/* Subgraph titles — pill chip that straddles the cluster top border.
+   foreignObject is shifted up 17px so the pill straddles the border;
+   the build hook also expands the SVG viewBox top so the pill isn't
+   clipped. text-align: center on the foreignObject's div is critical:
+   the pill (display: inline-block) is wider than the foreignObject
+   (mermaid sized the FO to the unpadded text), and without text-align
+   center the pill anchors to the FO's LEFT edge — off-center on the
+   rect by ~half-the-padding-width. */
+svg[aria-roledescription^="flowchart"] .cluster-label foreignObject {
+  overflow: visible;
+  transform: translateY(-17px);
+}
+/* Flexbox-center the pill so it lands on the rect's horizontal center
+   even though it's wider than Mermaid's measured foreignObject. The
+   div Mermaid emits has `display: table-cell` inline — text-align
+   center on a table-cell does NOT center an inline-block child that's
+   wider than the cell. Flex does. */
+svg[aria-roledescription^="flowchart"] .cluster-label foreignObject > div {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  overflow: visible !important;
+}
+svg[aria-roledescription^="flowchart"] .cluster-label .nodeLabel p {
+  display: inline-block !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.14em !important;
+  color: var(--wh-mermaid-ink) !important;
+  background: var(--wh-mermaid-surface) !important;
+  padding: 7px 18px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--wh-mermaid-cluster-border) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* Edge labels — small pill chip sitting on the line. NOTE: mermaid
+   uses `span.edgeLabel` (not `.nodeLabel`) for the inner text wrapper,
+   so we target the <p> via the outer `.edgeLabel` ancestor. Same
+   text-align: center fix as above so the pill is centered on the
+   line, not left-aligned to mermaid's text-sized foreignObject. */
+svg[aria-roledescription^="flowchart"] .edgeLabel foreignObject {
+  overflow: visible;
+}
+/* Same flex-center fix as cluster titles — applies to the edge label's
+   inner div so the pill is centered on the line midpoint. */
+svg[aria-roledescription^="flowchart"] .edgeLabel foreignObject > div {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  overflow: visible !important;
+}
+svg[aria-roledescription^="flowchart"] .edgeLabel p {
+  display: inline-block !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.01em !important;
+  color: var(--wh-mermaid-ink-muted) !important;
+  background: var(--wh-mermaid-surface) !important;
+  padding: 4px 11px !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--wh-mermaid-border) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14) !important;
+  line-height: 1.4 !important;
+}
+
+/* Cylinder shape labels — Mermaid positions labels assuming the path
+   bbox center is the visual center, but the cylinder's filled region
+   is biased upward (the top ellipse is filled, the bottom arc is mostly
+   outline), so the perceived center is ~7px above the bbox center.
+   Verified by visually comparing -13/-7/-3/0 shift screenshots: -7
+   centers both 1-line and 2-line cylinder labels in the visible body.
+   :has() targets non-rect shapes (cylinders in our diagrams). */
+svg[aria-roledescription^="flowchart"] .node:has(> path.basic.label-container) .label foreignObject {
+  transform: translateY(-7px);
+}
+
+/* SVG-element polish — rules below target SVG elements (rect, path, g),
+   which external document CSS can style fine. Document-level + !important
+   beats Mermaid's inline `#mermaid-N` rules (which don't use !important).
+   Anything targeting HTML inside <foreignObject> stays above this block
+   because SVG inline <style> can't cascade direct selectors across the
+   SVG → HTML boundary, but document CSS can. */
+
+/* Drop-shadow on every node — Linear/Vercel-style crisp dual layer. */
+svg[aria-roledescription^="flowchart"] .node {
+  filter:
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.22))
+    drop-shadow(0 4px 8px rgba(0, 0, 0, 0.26));
+}
+
+/* Hide Mermaid's default edge-label backdrop rect — the pill treatment
+   above gives the inner foreignObject content the same visual, so the
+   rect would just duplicate. */
+svg[aria-roledescription^="flowchart"] .edgeLabel rect {
+  fill: transparent !important;
+  opacity: 0 !important;
+}
+
+/* Bump border thickness on charcoal-fill classes for crisp light-mode
+   edges. */
+svg[aria-roledescription^="flowchart"] .node.neutral > *,
+svg[aria-roledescription^="flowchart"] .node.client > *,
+svg[aria-roledescription^="flowchart"] .node.infra > *,
+svg[aria-roledescription^="flowchart"] .node.store > * {
+  stroke-width: 2.5px !important;
+}
+
+/* Edges — slightly thicker. */
+svg[aria-roledescription^="flowchart"] .flowchart-link,
+svg[aria-roledescription^="flowchart"] .edgePath .path {
+  stroke-width: 1.4px !important;
+}
+
+/* Rounded corners on shape backgrounds. */
+svg[aria-roledescription^="flowchart"] .node rect.basic.label-container,
+svg[aria-roledescription^="flowchart"] .node polygon,
+svg[aria-roledescription^="flowchart"] .node path.basic.label-container {
+  rx: 8px;
+  ry: 8px;
+}
+svg[aria-roledescription^="flowchart"] .cluster rect {
+  rx: 14px;
+  ry: 14px;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.12));
 }
 
 /* ---------- Base ---------- */
