@@ -24,7 +24,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 | Layer | Lives in | Applies to | Purpose |
 | ----- | -------- | ---------- | ------- |
 | **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
-| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Enforces [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes |
+| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, pre-push-reviewer marker required on PR pushes |
 | **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: writes `tmp/review-passed-<HEAD-sha>` on `VERDICT: ship_it` |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
 
@@ -36,20 +36,20 @@ Two scripts, both committed to the repo:
 
 | Hook | Behavior |
 | ---- | -------- |
-| `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Then emits informational stderr nudges for likely doc-sync and SDK-sync misses (see AGENTS.md §Documentation Sync and §SDK Sync). Nudges don't block. |
-| `pre-push` | Checks for `tmp/ci-passed-<HEAD-sha>` marker. The `make ci` target writes this marker on success. **Blocks** if absent — Claude (or you) runs `make ci`, sees output, fixes failures, retries push. |
+| `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). |
+| `pre-push` | Checks for `tmp/ci-passed-tree-<TREE-sha>` written by `make ci`. **Blocks** if absent — run `make ci`, fix failures, retry push. |
 
-**Humans** can bypass with `git commit --no-verify` / `git push --no-verify` for intentional WIP / draft pushes. **Agents cannot** — `--no-verify` is blocked, the obvious marker-write idioms are denied at the permission layer, and the rest is an honest-agent rule (see [Agent PR Discipline](#agent-pr-discipline)).
+`--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
 
-The marker invalidates on every commit (HEAD SHA changes), so `make ci` re-runs after each new commit before pushing. That's the AGENTS.md rule made literal.
+Tree-keyed so commit-then-push works without a re-run when the tree is unchanged. `make ci` skips the marker write when `$CI` is set (CI runners don't push). Shared logic lives in `scripts/ci-marker.sh`.
 
 ## What's in `.claude/` and `.config/`
 
 | Path | Purpose |
 | ---- | ------- |
-| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, --no-verify, the obvious marker-write idioms, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all three hooks wired |
+| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all three hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
-| `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: enforces Agent PR Discipline (drafts only, no human reviewer adds, no `--no-verify`, marker required on PR pushes) |
+| `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, pre-push-reviewer marker required on PR pushes) |
 | `.claude/hooks/review-marker.sh` | SubagentStop: writes `tmp/review-passed-<HEAD-sha>` when `pre-push-reviewer` returns `VERDICT: ship_it`. Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |
 | `.claude/agents/pre-push-reviewer.md` | `pre-push-reviewer` subagent — canonical pre-push review, also used for auditing others' PRs locally |
@@ -97,7 +97,7 @@ Agents (Claude Code etc.) have additional gating beyond what humans face — enf
 - **No human reviewer assignment.** `gh pr edit --add-reviewer / --add-assignee` and `POST /requested_reviewers` are blocked. The `housekeeping.yml` workflow auto-assigns; humans handle the rest.
 - **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, `@gemini-code-assist /gemini review`, `@claude` or `/review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
 - **Pre-push review required on PR branches.** Before `git push` to a branch with an open PR, the agent must invoke `pre-push-reviewer` (fresh context). `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate. On iterate, fix the findings and re-invoke (always fresh context) — loop until clean.
-- **No bypass.** `--no-verify` is blocked on `git push` / `git commit` for agents. The obvious marker-write idioms (`Bash(touch tmp/ci-passed:*)`, `Write`/`Edit` on `tmp/ci-passed-*` and `tmp/review-passed-*`) are denied at the permission layer. Everything else relies on the honest-agent rule in AGENTS.md §"Agent PR Discipline": markers come from `make ci` and the `review-marker.sh` hook — nowhere else, by any means. Bash can write a file by a dozen paths and regex enforcement is a porous game of whack-a-mole; the rule is documented, not regex-enforced.
+- **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci` and the `review-marker.sh` hook; nothing else.
 - **PR reviews on others' PRs stay local by default.** Use `pr-review-locally` skill for local-only audits. To make the bot comment on the PR remotely, fire the CI workflow: `gh workflow run "Claude PR review" -f pr_number=<N>` — that's the canonical bot-comment path.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
@@ -199,7 +199,7 @@ Not committed at project level. Personal preference — put in `.claude/settings
 ## Daily workflow
 
 1. Write code (gofumpt-on-save formats Go files as you go).
-2. `git commit` → pre-commit hook runs `make verify` + sync nudges. Fix anything that fails.
+2. `git commit` → pre-commit hook runs `make verify` (or skips if `make ci` already validated this tree). Fix anything that fails.
 3. `git push` (first time on a feature branch) → pre-push hook blocks until `make ci` passed for HEAD. Run `make ci`, fix, retry push.
 4. Open the PR with `gh pr create --draft` (agents required to use `--draft`; humans flip to ready when ready).
 5. **Subsequent pushes** → agent-bash-gate hook ALSO requires `pre-push-reviewer` subagent to have run (fresh context) and returned `VERDICT: ship_it`. Invoke the subagent → on Ship it, marker auto-writes → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
