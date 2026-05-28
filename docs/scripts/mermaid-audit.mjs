@@ -45,16 +45,29 @@ function preparedCss() {
     .replace(/:root\b/g, ".pane");
 }
 
-function relLum(hex) {
-  const m = hex.match(/^#?([0-9a-f]{6})$/i) || hex.match(/rgb\(([\d.]+),\s*([\d.]+),\s*([\d.]+)\)/i);
-  let r, g, b;
-  if (hex.startsWith("rgb")) {
-    [, r, g, b] = m.map(Number);
+function relLum(color) {
+  // Inputs come from rgbToHex() (always 6-digit hex) today, so this is
+  // really just defensive: parse 3/4/6/8-digit hex and rgb()/rgba() (comma
+  // or space separated), defaulting to black, so a stray value can never
+  // crash on a null match or silently poison a contrast number with NaN.
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  const hex = color.match(/^#?([0-9a-f]{3,8})$/i);
+  if (hex) {
+    const h = hex[1];
+    if (h.length === 3 || h.length === 4) {
+      r = parseInt(h[0] + h[0], 16);
+      g = parseInt(h[1] + h[1], 16);
+      b = parseInt(h[2] + h[2], 16);
+    } else {
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
+    }
   } else {
-    const h = hex.replace("#", "");
-    r = parseInt(h.slice(0, 2), 16);
-    g = parseInt(h.slice(2, 4), 16);
-    b = parseInt(h.slice(4, 6), 16);
+    const rgb = color.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+    if (rgb) [r, g, b] = [rgb[1], rgb[2], rgb[3]].map(Number);
   }
   const lin = [r, g, b].map((v) => {
     v /= 255;

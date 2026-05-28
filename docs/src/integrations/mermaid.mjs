@@ -367,8 +367,14 @@ export function fixMermaidOutput() {
         }
       );
 
+      // The negative lookahead stops the pre-label scan at the next
+      // `<g class="cluster`, so a cluster with no label (e.g. an untitled
+      // subgraph) fails to match here instead of greedily swallowing the
+      // following cluster and repositioning ITS label against the wrong
+      // rect. All current diagrams title every subgraph, so this only
+      // guards future ones.
       patched = patched.replace(
-        /<g class="cluster[^"]*"[^>]*>([\s\S]*?<g class="cluster-label"[^>]*>[\s\S]*?<\/g>)/g,
+        /<g class="cluster[^"]*"[^>]*>((?:(?!<g class="cluster)[\s\S])*?<g class="cluster-label"[^>]*>[\s\S]*?<\/g>)/g,
         (match, body) => {
           const rectMatch = body.match(
             /<rect[^>]+x="([-\d.]+)"[^>]+y="([-\d.]+)"[^>]+width="([\d.]+)"/
