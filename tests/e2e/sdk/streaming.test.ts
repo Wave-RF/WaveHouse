@@ -1,13 +1,15 @@
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import type { Policy } from "@wavehouse/sdk";
 import { adminClient, publicClient, dataClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Streaming", () => {
   const admin = adminClient();
-  let baselinePolicy: any;
+  let baselinePolicy: Policy | undefined;
 
   beforeAll(async () => {
     // Fetch the baseline policy to restore after tests finish
     const res = await admin.policy.get();
+    if (res.error) throw new Error(`Failed to fetch baseline policy: ${res.error.message}`);
     baselinePolicy = structuredClone(res.data);
 
     // Configure the backend to assign the "anon" role to unauthenticated requests

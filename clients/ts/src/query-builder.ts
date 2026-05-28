@@ -250,6 +250,14 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 /**
  * Wraps a StreamController, applying client-side filters and column projection
  * before delivering events to subscribers.
+ *
+ * Lifecycle: by the time we reach this constructor, `inner` has already been
+ * built (and is opening its own SSE connection). The outer transport's
+ * `connect()` doesn't open a new connection — it bridges `inner`'s events
+ * through a filter into the outer subscriber set. On `disconnect()`, closing
+ * `inner` is what actually tears down the SSE socket; the subscription we
+ * register on `inner` is left to be garbage-collected with it, which is why
+ * we don't bother saving the unsubscribe handle.
  * @internal
  */
 class FilteredStreamController<T = Record<string, unknown>> extends StreamController<T> {
@@ -258,7 +266,6 @@ class FilteredStreamController<T = Record<string, unknown>> extends StreamContro
     filters: QueryFilter[],
     columns: string[],
   ) {
-    // Create a transport that wraps the inner controller's events.
     const transport: StreamTransport<T> = {
       onEvent: null,
       onStatus: null,
@@ -303,13 +310,13 @@ function evaluateFilter(actual: unknown, op: string, expected: unknown): boolean
     case 'neq':
       return actual !== expected;
     case 'gt':
-      return (actual as number) > (expected as number);
+      return compareOrdered(actual, expected, (a, b) => a > b);
     case 'gte':
-      return (actual as number) >= (expected as number);
+      return compareOrdered(actual, expected, (a, b) => a >= b);
     case 'lt':
-      return (actual as number) < (expected as number);
+      return compareOrdered(actual, expected, (a, b) => a < b);
     case 'lte':
-      return (actual as number) <= (expected as number);
+      return compareOrdered(actual, expected, (a, b) => a <= b);
     case 'in':
       return Array.isArray(expected) && expected.includes(actual);
     case 'like': {
@@ -328,6 +335,29 @@ function evaluateFilter(actual: unknown, op: string, expected: unknown): boolean
     default:
       return true; // unknown op — pass through
   }
+}
+
+/**
+ * @internal Apply an ordered comparison only when both sides are the same
+ * comparable primitive (number-vs-number or string-vs-string — strings are
+ * lexicographic, which is correct for ISO-8601 timestamps). Mismatched or
+ * unsupported types return false instead of relying on JS coercion.
+ */
+function compareOrdered(
+  actual: unknown,
+  expected: unknown,
+  cmp: (a: number, b: number) => boolean,
+): boolean {
+  if (typeof actual === 'number' && typeof expected === 'number') {
+    return cmp(actual, expected);
+  }
+  if (typeof actual === 'string' && typeof expected === 'string') {
+    // `>`/`<` on strings is lexicographic; reuse the same comparator by
+    // casting through `as unknown as number` — the runtime operator works
+    // identically on strings.
+    return cmp(actual as unknown as number, expected as unknown as number);
+  }
+  return false;
 }
 
 /** @internal Project a row to only the specified columns. */

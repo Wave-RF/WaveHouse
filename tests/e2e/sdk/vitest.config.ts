@@ -20,11 +20,10 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 120_000,
     pool: "forks",
-    // Run test files sequentially to avoid port/stream conflicts
-    poolOptions: {
-      forks: {
-        singleFork: true,
-      },
-    },
+    // Run test files sequentially to avoid port/stream conflicts.
+    // (Vitest 4 replaced poolOptions.forks.singleFork with these two
+    // top-level keys — see https://vitest.dev/guide/migration#pool-rework)
+    maxWorkers: 1,
+    isolate: false,
   },
 });

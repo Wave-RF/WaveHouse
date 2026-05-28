@@ -317,6 +317,30 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 	@scripts/ci-marker.sh write-verify
 	@echo "$(GREEN)==> All static checks passed$(RESET)"
 
+# SDK static checks: Biome handles format + lint + import sorting in one
+# tool, installed at the workspace root and invoked via root scripts.
+# Mirrors the Go fmt/lint/fix shape so contributors can `make fix-sdk`
+# the same way they `make fix` for Go.
+.PHONY: fmt-sdk
+fmt-sdk: install-sdk ## Check SDK + e2e formatting (run `make fix-sdk` to apply)
+	@echo "$(CYAN)==> Checking TypeScript formatting...$(RESET)"
+	@$(PNPM) format
+
+.PHONY: lint-sdk
+lint-sdk: install-sdk ## Run Biome lint on SDK + e2e (run `make fix-sdk` to apply --write)
+	@echo "$(CYAN)==> Running Biome lint...$(RESET)"
+	@$(PNPM) lint
+
+.PHONY: fix-sdk
+fix-sdk: install-sdk ## Apply Biome lint + format auto-fixes to SDK + e2e
+	@echo "$(CYAN)==> Applying Biome fixes...$(RESET)"
+	@$(PNPM) fix
+	@echo "$(GREEN)==> Done$(RESET)"
+
+.PHONY: verify-sdk
+verify-sdk: fmt-sdk lint-sdk ## Run SDK static checks (format + lint)
+	@echo "$(GREEN)==> SDK static checks passed$(RESET)"
+
 ##@ Build
 
 # All three variants dispatch to scripts/build.sh, which knows how to handle
@@ -393,7 +417,7 @@ DOCS_DIR    := docs
 # SDK is later extracted into a sibling Makefile, the same pattern absorbs it.
 .PHONY: install-sdk
 install-sdk:
-	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
+	@$(PNPM) install --frozen-lockfile
 
 # --- Subproject orchestration ------------------------------------------------
 # Sub-projects (docs today; per-language SDKs eventually) live in their own
@@ -443,14 +467,17 @@ docs-install docs-install-playwright docs-dev docs-preview docs-build docs-brand
 docs-%:
 	@$(MAKE) -C $(DOCS_DIR) $*
 
+# install-e2e-sdk is now a no-op alias: one root `pnpm install` installs
+# every workspace package, so this target just delegates to install-sdk.
+# Kept as a separate phony target because existing CI / docs invoke it by
+# name and removing it would break compatibility.
 .PHONY: install-e2e-sdk
-install-e2e-sdk:
-	@cd $(E2E_SDK_DIR) && $(PNPM) install --frozen-lockfile
+install-e2e-sdk: install-sdk
 
 .PHONY: build-sdk
 build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
 	@echo "$(CYAN)==> Building SDK...$(RESET)"
-	@cd $(SDK_DIR) && $(PNPM) build
+	@$(PNPM) --filter @wavehouse/sdk run build
 
 ##@ Test
 
@@ -496,7 +523,7 @@ test-sdk: install-sdk ## Run SDK vitest unit tests + render coverage + gate thre
 	@printf "$(CYAN)==> Running SDK Tests...$(RESET)\n"
 	@rm -rf tmp/coverage/sdk && mkdir -p tmp/coverage/sdk
 	@SDK_COVERAGE_DIR="$(CURDIR)/tmp/coverage/sdk" \
-		pnpm --dir clients/ts exec vitest run --coverage \
+		$(PNPM) --filter @wavehouse/sdk exec vitest run --coverage \
 		--coverage.thresholds.statements=$$(go run ./scripts/cov threshold sdk) $(ARGS)
 	@printf "$(GREEN)==> sdk gate passed$(RESET)  HTML: tmp/coverage/sdk/index.html\n"
 
@@ -536,7 +563,7 @@ cov: ## Merge all available covdata + gate against total threshold
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify subprojects-verify build build-cover build-sdk subprojects-build test test-sdk subprojects-test
+ci-parallel: verify verify-sdk subprojects-verify build build-cover build-sdk subprojects-build test test-sdk subprojects-test
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
