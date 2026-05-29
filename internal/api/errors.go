@@ -118,14 +118,3 @@ func forbiddenForRole(role string) string {
 	}
 	return "forbidden"
 }
-
-// loggerOrDefault returns l, or slog.Default() when l is nil, so the handler
-// constructors (and RequireAdmin) can accept an optional *slog.Logger without
-// each repeating the nil check — a nil logger would panic the first time the
-// handler logs.
-func loggerOrDefault(l *slog.Logger) *slog.Logger {
-	if l == nil {
-		return slog.Default()
-	}
-	return l
-}

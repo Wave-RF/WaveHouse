@@ -45,7 +45,7 @@ func NewStructuredQueryHandler(
 		PolicyStore:     policyStore,
 		BucketSecs:      bucketSecs,
 		maxQueryTimeout: queryTimeout,
-		logger:          loggerOrDefault(logger),
+		logger:          logger,
 	}
 }
 

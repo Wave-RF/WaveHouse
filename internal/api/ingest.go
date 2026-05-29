@@ -32,7 +32,7 @@ type IngestHandler struct {
 }
 
 func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
-	return &IngestHandler{Registry: registry, Publisher: pub, logger: loggerOrDefault(logger)}
+	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {

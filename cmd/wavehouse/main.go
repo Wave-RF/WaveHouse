@@ -383,7 +383,6 @@ func run() int {
 		Logger:          logger,
 		JS:              js,
 		CORSOrigins:     cfg.Server.CORSAllowedOrigins,
-		LogLevel:        logLevel,
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,

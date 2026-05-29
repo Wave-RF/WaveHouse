@@ -29,7 +29,7 @@ type PipesHandler struct {
 }
 
 func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, logger: loggerOrDefault(logger)}
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, logger: logger}
 }
 
 // List returns all named queries (admin endpoint).

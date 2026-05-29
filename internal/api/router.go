@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -163,24 +162,6 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Put("/pipes/{name}", deps.Pipes.Put)
 				r.Delete("/pipes/{name}", deps.Pipes.Delete)
 			}
-			if deps.LogLevel != nil {
-				r.Put("/log-level", func(w http.ResponseWriter, r *http.Request) {
-					levelStr := r.URL.Query().Get("level")
-
-					var newLevel slog.Level
-					if err := newLevel.UnmarshalText([]byte(levelStr)); err != nil {
-						writeJSONError(w, http.StatusBadRequest, "invalid or missing level (use debug, info, warn, error)")
-						return
-					}
-
-					deps.LogLevel.Set(newLevel)
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(map[string]string{
-						"status": "success",
-						"level":  newLevel.String(),
-					})
-				})
-			}
 		})
 	})
 
@@ -241,7 +222,6 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // writeAuthzDenied, so a present-but-invalid token fails loud (401 + token
 // reason) rather than as a bare 403.
 func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) http.Handler {
-	logger = loggerOrDefault(logger)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *policy.Policy

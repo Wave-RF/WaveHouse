@@ -259,6 +259,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
+		Logger: testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)
@@ -316,6 +317,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	})
 
 	post := func(role string) *httptest.ResponseRecorder {
@@ -377,6 +379,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	}
 
 	// Should not panic.
@@ -426,6 +429,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
+		Logger: testutil.NopLogger(),
 	}
 	router := NewRouter(deps)
 
@@ -451,6 +455,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
+		Logger: testutil.NopLogger(),
 	}
 	router := NewRouter(deps)
 
@@ -550,6 +555,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	})
 
 	get := func(path, role string) *httptest.ResponseRecorder {
