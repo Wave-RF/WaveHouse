@@ -14,8 +14,9 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
   it("routes only the failed row to DLQ while valid rows are inserted", async () => {
     const runId = testId();
 
+    // TODO: remove when #192 is fixed
     await new Promise(resolve => setTimeout(resolve, 5000));
-    
+
     // Get baseline DLQ stats before we pollute them
     const initialDlq = await admin.dlq.list();
     const initialClicksDlq =

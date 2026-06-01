@@ -34,7 +34,6 @@ type Dependencies struct {
 	PolicyStore *policy.Store
 	JS          jetstream.JetStream // for SSE/WS gap-fill
 	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
-	LogLevel    *slog.LevelVar
 	// Logger is the request-path logger the denial gates use (RequireAdmin and
 	// the handlers that call writeAuthzDenied). nil falls back to slog.Default().
 	Logger *slog.Logger
