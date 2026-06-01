@@ -76,19 +76,20 @@ make fix               # Auto-apply: tidy + gofumpt + goimports + lint --fix
 make build             # Compile wavehouse → bin/wavehouse (debug symbols kept)
 make build-release     # Stripped release-style build → bin/wavehouse-release
 make build-cover       # Coverage-instrumented build → bin/wavehouse-cov (used by E2E)
-make build-sdk         # Build TypeScript SDK → clients/ts/dist/
+make ts-build         # Build TypeScript SDK → clients/ts/dist/
 
 # Test (each suite renders coverage and gates against .testcoverage.yml)
 make test              # Alias for test-unit
 make test-unit         # Go unit tests + coverage gate
 make test-integration  # Go integration tests (requires Docker) + coverage gate
-make test-sdk          # SDK vitest unit tests + coverage gate
+make ts-test          # SDK vitest unit tests + coverage gate against suites.ts-unit
+make ts-cov           # Merge ts-unit (from ts-test) + ts-e2e (from test-e2e) → ts-total + gate
 make test-e2e          # E2E SDK suite against bin/wavehouse-cov + coverage gate
 make test-all          # All four suites sequentially + merged coverage gate
 make cov               # Merge whichever covdata exists + gate against total threshold
 
 # CI
-make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk + subprojects-{verify,build,test}
+make ci                # Phase 1 (parallel): verify + builds + test-unit + ts-test + subprojects-{verify,build} + docs-test
                        # Phase 2 (sequential): test-integration + test-e2e + cov
 
 # Analysis (informational, not in CI)

@@ -317,29 +317,6 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 	@scripts/ci-marker.sh write-verify
 	@echo "$(GREEN)==> All static checks passed$(RESET)"
 
-# SDK static checks: Biome handles format + lint + import sorting in one
-# tool, installed at the workspace root and invoked via root scripts.
-# Mirrors the Go fmt/lint/fix shape so contributors can `make fix-sdk`
-# the same way they `make fix` for Go.
-.PHONY: fmt-sdk
-fmt-sdk: install-sdk ## Check SDK + e2e formatting (run `make fix-sdk` to apply)
-	@echo "$(CYAN)==> Checking TypeScript formatting...$(RESET)"
-	@$(PNPM) format
-
-.PHONY: lint-sdk
-lint-sdk: install-sdk ## Run Biome lint on SDK + e2e (run `make fix-sdk` to apply --write)
-	@echo "$(CYAN)==> Running Biome lint...$(RESET)"
-	@$(PNPM) lint
-
-.PHONY: fix-sdk
-fix-sdk: install-sdk ## Apply Biome lint + format auto-fixes to SDK + e2e
-	@echo "$(CYAN)==> Applying Biome fixes...$(RESET)"
-	@$(PNPM) fix
-	@echo "$(GREEN)==> Done$(RESET)"
-
-.PHONY: verify-sdk
-verify-sdk: fmt-sdk lint-sdk ## Run SDK static checks (format + lint)
-	@echo "$(GREEN)==> SDK static checks passed$(RESET)"
 
 ##@ Build
 
@@ -354,7 +331,7 @@ verify-sdk: fmt-sdk lint-sdk ## Run SDK static checks (format + lint)
 # go-mod-download is a no-doc intermediate target — every Go-toolchain target
 # (build/test/lint variants) declares it as a prereq so `make -j` doesn't
 # kick off N parallel `go mod download` calls racing on the module cache.
-# Symmetric with install-sdk for the Node side.
+# Symmetric with ts-install for the Node side.
 .PHONY: go-mod-download
 go-mod-download:
 	@go mod download
@@ -396,7 +373,7 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 .PHONY: build-all
 build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
-	@$(MAKE) -j 4 build build-sdk subprojects-build
+	@$(MAKE) -j 4 build subprojects-build
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
 # --- TypeScript SDK build / install ------------------------------------------
@@ -406,19 +383,14 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 # (tests/e2e/sdk/), and the docs site (docs/).
 PNPM        ?= pnpm
 SDK_DIR     := clients/ts
-E2E_SDK_DIR := tests/e2e/sdk
 DOCS_DIR    := docs
 
-# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
-# comment so they don't show in `make help`. User-facing targets below
-# (build-sdk, test-sdk, test-e2e) depend on them. The docs project is wired
-# through the subproject orchestration block below (`SUBPROJECTS`, fan-out,
-# per-subproject pattern rule) rather than per-target prereqs here. When the
-# SDK is later extracted into a sibling Makefile, the same pattern absorbs it.
-.PHONY: install-sdk
-install-sdk:
-	@$(PNPM) install --frozen-lockfile
-
+# With pnpm workspaces, every Node package — SDK, e2e harness, docs — is
+# installed by one root `pnpm install`. User-facing targets (ts-build,
+# ts-test, test-e2e) declare ts-install / docs-install as prereqs and
+# the subproject orchestration block below (`SUBPROJECTS`, fan-out,
+# per-subproject pattern rule) does the rest. No separate install-e2e-sdk
+# target needed — ts-install is what every Node target depends on.
 # --- Subproject orchestration ------------------------------------------------
 # Sub-projects (docs today; per-language SDKs eventually) live in their own
 # directories with their own Makefiles. The root iterates over $(SUBPROJECTS)
@@ -428,7 +400,7 @@ install-sdk:
 #
 # Direct invocation from root: `make <sub>-<name>` (e.g. `make docs-dev`) via
 # the per-subproject pattern rules at the end of this section.
-SUBPROJECTS  := $(DOCS_DIR)
+SUBPROJECTS  := $(SDK_DIR) $(DOCS_DIR)
 COMMON_VERBS := install build test lint verify clean
 
 # `<dir>/.<verb>` — hidden phony ticket that recurses into the subproject.
@@ -467,17 +439,20 @@ docs-install docs-install-playwright docs-dev docs-preview docs-build docs-brand
 docs-%:
 	@$(MAKE) -C $(DOCS_DIR) $*
 
-# install-e2e-sdk is now a no-op alias: one root `pnpm install` installs
-# every workspace package, so this target just delegates to install-sdk.
-# Kept as a separate phony target because existing CI / docs invoke it by
-# name and removing it would break compatibility.
-.PHONY: install-e2e-sdk
-install-e2e-sdk: install-sdk
+# ts-<name>: same pattern as docs above. clients/ts/Makefile owns the
+# actual recipes (install, build, dev, test, test-cov, typecheck, fmt,
+# lint, fix, verify, codegen, clean); these targets just delegate.
+# `ts-test` is defined explicitly further down (it needs THRESHOLD
+# from Go's scripts/cov, which the simple delegation can't supply).
+# Note: ts-test is excluded from the static-pattern delegation below
+# because it's defined explicitly further down (with the Go-threshold
+# gate). Everything else delegates straight into clients/ts/Makefile.
+.PHONY: ts-install ts-build ts-dev ts-typecheck ts-fmt ts-lint ts-fix ts-verify ts-codegen ts-clean
+ts-install ts-build ts-dev ts-typecheck ts-fmt ts-lint ts-fix ts-verify ts-codegen ts-clean: ts-%:
+	@$(MAKE) -C $(SDK_DIR) $*
 
-.PHONY: build-sdk
-build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
-	@echo "$(CYAN)==> Building SDK...$(RESET)"
-	@$(PNPM) --filter @wavehouse/sdk run build
+ts-%:
+	@$(MAKE) -C $(SDK_DIR) $*
 
 ##@ Test
 
@@ -514,28 +489,44 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@go run ./scripts/cov render integration
 
-# test-sdk: vitest unit tests for the SDK. SDK_COVERAGE_DIR points vitest
-# at tmp/coverage/sdk/ (see clients/ts/vitest.config.ts), and the threshold
-# is read from .testcoverage.yml's `suites.sdk` and passed to vitest's
-# inline gate. Independent of Go — separate toolchain.
-.PHONY: test-sdk
-test-sdk: install-sdk ## Run SDK vitest unit tests + render coverage + gate threshold
-	@printf "$(CYAN)==> Running SDK Tests...$(RESET)\n"
-	@rm -rf tmp/coverage/sdk && mkdir -p tmp/coverage/sdk
-	@SDK_COVERAGE_DIR="$(CURDIR)/tmp/coverage/sdk" \
-		$(PNPM) --filter @wavehouse/sdk exec vitest run --coverage \
-		--coverage.thresholds.statements=$$(go run ./scripts/cov threshold sdk) $(ARGS)
-	@printf "$(GREEN)==> sdk gate passed$(RESET)  HTML: tmp/coverage/sdk/index.html\n"
+# ts-test: vitest unit tests for the SDK, always with v8 coverage +
+# threshold gate. Same shape as `make test` / `make test-unit` for Go
+# (always covers, always gates). Defined explicitly here (overriding the
+# pattern-rule delegation above) because the threshold value is derived
+# from .testcoverage.yml via Go's scripts/cov — the simple delegation
+# can't supply it. `cd clients/ts && make test` runs the same vitest
+# invocation standalone with a 0% gate (vacuous).
+.PHONY: ts-test
+ts-test: ts-install ## Run SDK unit tests + coverage + gate against suites.ts-unit
+	@printf "$(CYAN)==> Running SDK unit tests...$(RESET)\n"
+	@rm -rf tmp/coverage/ts-unit && mkdir -p tmp/coverage/ts-unit
+	@TS_UNIT_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-unit" \
+		$(MAKE) -C $(SDK_DIR) test THRESHOLD=$$(go run ./scripts/cov threshold ts-unit) $(ARGS)
+	@printf "$(GREEN)==> ts-unit gate passed$(RESET)  HTML: tmp/coverage/ts-unit/index.html\n"
 
 # test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
 # scripts/, then runs the SDK vitest harness against the live stack so both
-# halves are exercised. covdata flushes on SIGINT into tmp/coverage/e2e/data/.
+# halves are exercised. Coverage is collected on both sides (Go covdata
+# from the cover binary → tmp/coverage/e2e/data/; vitest v8 coverage of
+# the SDK source → tmp/coverage/ts-e2e/) — same "always coverage" pattern
+# as the Go test targets. `make ts-cov` merges ts-unit + ts-e2e after.
 .PHONY: test-e2e
-test-e2e: build-sdk build-cover install-e2e-sdk ## Run E2E SDK suite against cover binary + render coverage + gate
+test-e2e: ts-build build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
-	@rm -rf $(COV_E2E)/data && mkdir -p $(COV_E2E)/data tmp
-	@go run ./scripts/orchestrator
+	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
+	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp
+	@TS_E2E_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-e2e" \
+		go run ./scripts/orchestrator
 	@go run ./scripts/cov render e2e
+	@printf "$(GREEN)==> ts-e2e coverage written$(RESET)  HTML: tmp/coverage/ts-e2e/index.html\n"
+
+# ts-cov: merge SDK unit + e2e coverage → tmp/coverage/ts-total/ + gate
+# against suites.ts-total. Both source suites must have been run first
+# (`make ts-test` and `make test-e2e`); the merge gracefully skips a
+# missing suite but fails if neither has coverage to merge.
+.PHONY: ts-cov
+ts-cov: ## Merge ts-unit + ts-e2e coverage → ts-total + gate against suites.ts-total
+	@go run ./scripts/cov ts-merge
 
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
 # under `make -j N`. The suites bind ports / spin testcontainers / start the
@@ -543,7 +534,7 @@ test-e2e: build-sdk build-cover install-e2e-sdk ## Run E2E SDK suite against cov
 .PHONY: test-all
 test-all: ## Run all suites sequentially + merged Go coverage + gate
 	@$(MAKE) test-unit
-	@$(MAKE) test-sdk
+	@$(MAKE) ts-test
 	@$(MAKE) test-integration
 	@$(MAKE) test-e2e
 	@$(MAKE) cov
@@ -563,7 +554,11 @@ cov: ## Merge all available covdata + gate against total threshold
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
 # it stays out of `make help`; users invoke `make ci`, not this directly.
 .PHONY: ci-parallel
-ci-parallel: verify verify-sdk subprojects-verify build build-cover build-sdk subprojects-build test test-sdk subprojects-test
+# SDK tests run via ts-test (with coverage gate). subprojects-test would
+# also pick up clients/ts via the SUBPROJECT fanout, but we route through
+# the explicit ts-test instead so the Go-derived threshold gate fires.
+# docs-test runs explicitly too, since SDK is excluded from subprojects-test.
+ci-parallel: verify subprojects-verify build build-cover subprojects-build test ts-test docs-test
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
@@ -670,7 +665,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # tools: bootstrap a fresh clone.
 #   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
 #   - Downloads Go modules so go.mod tool deps are available offline.
-#   - Installs SDK + E2E pnpm deps so test-sdk / test-e2e are runnable
+#   - Installs SDK + E2E pnpm deps so ts-test / test-e2e are runnable
 #     without a separate manual setup step.
 #
 # Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by
@@ -678,7 +673,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk subprojects-install ## Install pinned tools, Go modules, pnpm deps, and git hooks
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download subprojects-install ## Install pinned tools, Go modules, pnpm deps, and git hooks
 	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
 	@# `make tools` repeatedly just re-asserts the config. The .githooks/
 	@# directory is committed; this line plumbs git to it. Users can opt out

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { adminClient } from "./helpers.js";
 
 describe("Admin", () => {
@@ -73,7 +73,7 @@ describe("Admin", () => {
       expect(tables).toHaveProperty("users");
 
       // Verify column metadata on clicks
-      const clicks = tables["clicks"];
+      const clicks = tables.clicks;
       expect(clicks.columns).toBeInstanceOf(Array);
       const colNames = clicks.columns.map((c: any) => c.name);
       expect(colNames).toContain("event_id");
@@ -100,12 +100,7 @@ describe("Admin", () => {
         clicks: {
           select: {
             viewer: {
-              allow_columns: [
-                "page",
-                "country",
-                "duration_ms",
-                "received_timestamp",
-              ],
+              allow_columns: ["page", "country", "duration_ms", "received_timestamp"],
               filter: { country: { _eq: "{{ jwt.country }}" } },
             },
             admin: {
@@ -207,9 +202,7 @@ describe("Admin", () => {
 
     it("raw SQL: row counts", async () => {
       for (const table of ["clicks", "events", "users"]) {
-        const result = await wh.sql(
-          `SELECT count() as cnt FROM default.${table}`,
-        );
+        const result = await wh.sql(`SELECT count() as cnt FROM default.${table}`);
         expect(result.error).toBeNull();
         expect(result.data).toBeInstanceOf(Array);
       }

@@ -26,11 +26,11 @@ export interface WaveHouseError {
 // --- Filter operators ---
 
 /** SDK filter operators (translated to backend equivalents). */
-export type FilterOp = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'in' | 'like' | 'not_like';
+export type FilterOp = "=" | "!=" | ">" | ">=" | "<" | "<=" | "in" | "like" | "not_like";
 
 // --- Streaming types ---
 
-export type StreamStatus = 'connecting' | 'live' | 'reconnecting' | 'closed';
+export type StreamStatus = "connecting" | "live" | "reconnecting" | "closed";
 
 export interface StreamEvent<T = Record<string, unknown>> {
   table: string;
@@ -51,7 +51,7 @@ export interface StreamSubscriber<T = Record<string, unknown>> {
 
 // --- Client config ---
 
-export interface ClientConfig<DB extends Database = Database> {
+export interface ClientConfig<_DB extends Database = Database> {
   /** Base URL of the WaveHouse server (e.g. "http://localhost:8080"). */
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */
@@ -91,7 +91,7 @@ export interface QueryFilter {
 
 export interface OrderClause {
   column: string;
-  dir: 'asc' | 'desc';
+  dir: "asc" | "desc";
 }
 
 export interface TimeRange {

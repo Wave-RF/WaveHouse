@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { StreamController } from './controller.js';
-import type { StreamTransport } from './controller.js';
-import type { StreamEvent, StreamStatus, WaveHouseError } from '../types.js';
+import { describe, expect, it, vi } from "vitest";
+import type { StreamEvent, StreamStatus, WaveHouseError } from "../types.js";
+import type { StreamTransport } from "./controller.js";
+import { StreamController } from "./controller.js";
 
 function makeTransport<T = Record<string, unknown>>(): StreamTransport<T> & {
   fireEvent(e: StreamEvent<T>): void;
@@ -31,24 +31,32 @@ function makeTransport<T = Record<string, unknown>>(): StreamTransport<T> & {
   return t;
 }
 
-const event1: StreamEvent = { table: 'clicks', timestamp: '2024-01-01T00:00:00Z', data: { page: '/a' } };
-const event2: StreamEvent = { table: 'clicks', timestamp: '2024-01-01T00:00:01Z', data: { page: '/b' } };
+const event1: StreamEvent = {
+  table: "clicks",
+  timestamp: "2024-01-01T00:00:00Z",
+  data: { page: "/a" },
+};
+const event2: StreamEvent = {
+  table: "clicks",
+  timestamp: "2024-01-01T00:00:01Z",
+  data: { page: "/b" },
+};
 
-describe('StreamController', () => {
-  it('calls transport.connect() on construction', () => {
+describe("StreamController", () => {
+  it("calls transport.connect() on construction", () => {
     const t = makeTransport();
     new StreamController(t);
     expect(t.connect).toHaveBeenCalledOnce();
   });
 
-  it('initial status is connecting', () => {
+  it("initial status is connecting", () => {
     const t = makeTransport();
     const ctrl = new StreamController(t);
-    expect(ctrl.status).toBe('connecting');
+    expect(ctrl.status).toBe("connecting");
   });
 
-  describe('subscribe()', () => {
-    it('invokes next callback for each event', () => {
+  describe("subscribe()", () => {
+    it("invokes next callback for each event", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const next = vi.fn();
@@ -62,28 +70,28 @@ describe('StreamController', () => {
       expect(next).toHaveBeenCalledWith(event2);
     });
 
-    it('fires status callback immediately with current status', () => {
+    it("fires status callback immediately with current status", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const status = vi.fn();
 
       ctrl.subscribe({ next: vi.fn(), status });
-      expect(status).toHaveBeenCalledWith('connecting');
+      expect(status).toHaveBeenCalledWith("connecting");
     });
 
-    it('fires status callback on status changes', () => {
+    it("fires status callback on status changes", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const status = vi.fn();
 
       ctrl.subscribe({ next: vi.fn(), status });
-      t.fireStatus('live');
+      t.fireStatus("live");
 
-      expect(status).toHaveBeenCalledWith('live');
-      expect(ctrl.status).toBe('live');
+      expect(status).toHaveBeenCalledWith("live");
+      expect(ctrl.status).toBe("live");
     });
 
-    it('fires error callback', () => {
+    it("fires error callback", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const error = vi.fn();
@@ -91,8 +99,8 @@ describe('StreamController', () => {
       ctrl.subscribe({ next: vi.fn(), error });
       const err: WaveHouseError = {
         status: 0,
-        code: 'STREAM_ERROR',
-        message: 'Stream error',
+        code: "STREAM_ERROR",
+        message: "Stream error",
         retryable: true,
       };
       t.fireError(err);
@@ -100,7 +108,7 @@ describe('StreamController', () => {
       expect(error).toHaveBeenCalledWith(err);
     });
 
-    it('returns an unsubscribe function', () => {
+    it("returns an unsubscribe function", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const next = vi.fn();
@@ -113,7 +121,7 @@ describe('StreamController', () => {
       expect(next).toHaveBeenCalledTimes(1);
     });
 
-    it('auto-closes when last subscriber unsubscribes', () => {
+    it("auto-closes when last subscriber unsubscribes", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
 
@@ -123,7 +131,7 @@ describe('StreamController', () => {
       expect(t.disconnect).toHaveBeenCalled();
     });
 
-    it('delivers to multiple subscribers', () => {
+    it("delivers to multiple subscribers", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const next1 = vi.fn();
@@ -138,15 +146,15 @@ describe('StreamController', () => {
     });
   });
 
-  describe('close()', () => {
-    it('disconnects the transport', () => {
+  describe("close()", () => {
+    it("disconnects the transport", () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       ctrl.close();
       expect(t.disconnect).toHaveBeenCalled();
     });
 
-    it('resolves pending async iterator waiters with done', async () => {
+    it("resolves pending async iterator waiters with done", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const iter = ctrl[Symbol.asyncIterator]();
@@ -159,8 +167,8 @@ describe('StreamController', () => {
     });
   });
 
-  describe('async iterator', () => {
-    it('yields buffered events immediately', async () => {
+  describe("async iterator", () => {
+    it("yields buffered events immediately", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
 
@@ -176,7 +184,7 @@ describe('StreamController', () => {
       expect(r2.value).toEqual(event2);
     });
 
-    it('waits for future events', async () => {
+    it("waits for future events", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const iter = ctrl[Symbol.asyncIterator]();
@@ -191,7 +199,7 @@ describe('StreamController', () => {
       expect(result.done).toBe(false);
     });
 
-    it('returns done after close', async () => {
+    it("returns done after close", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const iter = ctrl[Symbol.asyncIterator]();
@@ -202,19 +210,19 @@ describe('StreamController', () => {
       expect(result.done).toBe(true);
     });
 
-    it('returns done when status is closed', async () => {
+    it("returns done when status is closed", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const iter = ctrl[Symbol.asyncIterator]();
 
       const promise = iter.next();
-      t.fireStatus('closed');
+      t.fireStatus("closed");
 
       const result = await promise;
       expect(result.done).toBe(true);
     });
 
-    it('return() closes the stream', async () => {
+    it("return() closes the stream", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const iter = ctrl[Symbol.asyncIterator]();
@@ -224,7 +232,7 @@ describe('StreamController', () => {
       expect(t.disconnect).toHaveBeenCalled();
     });
 
-    it('supports for-await-of pattern', async () => {
+    it("supports for-await-of pattern", async () => {
       const t = makeTransport();
       const ctrl = new StreamController(t);
       const received: StreamEvent[] = [];
@@ -233,7 +241,7 @@ describe('StreamController', () => {
       t.fireEvent(event1);
       t.fireEvent(event2);
       // Close after events are buffered so the loop terminates
-      t.fireStatus('closed');
+      t.fireStatus("closed");
 
       for await (const event of ctrl) {
         received.push(event);

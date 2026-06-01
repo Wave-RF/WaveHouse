@@ -1,5 +1,5 @@
-import type { StreamEvent, StreamStatus, WaveHouseError } from '../types.js';
-import type { StreamTransport } from './controller.js';
+import type { StreamEvent, StreamStatus, WaveHouseError } from "../types.js";
+import type { StreamTransport } from "./controller.js";
 
 export interface SSEOptions {
   baseURL: string;
@@ -26,9 +26,9 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   }
 
   connect(): void {
-    if (typeof EventSource === 'undefined') {
+    if (typeof EventSource === "undefined") {
       throw new Error(
-        '[wavehouse] EventSource is not available in this environment. ' +
+        "[wavehouse] EventSource is not available in this environment. " +
           "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`).",
       );
     }
@@ -49,7 +49,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       this._es = null;
       activeSSEConnections = Math.max(0, activeSSEConnections - 1);
     }
-    this.onStatus?.('closed');
+    this.onStatus?.("closed");
   }
 
   private async _doConnect(): Promise<void> {
@@ -71,7 +71,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     if (activeSSEConnections > SSE_WARN_THRESHOLD) {
       console.warn(
         `[wavehouse] ${activeSSEConnections} SSE connections open. ` +
-          `Browsers limit HTTP/1.1 to 6 connections per domain.`
+          `Browsers limit HTTP/1.1 to 6 connections per domain.`,
       );
     }
 

@@ -8,6 +8,9 @@
 //	cov merge             Merge whichever Go suites have covdata into
 //	                      tmp/coverage/total/, render, gate against
 //	                      threshold.total.
+//	cov ts-merge          Merge SDK vitest coverage (ts-unit + ts-e2e)
+//	                      via nyc into tmp/coverage/ts-total/, render
+//	                      HTML + summary, gate against suites.ts-total.
 //	cov threshold <suite> Print the configured threshold for <suite>
 //	                      (or "total"). Used by the SDK pipeline to
 //	                      pass into vitest's --coverage.thresholds.
@@ -37,10 +40,16 @@ const (
 	root       = "tmp/coverage"
 )
 
-// Suites whose covdata participates in the merged total. SDK coverage
-// is rendered separately by vitest (different toolchain, lcov format)
-// and surfaced in the merge output as informational only.
+// Go suites whose covdata participates in the merged Go total. SDK
+// coverage (ts-unit, ts-e2e) is rendered separately by vitest (different
+// toolchain, Istanbul JSON format) and merged via `cov ts-merge` —
+// see the ts-total path below.
 var goSuites = []string{"unit", "integration", "e2e"}
+
+// TypeScript SDK suites (vitest). ts-unit comes from clients/ts; ts-e2e
+// from tests/e2e/sdk run with --coverage. Both produce Istanbul-format
+// coverage-final.json that `cov ts-merge` combines into ts-total.
+var tsSuites = []string{"ts-unit", "ts-e2e"}
 
 type config struct {
 	LocalPrefix string `yaml:"local-prefix"`
@@ -104,6 +113,10 @@ func main() {
 		if err := merge(cfg); err != nil {
 			fatal("%v", err)
 		}
+	case "ts-merge":
+		if err := mergeTS(cfg); err != nil {
+			fatal("%v", err)
+		}
 	case "threshold":
 		if len(os.Args) < 3 {
 			usage()
@@ -115,7 +128,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cov render <suite> | merge | threshold <suite>")
+	fmt.Fprintln(os.Stderr, "usage: cov render <suite> | merge | ts-merge | threshold <suite>")
 	os.Exit(2)
 }
 
@@ -219,9 +232,13 @@ func merge(c *config) error {
 	for _, s := range goSuites {
 		fmt.Printf("  %s%-13s%s %s\n", cyan, s+":", reset, suitePct(c, s))
 	}
-	if pct := readSDKPct(); pct != "" {
-		fmt.Printf("  %s%-13s%s %s%%  %s(separate gate; not in merge above)%s\n",
-			cyan, "sdk:", reset, pct, yellow, reset)
+	// Surface TS SDK coverage alongside the Go total — informational only,
+	// not part of the Go merged number above. `make ts-cov` is the gate.
+	for _, s := range append(tsSuites, "ts-total") {
+		if pct := readTSPct(s); pct != "" {
+			fmt.Printf("  %s%-13s%s %s%%  %s(separate gate; not in merge above)%s\n",
+				cyan, s+":", reset, pct, yellow, reset)
+		}
 	}
 
 	threshold := c.Threshold.Total
@@ -246,6 +263,139 @@ func merge(c *config) error {
 	fmt.Printf("%s==> Total gate passed (%s ≥ %d%%)%s\n",
 		green, formatPct(covered, total), threshold, reset)
 	return nil
+}
+
+// mergeTS combines vitest's Istanbul-format coverage-final.json from
+// the ts-unit (clients/ts/) and ts-e2e (tests/e2e/sdk run with --coverage)
+// suites into one ts-total report. nyc handles the actual istanbul-merge
+// and re-rendering; we just orchestrate file layout + the threshold gate.
+//
+// Layout under tmp/coverage/:
+//
+//	ts-unit/coverage-final.json    ← `make ts-test`
+//	ts-e2e/coverage-final.json     ← `make test-e2e` (always collects now)
+//	ts-merge-input/                ← scratch dir (both renamed json files)
+//	ts-total/                      ← merged JSON + html + summary
+func mergeTS(c *config) error {
+	const (
+		unitDir  = "tmp/coverage/ts-unit"
+		e2eDir   = "tmp/coverage/ts-e2e"
+		inputDir = "tmp/coverage/ts-merge-input"
+		outDir   = "tmp/coverage/ts-total"
+	)
+
+	fmt.Printf("%s==> Merging SDK coverage (ts-unit + ts-e2e)...%s\n", cyan, reset)
+	var inputs []string
+	for _, src := range []struct{ name, dir string }{
+		{"ts-unit", unitDir},
+		{"ts-e2e", e2eDir},
+	} {
+		path := filepath.Join(src.dir, "coverage-final.json")
+		if _, err := os.Stat(path); err != nil {
+			fmt.Printf("  %s✗%s %-9s (no coverage-final.json; run `make %s` to include)\n",
+				yellow, reset, src.name, ternary(src.name == "ts-unit", "ts-test", "test-e2e"))
+			continue
+		}
+		inputs = append(inputs, path)
+		fmt.Printf("  %s✔%s %-9s %s\n", green, reset, src.name, path)
+	}
+	if len(inputs) == 0 {
+		return fmt.Errorf("no SDK coverage to merge — run `make ts-test` and/or `make test-e2e` first")
+	}
+
+	// Recreate the merge input dir so stale files from a previous run
+	// don't get re-merged. Copy each suite's coverage-final.json under
+	// a suite-named filename — nyc merges all *.json under input-dir.
+	if err := os.RemoveAll(inputDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(inputDir, 0o750); err != nil {
+		return err
+	}
+	for _, p := range inputs {
+		suite := filepath.Base(filepath.Dir(p)) // "ts-unit" or "ts-e2e"
+		dst := filepath.Join(inputDir, suite+".json")
+		if err := copyFile(p, dst); err != nil {
+			return fmt.Errorf("stage %s for merge: %w", suite, err)
+		}
+	}
+
+	if err := os.RemoveAll(outDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		return err
+	}
+
+	// nyc merge: combine every *.json under inputDir into one coverage-final.json.
+	mergedJSON := filepath.Join(outDir, "coverage-final.json")
+	if err := sh("pnpm", "exec", "nyc", "merge", inputDir, mergedJSON); err != nil {
+		return fmt.Errorf("nyc merge: %w", err)
+	}
+
+	// nyc report: render text/html/json-summary from the merged JSON.
+	// --temp-dir points at outDir (which now contains coverage-final.json);
+	// --report-dir is the same directory so html/summary land alongside.
+	if err := sh("pnpm", "exec", "nyc", "report",
+		"--temp-dir="+outDir,
+		"--report-dir="+outDir,
+		"--reporter=text",
+		"--reporter=html",
+		"--reporter=json-summary",
+	); err != nil {
+		return fmt.Errorf("nyc report: %w", err)
+	}
+
+	pct := readTSPct("ts-total")
+	if pct == "" {
+		return fmt.Errorf("no ts-total summary written by nyc report")
+	}
+	threshold := thresholdFor(c, "ts-total")
+	fmt.Printf("\n%s==> ts-total: %s%s%%%s  (threshold: %d%%)%s\n",
+		cyan, yellow, pct, reset, threshold, reset)
+	fmt.Printf("  HTML: %s/index.html\n\n", outDir)
+
+	// Compare as floats — pct is "47.08" (string from json-summary).
+	pctFloat, err := strconv.ParseFloat(pct, 64)
+	if err != nil {
+		return fmt.Errorf("parse pct %q: %w", pct, err)
+	}
+	if pctFloat+1e-9 < float64(threshold) {
+		fmt.Fprintf(os.Stderr, "%s==> ts-total gate FAILED (%s%% < %d%%)%s\n",
+			red, pct, threshold, reset)
+		return fmt.Errorf("ts-total gate failed: %s%% < %d%%", pct, threshold)
+	}
+	fmt.Printf("%s==> ts-total gate passed (%s%% ≥ %d%%)%s\n", green, pct, threshold, reset)
+	return nil
+}
+
+// ternary returns a if cond else b. Used inline to keep the merge log
+// branching from sprawling into a 5-line if/else.
+func ternary[T any](cond bool, a, b T) T {
+	if cond {
+		return a
+	}
+	return b
+}
+
+// copyFile streams src → dst, creating dst and overwriting if it exists.
+// Used to stage coverage-final.json files under suite-prefixed names
+// before nyc merge so the inputs land in one directory.
+func copyFile(src, dst string) error {
+	// #nosec G304 — src/dst are paths we compute inside the merge dirs.
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	// #nosec G304 — see above.
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+	_, err = out.ReadFrom(in)
+	return err
 }
 
 type pkgRow struct {
@@ -372,12 +522,14 @@ func printBreakdown(rows []pkgRow, threshold int) {
 	}
 }
 
-// readSDKPct returns the SDK's top-level statements.pct from vitest's
-// coverage-summary.json, or "" if the file is missing. We pluck a single
-// field with a regex rather than parsing the full JSON because vitest
-// emits the entire summary as one giant single-line record.
-func readSDKPct() string {
-	raw, err := os.ReadFile(filepath.Join(root, "sdk", "coverage-summary.json"))
+// readTSPct returns the top-level statements.pct from a vitest
+// coverage-summary.json at tmp/coverage/<suite>/coverage-summary.json,
+// or "" if the file is missing. We pluck a single field with a regex
+// rather than parsing the full JSON because vitest emits the entire
+// summary as one giant single-line record.
+func readTSPct(suite string) string {
+	// #nosec G304 — constant components, not user input.
+	raw, err := os.ReadFile(filepath.Join(root, suite, "coverage-summary.json"))
 	if err != nil {
 		return ""
 	}

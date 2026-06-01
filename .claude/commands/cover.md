@@ -12,7 +12,9 @@ Behavior:
 - **unit**: `make test-unit` (gates per-suite + writes `tmp/coverage/unit/`)
 - **integration**: `make test-integration` (requires Docker)
 - **e2e**: `make test-e2e` (requires Docker; orchestrator + cover binary)
-- **sdk**: `make test-sdk` (vitest)
+- **ts-unit**: `make ts-test` (SDK unit tests + coverage + gate)
+- **ts-e2e**: emitted as a side effect of `make test-e2e` (the orchestrator always passes `--coverage` to the e2e vitest run; informational only, no standalone gate)
+- **ts-total**: `make ts-cov` (merge of ts-unit + ts-e2e via `cov ts-merge` → gate against `suites.ts-total`)
 - **all**: `make test-all` (all four suites sequentially + `make cov`)
 
 After the run completes:

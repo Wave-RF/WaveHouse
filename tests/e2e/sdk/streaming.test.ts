@@ -1,6 +1,6 @@
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import type { Policy } from "@wavehouse/sdk";
-import { adminClient, publicClient, dataClient, testId, waitForCondition } from "./helpers.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { adminClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Streaming", () => {
   const admin = adminClient();
@@ -64,10 +64,7 @@ describe("Streaming", () => {
           duration_ms: 99,
         });
 
-        await waitForCondition(
-          () => receivedEvents.some((e) => e.data?.event_id === id),
-          10_000,
-        );
+        await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
 
         const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
         expect(matchedEvent).toBeDefined();
@@ -106,10 +103,7 @@ describe("Streaming", () => {
           duration_ms: 99,
         });
 
-        await waitForCondition(
-          () => receivedEvents.some((e) => e.data?.event_id === id),
-          10_000,
-        );
+        await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
 
         const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
         expect(matchedEvent).toBeDefined();
