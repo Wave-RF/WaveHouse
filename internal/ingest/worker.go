@@ -121,19 +121,25 @@ func StartIngestWorker(
 
 	stopFunc := func(shutdownCtx context.Context) error {
 		workerCancel()
-		done := make(chan struct{})
-		go func() {
-			worker.wg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			return nil
-		case <-shutdownCtx.Done():
-			return shutdownCtx.Err()
-		}
+		return waitOrDeadline(shutdownCtx, &worker.wg)
 	}
 	return stopFunc, nil
+}
+
+// waitOrDeadline returns nil once wg drains, or ctx.Err() if ctx fires first
+// (sync.WaitGroup has no context-aware Wait). In-flight goroutines aren't cancelled.
+func waitOrDeadline(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
@@ -313,25 +319,19 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		}
 	}
 
-	w.wg.Add(1) // Tell the main worker we have a background task running
-
-	go func() {
-		defer w.wg.Done()
-
+	// Ack in a tracked background goroutine; safe only because flush runs
+	// synchronously in runLoop (else wg.Go's Add races stopFunc's Wait).
+	w.wg.Go(func() {
 		var ackWg sync.WaitGroup
 		for _, pm := range msgs {
-			ackWg.Add(1)
-
-			go func(m jetstream.Msg) {
-				defer ackWg.Done()
-				if err := m.DoubleAck(context.WithoutCancel(ctx)); err != nil {
+			ackWg.Go(func() {
+				if err := pm.natsMsg.DoubleAck(context.WithoutCancel(ctx)); err != nil {
 					w.logger.ErrorContext(context.WithoutCancel(ctx), "double ack failed for processed message", "error", err, "table", tableName)
 				}
-			}(pm.natsMsg)
+			})
 		}
-
 		ackWg.Wait()
-	}()
+	})
 }
 
 func (w *IngestWorker) sendToDLQ(ctx context.Context, tableName string, pm parsedMsg, errMsg string) {
