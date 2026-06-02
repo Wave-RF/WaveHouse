@@ -7,6 +7,12 @@
   // tuned. Biome owns JS / TS / JSON; markdownlint owns Markdown — no overlap.
   // Driven from the root Makefile (`make lint` / `make fix`).
   //
+  // markdownlint checks Markdown *style* only — it does NOT resolve links or
+  // routes (it lints one file at a time, with no model of the site). Internal
+  // link + #fragment validation is owned by starlight-links-validator at
+  // `astro build` (CI, via `make ci` → build-docs), the single source of truth
+  // for broken links. See docs/astro.config.mjs.
+  //
   // NOTE: .mdx is intentionally NOT linted — markdownlint parses CommonMark, not
   // MDX's JSX/import syntax (docs/src/content/docs/index.mdx).
   "globs": ["**/*.md"],
