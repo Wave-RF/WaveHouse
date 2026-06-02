@@ -63,7 +63,7 @@ fi
 # gh pr edit --add-reviewer / --add-assignee is humans-only.
 if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+edit\b' \
    && printf '%s\n' "$stripped" | grep -qE '(^|[[:space:]])--(add|remove)-(reviewer|assignee)\b'; then
-  block "Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (@coderabbitai review, @gemini-code-assist /gemini review, @claude / /review)."
+  block "Adding/removing reviewers is humans-only. Re-trigger bot reviewers via PR comment mention (e.g. @coderabbitai review)."
 fi
 
 # gh api .../requested_reviewers write verbs (API form of --add-reviewer).
