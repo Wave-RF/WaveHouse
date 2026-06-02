@@ -319,7 +319,7 @@ func run() int {
 
 	// Build handlers.
 	js := embeddedMQ.JetStream()
-	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
 	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
@@ -376,13 +376,13 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
+		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
+		Logger:          logger,
 		JS:              js,
 		CORSOrigins:     cfg.Server.CORSAllowedOrigins,
-		LogLevel:        logLevel,
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,

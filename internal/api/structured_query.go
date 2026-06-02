@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -25,6 +26,7 @@ type StructuredQueryHandler struct {
 	BucketSecs      int
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
+	logger          *slog.Logger
 }
 
 func NewStructuredQueryHandler(
@@ -34,6 +36,7 @@ func NewStructuredQueryHandler(
 	policyStore *policy.Store,
 	bucketSecs int,
 	queryTimeout time.Duration,
+	logger *slog.Logger,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
 		CHConn:          conn,
@@ -42,6 +45,7 @@ func NewStructuredQueryHandler(
 		PolicyStore:     policyStore,
 		BucketSecs:      bucketSecs,
 		maxQueryTimeout: queryTimeout,
+		logger:          logger,
 	}
 }
 
@@ -70,7 +74,11 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	claims, _ := auth.ClaimsFromContext(r.Context())
 	perms := policy.Evaluate(p, role, table, "select", claims)
 	if !perms.Allowed {
-		writeAuthzDenied(w, r, role)
+		writeAuthzDenied(w, r, h.logger, role, nil,
+			slog.String("gate", "policy"),
+			slog.String("table", table),
+			slog.String("action", "select"),
+		)
 		return
 	}
 
