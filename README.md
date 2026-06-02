@@ -1,7 +1,7 @@
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/branding/wavehouse-mark-dark.svg">
-    <img src="docs/src/assets/branding/wavehouse-mark-light.svg" alt="" height="36" width="36">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/branding/mark-dark.svg">
+    <img src="docs/public/branding/mark-light.svg" alt="" height="36" width="36">
   </picture>
   WaveHouse
 </h1>

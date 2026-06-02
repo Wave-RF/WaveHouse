@@ -120,7 +120,7 @@ make clean-all         # Full reset: above + data/ + docker volumes
 make docs-dev          # Hot-reload Astro dev server on :4321
 make docs-build        # Production build → docs/dist/
 make docs-preview      # Wrangler preview of the production build (auto-builds if dist/ missing)
-make docs-branding     # Regenerate logo/favicon/OG assets from docs/scripts/branding/mark.svg
+make docs-branding     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
