@@ -252,13 +252,14 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:  &QueryHandler{},
-		SSE:    NewStreamHandler(hub, nil),
-		Health: &HealthHandler{},
-		Schema: NewSchemaHandler(reg),
-		AuthMW: func(next http.Handler) http.Handler { return next },
-		Logger: testutil.NopLogger(),
+		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:   &QueryHandler{},
+		SSE:     NewStreamHandler(hub, nil),
+		Health:  &HealthHandler{},
+		Version: NewVersionHandler("test", "test", "test"),
+		Schema:  NewSchemaHandler(reg),
+		AuthMW:  func(next http.Handler) http.Handler { return next },
+		Logger:  testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)
@@ -270,6 +271,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	}{
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
+		{http.MethodGet, "/version", http.StatusOK},
 		// Schema is admin-only (see TestNewRouter_SchemaAdminOnly); a roleless
 		// request is denied 403 — the route still exists, which is what this
 		// registration test asserts (not 404/405).
