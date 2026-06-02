@@ -6,6 +6,12 @@ import { defineConfig } from "vitest/config";
 // keeps the SDK package self-contained for one-off local coverage.
 const reportsDirectory = process.env.TS_UNIT_COVERAGE_DIR ?? "./coverage";
 
+// Under COV_DEFER (set by `make ci`/`test-all`), drop the console reporter
+// entirely — `make cov` (scripts/cov report) prints ONE consolidated table at
+// the end, so a per-file dump here would just be upstream noise. Standalone,
+// show a 4-line text-summary (full per-file detail lives in the HTML report).
+const quietConsole = !!process.env.COV_DEFER;
+
 export default defineConfig({
   test: {
     globals: true,
@@ -14,10 +20,12 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reportsDirectory,
-      // text → console summary; html → browsable report; json-summary →
-      // machine-readable totals; json → coverage-final.json consumed by
-      // `cov ts-merge` to merge SDK unit + e2e coverage into ts-total.
-      reporter: ["text", "html", "json-summary", "json"],
+      // html → browsable report; json-summary → machine-readable totals
+      // (pct read by `cov report`); json → coverage-final.json consumed by
+      // `cov ts-merge`/`report` to merge SDK unit + e2e into ts-total.
+      reporter: quietConsole
+        ? ["html", "json-summary", "json"]
+        : ["text-summary", "html", "json-summary", "json"],
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts"],
     },

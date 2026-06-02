@@ -127,6 +127,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.9.1
+      '@vitest/coverage-v8':
+        specifier: ^4.1.6
+        version: 4.1.7(vitest@4.1.7)
       eventsource:
         specifier: ^4.1.0
         version: 4.1.0

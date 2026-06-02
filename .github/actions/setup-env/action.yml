@@ -101,7 +101,7 @@ runs:
 
     # Playwright Chromium binary (~130 MB) lives outside the pnpm store at
     # ~/.cache/ms-playwright. Without this cache, every CI run cold-pulls
-    # Chromium during docs-install-playwright — adds 30-60s per run. Keyed
+    # Chromium during install-playwright-docs — adds 30-60s per run. Keyed
     # on docs/pnpm-lock.yaml since that's where the Playwright version is
     # locked. Closes the Playwright half of #132.
     - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5

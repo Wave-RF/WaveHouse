@@ -65,31 +65,31 @@ make tools             # Install pinned tools, Go modules, pnpm deps, and git ho
 make help              # Show all targets with descriptions
 
 # Static checks (parallel-safe: `make -j verify`)
-make fmt               # Check formatting (run `make fix` to apply)
+make fmt               # Check formatting across Go (gofumpt) + TS (Biome)
 make tidy              # Verify go.mod/go.sum are tidy (run `make fix` to apply)
-make lint              # golangci-lint run ./...
+make lint              # Lint across Go (golangci-lint) + TS (Biome)
 make vulncheck         # Run govulncheck (V=1 for full call stacks)
-make verify            # tidy + fmt + vulncheck + lint
-make fix               # Auto-apply: tidy + gofumpt + goimports + lint --fix
+make verify            # Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + tsc typecheck)
+make fix               # Auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS (Biome --write)
 
 # Build
 make build             # Compile wavehouse → bin/wavehouse (debug symbols kept)
 make build-release     # Stripped release-style build → bin/wavehouse-release
 make build-cover       # Coverage-instrumented build → bin/wavehouse-cov (used by E2E)
-make ts-build         # Build TypeScript SDK → clients/ts/dist/
+make build-ts         # Build TypeScript SDK → clients/ts/dist/
 
 # Test (each suite renders coverage and gates against .testcoverage.yml)
 make test              # Alias for test-unit
 make test-unit         # Go unit tests + coverage gate
 make test-integration  # Go integration tests (requires Docker) + coverage gate
-make ts-test          # SDK vitest unit tests + coverage gate against suites.ts-unit
-make ts-cov           # Merge ts-unit (from ts-test) + ts-e2e (from test-e2e) → ts-total + gate
+make test-ts          # SDK vitest unit tests + coverage + gate against suites.ts-unit
+                       # (`make cov` merges ts-unit + ts-e2e automatically — no separate command)
 make test-e2e          # E2E SDK suite against bin/wavehouse-cov + coverage gate
 make test-all          # All four suites sequentially + merged coverage gate
-make cov               # Merge whichever covdata exists + gate against total threshold
+make cov               # Merge whichever Go + TS coverage exists + gate against thresholds
 
 # CI
-make ci                # Phase 1 (parallel): verify + builds + test-unit + ts-test + subprojects-{verify,build} + docs-test
+make ci                # Phase 1 (parallel): verify + builds (Go + SDK + docs) + test-unit + test-ts
                        # Phase 2 (sequential): test-integration + test-e2e + cov
 
 # Analysis (informational, not in CI)
@@ -117,11 +117,11 @@ make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
 make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
 make clean-all         # Full reset: above + data/ + docker volumes
 
-# Docs site (Astro + Starlight in docs/, with its own Makefile)
-make docs-dev          # Hot-reload Astro dev server on :4321
-make docs-build        # Production build → docs/dist/
-make docs-preview      # Wrangler preview of the production build (auto-builds if dist/ missing)
-make docs-branding     # Regenerate logo/favicon/OG assets from docs/scripts/branding/mark.svg
+# Docs site (Astro + Starlight in docs/, driven via pnpm workspace filters)
+make dev-docs          # Hot-reload Astro dev server on :4321
+make build-docs        # Production build → docs/dist/
+make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
+make branding-docs     # Regenerate logo/favicon/OG assets from docs/scripts/branding/mark.svg
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
@@ -131,8 +131,8 @@ Tooling notes:
 
 - Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
 - `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
-- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/`, `tests/e2e/sdk/`, and `docs/`.
-- **Subproject Makefiles**: `docs/` has its own `Makefile` so the docs site is self-contained (`cd docs && make build` works directly). The root forwards every `docs-<name>` target via a pattern rule and aggregates the common verbs (`install`, `build`, `test`, `lint`, `verify`, `clean`) through `subprojects-<verb>` fan-outs — so `make ci`, `make tools`, etc. pick up new subprojects automatically. When extracting more subprojects (per-language SDKs, etc.), append the directory to `SUBPROJECTS` at the top of the root `Makefile` — no aggregator edits required.
+- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs a single root `pnpm install --frozen-lockfile`, which installs all three workspace packages (`clients/ts/`, `tests/e2e/sdk/`, `docs/`).
+- **Node workspace**: the SDK (`clients/ts/`, `@wavehouse/sdk`), E2E harness (`tests/e2e/sdk/`, `wavehouse-e2e`), and docs site (`docs/`, `wavehouse-docs`) are pnpm workspace packages, driven directly from the root `Makefile` via `pnpm --filter` — no sub-Makefiles. The user-facing targets are verb-first and live in their natural `make help` sections: `build-ts` / `dev-ts` / `test-ts` / `clean-ts` for the SDK, and `build-docs` / `dev-docs` / `preview-docs` / `branding-docs` / `clean-docs` (plus the hidden `install-playwright-docs` helper) for docs. TS formatting/linting is workspace-wide via Biome (one `biome.json`), invoked by `make fmt` / `make lint` / `make fix`.
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 - **Worktrunk** (`wt`) reads `.config/wt.toml`. On `wt switch --create <branch>`, post-start runs `wt step copy-ignored` (seeds `.bin/` + `node_modules/` from main) then `make tools` to finish bootstrap. Personal overrides in `~/.config/worktrunk/config.toml`.
 

@@ -9,7 +9,7 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
     const runId = testId();
 
     // TODO: remove when #192 is fixed
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
 
     // Get baseline DLQ stats before we pollute them
     const initialDlq = await admin.dlq.list();

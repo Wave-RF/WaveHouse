@@ -11,6 +11,13 @@
 //	cov ts-merge          Merge SDK vitest coverage (ts-unit + ts-e2e)
 //	                      via nyc into tmp/coverage/ts-total/, render
 //	                      HTML + summary, gate against suites.ts-total.
+//	cov merge-all         Run merge + ts-merge; skip either side with no
+//	                      data, but fail if BOTH are empty (i.e. `make cov`
+//	                      ran before any test target).
+//	cov report            Single consolidated summary: every suite + the
+//	                      merged Go-total and ts-total, each with its gate
+//	                      status + a clickable HTML report path, then one
+//	                      aggregate pass/fail. Backs `make cov`.
 //	cov threshold <suite> Print the configured threshold for <suite>
 //	                      (or "total"). Used by the SDK pipeline to
 //	                      pass into vitest's --coverage.thresholds.
@@ -28,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -117,6 +125,23 @@ func main() {
 		if err := mergeTS(cfg); err != nil {
 			fatal("%v", err)
 		}
+	case "merge-all":
+		// Run both sides, skipping whichever has no data — but fail if
+		// neither does, so a stray `make cov` (before any test target)
+		// doesn't look like a passing gate.
+		if !hasAnyCoverage() {
+			fatal("no coverage data anywhere — run the test targets (e.g. `make test-all`) before `make cov`")
+		}
+		if err := merge(cfg); err != nil {
+			fatal("%v", err)
+		}
+		if err := mergeTS(cfg); err != nil {
+			fatal("%v", err)
+		}
+	case "report":
+		if err := report(cfg); err != nil {
+			fatal("%v", err)
+		}
 	case "threshold":
 		if len(os.Args) < 3 {
 			usage()
@@ -128,7 +153,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cov render <suite> | merge | ts-merge | threshold <suite>")
+	fmt.Fprintln(os.Stderr, "usage: cov render <suite> | merge | ts-merge | merge-all | report | threshold <suite>")
 	os.Exit(2)
 }
 
@@ -162,25 +187,38 @@ func thresholdFor(c *config, suite string) int {
 	return 0
 }
 
-func renderSuite(c *config, suite string) error {
+// goSuiteCoverage renders a Go suite's covdata to txt + html and parses the
+// post-exclusion coverage. No printing or gating — it's the seam shared by
+// `render` (standalone: prints a per-package breakdown) and `report` (the
+// consolidated summary). Returns the rendered HTML path so callers can link
+// to the suite's drill-down report.
+func goSuiteCoverage(c *config, suite string) (rows []pkgRow, total, covered int, htmlOut string, err error) {
 	dir := filepath.Join(root, suite)
 	dataDir := filepath.Join(dir, "data")
 	if !hasCovdata(dataDir) {
-		return fmt.Errorf("no covdata in %s — did make test-%s run?", dataDir, suite)
+		return nil, 0, 0, "", fmt.Errorf("no covdata in %s — did make test-%s run?", dataDir, suite)
 	}
 	profile := filepath.Join(dir, "coverage.txt")
-	htmlOut := filepath.Join(dir, "coverage.html")
-	if err := sh("go", "tool", "covdata", "textfmt", "-i="+dataDir, "-o", profile); err != nil {
-		return err
+	htmlOut = filepath.Join(dir, "coverage.html")
+	if err = sh("go", "tool", "covdata", "textfmt", "-i="+dataDir, "-o", profile); err != nil {
+		return nil, 0, 0, "", err
 	}
-	if err := sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut); err != nil {
-		return err
+	if err = sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut); err != nil {
+		return nil, 0, 0, "", err
 	}
-	threshold := thresholdFor(c, suite)
-	rows, total, covered, err := parseCoverage(profile, c, c.excludesFor(suite))
+	rows, total, covered, err = parseCoverage(profile, c, c.excludesFor(suite))
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	return rows, total, covered, htmlOut, nil
+}
+
+func renderSuite(c *config, suite string) error {
+	rows, total, covered, htmlOut, err := goSuiteCoverage(c, suite)
 	if err != nil {
 		return err
 	}
+	threshold := thresholdFor(c, suite)
 	fmt.Printf("\n%s==> %s coverage: %s%s%s  (threshold: %d%%)%s\n\n",
 		cyan, suite, yellow, formatPct(covered, total), reset, threshold, reset)
 	printBreakdown(rows, threshold)
@@ -193,6 +231,24 @@ func renderSuite(c *config, suite string) error {
 	}
 	fmt.Printf("%s==> %s gate passed (≥ %d%%)%s\n", green, suite, threshold, reset)
 	return nil
+}
+
+// hasAnyCoverage reports whether at least one suite has data to merge — any
+// Go covdata dir or any TS coverage-final.json. merge-all uses it to tell
+// "one side legitimately absent" (skip, fine) from "nothing ran at all"
+// (fail, because the caller expected a gate).
+func hasAnyCoverage() bool {
+	for _, s := range goSuites {
+		if hasCovdata(filepath.Join(root, s, "data")) {
+			return true
+		}
+	}
+	for _, s := range tsSuites {
+		if _, err := os.Stat(filepath.Join(root, s, "coverage-final.json")); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func merge(c *config) error {
@@ -212,7 +268,8 @@ func merge(c *config) error {
 		}
 	}
 	if len(dirs) == 0 {
-		return fmt.Errorf("no coverage data; run make test-all first")
+		fmt.Printf("  %sno Go coverage data — skipping Go merge%s\n", yellow, reset)
+		return nil
 	}
 
 	totalDir := filepath.Join(root, "total")
@@ -233,7 +290,7 @@ func merge(c *config) error {
 		fmt.Printf("  %s%-13s%s %s\n", cyan, s+":", reset, suitePct(c, s))
 	}
 	// Surface TS SDK coverage alongside the Go total — informational only,
-	// not part of the Go merged number above. `make ts-cov` is the gate.
+	// not part of the Go merged number above. `make cov` is the gate.
 	for _, s := range append(tsSuites, "ts-total") {
 		if pct := readTSPct(s); pct != "" {
 			fmt.Printf("  %s%-13s%s %s%%  %s(separate gate; not in merge above)%s\n",
@@ -265,85 +322,105 @@ func merge(c *config) error {
 	return nil
 }
 
-// mergeTS combines vitest's Istanbul-format coverage-final.json from
-// the ts-unit (clients/ts/) and ts-e2e (tests/e2e/sdk run with --coverage)
-// suites into one ts-total report. nyc handles the actual istanbul-merge
-// and re-rendering; we just orchestrate file layout + the threshold gate.
+// mergeTSArtifacts stages the present TS suites' coverage-final.json under a
+// scratch dir and runs `nyc merge` + `nyc report` to produce the merged
+// ts-total report (coverage-final.json plus the requested reporters, e.g.
+// "html", "json-summary", "text"). It returns the suite names that were
+// merged (nil if neither had data). No printing or gating — the seam shared
+// by `ts-merge` (standalone) and `report` (consolidated summary).
 //
 // Layout under tmp/coverage/:
 //
-//	ts-unit/coverage-final.json    ← `make ts-test`
-//	ts-e2e/coverage-final.json     ← `make test-e2e` (always collects now)
+//	ts-unit/coverage-final.json    ← `make test-ts`
+//	ts-e2e/coverage-final.json     ← `make test-e2e`
 //	ts-merge-input/                ← scratch dir (both renamed json files)
-//	ts-total/                      ← merged JSON + html + summary
-func mergeTS(c *config) error {
+//	ts-total/                      ← merged JSON + requested reports
+func mergeTSArtifacts(reporters ...string) (merged []string, err error) {
 	const (
-		unitDir  = "tmp/coverage/ts-unit"
-		e2eDir   = "tmp/coverage/ts-e2e"
 		inputDir = "tmp/coverage/ts-merge-input"
 		outDir   = "tmp/coverage/ts-total"
 	)
 
-	fmt.Printf("%s==> Merging SDK coverage (ts-unit + ts-e2e)...%s\n", cyan, reset)
 	var inputs []string
-	for _, src := range []struct{ name, dir string }{
-		{"ts-unit", unitDir},
-		{"ts-e2e", e2eDir},
-	} {
-		path := filepath.Join(src.dir, "coverage-final.json")
-		if _, err := os.Stat(path); err != nil {
-			fmt.Printf("  %s✗%s %-9s (no coverage-final.json; run `make %s` to include)\n",
-				yellow, reset, src.name, ternary(src.name == "ts-unit", "ts-test", "test-e2e"))
+	for _, name := range tsSuites { // ts-unit, ts-e2e
+		path := filepath.Join(root, name, "coverage-final.json")
+		if _, statErr := os.Stat(path); statErr != nil {
 			continue
 		}
 		inputs = append(inputs, path)
-		fmt.Printf("  %s✔%s %-9s %s\n", green, reset, src.name, path)
+		merged = append(merged, name)
 	}
 	if len(inputs) == 0 {
-		return fmt.Errorf("no SDK coverage to merge — run `make ts-test` and/or `make test-e2e` first")
+		return nil, nil
 	}
 
 	// Recreate the merge input dir so stale files from a previous run
 	// don't get re-merged. Copy each suite's coverage-final.json under
 	// a suite-named filename — nyc merges all *.json under input-dir.
-	if err := os.RemoveAll(inputDir); err != nil {
-		return err
+	if err = os.RemoveAll(inputDir); err != nil {
+		return nil, err
 	}
-	if err := os.MkdirAll(inputDir, 0o750); err != nil {
-		return err
+	if err = os.MkdirAll(inputDir, 0o750); err != nil {
+		return nil, err
 	}
 	for _, p := range inputs {
 		suite := filepath.Base(filepath.Dir(p)) // "ts-unit" or "ts-e2e"
 		dst := filepath.Join(inputDir, suite+".json")
-		if err := copyFile(p, dst); err != nil {
-			return fmt.Errorf("stage %s for merge: %w", suite, err)
+		if err = copyFile(p, dst); err != nil {
+			return nil, fmt.Errorf("stage %s for merge: %w", suite, err)
 		}
 	}
 
-	if err := os.RemoveAll(outDir); err != nil {
-		return err
+	if err = os.RemoveAll(outDir); err != nil {
+		return nil, err
 	}
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
-		return err
+	if err = os.MkdirAll(outDir, 0o750); err != nil {
+		return nil, err
 	}
 
 	// nyc merge: combine every *.json under inputDir into one coverage-final.json.
+	// Quiet — nyc prints a "coverage files … merged into …" line to stdout we
+	// don't want above the report table.
 	mergedJSON := filepath.Join(outDir, "coverage-final.json")
-	if err := sh("pnpm", "exec", "nyc", "merge", inputDir, mergedJSON); err != nil {
-		return fmt.Errorf("nyc merge: %w", err)
+	if err = shQuiet("pnpm", "exec", "nyc", "merge", inputDir, mergedJSON); err != nil {
+		return nil, fmt.Errorf("nyc merge: %w", err)
 	}
 
-	// nyc report: render text/html/json-summary from the merged JSON.
-	// --temp-dir points at outDir (which now contains coverage-final.json);
-	// --report-dir is the same directory so html/summary land alongside.
-	if err := sh("pnpm", "exec", "nyc", "report",
-		"--temp-dir="+outDir,
-		"--report-dir="+outDir,
-		"--reporter=text",
-		"--reporter=html",
-		"--reporter=json-summary",
-	); err != nil {
-		return fmt.Errorf("nyc report: %w", err)
+	// nyc report: render the requested reporters from the merged JSON.
+	// --temp-dir points at outDir (which now holds coverage-final.json);
+	// --report-dir is the same directory so reports land alongside.
+	args := []string{"exec", "nyc", "report", "--temp-dir=" + outDir, "--report-dir=" + outDir}
+	for _, r := range reporters {
+		args = append(args, "--reporter="+r)
+	}
+	if err = sh("pnpm", args...); err != nil {
+		return nil, fmt.Errorf("nyc report: %w", err)
+	}
+	return merged, nil
+}
+
+// mergeTS combines the ts-unit + ts-e2e Istanbul coverage into one ts-total
+// report (text + html + json-summary) and gates it against suites.ts-total.
+// mergeTSArtifacts does the istanbul merge + re-render; this wraps it with
+// the standalone command's per-suite log + threshold gate.
+func mergeTS(c *config) error {
+	fmt.Printf("%s==> Merging SDK coverage (ts-unit + ts-e2e)...%s\n", cyan, reset)
+	merged, err := mergeTSArtifacts("text", "html", "json-summary")
+	if err != nil {
+		return err
+	}
+	for _, name := range tsSuites {
+		if slices.Contains(merged, name) {
+			fmt.Printf("  %s✔%s %-9s %s\n", green, reset, name,
+				filepath.Join(root, name, "coverage-final.json"))
+		} else {
+			fmt.Printf("  %s✗%s %-9s (no coverage-final.json; run `make %s` to include)\n",
+				yellow, reset, name, ternary(name == "ts-unit", "test-ts", "test-e2e"))
+		}
+	}
+	if len(merged) == 0 {
+		fmt.Printf("  %sno TS coverage data — skipping ts-merge (run `make test-ts` and/or `make test-e2e` to populate)%s\n", yellow, reset)
+		return nil
 	}
 
 	pct := readTSPct("ts-total")
@@ -353,14 +430,9 @@ func mergeTS(c *config) error {
 	threshold := thresholdFor(c, "ts-total")
 	fmt.Printf("\n%s==> ts-total: %s%s%%%s  (threshold: %d%%)%s\n",
 		cyan, yellow, pct, reset, threshold, reset)
-	fmt.Printf("  HTML: %s/index.html\n\n", outDir)
+	fmt.Printf("  HTML: %s/index.html\n\n", filepath.Join(root, "ts-total"))
 
-	// Compare as floats — pct is "47.08" (string from json-summary).
-	pctFloat, err := strconv.ParseFloat(pct, 64)
-	if err != nil {
-		return fmt.Errorf("parse pct %q: %w", pct, err)
-	}
-	if pctFloat+1e-9 < float64(threshold) {
+	if !tsMeetsThreshold(pct, threshold) {
 		fmt.Fprintf(os.Stderr, "%s==> ts-total gate FAILED (%s%% < %d%%)%s\n",
 			red, pct, threshold, reset)
 		return fmt.Errorf("ts-total gate failed: %s%% < %d%%", pct, threshold)
@@ -368,6 +440,190 @@ func mergeTS(c *config) error {
 	fmt.Printf("%s==> ts-total gate passed (%s%% ≥ %d%%)%s\n", green, pct, threshold, reset)
 	return nil
 }
+
+// tsMeetsThreshold compares a vitest/nyc json-summary pct string ("47.08")
+// against an integer floor, with a tiny epsilon so 40.00 clears a 40 gate.
+func tsMeetsThreshold(pctStr string, threshold int) bool {
+	f, err := strconv.ParseFloat(pctStr, 64)
+	if err != nil {
+		return false
+	}
+	return f+1e-9 >= float64(threshold)
+}
+
+// presentGoSuites returns the Go suites that have covdata, in goSuites order.
+func presentGoSuites() []string {
+	var present []string
+	for _, s := range goSuites {
+		if hasCovdata(filepath.Join(root, s, "data")) {
+			present = append(present, s)
+		}
+	}
+	return present
+}
+
+// goTotalCoverage merges the given suites' covdata into tmp/coverage/total
+// (txt + html) and parses the merged profile with global excludes only —
+// the project-wide number gated by threshold.total. No printing/gating.
+func goTotalCoverage(c *config, present []string) (rows []pkgRow, total, covered int, htmlOut string, err error) {
+	dirs := make([]string, 0, len(present))
+	for _, s := range present {
+		dirs = append(dirs, filepath.Join(root, s, "data"))
+	}
+	totalDir := filepath.Join(root, "total")
+	if err = os.MkdirAll(totalDir, 0o750); err != nil {
+		return nil, 0, 0, "", err
+	}
+	profile := filepath.Join(totalDir, "coverage.txt")
+	htmlOut = filepath.Join(totalDir, "coverage.html")
+	if err = sh("go", "tool", "covdata", "textfmt", "-i="+strings.Join(dirs, ","), "-o", profile); err != nil {
+		return nil, 0, 0, "", err
+	}
+	if err = sh("go", "tool", "cover", "-html="+profile, "-o", htmlOut); err != nil {
+		return nil, 0, 0, "", err
+	}
+	rows, total, covered, err = parseCoverage(profile, c, c.excludesFor(""))
+	if err != nil {
+		return nil, 0, 0, "", err
+	}
+	return rows, total, covered, htmlOut, nil
+}
+
+// reportRow is one line in the consolidated `cov report` table.
+type reportRow struct {
+	name   string // suite name, or "Go total" / "ts-total"
+	pct    string // "85.1" / "n/a"
+	gated  bool   // false → informational (never fails the build)
+	thresh int
+	pass   bool
+	html   string // HTML report path (relative), or "" if none
+	rule   bool   // draw a separator line above this row (group/total boundary)
+}
+
+// report renders ONE consolidated coverage summary — every suite plus the
+// merged Go-total and ts-total, each with its gate status and a clickable
+// HTML report path — then a single aggregate pass/fail. It generates every
+// artifact it needs (per-suite html, merged Go profile, nyc ts-total), so it
+// stands alone at the end of `make ci` whether or not the per-suite test
+// targets rendered inline. This backs `make cov`.
+func report(c *config) error {
+	if !hasAnyCoverage() {
+		return fmt.Errorf("no coverage data anywhere — run the test targets (e.g. `make test-all`) before `make cov`")
+	}
+
+	var rows []reportRow
+
+	// --- Go suites + merged Go total ---
+	present := presentGoSuites()
+	for _, s := range goSuites {
+		if !slices.Contains(present, s) {
+			rows = append(rows, reportRow{name: s, pct: "n/a"})
+			continue
+		}
+		_, total, covered, html, err := goSuiteCoverage(c, s)
+		if err != nil {
+			return err
+		}
+		th := thresholdFor(c, s)
+		rows = append(rows, reportRow{
+			name: s, pct: formatPctBare(covered, total), gated: true, thresh: th,
+			pass: meetsThreshold(covered, total, th), html: html,
+		})
+	}
+	if len(present) > 0 {
+		_, total, covered, html, err := goTotalCoverage(c, present)
+		if err != nil {
+			return err
+		}
+		th := c.Threshold.Total
+		rows = append(rows, reportRow{
+			name: "Go total", pct: formatPctBare(covered, total), gated: true, thresh: th,
+			pass: meetsThreshold(covered, total, th), html: html, rule: true,
+		})
+	}
+
+	// --- TS suites + merged ts-total ---
+	merged, err := mergeTSArtifacts("html", "json-summary")
+	if err != nil {
+		return err
+	}
+	if len(merged) > 0 {
+		for i, s := range tsSuites {
+			th := thresholdFor(c, s)
+			row := reportRow{name: s, pct: readTSPct(s), html: tsHTML(s), rule: i == 0}
+			switch {
+			case row.pct == "":
+				row.pct = "n/a"
+			case th > 0: // ts-e2e threshold is 0 = informational
+				row.gated, row.thresh, row.pass = true, th, tsMeetsThreshold(row.pct, th)
+			}
+			rows = append(rows, row)
+		}
+		th := thresholdFor(c, "ts-total")
+		pct := readTSPct("ts-total")
+		rows = append(rows, reportRow{
+			name: "ts-total", pct: pct, gated: true, thresh: th,
+			pass: tsMeetsThreshold(pct, th), html: tsHTML("ts-total"), rule: true,
+		})
+	}
+
+	printReport(rows)
+
+	var failed []string
+	for _, r := range rows {
+		if r.gated && !r.pass {
+			failed = append(failed, r.name)
+		}
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(os.Stderr, "%s==> Coverage gate FAILED: %s%s\n", red, strings.Join(failed, ", "), reset)
+		return fmt.Errorf("coverage gate failed: %s", strings.Join(failed, ", "))
+	}
+	fmt.Printf("%s==> All coverage gates passed%s\n", green, reset)
+	return nil
+}
+
+// printReport prints the consolidated suite table. Columns: suite, coverage,
+// minimum (gate floor), a ✓/✗/· status glyph, and the HTML report path. Rows
+// flagged with rule get a separator above them (Go total, ts group, ts-total).
+func printReport(rows []reportRow) {
+	fmt.Printf("\n%s==> Coverage — all suites%s\n\n", cyan, reset)
+	fmt.Printf("  %-12s %7s  %-5s %s\n", "Suite", "Cover", "Min", "Report")
+	rule := "  " + strings.Repeat("─", 78)
+	fmt.Println(rule)
+	for _, r := range rows {
+		if r.rule {
+			fmt.Println(rule)
+		}
+		cov := r.pct
+		if cov != "n/a" {
+			cov += "%"
+		}
+		var glyph, floor, color string
+		switch {
+		case !r.gated:
+			glyph, floor, color = "·", "-", yellow
+		case r.pass:
+			glyph, floor, color = "✓", fmt.Sprintf(">=%d", r.thresh), green
+		default:
+			glyph, floor, color = "✗", fmt.Sprintf(">=%d", r.thresh), red
+		}
+		fmt.Printf("  %-12s %7s  %s%-5s %s%s  %s\n",
+			r.name, cov, color, floor, glyph, reset, r.html)
+	}
+	fmt.Println()
+}
+
+// formatPctBare is formatPct without the trailing % ("85.1"), or "n/a".
+func formatPctBare(covered, total int) string {
+	if total == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f", float64(covered)*100.0/float64(total))
+}
+
+// tsHTML is the vitest/nyc HTML report path for a TS suite.
+func tsHTML(suite string) string { return filepath.Join(root, suite, "index.html") }
 
 // ternary returns a if cond else b. Used inline to keep the merge log
 // branching from sprawling into a 5-line if/else.
@@ -597,6 +853,17 @@ func meetsThreshold(covered, total, threshold int) bool {
 func sh(name string, args ...string) error {
 	cmd := exec.CommandContext(context.Background(), name, args...)
 	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// shQuiet is sh with stdout discarded (stderr still wired through) — for
+// tools that print chatter to stdout we don't want in the report, e.g.
+// `nyc merge` announcing the merged-file path. Leaving cmd.Stdout nil
+// connects the child's stdout to the null device (os/exec semantics).
+// #nosec G204,G702 — name and args are not user input.
+func shQuiet(name string, args ...string) error {
+	cmd := exec.CommandContext(context.Background(), name, args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }

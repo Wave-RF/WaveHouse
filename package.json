@@ -9,7 +9,7 @@
   "scripts": {
     "format": "biome format .",
     "lint": "biome lint .",
-    "check": "biome check .",
+    "check": "biome check --error-on-warnings .",
     "fix": "biome check --write ."
   },
   "devDependencies": {

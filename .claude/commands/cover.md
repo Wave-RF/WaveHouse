@@ -8,13 +8,13 @@ Generate the coverage report and surface anything below threshold from `.testcov
 Suite to run: $ARGUMENTS
 
 Behavior:
-- **no argument or "merge"**: just `make cov` (merges whatever covdata exists in `tmp/coverage/*/data/` and gates against `threshold.total`)
+- **no argument or "merge"**: just `make cov` (merges whatever Go + TS coverage exists under `tmp/coverage/` and gates against the thresholds)
 - **unit**: `make test-unit` (gates per-suite + writes `tmp/coverage/unit/`)
 - **integration**: `make test-integration` (requires Docker)
 - **e2e**: `make test-e2e` (requires Docker; orchestrator + cover binary)
-- **ts-unit**: `make ts-test` (SDK unit tests + coverage + gate)
+- **ts-unit**: `make test-ts` (SDK unit tests + coverage + gate against `suites.ts-unit`)
 - **ts-e2e**: emitted as a side effect of `make test-e2e` (the orchestrator always passes `--coverage` to the e2e vitest run; informational only, no standalone gate)
-- **ts-total**: `make ts-cov` (merge of ts-unit + ts-e2e via `cov ts-merge` → gate against `suites.ts-total`)
+- **ts-total**: `make cov` (runs `cov report` — one consolidated Go + TS summary with per-suite HTML links + all gates; fails if *no* suite has data)
 - **all**: `make test-all` (all four suites sequentially + `make cov`)
 
 After the run completes:

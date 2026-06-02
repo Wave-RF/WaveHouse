@@ -188,8 +188,17 @@ func run() error {
 	// test-integration` (which always use Go's -cover). TS_E2E_COVERAGE_DIR
 	// is forwarded from the calling environment so reports land at
 	// tmp/coverage/ts-e2e/ for `cov ts-merge` to pick up.
+	//
+	// Call the vitest binary directly via `pnpm exec` rather than `pnpm run
+	// test -- --coverage`. The npm-style `--` separator does NOT survive pnpm
+	// 11: it forwards the literal `--` to the script, so vitest receives
+	// `vitest run -- --coverage` and parses --coverage as a trailing operand
+	// (coverage stays OFF, tests pass, no report is written — silently). Going
+	// straight to `pnpm exec vitest run --coverage` skips the script-arg
+	// forwarding layer entirely, matching how scripts/cov invokes `pnpm exec
+	// nyc`.
 	// #nosec G204 — args are a fixed string slice, not user input.
-	vitest := exec.CommandContext(ctx, "pnpm", "run", "test", "--", "--coverage")
+	vitest := exec.CommandContext(ctx, "pnpm", "exec", "vitest", "run", "--coverage")
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")
 	vitest.Env = append(os.Environ(),
 		"WAVEHOUSE_URL="+whURL,
