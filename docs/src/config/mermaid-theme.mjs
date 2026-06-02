@@ -74,7 +74,8 @@ export const mermaidTheme = {
 
   // Baked hex (exactly as Mermaid serializes them) → runtime CSS variable.
   // LHS must match themeVariables/classDefs above; RHS are defined in global.css.
-  colorReplacements: [
+  // Cast: TS widens the literal to string[][]; the plugin wants [string, string][].
+  colorReplacements: /** @type {[string, string][]} */ ([
     // base theme tokens
     ["#14171C", "var(--wh-mermaid-surface)"],
     ["#F1F3F7", "var(--wh-mermaid-ink)"],
@@ -99,7 +100,7 @@ export const mermaidTheme = {
     ["#94a3b8", "var(--wh-mermaid-neutral-border)"],
     ["#334155", "var(--wh-mermaid-infra-bg)"],
     ["#64748b", "var(--wh-mermaid-infra-border)"],
-  ],
+  ]),
 
   flowchart: {
     curve: "basis",
