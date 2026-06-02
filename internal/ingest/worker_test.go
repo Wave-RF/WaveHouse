@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -846,4 +847,88 @@ func TestFlush_StripsIngestPrefixFromSubject(t *testing.T) {
 	keys := cache.GetKeys()
 	assert.Contains(t, keys, "events", "table version key must be present")
 	assert.Contains(t, keys, "events.org_42", "NATS-safe subject (sans ingest. prefix) must be invalidated")
+}
+
+func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
+	t.Parallel()
+
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
+
+	// CH stub: count rows (newlines in the JSONEachRow body) per target table.
+	var (
+		mu          sync.Mutex
+		rowsByTable = map[string]int{}
+	)
+	chSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		table := r.URL.Query().Get("param_target_table")
+		mu.Lock()
+		rowsByTable[table] += bytes.Count(body, []byte("\n"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(chSrv.Close)
+
+	u, err := url.Parse(chSrv.URL)
+	require.NoError(t, err)
+	host, port, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+
+	js, err := jetstream.New(emb.NatsConn())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
+		Durable:       BufferConsumerName,
+		FilterSubject: "ingest.>",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		MaxAckPending: 1000,
+	})
+	require.NoError(t, err)
+
+	worker := &IngestWorker{
+		js:         js,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cache:      &testutil.MockCache{},
+		logger:     testutil.NopLogger(),
+		chURL:      fmt.Sprintf("http://%s:%s", host, port),
+		user:       "u",
+		password:   "p",
+		db:         "db",
+	}
+	worker.wg.Add(1)
+	go worker.runLoop(ctx, cons)
+	t.Cleanup(func() {
+		cancel()
+		worker.wg.Wait()
+	})
+
+	// 1. Prime table A — too few events to hit either trigger on its own.
+	for i := range 5 {
+		_, err = js.Publish(ctx, "ingest.tableA",
+			makeEnvelope(t, "tableA", "", map[string]any{"id": i}))
+		require.NoError(t, err)
+	}
+
+	// 2. Then publish exactly maxBatch events to table B — should hit B's
+	//    own size trigger and flush immediately, regardless of what A did.
+	for i := range 500 {
+		_, err = js.Publish(ctx, "ingest.tableB",
+			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
+		require.NoError(t, err)
+	}
+
+	// All B rows must reach ClickHouse within maxWait − epsilon.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return rowsByTable["tableB"] >= 500
+	}, 5*time.Second, 25*time.Millisecond,
+		"table B should flush 500 rows within 5s of being published "+
+			"(table A's prior events must not strand B rows in a batch "+
+			"that waits for the maxWait timer)",
+	)
 }
