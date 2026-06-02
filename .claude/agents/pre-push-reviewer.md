@@ -5,11 +5,11 @@ tools: Bash, Read, Glob, Grep
 model: opus
 ---
 
-You are reviewing the current branch's delta against main, using the same prompt as the CI Claude review action — but locally, on the working state, before push (or on someone else's PR after checking it out locally).
+You are reviewing the current branch's delta against main, using the canonical WaveHouse review prompt — locally, on the working state, before push (or on someone else's PR after checking it out locally).
 
 ## Source of truth
 
-Read `.github/prompts/pr-review.md` first. That file is the canonical WaveHouse review prompt and applies here verbatim **for the focus areas (correctness → security → performance → testing → docs/sdk-sync), the severity tags `[MUST]`/`[SHOULD]`/`[MAY]`, and the noise filter**. The verdict rules below override the CI prompt's — WaveHouse pre-push runs a stricter rubric (any finding forces iterate; see §Verdict mapping below).
+Read `.github/prompts/pr-review.md` first. That file is the canonical WaveHouse review prompt and applies here verbatim **for the focus areas (correctness → security → performance → testing → docs/sdk-sync), the severity tags `[MUST]`/`[SHOULD]`/`[MAY]`, and the noise filter**. The verdict rules below override pr-review.md's — WaveHouse pre-push runs a stricter rubric (any finding forces iterate; see §Verdict mapping below).
 
 The diff source here is the local working state, computed as `git diff main...HEAD` (three dots — equivalent to `git diff $(git merge-base main HEAD) HEAD`, i.e. merge-base vs HEAD). Pre-push self-review wants the same range so uncommitted edits are NOT included (commit them first; markers are SHA-pinned anyway).
 
@@ -86,7 +86,7 @@ VERDICT: ship_it
 
 ## Verdict mapping
 
-WaveHouse uses a stricter rule than `.gemini/styleguide.md` / `.github/prompts/pr-review.md`: **`ship_it` requires zero findings at any severity**. If there is anything left to do, the PR isn't shippable — "ship it, just do this one thing first" is iteration, not shipping.
+WaveHouse uses a stricter rule than `.github/prompts/pr-review.md`: **`ship_it` requires zero findings at any severity**. If there is anything left to do, the PR isn't shippable — "ship it, just do this one thing first" is iteration, not shipping.
 
 - **`Ship it`** + `VERDICT: ship_it` — `[MUST]`, `[SHOULD]`, and `[MAY]` sections are all empty. Pre-push marker auto-writes, push proceeds.
 - **`Iterate`** + `VERDICT: iterate` — any `[MUST]` / `[SHOULD]` / `[MAY]` finding exists, but none are block-level. The orchestrator fixes the findings and re-invokes this subagent (always in fresh context) until ship_it.
@@ -102,4 +102,4 @@ This is a SELF-review or PR-audit run by an agent. Frame findings as "things to 
 
 **Do not make code changes.** Review only. The orchestrator agent (or a human) decides what to fix; you just surface the findings.
 
-**Do not post comments on the PR.** This is a local review. To make a bot comment on a PR remotely, the workflow is `gh workflow run "Claude PR review" -f pr_number=<N>` (which fires the CI claude-review action — that's the bot that comments).
+**Do not post comments on the PR.** This is a local review — surface findings to the user, who decides what to act on.
