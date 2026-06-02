@@ -38,8 +38,17 @@ type IngestWorker struct {
 	user       string
 	password   string
 	db         string
+	maxBatch   int
+	maxWait    time.Duration
 	wg         sync.WaitGroup
 }
+
+// Production defaults; overridable on the struct for tests.
+// TODO: eventually make this configurable not just in tests
+const (
+	defaultMaxBatch = 500
+	defaultMaxWait  = 5 * time.Second
+)
 
 func StartIngestWorker(
 	ctx context.Context, nc *nats.Conn, cache cache.Cache,
@@ -100,6 +109,8 @@ func StartIngestWorker(
 		user:     chUser,
 		password: chPassword,
 		db:       chDB,
+		maxBatch: defaultMaxBatch,
+		maxWait:  defaultMaxWait,
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
@@ -128,10 +139,7 @@ func StartIngestWorker(
 func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 	defer w.wg.Done()
 
-	const maxBatch = 500
-	const maxWait = 5 * time.Second
-
-	msgChan := make(chan jetstream.Msg, maxBatch*2)
+	msgChan := make(chan jetstream.Msg, w.maxBatch*2)
 
 	// Push-based consumer (much faster/more efficient than iterators)
 	consumeCtx, err := cons.Consume(func(msg jetstream.Msg) {
@@ -144,7 +152,7 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 	defer consumeCtx.Stop()
 
 	var batch []jetstream.Msg
-	timer := time.NewTimer(maxWait)
+	timer := time.NewTimer(w.maxWait)
 	if !timer.Stop() {
 		<-timer.C
 	}
@@ -159,10 +167,10 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 			batch = nil
 		case m := <-msgChan:
 			if len(batch) == 0 {
-				timer.Reset(maxWait)
+				timer.Reset(w.maxWait)
 			}
 			batch = append(batch, m)
-			if len(batch) >= maxBatch {
+			if len(batch) >= w.maxBatch {
 				if !timer.Stop() {
 					select {
 					case <-timer.C:

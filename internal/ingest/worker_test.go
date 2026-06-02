@@ -852,6 +852,16 @@ func TestFlush_StripsIngestPrefixFromSubject(t *testing.T) {
 func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	t.Parallel()
 
+	const (
+		// worker.go config values
+		maxBatch = 100
+		maxWait  = 2 * time.Second
+
+		// test values
+		batchA = 5 // intentionally under maxBatch
+		batchB = maxBatch
+	)
+
 	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emb.Close() })
@@ -898,6 +908,8 @@ func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		user:       "u",
 		password:   "p",
 		db:         "db",
+		maxBatch:   maxBatch,
+		maxWait:    maxWait,
 	}
 	worker.wg.Add(1)
 	go worker.runLoop(ctx, cons)
@@ -907,7 +919,7 @@ func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	})
 
 	// 1. Prime table A — too few events to hit either trigger on its own.
-	for i := range 5 {
+	for i := range batchA {
 		_, err = js.Publish(ctx, "ingest.tableA",
 			makeEnvelope(t, "tableA", "", map[string]any{"id": i}))
 		require.NoError(t, err)
@@ -915,7 +927,7 @@ func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 
 	// 2. Then publish exactly maxBatch events to table B — should hit B's
 	//    own size trigger and flush immediately, regardless of what A did.
-	for i := range 500 {
+	for i := range batchB {
 		_, err = js.Publish(ctx, "ingest.tableB",
 			makeEnvelope(t, "tableB", "", map[string]any{"id": i}))
 		require.NoError(t, err)
@@ -925,9 +937,9 @@ func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return rowsByTable["tableB"] >= 500
-	}, 5*time.Second, 25*time.Millisecond,
-		"table B should flush 500 rows within 5s of being published "+
+		return rowsByTable["tableB"] >= batchB
+	}, maxWait/2, 25*time.Millisecond,
+		"table B should flush "+fmt.Sprint(batchB)+" rows within "+fmt.Sprint(maxWait)+" of being published "+
 			"(table A's prior events must not strand B rows in a batch "+
 			"that waits for the maxWait timer)",
 	)
