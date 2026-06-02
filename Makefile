@@ -345,9 +345,10 @@ fix: $(GOLANGCI_LINT) pnpm-install ## Apply auto-fixes across Go (tidy + gofumpt
 # verify: all static checks across the repo. fmt and lint above already
 # span Go + Biome; the recipe adds tidy + vulncheck (Go-side) and a TS
 # type-check (`tsc --noEmit`) — Biome doesn't type-check, so this fills
-# the gap that golangci-lint implicitly covers on the Go side.
+# the gap that golangci-lint implicitly covers on the Go side. The check-docs
+# prereq adds `astro check` (docs .astro/.mdx + content-collection schema types).
 .PHONY: verify
-verify: tidy fmt vulncheck lint pnpm-install ## Run all static checks across the repo (Go + TS, parallel-safe)
+verify: tidy fmt vulncheck lint pnpm-install check-docs ## Run all static checks across the repo (Go + TS + docs, parallel-safe)
 	@echo "$(CYAN)==> Type-checking SDK (tsc --noEmit)...$(RESET)"
 	@$(PNPM) --filter $(SDK_NAME) run typecheck
 	@scripts/ci-marker.sh write-verify
@@ -419,11 +420,23 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
 	@$(PNPM) --filter $(SDK_NAME) run build
 
+# check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
+# schemas, and config TS. Catches what `astro build` does NOT (the build strips
+# types without checking). No browser needed. A prereq of both `verify` and
+# `build-docs`, so make runs it once and serializes it before the build — Astro's
+# content-sync writes docs/.astro/, so check and build must not run concurrently.
+# (Link validation is separate: owned by starlight-links-validator at build.)
+.PHONY: check-docs
+check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
+	@echo "$(CYAN)==> Type-checking docs (astro check)...$(RESET)"
+	@$(PNPM) --filter $(DOCS_FILTER) run check
+
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)
 # because rehype-mermaid renders diagrams via headless Chrome at build time and
-# starlight-links-validator needs it too.
+# starlight-links-validator needs it too. Depends on check-docs so a type/content
+# error fails fast before the (heavier) build, and the two never race on .astro.
 .PHONY: build-docs
-build-docs: install-playwright-docs ## Build docs site → docs/dist/
+build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@$(PNPM) --filter $(DOCS_FILTER) run build
 
