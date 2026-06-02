@@ -22,6 +22,7 @@ type Dependencies struct {
 	Query           *QueryHandler
 	SSE             *StreamHandler
 	Health          *HealthHandler
+	Version         *VersionHandler
 	Schema          *SchemaHandler
 	DLQ             *DLQHandler
 	Policy          *PolicyHandler
@@ -88,6 +89,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)
+	r.Get("/version", deps.Version.Handle)
 
 	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
 	// AND prometheus.port is 0 (mount on this router). When prometheus.port
