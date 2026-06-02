@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -21,8 +20,7 @@ import (
 type Dependencies struct {
 	Ingest          *IngestHandler
 	Query           *QueryHandler
-	SSE             *SSEHandler
-	WS              *WSHandler
+	SSE             *StreamHandler
 	Health          *HealthHandler
 	Schema          *SchemaHandler
 	DLQ             *DLQHandler
@@ -33,9 +31,9 @@ type Dependencies struct {
 	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the policy, so admin_role changes apply without a restart.
 	PolicyStore *policy.Store
-	JS          jetstream.JetStream // for SSE/WS gap-fill
+	JS          jetstream.JetStream // for SSE gap-fill
 	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
-	LogLevel    *slog.LevelVar
+	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -67,9 +65,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip span creation on infra/probe paths:
-			//   /v1/stream/*  — long-lived streams (SSE/WS); the standard
+			//   /v1/stream    — long-lived streams (SSE); the standard
 			//                   HTTP tracer would emit one span per stream
-			//                   that lives until the client disconnects.
+			//                   that lives until the client disconnects. // TODO: do we not want this behavior?
 			//   prometheus    — scrape every ~15s would produce ~4 spans/min
 			//                   of pure infra cardinality, and creates a
 			//                   self-loop when the same backend stores both
@@ -77,7 +75,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			//   /health, /ready — liveness/readiness probes inflate span
 			//                   counts and skew latency percentiles.
 			p := r.URL.Path
-			if strings.HasPrefix(p, "/v1/stream/") || p == "/health" || p == "/ready" ||
+			if strings.HasPrefix(p, "/v1/stream") || p == "/health" || p == "/ready" ||
 				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return
@@ -106,11 +104,10 @@ func NewRouter(deps Dependencies) http.Handler {
 		// is policy.AdminRole (configurable via admin_role, "admin" by default),
 		// read live from the policy store so changes apply without a restart.
 		// Declaring it once keeps the gate consistent across the tree.
-		requireAdmin := RequireAdmin(deps.PolicyStore)
+		requireAdmin := RequireAdmin(deps.PolicyStore, deps.Logger)
 
 		r.Post("/ingest", deps.Ingest.Handle)
-		r.Get("/stream/sse", deps.SSE.Handle)
-		r.Get("/stream/ws", deps.WS.Handle)
+		r.Get("/stream", deps.SSE.Handle)
 
 		// Schema discovery — admin-only (no policy gate of its own).
 		r.With(requireAdmin).Get("/schema", deps.Schema.Get)
@@ -159,24 +156,6 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Get("/pipes/{name}", deps.Pipes.Get)
 				r.Put("/pipes/{name}", deps.Pipes.Put)
 				r.Delete("/pipes/{name}", deps.Pipes.Delete)
-			}
-			if deps.LogLevel != nil {
-				r.Put("/log-level", func(w http.ResponseWriter, r *http.Request) {
-					levelStr := r.URL.Query().Get("level")
-
-					var newLevel slog.Level
-					if err := newLevel.UnmarshalText([]byte(levelStr)); err != nil {
-						writeJSONError(w, http.StatusBadRequest, "invalid or missing level (use debug, info, warn, error)")
-						return
-					}
-
-					deps.LogLevel.Set(newLevel)
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(map[string]string{
-						"status": "success",
-						"level":  newLevel.String(),
-					})
-				})
 			}
 		})
 	})
@@ -237,7 +216,7 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // resolves to an empty (non-admin) role and is denied here. Denials go through
 // writeAuthzDenied, so a present-but-invalid token fails loud (401 + token
 // reason) rather than as a bare 403.
-func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
+func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *policy.Policy
@@ -249,7 +228,7 @@ func RequireAdmin(store *policy.Store) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			writeAuthzDenied(w, r, role)
+			writeAuthzDenied(w, r, logger, role, nil, slog.String("gate", "admin"))
 		})
 	}
 }

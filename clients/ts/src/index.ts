@@ -3,60 +3,58 @@
 // ============================================================================
 
 // --- Main entry point ---
-export { createClient, WaveHouseClient } from './client.js';
-
+export { createClient, WaveHouseClient } from "./client.js";
+export { DLQNamespace } from "./dlq.js";
+export { PipeRef, PipesNamespace } from "./pipes.js";
+export { PolicyNamespace } from "./policy.js";
+export { QueryBuilder } from "./query-builder.js";
+export { SchemaNamespace } from "./schema.js";
+export { StreamController } from "./stream/controller.js";
+export { LiveQuery } from "./stream/live-query.js";
+export { SysNamespace } from "./sys.js";
 // --- Core classes ---
-export { TableRef } from './table.js';
-export { QueryBuilder } from './query-builder.js';
-export { PipeRef, PipesNamespace } from './pipes.js';
-export { SchemaNamespace } from './schema.js';
-export { PolicyNamespace } from './policy.js';
-export { DLQNamespace } from './dlq.js';
-export { SysNamespace } from './sys.js';
-export { StreamController } from './stream/controller.js';
-export { SharedWSManager } from './stream/ws-manager.js';
-export { LiveQuery } from './stream/live-query.js';
+export { TableRef } from "./table.js";
 
 // --- Types ---
 export type {
-  // Database & result
-  Database,
-  Result,
-  WaveHouseError,
+  Aggregation,
   // Config
   ClientConfig,
   ClientOptions,
-  // Query
-  FilterOp,
-  FetchOptions,
-  StructuredQuery,
-  Aggregation,
-  QueryFilter,
-  OrderClause,
-  TimeRange,
   // Schema
   Column,
-  TableSchema,
-  Schemas,
-  // Ingest
-  InsertResult,
-  // Streaming
-  StreamStatus,
-  StreamEvent,
-  StreamSubscriber,
-  StreamOptions,
+  // Database & result
+  Database,
   // DLQ
   DLQStats,
+  FetchOptions,
+  // Query
+  FilterOp,
   // Health
   Health,
-  Ready,
+  // Ingest
+  InsertResult,
+  OrderClause,
+  ParamDef,
   // Pipes
   Pipe,
-  ParamDef,
   // Policy
   Policy,
-  TablePolicy,
-  RolePermissions,
   PolicyFilter,
+  QueryFilter,
+  Ready,
+  Result,
+  RolePermissions,
+  Schemas,
+  StreamEvent,
+  StreamOptions,
+  // Streaming
+  StreamStatus,
+  StreamSubscriber,
+  StructuredQuery,
+  TablePolicy,
+  TableSchema,
+  TimeRange,
   ValidationResult,
-} from './types.js';
+  WaveHouseError,
+} from "./types.js";

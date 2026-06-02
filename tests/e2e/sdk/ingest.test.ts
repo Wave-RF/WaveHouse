@@ -1,13 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  dataClient,
-  viewerClient,
-  waitForCondition,
-  testId,
-  chQuery,
   adminClient,
+  chQuery,
+  dataClient,
   makeJWT,
+  testId,
+  viewerClient,
   WH_URL,
+  waitForCondition,
 } from "./helpers.js";
 
 describe("Ingest", () => {
@@ -29,15 +29,11 @@ describe("Ingest", () => {
 
     // Poll ClickHouse — pipeline flush timing varies
     await waitForCondition(async () => {
-      const r = await chQuery(
-        `SELECT event_id FROM default.clicks WHERE event_id = '${id}'`,
-      );
+      const r = await chQuery(`SELECT event_id FROM default.clicks WHERE event_id = '${id}'`);
       return r.length === 1;
     }, 10_000);
 
-    const rows = await chQuery(
-      `SELECT event_id FROM default.clicks WHERE event_id = '${id}'`,
-    );
+    const rows = await chQuery(`SELECT event_id FROM default.clicks WHERE event_id = '${id}'`);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveProperty("event_id", id);
   });
@@ -107,15 +103,11 @@ describe("Ingest", () => {
 
     // Poll ClickHouse — on cold-start the pipeline may take longer than 4s
     await waitForCondition(async () => {
-      const r = await chQuery(
-        `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
-      );
+      const r = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
       return r.length === 1;
     }, 10_000);
 
-    const rows = await chQuery(
-      `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
-    );
+    const rows = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
     expect(rows).toHaveLength(1);
   });
 
@@ -144,15 +136,11 @@ describe("Ingest", () => {
 
     // Poll ClickHouse — on cold-start the pipeline may take longer than 4s
     await waitForCondition(async () => {
-      const r = await chQuery(
-        `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
-      );
+      const r = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
       return r.length === 1;
     }, 10_000);
 
-    const rows = await chQuery(
-      `SELECT event_id FROM default.events WHERE event_id = '${id}'`,
-    );
+    const rows = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
     expect(rows).toHaveLength(1);
   });
 
@@ -197,13 +185,13 @@ describe("Ingest", () => {
     // 5. Verify it successfully made it through NATS, ingest worker, and into ClickHouse
     await waitForCondition(async () => {
       const r = await chQuery(
-        `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`
+        `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`,
       );
       return r.length === 1;
     }, 10_000);
 
     const rows = await chQuery(
-      `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`
+      `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`,
     );
     expect(rows).toHaveLength(1);
 
@@ -252,7 +240,7 @@ describe("Ingest", () => {
     // 5. Verify it landed in the weirdly named table (proving it was treated as a literal string)
     await waitForCondition(async () => {
       const r = await chQuery(
-        `SELECT event_id FROM default.\`${maliciousName}\` WHERE event_id = '${id}'`
+        `SELECT event_id FROM default.\`${maliciousName}\` WHERE event_id = '${id}'`,
       );
       return r.length === 1;
     }, 10_000);
@@ -302,15 +290,15 @@ describe("Ingest", () => {
             // defaults `*` to allow everything.
             "*": {
               allow_columns: ["*"],
-              check: { country: { _eq: "US" } }
+              check: { country: { _eq: "US" } },
             },
             viewer: {
               allow_columns: ["*"],
-              check: { country: { _eq: "US" } }
-            }
-          }
-        }
-      }
+              check: { country: { _eq: "US" } },
+            },
+          },
+        },
+      },
     });
 
     // Reject if we explicitly send country=GB
@@ -319,7 +307,7 @@ describe("Ingest", () => {
       user_id: "u-policy",
       session_id: "s-policy",
       event_id: testId(),
-      country: "GB"
+      country: "GB",
     });
     expect(badRes.error).not.toBeNull();
     expect(badRes.error!.status).toBe(403);
@@ -365,10 +353,10 @@ describe("Ingest", () => {
         clicks: {
           ...((currentPolicyRes.data as any).tables.clicks || {}),
           select: {
-            viewer: { allow_columns: ["*"], max_rows: 2 }
-          }
-        }
-      }
+            viewer: { allow_columns: ["*"], max_rows: 2 },
+          },
+        },
+      },
     });
 
     // Even if we ask for 10 rows via the SDK, the policy should cap it at 2 at the backend
@@ -380,4 +368,3 @@ describe("Ingest", () => {
     await admin.policy.set(currentPolicyRes.data!);
   });
 });
-

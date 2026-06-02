@@ -1,0 +1,44 @@
+# WaveHouse config for the e2e harness (scripts/orchestrator + tests/e2e).
+#
+# Dynamic values — ClickHouse addr/HTTP port (testcontainer), WaveHouse
+# server port (free port), WH_DATA_DIR (per-run scratch) — are injected by
+# the orchestrator via env vars. Everything below is pinned here so the
+# rig config is visible and editable without recompiling Go.
+
+server:
+  cors_allowed_origins:
+    - "*"
+
+mq:
+  # 1 GiB keeps the testcontainer's NATS stream tiny; the suite never
+  # writes anywhere near that.
+  max_bytes_gb: 1
+
+dedupe:
+  enabled: true
+  id_field: event_id
+
+# JWT validation. The suite signs test tokens with this fixed dev secret;
+# don't reuse outside the e2e rig.
+auth:
+  jwt_secret: sdk-dev-secret
+  role_claim: role
+
+schema:
+  # 5s, not the 60s default — tests asserting schema-discovery side
+  # effects shouldn't wait a minute for the next tick.
+  refresh_interval: 5
+
+dlq:
+  enabled: true
+
+policy:
+  # Resolved relative to wavehouse-cov's cwd — the orchestrator pins that
+  # to the repo root.
+  file_path: tests/e2e/fixtures/policy.yaml
+
+# OTel on so the export branches get coverage. gRPC exporters init lazily,
+# so the absence of a collector at :4317 doesn't matter for the suite.
+otel:
+  enabled: true
+  addr: "127.0.0.1:4317"

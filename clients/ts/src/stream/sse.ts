@@ -1,5 +1,5 @@
-import type { StreamEvent, StreamStatus, WaveHouseError } from '../types.js';
-import type { StreamTransport } from './controller.js';
+import type { StreamEvent, StreamStatus, WaveHouseError } from "../types.js";
+import type { StreamTransport } from "./controller.js";
 
 export interface SSEOptions {
   baseURL: string;
@@ -26,10 +26,10 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   }
 
   connect(): void {
-    if (typeof EventSource === 'undefined') {
+    if (typeof EventSource === "undefined") {
       throw new Error(
-        '[wavehouse] EventSource is not available in this environment. ' +
-          'Use transport: "ws" for Node.js, or install an EventSource polyfill.',
+        "[wavehouse] EventSource is not available in this environment. " +
+          "Please provide a global polyfill (e.g., `globalThis.EventSource = require('eventsource')`).",
       );
     }
 
@@ -49,17 +49,18 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       this._es = null;
       activeSSEConnections = Math.max(0, activeSSEConnections - 1);
     }
-    this.onStatus?.('closed');
+    this.onStatus?.("closed");
   }
 
   private async _doConnect(): Promise<void> {
-    const url = new URL("/v1/stream/sse", this._opts.baseURL);
+    const url = new URL("/v1/stream", this._opts.baseURL);
     url.searchParams.set("table", this._opts.table);
     if (this._opts.since) {
       url.searchParams.set("since", this._opts.since);
     }
 
-    // Inject auth token for WebSocket upgrade
+    // EventSource can't set request headers, so the JWT goes in ?token=
+    // (the server also accepts an Authorization header for non-browser clients)
     if (this._opts.auth) {
       const token = await this._opts.auth();
       if (token) {
@@ -71,8 +72,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     if (activeSSEConnections > SSE_WARN_THRESHOLD) {
       console.warn(
         `[wavehouse] ${activeSSEConnections} SSE connections open. ` +
-          `Browsers limit HTTP/1.1 to 6 connections per domain. ` +
-          `Consider using WebSocket transport instead.`,
+          `Browsers limit HTTP/1.1 to 6 connections per domain.`,
       );
     }
 

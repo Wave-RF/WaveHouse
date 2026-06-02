@@ -25,10 +25,18 @@ threshold:
 # percentage each suite must hit before it counts as passing.
 #
 suites:
-  unit: 70
-  integration: 12
-  e2e: 50
-  sdk: 40 # statements (vitest gates via --coverage.thresholds.statements)
+  unit: 80
+  integration: 20
+  e2e: 60
+  # TypeScript SDK suites — see scripts/cov for the merge / render logic.
+  # vitest gates via --coverage.thresholds.statements; the merged ts-total
+  # is gated by `cov ts-merge` against the value below. Tune ts-total
+  # upward as the e2e suite picks up more SDK paths.
+  ts-unit: 40  # vitest unit tests (clients/ts/src/**)
+  ts-e2e: 40    # vitest e2e tests covering SDK source (informational until you set a real floor)
+  ts-total: 50 # merged ts-unit + ts-e2e (gated by `make cov`). Start at ts-unit's
+               # number; raise this once the e2e suite is collecting coverage and you
+               # know what the realistic merged floor looks like.
 
 exclude:
   # Global excludes apply to every suite render AND to the merged total.

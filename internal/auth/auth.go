@@ -135,7 +135,7 @@ func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
 }
 
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
-// WebSocket clients that can't set headers — the ?token query parameter, which
+// clients that can't set headers — the ?token query parameter, which
 // is stripped from the URL so it can't leak into logs. The Authorization header
 // takes precedence when both are present. Returns "" if absent.
 func bearerToken(r *http.Request) string {

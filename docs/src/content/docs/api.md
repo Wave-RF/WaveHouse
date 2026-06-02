@@ -2,7 +2,7 @@
 title: "API Reference"
 description: "All endpoints, authentication, request/response formats for the WaveHouse API."
 sidebar:
-  order: 5
+  order: 7
 ---
 
 Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. The JWT middleware always runs; what a caller can do is driven by the policy; see [Configuration](/configuration#authentication) for the full auth config surface.
@@ -17,13 +17,13 @@ Authorization: Bearer <token>
 
 The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url`). The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
 
-For WebSocket and SSE connections where custom headers are not possible, you can pass the token as a query parameter:
+For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
 
 ```text
-GET /v1/stream/ws?token=<jwt>
+GET /v1/stream?token=<jwt>
 ```
 
-The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`, WebSocket), so a token in the more log-leakable URL never overrides an explicit header credential. The `token` query parameter is stripped from the URL after extraction so it can't leak into logs.
+The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`), so a token in the more log-leakable URL never overrides an explicit header credential. The `token` query parameter is stripped from the URL after extraction so it can't leak into logs.
 
 **Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`).
 
@@ -68,9 +68,7 @@ Historically some error paths defaulted to `text/plain` because they were emitte
 
 The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
 
-> **Caveat — WebSocket upgrade failures.** A failed WebSocket upgrade on `GET /v1/stream/ws` (e.g., wrong method, missing `Upgrade` header, rejected `Origin`) is rejected at the HTTP/1.1 → WebSocket negotiation layer by the `coder/websocket` library, which writes a `text/plain` body. This sits below the application's error contract — clients negotiating a WebSocket should branch on the upgrade-handshake outcome rather than the response body.
->
-> **Caveat — streaming / partial-write responses.** For SSE, streaming endpoints, WebSockets after upgrade, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
+> **Caveat — streaming / partial-write responses.** For SSE, streaming endpoints, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
 
 ## Endpoints
 
@@ -191,7 +189,7 @@ Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQ
 
 This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
-> **Admin only.** The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD, log-level). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+> **Admin only.** The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 
 `/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
 
@@ -326,7 +324,7 @@ JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whe
 
 ---
 
-### `GET /v1/stream/sse` — Server-Sent Events Stream
+### `GET /v1/stream` — Server-Sent Events Stream
 
 Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`.
 
@@ -354,7 +352,7 @@ id: 2026-03-24T12:00:01.456Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"page":"/pricing"}}
 ```
 
-Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table or use the WebSocket endpoint with in-band multiplexing.
+Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
@@ -362,56 +360,10 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 
 ```bash
 # Subscribe to a specific table
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
+curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 # With gap-fill
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
-```
-
----
-
-### `GET /v1/stream/ws` — WebSocket Stream
-
-Opens a WebSocket connection for real-time event streaming. Supports in-band multiplexing — a single WebSocket can subscribe to multiple tables dynamically.
-
-**Query Parameters:**
-
-| Param | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `table` | string | — | Optional initial table to subscribe to. If omitted, the client must send subscribe commands. When present, must match `^[a-zA-Z_][a-zA-Z0-9_]*$` — invalid values return 400 before the WebSocket upgrade. |
-| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp for gap-fill on the initial `?table=` subscription. |
-| `token` | string | — | JWT token (alternative to `Authorization` header). Stripped from URL after extraction. |
-
-**In-band commands (client → server):**
-
-After connecting, send JSON commands to manage subscriptions:
-
-```json
-{"action": "subscribe", "table": "clicks"}
-{"action": "subscribe", "table": "page_views"}
-{"action": "unsubscribe", "table": "clicks"}
-```
-
-**Outbound message format (server → client):**
-
-Each message is wrapped in an envelope labelled with the table name:
-
-```json
-{"table": "clicks", "data": {"table_name": "clicks", "received_timestamp": "...", "data": {...}}}
-```
-
-**JavaScript example:**
-
-```javascript
-const ws = new WebSocket("ws://localhost:8080/v1/stream/ws?token=<jwt>");
-ws.onopen = () => {
-  ws.send(JSON.stringify({ action: "subscribe", table: "clicks" }));
-  ws.send(JSON.stringify({ action: "subscribe", table: "page_views" }));
-};
-ws.onmessage = (event) => {
-  const { table, data } = JSON.parse(event.data);
-  console.log(`[${table}]`, data.table_name, data.data);
-};
+curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
 ---
@@ -597,7 +549,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
 | `data` | object | The original flat JSON body. |
 
-### Client-Facing Format (SSE/WebSocket)
+### Client-Facing Format (SSE)
 
 Same as the wire format — events are passed through directly:
 

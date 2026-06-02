@@ -17,10 +17,10 @@
 #   favicon.ico                     (site root, for /favicon.ico auto-probe)
 #
 # To change the brand: edit a hue in docs/src/styles/global.css (--brand-*) or
-# a source SVG, then run `make branding` (or `make docs-branding` from root).
-# The live site picks up CSS instantly; this script propagates the same colors
-# into the generated raster/SVG assets. Requires rsvg-convert (librsvg) and
-# magick (ImageMagick 7+):
+# a source SVG, then run `make branding-docs` from the repo root. The live site
+# picks up CSS instantly; this script propagates the same colors into the
+# generated raster/SVG assets. Requires rsvg-convert (librsvg) and magick
+# (ImageMagick 7+):
 #   brew install librsvg imagemagick      (macOS)
 #   apt install librsvg2-bin imagemagick  (Debian/Ubuntu)
 

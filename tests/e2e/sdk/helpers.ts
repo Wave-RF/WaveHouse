@@ -15,18 +15,14 @@ export const JWT_SECRET = "sdk-dev-secret";
 
 // ── JWT Builder ───────────────────────────────────────────────────────────────
 
-export function makeJWT(
-  claims: Record<string, unknown>,
-  secret: string = JWT_SECRET,
-): string {
+export function makeJWT(claims: Record<string, unknown>, secret: string = JWT_SECRET): string {
   const header = { alg: "HS256", typ: "JWT" };
   const payload = {
     ...claims,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,
   };
-  const encode = (obj: unknown) =>
-    Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
 
   const unsigned = `${encode(header)}.${encode(payload)}`;
   const sig = createHmac("sha256", secret).update(unsigned).digest("base64url");
@@ -40,13 +36,10 @@ export function makeExpiredJWT(claims: Record<string, unknown>): string {
     iat: Math.floor(Date.now() / 1000) - 7200,
     exp: Math.floor(Date.now() / 1000) - 3600,
   };
-  const encode = (obj: unknown) =>
-    Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
 
   const unsigned = `${encode(header)}.${encode(payload)}`;
-  const sig = createHmac("sha256", JWT_SECRET)
-    .update(unsigned)
-    .digest("base64url");
+  const sig = createHmac("sha256", JWT_SECRET).update(unsigned).digest("base64url");
   return `${unsigned}.${sig}`;
 }
 
@@ -58,14 +51,10 @@ export function publicClient() {
 }
 
 /** Authenticated SDK client with a given role. */
-export function authClient(
-  role: string,
-  extraClaims?: Record<string, unknown>,
-) {
+export function authClient(role: string, extraClaims?: Record<string, unknown>) {
   return createClient({
     baseURL: WH_URL,
-    auth: () =>
-      makeJWT({ sub: `test-${role}`, role, tenant_id: "acme", ...extraClaims }),
+    auth: () => makeJWT({ sub: `test-${role}`, role, tenant_id: "acme", ...extraClaims }),
   });
 }
 
@@ -106,9 +95,7 @@ export function testId(): string {
 
 // ── ClickHouse Direct Query ───────────────────────────────────────────────────
 
-export async function chQuery<T = Record<string, unknown>>(
-  sql: string,
-): Promise<T[]> {
+export async function chQuery<T = Record<string, unknown>>(sql: string): Promise<T[]> {
   const res = await fetch(`${CH_URL}/?default_format=JSONEachRow`, {
     method: "POST",
     body: sql,

@@ -2,7 +2,7 @@
 title: "TypeScript SDK"
 description: "Zero-dependency client SDK — query builder, real-time streaming, codegen."
 sidebar:
-  order: 6
+  order: 8
 ---
 
 `@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
@@ -46,7 +46,6 @@ import type { Database } from './my-types'; // optional hand-written types
 const wh = createClient<Database>({
   baseURL: 'https://wavehouse.example.com',
   auth: async () => myAuthProvider.getToken(),
-  transport: 'auto', // 'auto' | 'sse' | 'ws'
   options: {
     maxRetries: 2,
   },
@@ -59,10 +58,9 @@ const wh = createClient<Database>({
 |-------|------|---------|-------------|
 | `baseURL` | `string` | — | WaveHouse server URL (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
-| `transport` | `'auto' \| 'sse' \| 'ws'` | `'auto'` | Stream transport. Auto = SSE when no auth, WS when auth |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
-> **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` and `WebSocket` APIs can't set headers — as a `?token=` query parameter on streaming connections (SSE and WS). When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+> **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
 
 ### Type-Safe Tables
 
@@ -444,7 +442,7 @@ const { data } = await wh.sys.ready();
 
 ## Streaming
 
-Streams use SSE (Server-Sent Events) for unauthenticated connections and WebSocket for authenticated ones. The `transport: 'auto'` default selects automatically; override with `'sse'` or `'ws'`.
+Streams use SSE (Server-Sent Events) for both unauthenticated connections and for authenticated ones.
 
 ### `StreamController`
 
@@ -503,10 +501,9 @@ Current connection status: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
 ### `StreamOptions`
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `since` | `string` | RFC3339 timestamp for gap-fill replay |
 | `signal` | `AbortSignal` | Cancel/close the stream. Wired via `attachSignal()` internally. |
-| `transport` | `'auto' \| 'sse' \| 'ws'` | Override client-level transport |
 
 ### `StreamEvent<T>`
 
@@ -520,21 +517,13 @@ interface StreamEvent<T> {
 
 ### Transport Behavior
 
-| Transport | Auth Required | Reconnect | Protocol |
-|-----------|---------------|-----------|----------|
-| SSE | No | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
-| WebSocket | Yes | Exponential backoff (1s → 30s) with auto-resubscribe | RFC 6455, multiplexed |
+| Transport | Reconnect | Protocol |
+| --------- | --------- | -------- |
+| SSE | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
+<!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
+<!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
-> **SSE connection limit:** The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain). Use WebSocket transport for authenticated workloads to avoid this limit.
-
-### `SharedWSManager`
-
-When using WebSocket transport, the SDK automatically multiplexes all per-table subscriptions over a single WebSocket connection per client via `SharedWSManager`. This is transparent — `.stream()` calls route through it automatically.
-
-Key behaviors:
-- Ref-counted subscriptions: unsubscribing removes only when the last subscriber for a table disconnects.
-- Auto-reconnect with exponential backoff; all active table subscriptions resubscribed on reconnect.
-- Exact-match dispatch by table name. The legacy NATS-style wildcards (`*`, `>`) are no longer accepted server-side; subscribe to one concrete table per call.
+> **SSE connection limit:** The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
 
 ### Client-Side Stream Filtering
 

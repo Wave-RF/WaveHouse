@@ -18,18 +18,19 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// SSEHandler handles GET /v1/stream/sse.
-type SSEHandler struct {
+// StreamHandler handles GET /v1/stream
+type StreamHandler struct {
 	Hub         *Hub
 	JS          jetstream.JetStream
 	PolicyStore *policy.Store
 }
 
-func NewSSEHandler(hub *Hub, js jetstream.JetStream) *SSEHandler {
-	return &SSEHandler{Hub: hub, JS: js}
+func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
+	return &StreamHandler{Hub: hub, JS: js}
 }
 
-func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
+func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	// TODO: for servers or clients that don't support SSE or are having issues, should we use this path and build in the full mechanisms for a fallback, like long-polling (probably bad idea) or just periodic fetch queries, or have them fallback to structured queries or a pipe or something? Or no fallback at all?
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "streaming not supported")
@@ -74,6 +75,7 @@ func (h *SSEHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Gap fill from NATS using DeliverByStartTime.
 	// Prefer Last-Event-ID header (set automatically by EventSource on reconnect)
 	// over the "since" query parameter.
+	// TODO: this breaks I think if we multiplex SSE? Need to test further...
 	sinceStr := r.Header.Get("Last-Event-ID")
 	if sinceStr == "" {
 		sinceStr = r.URL.Query().Get("since")
@@ -155,7 +157,7 @@ func extractEventTimestamp(data []byte) string {
 
 // applyStreamPolicy transforms raw event data for the client, filtering columns
 // based on the caller's policy permissions. Returns nil if the event should be skipped.
-func (h *SSEHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
+func (h *StreamHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
 	// Scope should be applied before getting here, so we ignore it here
 	var evt ingest.EventMessage
 	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
@@ -190,7 +192,7 @@ func (h *SSEHandler) applyStreamPolicy(raw []byte, role string, claims map[strin
 
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time
 // and sends all available messages to the callback until caught up.
-func (h *SSEHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
+func (h *StreamHandler) replayFromNATS(ctx context.Context, since time.Time, subject string, send func([]byte) bool) {
 	cons, err := h.JS.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
 		FilterSubject:     subject,
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,

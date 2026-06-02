@@ -1,8 +1,15 @@
-import type { Result, FetchOptions, HttpContext, StreamOptions, InsertResult, TableSchema } from './types.js';
-import { request } from './http.js';
-import { ok, err } from './errors.js';
-import { QueryBuilder } from './query-builder.js';
-import type { StreamController } from './stream/controller.js';
+import { err, ok } from "./errors.js";
+import { request } from "./http.js";
+import { QueryBuilder } from "./query-builder.js";
+import type { StreamController } from "./stream/controller.js";
+import type {
+  FetchOptions,
+  HttpContext,
+  InsertResult,
+  Result,
+  StreamOptions,
+  TableSchema,
+} from "./types.js";
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
 
@@ -23,7 +30,9 @@ export class TableRef<Row = Record<string, unknown>> {
 
   /** SELECT * shortcut — fetches rows with optional pagination. */
   async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
-    return this.select().limit(opts?.limit ?? 1000).fetch(opts);
+    return this.select()
+      .limit(opts?.limit ?? 1000)
+      .fetch(opts);
   }
 
   /** Start building a typed query. Returns an immutable, PromiseLike QueryBuilder. */
@@ -70,7 +79,7 @@ export class TableRef<Row = Record<string, unknown>> {
     }
 
     const { data: res, error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
-      method: 'POST',
+      method: "POST",
       path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
       body: data,
       signal: opts?.signal,
@@ -85,7 +94,7 @@ export class TableRef<Row = Record<string, unknown>> {
   /** Fetch the schema for this table. */
   async schema(opts?: { signal?: AbortSignal }): Promise<Result<TableSchema>> {
     const { data, error } = await request<TableSchema>(this._ctx, {
-      method: 'GET',
+      method: "GET",
       path: `/v1/schema?table=${encodeURIComponent(this._table)}`,
       signal: opts?.signal,
     });

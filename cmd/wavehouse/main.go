@@ -298,7 +298,7 @@ func run() int {
 	// Start active sweeper.
 	go sweeper.Start(ctx)
 
-	// Hub bridge: MQ → broadcast to connected SSE/WS clients.
+	// Hub bridge: MQ → broadcast to connected SSE clients.
 	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
 		var evt ingest.EventMessage
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
@@ -319,7 +319,7 @@ func run() int {
 
 	// Build handlers.
 	js := embeddedMQ.JetStream()
-	ingestHandler := api.NewIngestHandler(registry, embeddedMQ)
+	ingestHandler := api.NewIngestHandler(registry, embeddedMQ, logger)
 	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
@@ -349,11 +349,8 @@ func run() int {
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
 
-	sseHandler := api.NewSSEHandler(hub, js)
-	sseHandler.PolicyStore = policyStore
-
-	wsHandler := api.NewWSHandler(hub, js, cfg.Server.CORSAllowedOrigins)
-	wsHandler.PolicyStore = policyStore
+	streamHandler := api.NewStreamHandler(hub, js)
+	streamHandler.PolicyStore = policyStore
 
 	// Build the auth middleware up front so a misconfigured/unreachable JWKS
 	// endpoint fails startup loudly rather than booting into a degraded state.
@@ -370,19 +367,18 @@ func run() int {
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
-		SSE:             sseHandler,
-		WS:              wsHandler,
+		SSE:             streamHandler,
 		Health:          healthHandler,
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout),
+		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
+		Logger:          logger,
 		JS:              js,
 		CORSOrigins:     cfg.Server.CORSAllowedOrigins,
-		LogLevel:        logLevel,
 	}
 
 	// Prometheus /metrics routing: same-port → mount on API router,
@@ -402,7 +398,7 @@ func run() int {
 				Handler:           mux,
 				ReadHeaderTimeout: 10 * time.Second,
 				// Full Read/Write timeouts are safe here — unlike the main API
-				// server (SSE/WebSocket), the Prometheus sidecar serves only
+				// server (SSE), the Prometheus sidecar serves only
 				// single-shot scrape requests, so an unbounded slow client has
 				// no legitimate reason to hold a connection.
 				ReadTimeout:  30 * time.Second,

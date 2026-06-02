@@ -3,11 +3,9 @@
   "type": "module",
   "version": "0.0.1",
   "private": true,
-  "packageManager": "pnpm@11.1.3",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "prebuild": "playwright install chromium",
     "build": "astro build",
     "preview": "wrangler dev",
     "astro": "astro"
@@ -39,6 +37,6 @@
     "wrangler": "^4.81.0"
   },
   "engines": {
-    "node": ">=22.0"
+    "node": ">=22"
   }
 }

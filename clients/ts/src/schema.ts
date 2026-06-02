@@ -1,6 +1,6 @@
-import type { Result, HttpContext, Schemas } from './types.js';
-import { request } from './http.js';
-import { ok, err } from './errors.js';
+import { err, ok } from "./errors.js";
+import { request } from "./http.js";
+import type { HttpContext, Result, Schemas } from "./types.js";
 
 /** Namespace for schema introspection. */
 export class SchemaNamespace {
@@ -14,8 +14,8 @@ export class SchemaNamespace {
   async list(opts?: { signal?: AbortSignal }): Promise<Result<Schemas>> {
     // The backend returns TableSchema[] — transform to Record<string, TableSchema>.
     const { data, error } = await request<unknown>(this._ctx, {
-      method: 'GET',
-      path: '/v1/schema',
+      method: "GET",
+      path: "/v1/schema",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -24,7 +24,7 @@ export class SchemaNamespace {
     if (Array.isArray(data)) {
       schemas = {};
       for (const table of data) {
-        if (table && typeof table === 'object' && 'name' in table) {
+        if (table && typeof table === "object" && "name" in table) {
           schemas[(table as { name: string }).name] = table as Schemas[string];
         }
       }
@@ -37,11 +37,11 @@ export class SchemaNamespace {
   /** Force a schema refresh from ClickHouse system.columns. */
   async refresh(opts?: { signal?: AbortSignal }): Promise<Result<void>> {
     const { error } = await request<Schemas>(this._ctx, {
-      method: 'POST',
-      path: '/v1/schema/refresh',
+      method: "POST",
+      path: "/v1/schema/refresh",
       signal: opts?.signal,
     });
     if (error) return err<void>(error);
-    return ok(undefined as void);
+    return ok(undefined as undefined);
   }
 }

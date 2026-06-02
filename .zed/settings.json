@@ -3,8 +3,48 @@
     "gopls": {
       "initialization_options": {
         "build.buildFlags": ["-tags=integration"],
-        "formatting.gofumpt": true,
-      },
-    },
+        "formatting.gofumpt": true
+      }
+    }
   },
+  "languages": {
+    "TypeScript": {
+      "format_on_save": "on",
+      "formatter": {
+        "language_server": { "name": "biome" }
+      },
+      "code_actions_on_format": {
+        "source.organizeImports.biome": true,
+        "quickfix.biome": true
+      }
+    },
+    "TSX": {
+      "format_on_save": "on",
+      "formatter": {
+        "language_server": { "name": "biome" }
+      },
+      "code_actions_on_format": {
+        "source.organizeImports.biome": true,
+        "quickfix.biome": true
+      }
+    },
+    "JavaScript": {
+      "format_on_save": "on",
+      "formatter": {
+        "language_server": { "name": "biome" }
+      }
+    },
+    "JSON": {
+      "format_on_save": "on",
+      "formatter": {
+        "language_server": { "name": "biome" }
+      }
+    },
+    "JSONC": {
+      "format_on_save": "on",
+      "formatter": {
+        "language_server": { "name": "biome" }
+      }
+    }
+  }
 }

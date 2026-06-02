@@ -14,7 +14,7 @@ One binary:
 
 Eleven internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
-- **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/WS/schema/DLQ/policy/pipes handlers, Hub
+- **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/schema/DLQ/policy/pipes handlers, Hub
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
 - **`config/`** — YAML + env var config loading (cleanenv)
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) — optional, controlled by `dedupe.enabled`
@@ -37,7 +37,7 @@ Eleven internal packages under `internal/` (plus `internal/testutil/` for shared
 7. **Auth (JWT, no on/off switch)**: The JWT middleware (`internal/auth`) **always** runs — there is no `auth.enabled` or `auth.dev_mode` flag. It verifies tokens with **either** a JWKS endpoint (`auth.jwks_url`) **or** an HMAC shared secret, not both — when `jwks_url` is set it is the sole verifier and `jwt_secret` is ignored (an unreachable JWKS endpoint fails startup loudly); roles come from a configurable claim path (`auth.role_claim`). Accepted signing algorithms are pinned to the active verifier (HMAC → `HS*`; JWKS → asymmetric `RS*/ES*/PS*/EdDSA`) via `jwt.WithValidMethods`, and the `alg` header is checked before any key is used, so `alg: none` and cross-family alg-confusion tokens are rejected. **Authentication is decoupled from authorization:** a request with **no** token, or an **invalid/expired/malformed** one, falls back to an empty role (which `policy.ResolveRole` maps to the policy `default_role`) — the bad-token reason is stashed in the request context so a gate that ultimately denies can **fail loud** (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the policy `admin_role`). **Public (no-token) access is policy-driven:** set a usable `default_role` to open it, remove it to close it — a policy PUT/delete flips it live, no restart. `/v1/admin/*` **and** the schema/DLQ routes are admin-only via `RequireAdmin`, which reads `policy.AdminRole` from the store live (so `admin_role` changes apply without a restart); a pipe with no `allowed_roles` denies everyone but the admin role. There is **no** fail-closed cache hack: a deleted policy becomes `nil`, and `Evaluate(nil)`/`IsAdmin(nil)` deny everyone — including the admin role — on their own (fail fully closed), so "delete the policy" structurally locks everyone out (bootstrap a fresh deployment from the policy file, not an implicit admin grant).
 8. **Optional dedup**: Deduplication is opt-in via `dedupe.enabled`. When enabled, the `dedupe.id_field` config specifies which JSON field to use as the dedup key.
 9. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.
-10. **Active Sweeper**: NATS messages are retained for SSE/WS gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
+10. **Active Sweeper**: NATS messages are retained for SSE gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
 11. **Hasura-style access control**: Per-table, per-role column-level and row-level permissions with JWT claim templating (`{{ jwt.path }}`). Policies stored in NATS KV with file-based bootstrap and cluster-wide sync via KV Watch. The **single** admin check is `policy.IsAdmin` (role == `admin_role`, configurable per policy, `"admin"` by default, **exact case-sensitive** match — no `ToLower`/`TrimSpace` normalization); it is the one source of truth shared by `Evaluate`, `ResolveRole`, `Validate`, the `/v1/admin` gate, and pipe authorization (`policy.RoleAllowed`). An empty/absent role is fail-closed: it never matches a role key — matching is exact (no `"*"` any-role wildcard) and only the admin role bypasses the allowlist — `Validate` rejects empty role keys at write time, and a `nil` policy denies everyone, including the admin role (a total lockout — bootstrap from the policy file, not an implicit admin grant). Preserve this when touching `internal/policy` (the policy twin of the pipe invariant in #13, see #159). The optional `default_role` is the one sanctioned exception: `ResolveRole` maps an empty role to it *before* evaluation (so a roleless request gets that role's perms). Setting `default_role` equal to the `admin_role` is permitted and makes every roleless request admin — a local/dev-only convenience that is **not** refused by `ResolveRole` or `Validate`, but the store logs a loud warning on every node that adopts such a policy (`policy.DefaultRoleGrantsAdmin`, the single source of truth for the condition); never use it in production. Roles do **not** inherit the default's permissions.
 12. **Structured queries**: Type-safe query AST endpoint (`POST /v1/query?table={table}`) validated against schema, with permission enforcement, timestamp bucketing for cache optimization, and `DefaultMaxRows` (10,000) limit cap.
 13. **Named query pipes**: Pre-defined SQL templates (inspired by Tinybird) with parameter binding, role restrictions, and caching. Stored in NATS KV with `.sql` file directory bootstrap. Per-pipe `allowed_roles` is the *only* authorization gate on the execute path — `GET/POST /v1/pipes/{name}` sit outside the `/v1/admin/*` `RequireAdmin` block — and it **fails closed** via `policy.RoleAllowed`: authorization is exact allowlist membership (there is no `"*"` any-role wildcard), the admin role (`policy.AdminRole`) always passes, and any request whose resolved role is empty or absent (no token, or a JWT missing `auth.role_claim`, with no usable `default_role`) matches nothing; empty-string allowlist entries are ignored so a stray `""` cannot authorize an empty role, and a pipe with no `allowed_roles` authorizes nobody but the admin role. When changing pipe execution, preserve this — and exercise it via the shared `testutil.RunRoleMatrix` / `StandardRoleMatrix` matrix (see #159).
@@ -65,30 +65,31 @@ make tools             # Install pinned tools, Go modules, pnpm deps, and git ho
 make help              # Show all targets with descriptions
 
 # Static checks (parallel-safe: `make -j verify`)
-make fmt               # Check formatting (run `make fix` to apply)
+make fmt               # Check formatting across Go (gofumpt) + TS (Biome)
 make tidy              # Verify go.mod/go.sum are tidy (run `make fix` to apply)
-make lint              # golangci-lint run ./...
+make lint              # Lint across Go (golangci-lint) + TS (Biome)
 make vulncheck         # Run govulncheck (V=1 for full call stacks)
-make verify            # tidy + fmt + vulncheck + lint
-make fix               # Auto-apply: tidy + gofumpt + goimports + lint --fix
+make verify            # Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + tsc typecheck)
+make fix               # Auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS (Biome --write)
 
 # Build
 make build             # Compile wavehouse → bin/wavehouse (debug symbols kept)
 make build-release     # Stripped release-style build → bin/wavehouse-release
 make build-cover       # Coverage-instrumented build → bin/wavehouse-cov (used by E2E)
-make build-sdk         # Build TypeScript SDK → clients/ts/dist/
+make build-ts         # Build TypeScript SDK → clients/ts/dist/
 
 # Test (each suite renders coverage and gates against .testcoverage.yml)
 make test              # Alias for test-unit
 make test-unit         # Go unit tests + coverage gate
 make test-integration  # Go integration tests (requires Docker) + coverage gate
-make test-sdk          # SDK vitest unit tests + coverage gate
+make test-ts          # SDK vitest unit tests + coverage + gate against suites.ts-unit
+                       # (`make cov` merges ts-unit + ts-e2e automatically — no separate command)
 make test-e2e          # E2E SDK suite against bin/wavehouse-cov + coverage gate
 make test-all          # All four suites sequentially + merged coverage gate
-make cov               # Merge whichever covdata exists + gate against total threshold
+make cov               # Merge whichever Go + TS coverage exists + gate against thresholds
 
 # CI
-make ci                # Phase 1 (parallel): verify + builds + test-unit + test-sdk + subprojects-{verify,build,test}
+make ci                # Phase 1 (parallel): verify + builds (Go + SDK + docs) + test-unit + test-ts
                        # Phase 2 (sequential): test-integration + test-e2e + cov
 
 # Analysis (informational, not in CI)
@@ -116,11 +117,11 @@ make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
 make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
 make clean-all         # Full reset: above + data/ + docker volumes
 
-# Docs site (Astro + Starlight in docs/, with its own Makefile)
-make docs-dev          # Hot-reload Astro dev server on :4321
-make docs-build        # Production build → docs/dist/
-make docs-preview      # Wrangler preview of the production build (auto-builds if dist/ missing)
-make docs-branding     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
+# Docs site (Astro + Starlight in docs/, driven via pnpm workspace filters)
+make dev-docs          # Hot-reload Astro dev server on :4321
+make build-docs        # Production build → docs/dist/
+make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
+make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
@@ -130,8 +131,8 @@ Tooling notes:
 
 - Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
 - `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
-- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs `pnpm install --frozen-lockfile` in `clients/ts/`, `tests/e2e/sdk/`, and `docs/`.
-- **Subproject Makefiles**: `docs/` has its own `Makefile` so the docs site is self-contained (`cd docs && make build` works directly). The root forwards every `docs-<name>` target via a pattern rule and aggregates the common verbs (`install`, `build`, `test`, `lint`, `verify`, `clean`) through `subprojects-<verb>` fan-outs — so `make ci`, `make tools`, etc. pick up new subprojects automatically. When extracting more subprojects (per-language SDKs, etc.), append the directory to `SUBPROJECTS` at the top of the root `Makefile` — no aggregator edits required.
+- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs a single root `pnpm install --frozen-lockfile`, which installs all three workspace packages (`clients/ts/`, `tests/e2e/sdk/`, `docs/`).
+- **Node workspace**: the SDK (`clients/ts/`, `@wavehouse/sdk`), E2E harness (`tests/e2e/sdk/`, `wavehouse-e2e`), and docs site (`docs/`, `wavehouse-docs`) are pnpm workspace packages, driven directly from the root `Makefile` via `pnpm --filter` — no sub-Makefiles. The user-facing targets are verb-first and live in their natural `make help` sections: `build-ts` / `dev-ts` / `test-ts` / `clean-ts` for the SDK, and `build-docs` / `dev-docs` / `preview-docs` / `branding-docs` / `clean-docs` (plus the hidden `install-playwright-docs` helper) for docs. TS formatting/linting is workspace-wide via Biome (one `biome.json`), invoked by `make fmt` / `make lint` / `make fix`.
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 - **Worktrunk** (`wt`) reads `.config/wt.toml`. On `wt switch --create <branch>`, post-start runs `wt step copy-ignored` (seeds `.bin/` + `node_modules/` from main) then `make tools` to finish bootstrap. Personal overrides in `~/.config/worktrunk/config.toml`.
 
@@ -308,7 +309,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 Source-of-truth pairs that must agree:
 
 - Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.md`, `config.yaml`, compose env blocks
-- `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE/WS examples, ClickHouse INSERT columns
+- `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE examples, ClickHouse INSERT columns
 - Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 

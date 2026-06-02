@@ -16,7 +16,7 @@ import (
 
 func TestRequireAdmin_AdminAllowed(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	ctx := auth.WithRole(context.Background(), "admin")
@@ -28,7 +28,7 @@ func TestRequireAdmin_AdminAllowed(t *testing.T) {
 
 func TestRequireAdmin_NonAdminForbidden(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 	ctx := auth.WithRole(context.Background(), "viewer")
@@ -44,7 +44,7 @@ func TestRequireAdmin_NonAdminForbidden(t *testing.T) {
 // admin route — fail closed with 403.
 func TestRequireAdmin_NoRoleForbidden(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(nil, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called - a roleless request must not reach an admin route")
 	}))
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -59,7 +59,7 @@ func TestRequireAdmin_NoRoleForbidden(t *testing.T) {
 func TestRequireAdmin_CustomAdminRole(t *testing.T) {
 	t.Parallel()
 	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"})
-	handler := RequireAdmin(store)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(store, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	for role, want := range map[string]int{"superuser": http.StatusOK, "admin": http.StatusForbidden} {
@@ -76,7 +76,7 @@ func TestRequireAdmin_CustomAdminRole(t *testing.T) {
 // (401) rather than a bare 403.
 func TestRequireAdmin_InvalidTokenFailsLoud(t *testing.T) {
 	t.Parallel()
-	handler := RequireAdmin(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RequireAdmin(nil, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 	ctx := auth.WithAuthError(context.Background(), errors.New("token expired"))
@@ -252,13 +252,13 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub),
+		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
+		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
+		Logger: testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)
@@ -308,14 +308,14 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	hub := NewHub()
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub),
+		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil),
-		WS:          NewWSHandler(hub, nil, nil),
+		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	})
 
 	post := func(role string) *httptest.ResponseRecorder {
@@ -369,14 +369,14 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest:      NewIngestHandler(reg, pub),
+		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil),
-		WS:          NewWSHandler(hub, nil, nil),
+		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	}
 
 	// Should not panic.
@@ -419,13 +419,13 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := NewHub()
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub),
+		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
+		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
+		Logger: testutil.NopLogger(),
 	}
 	router := NewRouter(deps)
 
@@ -444,13 +444,13 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	hub := NewHub()
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub),
+		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
-		SSE:    NewSSEHandler(hub, nil),
-		WS:     NewWSHandler(hub, nil, nil),
+		SSE:    NewStreamHandler(hub, nil),
 		Health: &HealthHandler{},
 		Schema: NewSchemaHandler(reg),
 		AuthMW: func(next http.Handler) http.Handler { return next },
+		Logger: testutil.NopLogger(),
 	}
 	router := NewRouter(deps)
 
@@ -542,14 +542,14 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	hub := NewHub()
 
 	router := NewRouter(Dependencies{
-		Ingest:      NewIngestHandler(reg, pub),
+		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:       &QueryHandler{},
-		SSE:         NewSSEHandler(hub, nil),
-		WS:          NewWSHandler(hub, nil, nil),
+		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
 		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
 	})
 
 	get := func(path, role string) *httptest.ResponseRecorder {

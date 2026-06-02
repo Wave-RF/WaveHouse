@@ -13,12 +13,11 @@ WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the 
 
 ```mermaid
 flowchart TD
-    Clients["Clients<br/>(REST API, SSE, WebSocket)"]:::client
+    Clients["Clients<br/>(REST API, SSE)"]:::client
 
     Clients --> IH
     Clients --> QH
     Clients --> SSH
-    Clients --> WSH
 
     subgraph api["WaveHouse API Layer"]
         IH["Ingest Handler"] --> SR["Schema Registry"]
@@ -30,11 +29,10 @@ flowchart TD
         QH["Query Handler"] --> Cache["Cache<br/>(Ristretto + singleflight)"]
 
         SSH["SSE Handler"] --> Hub["Hub<br/>(broadcast fan-out)"]
-        WSH["WebSocket Handler"] --> Hub
 
         SW["Active Sweeper"] -.->|purges old msgs| MQ
 
-        NATS["NATS JetStream retains messages<br/>for SSE/WS gap-fill<br/>via DeliverByStartTime"]
+        NATS["NATS JetStream retains messages<br/>for SSE gap-fill<br/>via DeliverByStartTime"]
     end
 
     BC --> CH[("ClickHouse<br/>(analytics storage)")]:::store
@@ -68,14 +66,14 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
 
-- **router.go** — Route definitions. Public: `/health`, `/ready`. Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream/sse`, `/v1/stream/ws`. Admin-only (`RequireAdmin`, role == `policy.admin_role`): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/log-level`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
+- **router.go** — Route definitions. Public: `/health`, `/ready`. Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin`, role == `policy.admin_role`): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
 - **`internal/auth`** — JWT auth middleware supporting HMAC and JWKS validation and role extraction from a configurable claim path. It always runs (no on/off flag) and never rejects: a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table{.scope}}`.
 - **query.go** — Executes SQL queries directly against ClickHouse. Results are cached. UUID/DateTime columns are converted to strings.
-- **stream_sse.go** / **stream_ws.go** — Real-time streaming via SSE and WebSocket. Callers select a table with the `?table=` query parameter (required for SSE); WS additionally accepts in-band `{"action":"subscribe","table":"..."}` commands. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
+- **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
@@ -130,7 +128,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### `pipes/` — Named Query Pipes
 
-- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` replaces `{{param}}` placeholders with positional parameters.
+- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings are single-quote-escaped).
 
 ### `query/` — Structured Query Engine
 
@@ -179,7 +177,7 @@ Active Sweeper (async goroutine, every 60s):
 Client POST /v1/admin/query
   → JWT auth middleware (always runs; no/invalid token → empty role)
   → /v1/admin RequireAdmin (role == policy.admin_role) — single gate shared
-    with the rest of /v1/admin/* (policy CRUD, pipes CRUD, log-level). Raw SQL has
+    with the rest of /v1/admin/* (policy CRUD, pipes CRUD). Raw SQL has
     no per-statement scope check (a full SQL parser would be needed to
     authorize predicates), so the role gate is the entire authorization
     story. /v1/admin/query is the only sanctioned surface for non-SELECT
@@ -228,7 +226,7 @@ consistent.
 ### Streaming Path
 
 ```text
-Client GET /v1/stream/sse or /v1/stream/ws
+Client GET /v1/stream
   → Optional JWT auth middleware
   → If ?since= parameter provided:
     → Create ephemeral NATS consumer with DeliverByStartTime
@@ -248,7 +246,6 @@ Client GET /v1/stream/sse or /v1/stream/ws
 | Message Queue | NATS + JetStream | Durable event streaming |
 | L1 Cache | Ristretto v2 | In-process memory cache |
 | Embedded KV | Pebble | Optional deduplication |
-| WebSocket | coder/websocket | WebSocket protocol support |
 | Config | cleanenv | YAML + env var config loading |
 | Release | GoReleaser | Cross-platform binary builds |
 | Containers | Docker (distroless) | Minimal production images |

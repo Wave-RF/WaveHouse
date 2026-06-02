@@ -1,7 +1,7 @@
-import type { Result, HttpContext, DLQStats, StreamOptions } from './types.js';
-import { request } from './http.js';
-import { ok, err } from './errors.js';
-import type { StreamController } from './stream/controller.js';
+import { err, ok } from "./errors.js";
+import { request } from "./http.js";
+import type { StreamController } from "./stream/controller.js";
+import type { DLQStats, HttpContext, Result, StreamOptions } from "./types.js";
 
 type CreateStreamFn = (table: string, opts?: StreamOptions) => StreamController;
 
@@ -18,8 +18,8 @@ export class DLQNamespace {
   /** Get DLQ statistics (message counts per table). */
   async list(opts?: { signal?: AbortSignal }): Promise<Result<DLQStats>> {
     const { data, error } = await request<DLQStats>(this._ctx, {
-      method: 'GET',
-      path: '/v1/dlq/stats',
+      method: "GET",
+      path: "/v1/dlq/stats",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -29,8 +29,8 @@ export class DLQNamespace {
   /** Get DLQ stats filtered by table name. */
   async table(name: string, opts?: { signal?: AbortSignal }): Promise<Result<DLQStats>> {
     const { data, error } = await request<DLQStats>(this._ctx, {
-      method: 'GET',
-      path: '/v1/dlq/stats',
+      method: "GET",
+      path: "/v1/dlq/stats",
       params: { table: name },
       signal: opts?.signal,
     });
@@ -40,6 +40,6 @@ export class DLQNamespace {
 
   /** Subscribe to live DLQ events. */
   stream(opts?: StreamOptions): StreamController {
-    return this._createStream('dlq', opts);
+    return this._createStream("dlq", opts);
   }
 }

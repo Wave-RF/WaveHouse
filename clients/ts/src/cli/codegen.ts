@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/// <reference types="node" />
 /**
  * WaveHouse Codegen CLI
  *
@@ -19,23 +20,23 @@ interface CliArgs {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { url: 'http://localhost:8080', out: './wavehouse.d.ts' };
+  const args: CliArgs = { url: "http://localhost:8080", out: "./wavehouse.d.ts" };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--url':
-      case '-u':
+      case "--url":
+      case "-u":
         args.url = argv[++i];
         break;
-      case '--out':
-      case '-o':
+      case "--out":
+      case "-o":
         args.out = argv[++i];
         break;
-      case '--auth':
-      case '-a':
+      case "--auth":
+      case "-a":
         args.auth = argv[++i];
         break;
-      case '--help':
-      case '-h':
+      case "--help":
+      case "-h":
         console.log(`wavehouse codegen — Generate TypeScript types from WaveHouse schema
 
 Options:
@@ -53,45 +54,45 @@ Options:
 
 function chTypeToTS(chType: string): string {
   // Unwrap Nullable
-  if (chType.startsWith('Nullable(') && chType.endsWith(')')) {
+  if (chType.startsWith("Nullable(") && chType.endsWith(")")) {
     const inner = chType.slice(9, -1);
     return `${chTypeToTS(inner)} | null`;
   }
 
   // Unwrap LowCardinality
-  if (chType.startsWith('LowCardinality(') && chType.endsWith(')')) {
+  if (chType.startsWith("LowCardinality(") && chType.endsWith(")")) {
     return chTypeToTS(chType.slice(15, -1));
   }
 
   // String-like types
   if (
-    chType === 'String' ||
-    chType.startsWith('FixedString(') ||
-    chType === 'UUID' ||
-    chType.startsWith('DateTime') ||
-    chType.startsWith('Date') ||
-    chType.startsWith('Enum8(') ||
-    chType.startsWith('Enum16(') ||
-    chType === 'IPv4' ||
-    chType === 'IPv6'
+    chType === "String" ||
+    chType.startsWith("FixedString(") ||
+    chType === "UUID" ||
+    chType.startsWith("DateTime") ||
+    chType.startsWith("Date") ||
+    chType.startsWith("Enum8(") ||
+    chType.startsWith("Enum16(") ||
+    chType === "IPv4" ||
+    chType === "IPv6"
   ) {
-    return 'string';
+    return "string";
   }
 
   // Boolean
-  if (chType === 'Bool') return 'boolean';
+  if (chType === "Bool") return "boolean";
 
   // Numeric types
-  if (isNumeric(chType)) return 'number';
+  if (isNumeric(chType)) return "number";
 
   // Array
-  if (chType.startsWith('Array(') && chType.endsWith(')')) {
+  if (chType.startsWith("Array(") && chType.endsWith(")")) {
     const inner = chType.slice(6, -1);
     return `${chTypeToTS(inner)}[]`;
   }
 
   // Map
-  if (chType.startsWith('Map(') && chType.endsWith(')')) {
+  if (chType.startsWith("Map(") && chType.endsWith(")")) {
     const inner = chType.slice(4, -1);
     const comma = findTopLevelComma(inner);
     if (comma !== -1) {
@@ -99,33 +100,45 @@ function chTypeToTS(chType: string): string {
       const valType = chTypeToTS(inner.slice(comma + 1).trim());
       return `Record<${keyType}, ${valType}>`;
     }
-    return 'Record<string, unknown>';
+    return "Record<string, unknown>";
   }
 
   // Tuple → object or array (fall back to unknown[])
-  if (chType.startsWith('Tuple(')) {
-    return 'unknown[]';
+  if (chType.startsWith("Tuple(")) {
+    return "unknown[]";
   }
 
-  return 'unknown';
+  return "unknown";
 }
 
 function isNumeric(t: string): boolean {
   const numericPrefixes = [
-    'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128', 'UInt256',
-    'Int8', 'Int16', 'Int32', 'Int64', 'Int128', 'Int256',
-    'Float32', 'Float64', 'Decimal',
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt64",
+    "UInt128",
+    "UInt256",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "Int128",
+    "Int256",
+    "Float32",
+    "Float64",
+    "Decimal",
   ];
-  return numericPrefixes.some((p) => t === p || t.startsWith(p + '('));
+  return numericPrefixes.some((p) => t === p || t.startsWith(`${p}(`));
 }
 
 /** Find the first comma that isn't inside parentheses. */
 function findTopLevelComma(s: string): number {
   let depth = 0;
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === '(') depth++;
-    else if (s[i] === ')') depth--;
-    else if (s[i] === ',' && depth === 0) return i;
+    if (s[i] === "(") depth++;
+    else if (s[i] === ")") depth--;
+    else if (s[i] === "," && depth === 0) return i;
   }
   return -1;
 }
@@ -148,9 +161,9 @@ type Schemas = Record<string, TableSchema>;
 
 async function fetchSchemas(url: string, auth?: string): Promise<Schemas> {
   const headers: Record<string, string> = {};
-  if (auth) headers['Authorization'] = `Bearer ${auth}`;
+  if (auth) headers.Authorization = `Bearer ${auth}`;
 
-  const res = await fetch(`${url.replace(/\/+$/, '')}/v1/schema`, { headers });
+  const res = await fetch(`${url.replace(/\/+$/, "")}/v1/schema`, { headers });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);
@@ -160,21 +173,21 @@ async function fetchSchemas(url: string, auth?: string): Promise<Schemas> {
 
 function generateTypes(schemas: Schemas): string {
   const lines: string[] = [
-    '// Auto-generated by @wavehouse/sdk codegen',
+    "// Auto-generated by @wavehouse/sdk codegen",
     `// Generated at: ${new Date().toISOString()}`,
-    '// Do not edit manually — re-run: npm run codegen',
-    '',
-    'export interface Database {',
+    "// Do not edit manually — re-run: npm run codegen",
+    "",
+    "export interface Database {",
   ];
 
   const tableNames = Object.keys(schemas).sort();
   for (const tableName of tableNames) {
-    const schema = schemas[tableName];
+    const _schema = schemas[tableName];
     const rowType = `${pascalCase(tableName)}Row`;
     lines.push(`  ${tableName}: ${rowType};`);
   }
-  lines.push('}');
-  lines.push('');
+  lines.push("}");
+  lines.push("");
 
   // Generate row interfaces
   for (const tableName of tableNames) {
@@ -183,23 +196,23 @@ function generateTypes(schemas: Schemas): string {
     lines.push(`export interface ${rowType} {`);
 
     for (const col of schema.columns) {
-      let tsType = chTypeToTS(col.type);
-      const optional = col.has_default ? '?' : '';
+      const tsType = chTypeToTS(col.type);
+      const optional = col.has_default ? "?" : "";
       lines.push(`  ${col.name}${optional}: ${tsType};`);
     }
 
-    lines.push('}');
-    lines.push('');
+    lines.push("}");
+    lines.push("");
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function pascalCase(s: string): string {
   return s
     .split(/[_\-\s]+/)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join('');
+    .join("");
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -212,23 +225,23 @@ async function main() {
   const tableCount = Object.keys(schemas).length;
 
   if (tableCount === 0) {
-    console.warn('No tables found. Is WaveHouse running with tables in ClickHouse?');
+    console.warn("No tables found. Is WaveHouse running with tables in ClickHouse?");
     process.exit(1);
   }
 
-  console.log(`Found ${tableCount} table(s): ${Object.keys(schemas).join(', ')}`);
+  console.log(`Found ${tableCount} table(s): ${Object.keys(schemas).join(", ")}`);
 
   const output = generateTypes(schemas);
 
-  const { writeFile } = await import('node:fs/promises');
-  const { resolve } = await import('node:path');
+  const { writeFile } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
   const outPath = resolve(args.out);
-  await writeFile(outPath, output, 'utf-8');
+  await writeFile(outPath, output, "utf-8");
 
   console.log(`✓ Types written to ${outPath}`);
 }
 
 main().catch((err) => {
-  console.error('Codegen failed:', err.message);
+  console.error("Codegen failed:", err.message);
   process.exit(1);
 });
