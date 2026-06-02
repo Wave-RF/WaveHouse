@@ -60,7 +60,14 @@
     "editor.tabSize": 2
   },
   "[markdown]": {
-    "editor.tabSize": 2
+    "editor.tabSize": 2,
+    // Apply markdownlint's auto-fixes on save — mirrors `make fix` / `pnpm run
+    // fix:md`. The DavidAnson.vscode-markdownlint extension and the CLI both read
+    // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs), so
+    // the editor and CI stay in lockstep.
+    "editor.codeActionsOnSave": {
+      "source.fixAll.markdownlint": "explicit"
+    }
   },
 
   // ── Search exclusions ──────────────────────────────────────────
