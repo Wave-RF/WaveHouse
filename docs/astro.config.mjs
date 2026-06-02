@@ -1,16 +1,17 @@
 // @ts-check
-import { defineConfig } from "astro/config";
+
 import starlight from "@astrojs/starlight";
-import starlightImageZoom from "starlight-image-zoom";
-import starlightLlmTools from "starlight-llm-tools";
-import starlightLinksValidator from "starlight-links-validator";
 import tailwindcss from "@tailwindcss/vite";
+import { defineConfig } from "astro/config";
+import { themedMermaid } from "astro-themed-mermaid";
+import rehypeKatex from "rehype-katex";
 import rehypeMermaid from "rehype-mermaid";
 import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import { sidebar } from "./src/config/sidebar.ts";
-import { themedMermaid } from "astro-themed-mermaid";
+import starlightImageZoom from "starlight-image-zoom";
+import starlightLinksValidator from "starlight-links-validator";
+import starlightLlmTools from "starlight-llm-tools";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
+import { sidebar } from "./src/config/sidebar.ts";
 
 // Color-agnostic Mermaid plugin (astro-themed-mermaid pkg) + WaveHouse's palette
 // (src/config/mermaid-theme). Diagram colors are defined once in global.css
@@ -46,21 +47,54 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         // non-SVG browsers; also auto-probed at the site root) and the
         // apple-touch icon. The whole brand kit is generated into /branding/ by
         // scripts/branding/generate.sh.
-        { tag: "link", attrs: { rel: "icon", type: "image/x-icon", sizes: "16x16 32x32 48x48", href: "/favicon.ico" } },
-        { tag: "link", attrs: { rel: "apple-touch-icon", sizes: "180x180", href: "/branding/apple-touch-icon.png" } },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            type: "image/x-icon",
+            sizes: "16x16 32x32 48x48",
+            href: "/favicon.ico",
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "apple-touch-icon",
+            sizes: "180x180",
+            href: "/branding/apple-touch-icon.png",
+          },
+        },
         // Open Graph — Starlight already emits og:title, og:type, og:url,
         // og:locale, og:description, og:site_name, twitter:card. These are
         // the bits it doesn't, applied site-wide so every shareable page
         // carries them. og:image:alt doubles as accessibility text for
         // screen readers and the fallback string platforms render when the
         // image fails to load.
-        { tag: "meta", attrs: { property: "og:image", content: "https://wavehouse.dev/branding/og.png" } },
+        {
+          tag: "meta",
+          attrs: { property: "og:image", content: "https://wavehouse.dev/branding/og.png" },
+        },
         { tag: "meta", attrs: { property: "og:image:type", content: "image/png" } },
         { tag: "meta", attrs: { property: "og:image:width", content: "1200" } },
         { tag: "meta", attrs: { property: "og:image:height", content: "630" } },
-        { tag: "meta", attrs: { property: "og:image:alt", content: "WaveHouse — open-source real-time API gateway for ClickHouse" } },
-        { tag: "meta", attrs: { name: "twitter:image", content: "https://wavehouse.dev/branding/og.png" } },
-        { tag: "meta", attrs: { name: "twitter:image:alt", content: "WaveHouse — open-source real-time API gateway for ClickHouse" } },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:image:alt",
+            content: "WaveHouse — open-source real-time API gateway for ClickHouse",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: { name: "twitter:image", content: "https://wavehouse.dev/branding/og.png" },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            name: "twitter:image:alt",
+            content: "WaveHouse — open-source real-time API gateway for ClickHouse",
+          },
+        },
       ],
       // No `logo` here on purpose: the SiteTitle override renders the brand
       // mark via the shared <WaveMark/> component (currentColor, theme-aware),
@@ -84,10 +118,8 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         themes: ["github-dark", "github-light"],
         styleOverrides: {
           borderRadius: "0.5rem",
-          codeFontFamily:
-            "'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace",
-          uiFontFamily:
-            "'Inter Variable', ui-sans-serif, system-ui, sans-serif",
+          codeFontFamily: "'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace",
+          uiFontFamily: "'Inter Variable', ui-sans-serif, system-ui, sans-serif",
           frames: {
             shadowColor: "rgba(0, 0, 0, 0.3)",
           },

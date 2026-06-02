@@ -3,9 +3,9 @@
  * Requires the dev server to be running on http://127.0.0.1:4321
  * (the Astro default, which is also what `make docs-dev` starts). */
 
-import { chromium } from "playwright";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { chromium } from "playwright";
 
 const BASE = process.env.BASE_URL ?? "http://127.0.0.1:4321";
 const OUT = resolve(process.cwd(), "screenshots");
@@ -13,9 +13,19 @@ const OUT = resolve(process.cwd(), "screenshots");
 const pages = [
   { name: "landing", url: "/", viewport: { width: 1440, height: 900 }, full: true },
   { name: "landing-mobile", url: "/", viewport: { width: 390, height: 844 }, full: true },
-  { name: "getting-started", url: "/getting-started", viewport: { width: 1440, height: 900 }, full: false },
+  {
+    name: "getting-started",
+    url: "/getting-started",
+    viewport: { width: 1440, height: 900 },
+    full: false,
+  },
   { name: "api", url: "/api", viewport: { width: 1440, height: 900 }, full: false },
-  { name: "architecture", url: "/architecture", viewport: { width: 1440, height: 900 }, full: false },
+  {
+    name: "architecture",
+    url: "/architecture",
+    viewport: { width: 1440, height: 900 },
+    full: false,
+  },
 ];
 
 await mkdir(OUT, { recursive: true });
@@ -32,7 +42,9 @@ try {
       await page.goto(`${BASE}${p.url}`, { waitUntil: "networkidle" });
       await page.evaluate((t) => {
         document.documentElement.setAttribute("data-theme", t);
-        try { localStorage.setItem("starlight-theme", t); } catch {}
+        try {
+          localStorage.setItem("starlight-theme", t);
+        } catch {}
       }, theme);
       // Wait on web fonts + the hero's own ready signal — Hero.astro stamps
       // `[data-screenshot-ready]` on <html> via animationend on the last

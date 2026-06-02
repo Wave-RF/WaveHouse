@@ -624,7 +624,7 @@ The SDK **never throws**. All errors are returned in `Result.error`.
 
 ## Full API Tree
 
-```
+```text
 createClient<DB>(config) → WaveHouseClient
 ├── .from(table) → TableRef (NOT thenable)
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>

@@ -1,0 +1,19 @@
+{
+  // markdownlint-cli2 CLI config for the WaveHouse monorepo: which files to lint.
+  //
+  // Rule configuration lives in .markdownlint.json (NOT here) so that editor
+  // markdownlint extensions — which read .markdownlint.json directly — stay in
+  // sync with the CLI. See that file for why MD013 / MD033 / MD024 / MD041 are
+  // tuned. Biome owns JS / TS / JSON; markdownlint owns Markdown — no overlap.
+  // Driven from the root Makefile (`make lint` / `make fix`).
+  //
+  // NOTE: .mdx is intentionally NOT linted — markdownlint parses CommonMark, not
+  // MDX's JSX/import syntax (docs/src/content/docs/index.mdx).
+  "globs": ["**/*.md"],
+  "ignores": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/.astro/**",
+    "**/.pnpm/**"
+  ]
+}

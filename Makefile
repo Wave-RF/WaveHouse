@@ -263,10 +263,12 @@ obs-front: ## Start local OTel Front UI
 GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
 
 # fmt/lint/fix: Biome is workspace-wide — one config (biome.json), one binary,
-# scanning whatever its files.includes glob covers (SDK + e2e today). It's
+# scanning whatever its files.includes glob covers (SDK + e2e + docs). It's
 # invoked directly here, not via a per-subproject target. All three depend on
 # pnpm-install so Biome never runs before node_modules exists (fresh clone, or
-# as a sibling under `make -j verify`).
+# as a sibling under `make -j verify`). Markdown is linted separately by
+# markdownlint-cli2 (rules in .markdownlint.json, globs in .markdownlint-cli2.jsonc)
+# and wired into lint/fix below — Biome doesn't handle Markdown, only JS/TS/JSON.
 #
 # fmt = format only (quick). lint = `biome check --error-on-warnings` (format +
 # lint + organize-imports) — the read-only inverse of fix's `biome check
@@ -295,9 +297,11 @@ fmt: pnpm-install ## Check formatting across Go (gofumpt) + TS (Biome). Run `mak
 # lint: Go (golangci-lint) + TS. The TS side runs `biome check` (lint +
 # format + import order) — see the fmt block for why it mirrors fix.
 .PHONY: lint
-lint: $(GOLANGCI_LINT) go-mod-download pnpm-install ## Lint across Go (golangci-lint) + TS (biome check). Run `make fix` to apply --fix.
+lint: $(GOLANGCI_LINT) go-mod-download pnpm-install ## Lint across Go (golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint). Run `make fix` to apply --fix.
 	@echo "$(CYAN)==> Running Biome check (lint + format + imports)...$(RESET)"
 	@$(PNPM) -w run check || { echo "$(RED)==> Biome found issues.$(RESET) Run $(CYAN)make fix$(RESET) to auto-fix (warnings without a safe fix need a manual edit)."; exit 1; }
+	@echo "$(CYAN)==> Running markdownlint (Markdown)...$(RESET)"
+	@$(PNPM) -w run lint:md || { echo "$(RED)==> markdownlint found issues.$(RESET) Run $(CYAN)make fix$(RESET) to auto-fix (some rules need a manual edit)."; exit 1; }
 	@echo "$(CYAN)==> Running golangci-lint...$(RESET)"
 	@$(GOLANGCI_LINT) run ./... --allow-parallel-runners
 
@@ -326,9 +330,11 @@ tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 # fix: apply auto-fixes everywhere — Go (tidy + gofumpt + goimports +
 # golangci-lint --fix) + Biome (`check --write`: format + lint + imports).
 .PHONY: fix
-fix: $(GOLANGCI_LINT) pnpm-install ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS (Biome --write)
+fix: $(GOLANGCI_LINT) pnpm-install ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS/JSON (Biome) + Markdown (markdownlint)
 	@echo "$(CYAN)==> Applying Biome fixes...$(RESET)"
 	@$(PNPM) -w run fix
+	@echo "$(CYAN)==> Applying markdownlint fixes...$(RESET)"
+	@$(PNPM) -w run fix:md
 	@echo "$(CYAN)==> Applying Go auto-fixes...$(RESET)"
 	@go mod tidy
 	@$(GOFUMPT) -w $(GO_DIRS)

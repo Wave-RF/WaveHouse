@@ -8,21 +8,18 @@
  *
  * Reports numbers, not opinions. Run with: node scripts/mermaid-audit.mjs */
 
-import { chromium } from "playwright";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { chromium } from "playwright";
 
 const ROOT = resolve(process.cwd());
 const OUT = resolve(ROOT, "screenshots");
 await mkdir(OUT, { recursive: true });
 
 function extractMermaidSvgs(html) {
-  const svgs = [];
   const re =
     /<svg\b[^>]*aria-roledescription="(?:flowchart|sequence|class|state|gantt|pie|er)-[^"]*"[\s\S]*?<\/svg>/g;
-  let m;
-  while ((m = re.exec(html))) svgs.push(m[0]);
-  return svgs;
+  return [...html.matchAll(re)].map((m) => m[0]);
 }
 
 const sources = [
@@ -85,12 +82,7 @@ function rgbToHex(rgb) {
   const m = rgb.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/);
   if (!m) return rgb;
   const [, r, g, b] = m.map(Number);
-  return (
-    "#" +
-    [r, g, b]
-      .map((v) => Math.round(v).toString(16).padStart(2, "0"))
-      .join("")
-  );
+  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 }
 
 function probePage(svg, css) {
@@ -143,7 +135,7 @@ for (const t of targets) {
     function svgCenter(svgEl) {
       // For SVG geometry (filter-free), use getBBox + element CTM to get
       // page coordinates of the geometric center.
-      if (!svgEl || !svgEl.getBBox) return null;
+      if (!svgEl?.getBBox) return null;
       const b = svgEl.getBBox();
       const m = svgEl.getScreenCTM();
       if (!m) return null;
@@ -157,7 +149,14 @@ for (const t of targets) {
     function bbox(el) {
       if (!el) return null;
       const r = el.getBoundingClientRect();
-      return { x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
+      return {
+        x: r.x,
+        y: r.y,
+        w: r.width,
+        h: r.height,
+        cx: r.x + r.width / 2,
+        cy: r.y + r.height / 2,
+      };
     }
     const out = {};
     for (const pane of document.querySelectorAll(".pane")) {
@@ -197,10 +196,13 @@ for (const t of targets) {
         for (const path of pane.querySelectorAll(".flowchart-link, .edgePath .path")) {
           const r = path.getBoundingClientRect();
           // distance from label center to path bbox center
-          const dx = (r.x + r.width / 2) - labelBox.cx;
-          const dy = (r.y + r.height / 2) - labelBox.cy;
+          const dx = r.x + r.width / 2 - labelBox.cx;
+          const dy = r.y + r.height / 2 - labelBox.cy;
           const d = Math.hypot(dx, dy);
-          if (d < nearestDist) { nearestDist = d; nearest = r; }
+          if (d < nearestDist) {
+            nearestDist = d;
+            nearest = r;
+          }
         }
         if (!nearest) continue;
         edges.push({

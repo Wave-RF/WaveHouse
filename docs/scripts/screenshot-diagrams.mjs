@@ -20,10 +20,11 @@
  *
  * Output: screenshots/<page>-{light|dark}-<i>.png, one per diagram.
  * `screenshots/` is gitignored. */
-import { chromium } from "playwright";
+
+import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readFile, mkdir } from "node:fs/promises";
+import { chromium } from "playwright";
 
 const ROOT = resolve(process.cwd());
 const DIST = resolve(ROOT, "dist");
@@ -69,8 +70,8 @@ try {
           const type = path.endsWith(".css")
             ? "text/css"
             : path.endsWith(".js")
-            ? "text/javascript"
-            : "application/octet-stream";
+              ? "text/javascript"
+              : "application/octet-stream";
           return route.fulfill({ body, contentType: type });
         } catch {
           return route.continue();
@@ -86,7 +87,7 @@ try {
 
       const count = await page.$$eval(
         'svg[aria-roledescription^="flowchart"]',
-        (svgs) => svgs.length
+        (svgs) => svgs.length,
       );
       for (let i = 0; i < count; i++) {
         // Scroll the i-th svg into view, then page.screenshot clipped to
@@ -94,9 +95,7 @@ try {
         // CSS for its foreignObject HTML content; clipping the page does
         // not.
         const box = await page.evaluate((idx) => {
-          const svg = document.querySelectorAll(
-            'svg[aria-roledescription^="flowchart"]'
-          )[idx];
+          const svg = document.querySelectorAll('svg[aria-roledescription^="flowchart"]')[idx];
           svg.scrollIntoView({ block: "center" });
           const r = svg.getBoundingClientRect();
           return { x: r.x, y: r.y, w: r.width, h: r.height };

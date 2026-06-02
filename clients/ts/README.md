@@ -133,4 +133,3 @@ See the full [SDK API Reference](../../docs/sdk.md) for detailed documentation o
 ## License
 
 Apache-2.0
-

@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- markdownlint-disable-file MD024 — Keep a Changelog repeats ### Added / Changed / Fixed / Removed headings across version sections. -->
+
 ## Unreleased
 
 ### Added
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Lint/format coverage extended to the docs package + repo-wide Markdown** (`biome.json`, `package.json`, `.markdownlint.json`, `.markdownlint-cli2.jsonc`, `Makefile`, `AGENTS.md`): Biome's `files.includes` now covers `docs/**` JS/TS/JSON (astro config, mermaid theme, sidebar, worker, dev scripts) on top of the SDK and E2E harness — `.astro` templates and Markdown remain out of Biome's scope by design. Markdown across the whole repo is now linted by `markdownlint-cli2` (new root devDependency), wired into `make lint` / `make fix` next to Biome; rules live in `.markdownlint.json` (so editor extensions stay in sync) and file globs in `.markdownlint-cli2.jsonc`. `MD013` (line length), `MD033` (inline HTML — the README's theme-aware `<picture>`), and `MD060` (table column style) are disabled as ill-fitting here; `MD024` (duplicate headings) is exempted in `CHANGELOG.md` only, since Keep a Changelog repeats `### Added` / `Changed` / `Fixed` per version. `.mdx` is not linted (markdownlint parses CommonMark, not MDX's JSX).
 - **Docs site auto-deploys to `wavehouse.dev` via Cloudflare Workers Builds, and is driven from the root `Makefile` through the pnpm workspace** (`Makefile`, `docs/wrangler.jsonc`, `docs/scripts/branding/` (moved from `scripts/branding/`), `AGENTS.md`, `docs/src/content/docs/development.md`, `docs/scripts/screenshot.mjs`, `.github/actions/setup-env/action.yml`). Three threads, one PR:
   - **Driven from the root Makefile via the pnpm workspace.** `docs/` (package `wavehouse-docs`) is a pnpm workspace package built and served straight from the root `Makefile` with `pnpm --filter wavehouse-docs run <script>` — no sub-Makefile. Root targets are verb-first and slot into the normal `make help` sections: `build-docs`, `dev-docs`, `preview-docs`, `branding-docs`, `clean-docs`, plus a hidden `install-playwright-docs` helper that lazily fetches the Chromium build `rehype-mermaid` + `starlight-links-validator` need (the `--with-deps` apt step gated on `$CI`). The SDK (`clients/ts/`) and E2E harness (`tests/e2e/sdk/`) are workspace packages too, driven the same way (`build-ts`, `test-ts`, …), and `make ci` / `make tools` / `make build-all` call these targets directly.
   - **Branding pipeline relocated.** `scripts/branding/{mark.svg,lockup.svg,og.template.svg,generate.sh}` → `docs/scripts/branding/` since it's a docs-only concern; `generate.sh` now resolves the repo root via `git rev-parse --show-toplevel` instead of a hard-coded relative climb, so future moves don't re-break it. `make branding-docs` is the canonical entry point from root.
@@ -114,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`workflow_dispatch` manual trigger on `ci.yml`**: lets us re-run CI on demand for any branch via `gh workflow run CI --ref <branch>`. Added after PR #79 hit a GitHub-side anomaly where `pull_request` events stopped firing for a single PR's branch.
 
 ### Changed
+
 - **Breaking:** `mq.Message.Ack()` and `mq.Message.Nak()` now return `error` (previously no return value) and no longer accept a `context.Context`.
 - **Breaking:** Added `mq.Message.DoubleAck(ctx context.Context) error` for synchronous, server-confirmed acknowledgments. Use this for critical ingest paths (ClickHouse writes).
 - Ingest worker now uses NATS `DoubleAck` for explicit server-side confirmation before finalizing batches.
@@ -184,7 +188,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Repository governance files**: `CLAUDE.md` and `.gemini/styleguide.md` pointers to `AGENTS.md` so Claude Code and Gemini Code Assist pick up project conventions automatically. _(Note: `.github/CODEOWNERS` was originally added here but is removed later in this same Unreleased cycle — see the `Changed` entry at the top of this section.)_
+- **Repository governance files**: `CLAUDE.md` and `.gemini/styleguide.md` pointers to `AGENTS.md` so Claude Code and Gemini Code Assist pick up project conventions automatically. *(Note: `.github/CODEOWNERS` was originally added here but is removed later in this same Unreleased cycle — see the `Changed` entry at the top of this section.)*
 - **PR title linting**: `.github/workflows/pr-title.yml` validates that PR titles follow Conventional Commits. Enforced as a required status check (`Validate`) in the `main branch protection` ruleset — PRs with non-conforming titles cannot merge. CONTRIBUTING.md documents the full accepted type list (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`), with optional scope and optional `!` breaking-change marker.
 
 - **Issue triage automation**: `.github/workflows/triage.yml` classifies new/edited issues via GitHub Models (`gpt-4o-mini`) and applies `area/*`, `security`, and `breaking-change` labels. When a `PROJECT_BOARD_TOKEN` secret with project scope is configured, also writes the `Priority` field on Task Board project #7. The step soft-fails if the secret is missing so label-only triage still works out of the box.
@@ -283,6 +287,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Analysis Make targets rewritten**: `size-tree` uses `gsa --format text --hide-sections` for a clean package-size table (was broken `goda weight`). `size-treemap` outputs text + SVG + interactive HTML treemap, auto-opens HTML outside CI. `dep-graph` suppresses graphviz cluster warnings, CI-aware auto-open. `dep-cut` filters to InDegree ≤ 3, strips `github.com/` prefix, respects `LIMIT` var (default 30). `audit-cgo` adds informational context about CGO_ENABLED=0. New `LIMIT` variable for analysis row limits. Analysis artifacts added to `make clean` and `.gitignore`.
 
 ### Fixed
+
 - **RequireRole fail-closed**: Deny requests with no role when `auth.enabled` is true, preventing a missing JWT claim from inadvertently granting admin access.
 - **Cursor pagination with DateTime64 filters**: `coerceFilterValue` now returns ClickHouse-compatible formatted strings (e.g. `2026-04-02 16:25:50.297`) preserving sub-second precision, instead of `time.Time` which the driver formats with second-only precision via `toDateTime()`. Fixes cursor pagination returning 0 rows on subsequent pages when DateTime64 columns are used as cursor keys.
 - **Pipes template inline substitution**: `BindParams` now inlines parameter values directly into the SQL string (with proper escaping) instead of using `?` positional placeholders. String values that look numeric are inlined bare (for LIMIT etc.), other strings are single-quote escaped. Fixes `{{limit:10}}` templates causing ClickHouse syntax errors.

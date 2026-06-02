@@ -23,8 +23,8 @@ export const mermaidTheme = {
     woff2: fileURLToPath(
       new URL(
         "../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2",
-        import.meta.url
-      )
+        import.meta.url,
+      ),
     ),
   },
 

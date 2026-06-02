@@ -10,10 +10,13 @@
     "format": "biome format .",
     "lint": "biome lint .",
     "check": "biome check --error-on-warnings .",
-    "fix": "biome check --write ."
+    "fix": "biome check --write .",
+    "lint:md": "markdownlint-cli2",
+    "fix:md": "markdownlint-cli2 --fix"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
+    "markdownlint-cli2": "^0.22.1",
     "nyc": "^18.0.0"
   }
 }
