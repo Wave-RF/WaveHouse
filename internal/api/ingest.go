@@ -28,10 +28,11 @@ type IngestHandler struct {
 	IDField     string              // dedup key field name (e.g. "event_id")
 	Publisher   mq.Publisher
 	PolicyStore *policy.Store
+	logger      *slog.Logger
 }
 
-func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher) *IngestHandler {
-	return &IngestHandler{Registry: registry, Publisher: pub}
+func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
+	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
 }
 
 func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -47,14 +48,14 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Add a standard log to prove we are inside the span logic
-	slog.DebugContext(ctx, "debug: span started for ingest", "table", table)
+	h.logger.DebugContext(ctx, "debug: span started for ingest", "table", table)
 
 	r = r.WithContext(ctx)
 
 	// TODO: what should the order of these be to maximize speed + limit risk of data leakage or DoS/resource exhaustion?
 
 	if table == "" {
-		slog.ErrorContext(ctx, "missing table parameter in request")
+		h.logger.ErrorContext(ctx, "missing table parameter in request")
 		writeJSONError(w, http.StatusBadRequest, "missing table")
 		return
 	}
@@ -62,7 +63,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// TODO: prevent table-enumeration...
 	schema := h.Registry.Get(table)
 	if schema == nil {
-		slog.WarnContext(ctx, "unknown table requested", "table", table)
+		h.logger.WarnContext(ctx, "unknown table requested", "table", table)
 		writeJSONError(w, http.StatusNotFound, "unknown table: "+table)
 		return
 	}
@@ -77,8 +78,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(ctx)
 		perms = policy.Evaluate(p, role, table, "insert", claims)
 		if !perms.Allowed {
-			slog.WarnContext(ctx, "policy enforcement rejected request", "role", role, "table", table)
-			writeAuthzDenied(w, r, role)
+			writeAuthzDenied(w, r, h.logger, role, nil,
+				slog.String("gate", "policy"),
+				slog.String("table", table),
+				slog.String("action", "insert"),
+			)
 			return
 		}
 	}
@@ -88,13 +92,13 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()
 	if err := decoder.Decode(&data); err != nil {
-		slog.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
+		h.logger.ErrorContext(ctx, "invalid json payload", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := discovery.Validate(schema, data); err != nil {
-		slog.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
+		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -104,7 +108,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// Check column permissions — reject disallowed columns.
 		for col := range data {
 			if !perms.IsColumnAllowed(col) {
-				slog.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
+				h.logger.WarnContext(ctx, "column insertion forbidden", "column", col, "role", role)
 				writeJSONError(w, http.StatusForbidden, fmt.Sprintf("column %q not allowed for insert", col))
 				return
 			}
@@ -113,7 +117,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		for col, requiredVal := range perms.CheckClauses {
 			if actual, ok := data[col]; ok {
 				if fmt.Sprint(actual) != fmt.Sprint(requiredVal) {
-					slog.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
+					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
 					writeJSONError(w, http.StatusForbidden, fmt.Sprintf("check failed for column %q", col))
 					return
 				}
@@ -130,12 +134,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			eventID := fmt.Sprint(idVal)
 			dup, err := h.Dedup.CheckAndMark(ctx, eventID)
 			if err != nil {
-				slog.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
+				h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
 				writeJSONError(w, http.StatusInternalServerError, "dedupe failed")
 				return
 			}
 			if dup {
-				slog.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
+				h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]bool{"duplicate": true})
 				return
@@ -155,7 +159,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to marshal event message", "error", err)
+		h.logger.ErrorContext(ctx, "failed to marshal event message", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "marshal failed")
 		return
 	}
@@ -165,20 +169,20 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		subject += "." + query.SafeEncodeNATS(scope)
 	}
 
-	slog.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
+	h.logger.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)
 	if err := h.Publisher.Publish(ctx, subject, payload); err != nil {
 		if strings.Contains(err.Error(), "maximum bytes exceeded") {
-			slog.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)
+			h.logger.WarnContext(ctx, "nats maximum bytes exceeded", "subject", subject)
 			w.Header().Set("Retry-After", "30")
 			writeJSONError(w, http.StatusServiceUnavailable, "service unavailable")
 			return
 		}
-		slog.ErrorContext(ctx, "failed to publish to NATS", "error", err, "subject", subject)
+		h.logger.ErrorContext(ctx, "failed to publish to NATS", "error", err, "subject", subject)
 		writeJSONError(w, http.StatusInternalServerError, "publish failed")
 		return
 	}
 
-	slog.InfoContext(ctx, "event successfully ingested", "table", table, "subject", subject)
+	h.logger.InfoContext(ctx, "event successfully ingested", "table", table, "subject", subject)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
