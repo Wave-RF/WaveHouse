@@ -114,6 +114,25 @@ Status code: `503 Service Unavailable`
 
 ---
 
+### `GET /version` — Build Info
+
+Returns the build metadata embedded in the running binary — the `version`, `git_commit`, and `build_time` injected at compile time via `-ldflags`, plus the `go_version` read from the runtime. No authentication required: these are the same values logged at startup, so the endpoint discloses nothing the logs don't already. Useful for confirming exactly which build is deployed when troubleshooting.
+
+**Response:**
+
+```json
+{
+  "version": "v1.2.3",
+  "git_commit": "a1b2c3d",
+  "build_time": "2026-06-02T12:00:00Z",
+  "go_version": "go1.26.3"
+}
+```
+
+A binary built without the `-ldflags` injection (e.g. a bare `go build` rather than `make build`) reports the fallback values `"dev"` / `"unknown"` for `version` / `git_commit`.
+
+---
+
 ### `POST /v1/ingest?table={table}` — Ingest Data
 
 Accepts a flat JSON object, validates it against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.

@@ -369,6 +369,7 @@ func run() int {
 		Query:           queryHandler,
 		SSE:             streamHandler,
 		Health:          healthHandler,
+		Version:         api.NewVersionHandler(Version, GitCommit, BuildTime),
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
