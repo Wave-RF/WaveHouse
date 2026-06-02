@@ -252,14 +252,14 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	hub := NewHub()
 
 	deps := Dependencies{
-		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
-		Query:  &QueryHandler{},
-		SSE:    NewStreamHandler(hub, nil),
-		Health: &HealthHandler{},
+		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
+		Query:   &QueryHandler{},
+		SSE:     NewStreamHandler(hub, nil),
+		Health:  &HealthHandler{},
 		Version: NewVersionHandler("test", "test", "test"),
-		Schema: NewSchemaHandler(reg),
-		AuthMW: func(next http.Handler) http.Handler { return next },
-		Logger: testutil.NopLogger(),
+		Schema:  NewSchemaHandler(reg),
+		AuthMW:  func(next http.Handler) http.Handler { return next },
+		Logger:  testutil.NopLogger(),
 	}
 
 	router := NewRouter(deps)

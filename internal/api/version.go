@@ -6,34 +6,38 @@ import (
 	"runtime"
 )
 
+// VersionHandler serves the binary's build metadata at /version. The payload is
+// fully static for the process lifetime (the ldflags-injected build info plus
+// the Go runtime version), so it's marshaled once in NewVersionHandler and the
+// cached bytes are written on each request — no per-request encoding.
 type VersionHandler struct {
-	Version   string
-	GitCommit string
-	BuildTime string
+	payload []byte
 }
 
-// NewVersionHandler builds a VersionHandler from the ldflags-injected build
-// info. Empty values are passed through verbatim — a binary built without the
-// ldflags reports the cmd/wavehouse fallbacks ("dev" / "unknown") that main
-// holds.
+// NewVersionHandler pre-marshals the build-info JSON from the ldflags-injected
+// values (version, git commit, build time — see the Makefile / .goreleaser.yaml)
+// plus runtime.Version(). Marshaling a struct of strings cannot fail, so the
+// error is discarded.
 func NewVersionHandler(version, gitCommit, buildTime string) *VersionHandler {
-	return &VersionHandler{Version: version, GitCommit: gitCommit, BuildTime: buildTime}
-}
-
-// Handle responds with the build metadata as a small JSON document
-// ({version, git_commit, build_time, go_version}).
-func (h *VersionHandler) Handle(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(struct {
+	payload, _ := json.Marshal(struct {
 		Version   string `json:"version"`
 		GitCommit string `json:"git_commit"`
 		BuildTime string `json:"build_time"`
 		GoVersion string `json:"go_version"`
 	}{
-		Version:   h.Version,
-		GitCommit: h.GitCommit,
-		BuildTime: h.BuildTime,
+		Version:   version,
+		GitCommit: gitCommit,
+		BuildTime: buildTime,
 		GoVersion: runtime.Version(),
 	})
+	return &VersionHandler{payload: payload}
+}
+
+// Handle writes the pre-marshaled build metadata. No auth gate (wired among the
+// public routes in NewRouter) — the values are non-sensitive and already in the
+// startup logs.
+func (h *VersionHandler) Handle(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(h.payload)
 }
