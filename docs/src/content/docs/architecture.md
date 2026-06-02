@@ -130,7 +130,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### `pipes/` — Named Query Pipes
 
-- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` replaces `{{param}}` placeholders with positional parameters.
+- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings are single-quote-escaped).
 
 ### `query/` — Structured Query Engine
 

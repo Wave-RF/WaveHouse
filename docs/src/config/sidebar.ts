@@ -13,6 +13,8 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     label: "Guides",
     items: [
       { label: "Architecture", slug: "architecture" },
+      { label: "Access Control", slug: "access-control" },
+      { label: "Named Pipes", slug: "pipes" },
       { label: "API Reference", slug: "api" },
       { label: "TypeScript SDK", slug: "sdk" },
     ],

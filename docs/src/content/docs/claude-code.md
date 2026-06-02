@@ -2,7 +2,7 @@
 title: "Claude Code & AI agents"
 description: "Working with Claude Code in the WaveHouse repo — what ships in .claude/ and .githooks/, how enforcement is layered, and recommended user-level setup."
 sidebar:
-  order: 10
+  order: 12
 ---
 
 WaveHouse ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration. The repo commits only what's distinctly useful to every contributor; cosmetic and personal choices stay at the user level.
