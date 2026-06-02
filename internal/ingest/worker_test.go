@@ -44,7 +44,7 @@ func newTestWorker(rt http.RoundTripper) (*IngestWorker, *testutil.MockJetStream
 		password:   "test_pass",
 		db:         "test_db",
 	}
-	return w, js, cache, func() { w.wg.Wait() }
+	return w, js, cache, func() { w.ackWg.Wait() }
 }
 
 // makeEnvelope returns the JSON wire format the worker reads off NATS.
@@ -599,21 +599,66 @@ func TestSendToDLQ(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// flush — orchestration: parse → group → insert → ack / fall back / DLQ
+// parseMsg + flushTable — parse/route, then per-table insert / ack / DLQ
 // ---------------------------------------------------------------------------
 
-func TestFlush_EmptyBatch_NoOp(t *testing.T) {
+// parseAll runs each mock message through the worker's real parseMsg path and
+// returns the parsedMsgs, failing the test if any envelope is malformed.
+func parseAll(t *testing.T, w *IngestWorker, msgs ...*testutil.MockJetStreamMsg) []parsedMsg {
+	t.Helper()
+	out := make([]parsedMsg, 0, len(msgs))
+	for _, m := range msgs {
+		pm, ok := w.parseMsg(context.Background(), m)
+		require.True(t, ok, "parseMsg unexpectedly dropped a message")
+		out = append(out, pm)
+	}
+	return out
+}
+
+func TestParseMsg(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid envelope populates routing fields", func(t *testing.T) {
+		t.Parallel()
+		w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+		m := newIngestMsg(t, "events", "org_42", map[string]any{"id": 1})
+
+		pm, ok := w.parseMsg(context.Background(), m)
+		require.True(t, ok)
+		assert.Equal(t, "events", pm.tableName, "raw table name drives per-table routing")
+		assert.Equal(t, "org_42", pm.scope)
+		// natsSafeSubject is the subject sans the "ingest." prefix (cache version key).
+		assert.Equal(t, "events.org_42", pm.natsSafeSubject)
+		assert.JSONEq(t, `{"id":1}`, string(pm.rawJSON))
+		assert.False(t, m.DoubleAcked.Load(), "valid message must not be acked by parseMsg")
+	})
+
+	t.Run("malformed envelope is acked-and-dropped", func(t *testing.T) {
+		t.Parallel()
+		w, _, _, _ := newTestWorker(&testutil.MockRoundTripper{})
+		bad := &testutil.MockJetStreamMsg{
+			MsgSubject: "ingest.events",
+			MsgData:    []byte("not valid json"),
+		}
+
+		_, ok := w.parseMsg(context.Background(), bad)
+		assert.False(t, ok, "malformed envelope must be dropped")
+		assert.True(t, bad.DoubleAcked.Load(), "poison pill must be acked so NATS won't redeliver it")
+	})
+}
+
+func TestFlushTable_EmptyBatch_NoOp(t *testing.T) {
 	t.Parallel()
 	rt := &testutil.MockRoundTripper{}
 	w, _, _, _ := newTestWorker(rt)
 
 	// Must not panic, must not call HTTP.
-	w.flush(context.Background(), nil)
-	w.flush(context.Background(), []jetstream.Msg{})
+	w.flushTable(context.Background(), "events", nil)
+	w.flushTable(context.Background(), "events", []parsedMsg{})
 	assert.Equal(t, int32(0), rt.Hits())
 }
 
-func TestFlush_SingleTable_HappyPath(t *testing.T) {
+func TestFlushTable_HappyPath(t *testing.T) {
 	t.Parallel()
 	rt := &testutil.MockRoundTripper{
 		Fn: func(_ *http.Request) (*http.Response, error) {
@@ -625,10 +670,10 @@ func TestFlush_SingleTable_HappyPath(t *testing.T) {
 	m1 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 2})
 
-	w.flush(context.Background(), []jetstream.Msg{m1, m2})
+	w.flushTable(context.Background(), "events", parseAll(t, w, m1, m2))
 	wait()
 
-	// One HTTP request — both rows batched together.
+	// One HTTP request — both rows in a single bulk insert.
 	assert.Equal(t, int32(1), rt.Hits())
 
 	// Both messages acked.
@@ -642,11 +687,10 @@ func TestFlush_SingleTable_HappyPath(t *testing.T) {
 	)
 }
 
-// TestFlush_MultiScope_InvalidatesPerScope covers the multi-scope batching path:
-// distinct scopes for the same table get grouped into one HTTP insert (per-table
-// grouping), but each unique scope still gets its own cache version key bumped
+// TestFlushTable_MultiScope covers a single table with multiple scopes: one bulk
+// HTTP insert, but each unique scope still gets its own cache version key bumped
 // alongside the global table key.
-func TestFlush_MultiScope_InvalidatesPerScope(t *testing.T) {
+func TestFlushTable_MultiScope(t *testing.T) {
 	t.Parallel()
 	rt := &testutil.MockRoundTripper{
 		Fn: func(_ *http.Request) (*http.Response, error) {
@@ -655,16 +699,16 @@ func TestFlush_MultiScope_InvalidatesPerScope(t *testing.T) {
 	}
 	w, _, cache, wait := newTestWorker(rt)
 
-	msgs := []jetstream.Msg{
+	msgs := parseAll(t, w,
 		newIngestMsg(t, "events", "org_1", map[string]any{"id": 1}),
 		newIngestMsg(t, "events", "org_2", map[string]any{"id": 2}),
 		newIngestMsg(t, "events", "org_1", map[string]any{"id": 3}),
-	}
+	)
 
-	w.flush(context.Background(), msgs)
+	w.flushTable(context.Background(), "events", msgs)
 	wait()
 
-	// Per-table grouping → one HTTP request despite multiple scopes.
+	// One bulk HTTP request despite multiple scopes.
 	assert.Equal(t, int32(1), rt.Hits())
 
 	// Cache: table key + each unique scope key, deduped.
@@ -674,71 +718,7 @@ func TestFlush_MultiScope_InvalidatesPerScope(t *testing.T) {
 	)
 }
 
-func TestFlush_MalformedEnvelope_DropsAndContinues(t *testing.T) {
-	t.Parallel()
-	rt := &testutil.MockRoundTripper{
-		Fn: func(req *http.Request) (*http.Response, error) {
-			body, _ := io.ReadAll(req.Body)
-			// Only the good row should survive into the request.
-			assert.Equal(t, `{"id":2}`+"\n", string(body))
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
-		},
-	}
-	w, _, _, wait := newTestWorker(rt)
-
-	// Bad message: intentionally malformed envelope, can't go through
-	// newIngestMsg because that helper builds a valid envelope.
-	bad := &testutil.MockJetStreamMsg{
-		MsgSubject: "ingest.events",
-		MsgData:    []byte("not valid json"),
-	}
-	good := newIngestMsg(t, "events", "", map[string]any{"id": 2})
-
-	w.flush(context.Background(), []jetstream.Msg{bad, good})
-	wait()
-
-	// Bad envelope is DoubleAcked synchronously inside flush (poison-pill drop).
-	assert.True(t, bad.DoubleAcked.Load(), "malformed envelope must be acked and dropped")
-	// Good message also acked after a successful bulk insert.
-	assert.True(t, good.DoubleAcked.Load())
-}
-
-func TestFlush_MultipleTables_GroupedPerTable(t *testing.T) {
-	t.Parallel()
-	var tables sync.Map
-	rt := &testutil.MockRoundTripper{
-		Fn: func(req *http.Request) (*http.Response, error) {
-			table := req.URL.Query().Get("param_target_table")
-			tables.Store(table, true)
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
-		},
-	}
-	w, _, cache, wait := newTestWorker(rt)
-
-	msgs := []jetstream.Msg{
-		newIngestMsg(t, "events", "", map[string]any{"id": 1}),
-		newIngestMsg(t, "users", "", map[string]any{"id": 2}),
-		newIngestMsg(t, "events", "", map[string]any{"id": 3}),
-	}
-
-	w.flush(context.Background(), msgs)
-	wait()
-
-	// One request per table — bulk batches per table.
-	assert.Equal(t, int32(2), rt.Hits())
-
-	_, eventsHit := tables.Load("events")
-	_, usersHit := tables.Load("users")
-	assert.True(t, eventsHit, "events table must have been targeted")
-	assert.True(t, usersHit, "users table must have been targeted")
-
-	// Cache invalidated for both tables.
-	keys := cache.GetKeys()
-	assert.Contains(t, keys, "events")
-	assert.Contains(t, keys, "users")
-}
-
-func TestFlush_BulkFails_FallsBackToOneByOne(t *testing.T) {
+func TestFlushTable_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	t.Parallel()
 	// Mock: fail on multi-row body, succeed on single-row body.
 	// This forces flush into the 1-by-1 isolation path and verifies it
@@ -761,7 +741,7 @@ func TestFlush_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	m1 := newIngestMsg(t, "events", "", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "", map[string]any{"id": 2})
 
-	w.flush(context.Background(), []jetstream.Msg{m1, m2})
+	w.flushTable(context.Background(), "events", parseAll(t, w, m1, m2))
 	wait()
 
 	// 1 bulk attempt (failed) + 2 single-row retries = 3 HTTP requests.
@@ -775,7 +755,7 @@ func TestFlush_BulkFails_FallsBackToOneByOne(t *testing.T) {
 	assert.Empty(t, js.Published(), "no DLQ publishes when 1-by-1 retries all succeed")
 }
 
-func TestFlush_BadRow_Isolated_GoesToDLQ(t *testing.T) {
+func TestFlushTable_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	t.Parallel()
 	// Bulk insert fails; on per-row retry, the row carrying `"poison":true`
 	// fails again. That single row should end up in the DLQ while the rest
@@ -809,7 +789,7 @@ func TestFlush_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	poison := newIngestMsg(t, "events", "", map[string]any{"id": 2, "poison": true})
 	goodB := newIngestMsg(t, "events", "", map[string]any{"id": 3})
 
-	w.flush(context.Background(), []jetstream.Msg{goodA, poison, goodB})
+	w.flushTable(context.Background(), "events", parseAll(t, w, goodA, poison, goodB))
 	wait()
 
 	// 1 bulk + 3 single-row retries = 4 HTTP requests.
@@ -829,27 +809,141 @@ func TestFlush_BadRow_Isolated_GoesToDLQ(t *testing.T) {
 	assert.Contains(t, published[0].Header.Get("X-DLQ-Error"), "Code: 60")
 }
 
-func TestFlush_StripsIngestPrefixFromSubject(t *testing.T) {
-	t.Parallel()
-	// The worker uses the subject (sans "ingest." prefix) as the version key
-	// for cache invalidation. Verify that prefix stripping happens.
-	rt := &testutil.MockRoundTripper{
+// ---------------------------------------------------------------------------
+// tableBatcher — coalescing, the flushQueued latch, and drain.
+//
+// These are white-box: they drive the per-table state machine's methods
+// directly (the way tableLoop's select does), setting `flushing`/`flushQueued`
+// to simulate "a flush is in flight" so the coalesce/latch/drain branches are
+// exercised deterministically without timing races.
+// ---------------------------------------------------------------------------
+
+func okRoundTripper() *testutil.MockRoundTripper {
+	return &testutil.MockRoundTripper{
 		Fn: func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
 		},
 	}
-	w, _, cache, wait := newTestWorker(rt)
-
-	m := newIngestMsg(t, "events", "org_42", map[string]any{"id": 1})
-	w.flush(context.Background(), []jetstream.Msg{m})
-	wait()
-
-	keys := cache.GetKeys()
-	assert.Contains(t, keys, "events", "table version key must be present")
-	assert.Contains(t, keys, "events.org_42", "NATS-safe subject (sans ingest. prefix) must be invalidated")
 }
 
-func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
+// closedChan returns an already-closed signal channel, simulating a flush that
+// has finished (so "<-b.flushing" returns immediately).
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// newTestBatcher builds a tableBatcher backed by mocks. maxWait is long so the
+// deadline timer never fires during these tests; wait() drains background acks.
+func newTestBatcher(t *testing.T, rt http.RoundTripper) (b *tableBatcher, w *IngestWorker, wait func()) {
+	t.Helper()
+	w, _, _, wait = newTestWorker(rt)
+	w.maxBatch = 3
+	w.maxWait = time.Hour
+	b = newTableBatcher(w, "events")
+	t.Cleanup(func() { b.timer.Stop() })
+	return b, w, wait
+}
+
+func TestTableBatcher_RequestFlush_EmptyBatchNoOp(t *testing.T) {
+	t.Parallel()
+	rt := okRoundTripper()
+	b, _, _ := newTestBatcher(t, rt)
+
+	b.requestFlush(context.Background()) // nothing buffered
+
+	assert.Equal(t, int32(0), rt.Hits(), "no insert for an empty batch")
+	assert.Nil(t, b.flushing)
+	assert.False(t, b.flushQueued)
+}
+
+func TestTableBatcher_RequestFlush_LatchesWhileFlushing(t *testing.T) {
+	t.Parallel()
+	rt := okRoundTripper()
+	b, w, _ := newTestBatcher(t, rt)
+
+	// Simulate a flush already in flight (tableLoop would have set this).
+	b.flushing = make(chan struct{})
+	b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
+
+	b.requestFlush(context.Background())
+
+	assert.True(t, b.flushQueued, "a trigger during an in-flight flush must latch, not start a 2nd flush")
+	assert.Len(t, b.batch, 1, "rows stay buffered for the deferred flush")
+	assert.Equal(t, int32(0), rt.Hits(), "at most one concurrent insert per table")
+}
+
+func TestTableBatcher_OnFlushDone(t *testing.T) {
+	t.Parallel()
+
+	t.Run("queued flush starts when the slot frees", func(t *testing.T) {
+		t.Parallel()
+		rt := okRoundTripper()
+		b, w, wait := newTestBatcher(t, rt)
+
+		// A flush just finished (closed channel), another was latched, rows wait.
+		b.flushing = closedChan()
+		b.flushQueued = true
+		b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
+
+		b.onFlushDone(context.Background())
+		require.NotNil(t, b.flushing, "latched flush must start")
+		<-b.flushing // let it complete
+		wait()       // drain background acks
+
+		assert.Equal(t, int32(1), rt.Hits())
+		assert.False(t, b.flushQueued)
+		assert.Empty(t, b.batch)
+	})
+
+	t.Run("no queued flush leaves a partial batch waiting", func(t *testing.T) {
+		t.Parallel()
+		rt := okRoundTripper()
+		b, w, _ := newTestBatcher(t, rt)
+
+		b.flushing = closedChan()
+		b.flushQueued = false
+		b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
+
+		b.onFlushDone(context.Background())
+
+		assert.Nil(t, b.flushing, "slot freed")
+		assert.Equal(t, int32(0), rt.Hits(), "partial batch waits for its own size/timer")
+		assert.Len(t, b.batch, 1)
+	})
+}
+
+func TestTableBatcher_DrainAndExit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("waits for in-flight flush then flushes leftover", func(t *testing.T) {
+		t.Parallel()
+		rt := okRoundTripper()
+		b, w, wait := newTestBatcher(t, rt)
+
+		// An in-flight flush (already completed → closed channel) plus a leftover row.
+		b.flushing = closedChan()
+		b.batch = parseAll(t, w, newIngestMsg(t, "events", "", map[string]any{"id": 1}))
+
+		b.drainAndExit(context.Background())
+		wait()
+
+		assert.Equal(t, int32(1), rt.Hits(), "leftover row is flushed on the way out")
+	})
+
+	t.Run("idle with empty batch flushes nothing", func(t *testing.T) {
+		t.Parallel()
+		rt := okRoundTripper()
+		b, _, _ := newTestBatcher(t, rt)
+
+		b.drainAndExit(context.Background()) // flushing nil, batch empty
+
+		assert.Equal(t, int32(0), rt.Hits())
+	})
+}
+
+func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -912,7 +1006,7 @@ func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		maxWait:    maxWait,
 	}
 	worker.wg.Add(1)
-	go worker.runLoop(ctx, cons)
+	go worker.dispatchLoop(ctx, cons)
 	t.Cleanup(func() {
 		cancel()
 		worker.wg.Wait()
@@ -943,4 +1037,99 @@ func TestRunLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 			"(table A's prior events must not strand B rows in a batch "+
 			"that waits for the maxWait timer)",
 	)
+}
+
+// TestDispatchLoop_PartialBatchWaitsForOwnTrigger pins the leftover-after-a-size-
+// flush behavior: when a full batch flushes on the size trigger and a few rows
+// remain, those rows must NOT flush merely because the first flush completed —
+// they wait for their own size or timer trigger. maxWait is long here, so the
+// leftover should stay buffered. (The old code flushed it on flush completion.)
+func TestDispatchLoop_PartialBatchWaitsForOwnTrigger(t *testing.T) {
+	t.Parallel()
+
+	const (
+		maxBatch = 3
+		maxWait  = 30 * time.Second // long: the leftover row's timer never fires during this test
+		total    = 4                // 3 → one full batch on the size trigger; 1 leftover
+	)
+
+	emb, err := mq.NewEmbedded(t.TempDir(), 8*1024*1024, testutil.NopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
+
+	// CH stub counts rows and sleeps briefly, so the 4th row is reliably buffered
+	// before the first (3-row) flush completes — that's when the old code would
+	// have wrongly flushed it.
+	var (
+		mu   sync.Mutex
+		rows int
+	)
+	chSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		rows += bytes.Count(body, []byte("\n"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(chSrv.Close)
+
+	u, err := url.Parse(chSrv.URL)
+	require.NoError(t, err)
+	host, port, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+
+	js, err := jetstream.New(emb.NatsConn())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cons, err := js.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
+		Durable:       BufferConsumerName,
+		FilterSubject: "ingest.>",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		MaxAckPending: 1000,
+	})
+	require.NoError(t, err)
+
+	worker := &IngestWorker{
+		js:         js,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cache:      &testutil.MockCache{},
+		logger:     testutil.NopLogger(),
+		chURL:      fmt.Sprintf("http://%s:%s", host, port),
+		user:       "u",
+		password:   "p",
+		db:         "db",
+		maxBatch:   maxBatch,
+		maxWait:    maxWait,
+	}
+	worker.wg.Add(1)
+	go worker.dispatchLoop(ctx, cons)
+	t.Cleanup(func() {
+		cancel()
+		worker.wg.Wait()
+	})
+
+	for i := range total {
+		_, err = js.Publish(ctx, "ingest.tableX",
+			makeEnvelope(t, "tableX", "", map[string]any{"id": i}))
+		require.NoError(t, err)
+	}
+
+	// The first full batch (maxBatch rows) flushes on the size trigger.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return rows >= maxBatch
+	}, 3*time.Second, 25*time.Millisecond, "first full batch should flush on the size trigger")
+
+	// The leftover row must NOT flush just because that flush completed — with a
+	// long maxWait it stays buffered until shutdown drains it.
+	assert.Never(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return rows > maxBatch
+	}, 750*time.Millisecond, 50*time.Millisecond,
+		"leftover row must wait for its own size/timer, not flush when the prior flush completes")
 }
