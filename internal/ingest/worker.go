@@ -43,11 +43,25 @@ type IngestWorker struct {
 	wg         sync.WaitGroup
 }
 
-// Production defaults; overridable on the struct for tests.
+// Batching defaults; overridable on the struct for tests.
 // TODO: eventually make this configurable not just in tests
 const (
 	defaultMaxBatch = 500
 	defaultMaxWait  = 5 * time.Second
+)
+
+// Consumer/consume tuning, fixed at creation. Invariants: pullMaxMessages ≤
+// maxAckPending, and ackWait > defaultMaxWait + CH flush (else in-flight
+// messages are redelivered mid-processing → duplicate inserts).
+const (
+	// Server-side cap on unacked messages; suspends delivery when hit (backpressure).
+	maxAckPending = 10_000 // TODO: raise if NATS delivery becomes the bottleneck
+
+	// Client prefetch buffer in front of msgChan (was the implicit jetstream default).
+	pullMaxMessages = 500
+
+	// Redelivery timeout. 60s ≈ 5s batch + ~30s HTTP timeout + margin.
+	ackWait = 60 * time.Second
 )
 
 func StartIngestWorker(
@@ -70,7 +84,8 @@ func StartIngestWorker(
 		Durable:       BufferConsumerName,
 		FilterSubject: "ingest.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		MaxAckPending: 10_000, // TODO: testing increasing this to see if NATS is bottlenecking us
+		AckWait:       ackWait,
+		MaxAckPending: maxAckPending,
 	})
 	if err != nil {
 		return nil, err
@@ -147,10 +162,11 @@ func (w *IngestWorker) runLoop(ctx context.Context, cons jetstream.Consumer) {
 
 	msgChan := make(chan jetstream.Msg, w.maxBatch*2)
 
-	// Push-based consumer (much faster/more efficient than iterators)
+	// Pull consumer with a push-like callback (nats.go prefetches pullMaxMessages).
+	// Hand off to msgChan only, so the consume goroutine never blocks on flush work.
 	consumeCtx, err := cons.Consume(func(msg jetstream.Msg) {
 		msgChan <- msg
-	})
+	}, jetstream.PullMaxMessages(pullMaxMessages))
 	if err != nil {
 		w.logger.Error("failed to start consumer", "error", err)
 		return
