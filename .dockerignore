@@ -48,7 +48,6 @@ LICENSE
 TODO.md
 AGENTS.md
 CLAUDE.md
-.gemini/
 
 # --- Tests + harness ---------------------------------------------------------
 # The shipped binary doesn't include test code (Go only pulls from the

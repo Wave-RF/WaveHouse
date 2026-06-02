@@ -13,7 +13,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 
 1. **Install Claude Code**: follow the [official install guide](https://code.claude.com/docs/en/quickstart). On macOS: `brew install --cask claude-code`.
 
-2. **Authenticate**: run `claude setup-token` once. The CI Claude review workflow uses `CLAUDE_CODE_OAUTH_TOKEN`; locally you just need to be logged in to your Max subscription.
+2. **Authenticate**: log in to your Max subscription — Claude Code prompts you on first run.
 
 3. **Bootstrap the repo**: `make tools`. This installs Go tools, pnpm deps, and **also configures git hooks** (`git config core.hooksPath .githooks`). Without this step, the team's pre-commit / pre-push gates won't fire.
 
@@ -85,7 +85,7 @@ Skills load automatically into Claude's context when conversation patterns match
 | Skill | Triggers on |
 | ----- | ----------- |
 | `pr-sync-with-main` | When a PR shows "out-of-date with base branch", or a user asks to "fix the PR" / "sync with main". Documents the merge-not-rebase procedure and the WaveHouse-specific reason long-lived branches need it. |
-| `pr-review-locally` | When a user asks to "review PR <N>", "audit PR <N>", "look at PR <N>" — pulls the PR down via `wt switch pr:<N>` (or `gh pr checkout`), runs `pre-push-reviewer` in fresh context, surfaces findings without commenting on the PR. Documents the local-only vs CI-claude-review-comment-mode distinction. |
+| `pr-review-locally` | When a user asks to "review PR <N>", "audit PR <N>", "look at PR <N>" — pulls the PR down via `wt switch pr:<N>` (or `gh pr checkout`), runs `pre-push-reviewer` in fresh context, surfaces findings without commenting on the PR. |
 
 To add a skill: create `.claude/skills/<name>/SKILL.md` with frontmatter `name` + `description` and the workflow body. Description quality matters — that's what Claude matches against to load the skill.
 
@@ -95,10 +95,10 @@ Agents (Claude Code etc.) have additional gating beyond what humans face — enf
 
 - **Drafts only.** `gh pr create` must include `--draft`. Only humans transition draft → ready (`gh pr ready` is blocked), approve (`gh pr review --approve` is blocked), or request changes (`gh pr review --request-changes` is blocked).
 - **No human reviewer assignment.** `gh pr edit --add-reviewer / --add-assignee` and `POST /requested_reviewers` are blocked. The `housekeeping.yml` workflow auto-assigns; humans handle the rest.
-- **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, `@gemini-code-assist /gemini review`, `@claude` or `/review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
+- **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
 - **Pre-push review required on PR branches.** Before `git push` to a branch with an open PR, the agent must invoke `pre-push-reviewer` (fresh context). `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate. On iterate, fix the findings and re-invoke (always fresh context) — loop until clean.
 - **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci` and the `review-marker.sh` hook; nothing else.
-- **PR reviews on others' PRs stay local by default.** Use `pr-review-locally` skill for local-only audits. To make the bot comment on the PR remotely, fire the CI workflow: `gh workflow run "Claude PR review" -f pr_number=<N>` — that's the canonical bot-comment path.
+- **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — `pre-push-reviewer` findings go to you, not the PR.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
 
@@ -209,9 +209,8 @@ Helpers along the way:
 
 - Stale PR ("out-of-date with base branch") → ask Claude to "fix the PR" (loads `pr-sync-with-main` skill — merges main, doesn't rebase or force-push).
 - Reviewing someone else's PR → "review PR 120 locally" / "audit PR 120" (loads `pr-review-locally` skill — `wt switch pr:120` + `pre-push-reviewer`, no PR comments).
-- Re-trigger a bot reviewer → ask Claude to "ping coderabbit again" / "re-request claude review" — Claude posts the appropriate `@<bot>` comment on the PR.
+- Re-trigger a bot reviewer → ask Claude to "ping coderabbit again" — Claude posts the appropriate `@<bot>` comment on the PR.
 - Coverage check on a specific suite → `/cover unit` (or `integration`, `e2e`, `sdk`, `all`).
-- Make the bot comment on a PR remotely → ask Claude to "fire the CI claude-review on PR 120" — `gh workflow run "Claude PR review" -f pr_number=120`.
 
 **Memory**: Claude Code maintains per-project memory in `~/.claude/projects/<slug>/memory/`. `AGENTS.md` is the SHARED source of truth; memory is for personal observations / preferences that don't belong in committed config.
 
@@ -232,5 +231,4 @@ If you build something useful, commit it and update this doc.
 - [AGENTS.md](https://github.com/Wave-RF/WaveHouse/blob/main/AGENTS.md) — project conventions, architecture, code style, doc-sync rules, SDK-sync rules, branch maintenance. Source of truth for all AI agent work.
 - [Claude Code docs](https://code.claude.com/docs) — official Claude Code reference.
 - [worktrunk.dev](https://worktrunk.dev) — worktree manager.
-- `.github/prompts/pr-review.md` — the prompt the CI Claude review runs (and what `pre-push-reviewer` mirrors locally).
-- `.gemini/styleguide.md` — Gemini Code Assist review style.
+- `.github/prompts/pr-review.md` — the canonical review prompt that `pre-push-reviewer` runs locally.

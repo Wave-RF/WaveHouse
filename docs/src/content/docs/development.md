@@ -550,13 +550,12 @@ Auto-merge is enabled repo-wide: click "Enable auto-merge (squash)" on a PR and 
 
 ### AI reviewers
 
-Three bots review PRs:
+Advisory PR review comes from marketplace apps configured at the org/repo level:
 
-- **Claude** (`.github/workflows/claude-review.yml`) — auto-reviews PRs from OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR authors on open, push, ready-for-review. Uses Anthropic's canonical PR-review template with WaveHouse-specific focus on Go concurrency, ClickHouse SQL injection, and AGENTS.md documentation-sync rules. Skips drafts and Dependabot PRs. Sticky comment mode — updates one comment across pushes instead of spamming.
-- **Gemini Code Assist** — Marketplace App, reads `.gemini/styleguide.md` and `.gemini/config.yaml`. Configured with `comment_severity_threshold: LOW` to surface more findings.
+- **CodeRabbit** — automated PR review; auto-reviews on open + push, re-trigger with `@coderabbitai review`.
 - **Copilot** — tied to individual reviewer subscriptions; shows up on PRs where a maintainer with Copilot Pro is listed as a reviewer.
 
-All three are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
+Both are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
 
 ### Task Board is the single signal
 
@@ -570,15 +569,14 @@ Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch
 
 ### Invoking bots manually
 
-- **Claude**: comment `@claude <instruction>` on an issue, PR, or review. Gated to OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR. Applying the `agent` label to an issue also triggers Claude. See `.github/workflows/claude-agent.yml`.
-- **Gemini**: comment `@gemini-code-assist <question>` or use slash commands `/gemini review`, `/gemini summary`, `/gemini help`. Works in both top-level and inline review comments.
+- **CodeRabbit**: comment `@coderabbitai review` to re-trigger a review, or `@coderabbitai <question>` to ask it something. Works in both top-level and inline review comments.
 - **Copilot**: the re-request-review button on the PR page sends a fresh request.
 
 ### Review-response expectations
 
 Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response (MANDATORY)": accept / push back / defer, reply with detail, resolve when settled.
 
-When pushing back on a bot's suggestion, end the reply with `@claude` or `@gemini-code-assist` to invite a counter-reply so the dialog actually loops.
+When pushing back on a bot's suggestion, end the reply with the bot's mention (e.g. `@coderabbitai`) to invite a counter-reply so the dialog actually loops.
 
 ### Issue triage
 

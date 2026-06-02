@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Removed
+
+- **Gemini Code Assist integration and the on-repo Claude PR review workflow** (`.gemini/config.yaml`, `.gemini/styleguide.md`, `.github/workflows/claude-review.yml` deleted; `.dockerignore`, `AGENTS.md`, `.github/prompts/pr-review.md`, `.claude/agents/pre-push-reviewer.md`, `.claude/skills/pr-review-locally/SKILL.md`, `.claude/hooks/agent-bash-gate.sh`, `docs/src/content/docs/development.md`, `docs/src/content/docs/claude-code.md` updated). Dropped the Gemini Code Assist app configuration (`.gemini/`) and the GitHub Actions Claude PR review workflow (`claude-review.yml` — the manual `@claude` / `/review` / `workflow_dispatch` reviewer) outright. **Local Claude Code tooling under `.claude/` is unchanged**: the `pre-push-reviewer` subagent still runs the canonical `.github/prompts/pr-review.md` locally before pushes, and that prompt file is retained for it. Living docs, agent/skill/hook references, and the bot-re-trigger tables were scrubbed of both reviewers; CodeRabbit and Copilot remain the advisory PR reviewers, and `Admin approval` + the `main branch protection` ruleset remain the actual merge gate. Earlier CHANGELOG entries that mention either reviewer are left as historical record.
+
 ### Added
 
 - **`GET /version` build-info endpoint** (`internal/api/version.go` (new), `internal/api/version_test.go` (new), `internal/api/router.go`, `internal/api/router_test.go`, `cmd/wavehouse/main.go`, `docs/src/content/docs/api.md`): a public, unauthenticated endpoint returning the binary's `version`, `git_commit`, and `build_time` — the same values injected via `-ldflags` (`Makefile`, `.goreleaser.yaml`) and logged at startup — plus `go_version` from `runtime.Version()`. Completes issue #44: the ldflags injection and startup logging already shipped; this exposes the same metadata over HTTP so an operator can confirm exactly which build is running on a deployed instance. Wired alongside `/health` and `/ready`, outside the `/v1` auth tree; the values are non-sensitive and already in the logs, so there is no auth gate.

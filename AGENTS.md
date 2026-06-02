@@ -178,21 +178,20 @@ When delegating to a subagent: tell them explicitly *"run locally first."* Agent
 
 ## Review Response
 
-Every review comment gets a substantive reply, and every thread gets resolved before merge. The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads block merge. Applies to human reviewers and AI reviewers alike (Copilot, Gemini Code Assist, claude-review).
+Every review comment gets a substantive reply, and every thread gets resolved before merge. The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads block merge. Applies to human reviewers and AI reviewers alike (CodeRabbit, Copilot).
 
 ### What to do
 
 1. **Decide**: accept, push back, or defer (right but out-of-scope).
 2. **Reply substantively** with the fix's commit SHA or your reasoning. No bare "fixed" / "LGTM" / "good catch".
 3. **@mention the bot you're replying to** (except Copilot), on its own line below your signature trailer:
-   - Claude: `@claude` or `/review` re-invokes the workflow
-   - Gemini: `@gemini-code-assist` or `/gemini <question>`
+   - CodeRabbit: `@coderabbitai` re-engages on the thread
    - Copilot: no mention works — note the re-request-review button
 
    Without the mention, the bot never sees the reply and the dialog silently terminates.
 4. **Fix in this PR** if the suggestion is right and in scope. Out-of-scope but valid: link a tracking issue before resolving.
 5. **Resolve the thread** once the reply addresses the concern and no counter-reply is pending. Bot threads are safe to resolve after a substantive reply (bots only re-engage on mention); human threads — wait for them.
-6. **Re-request review** from humans after substantive changes. Bot reviewers re-run on `synchronize` (Gemini), via PR-comment mention (Claude), or via a re-request button (Copilot).
+6. **Re-request review** from humans after substantive changes. Bot reviewers re-run via their own triggers — CodeRabbit on `@coderabbitai review`, Copilot via the re-request button.
 
 ### What not to do
 
@@ -203,12 +202,9 @@ Every review comment gets a substantive reply, and every thread gets resolved be
 
 | Reviewer | How it runs | Re-runs on new commits | Blocks merge |
 | -------- | ----------- | ---------------------- | ------------ |
-| Claude (`.github/workflows/claude-review.yml`) | Manual-only. Comment `@claude` or `/review` on the PR (trusted reviewers), or run `gh workflow run "Claude PR review" -f pr_number=<N>`. Findings post as inline review comments plus a sticky verdict-summary comment that edits in place | No — re-trigger by mention after pushing new commits | Yes for inline comments — `required_review_thread_resolution: true` blocks merge until each `claude[bot]` thread is resolved. The workflow's check itself is advisory |
-| Gemini Code Assist | Marketplace App at repo level | Yes on synchronize. **Silently skips `.github/workflows/**`** (built-in exclusion, can't be overridden) — Gemini rarely sees infra PRs | No (advisory) |
+| CodeRabbit | Marketplace App at repo level. Auto-reviews on open + push; re-trigger by commenting `@coderabbitai review` | Yes, on push | Inline findings post as review threads — `required_review_thread_resolution: true` blocks merge until each is resolved. Its own check is advisory |
 | Copilot | GitHub-native, requires a reviewer with Copilot Pro | Yes if enabled | No (advisory) |
 | Human admins | Review requested from a non-author admin by `housekeeping.yml` on PR open / ready-for-review (not on every push). Selection picks the other admin if the author is one, otherwise round-robins. The composite also sets `assignees`. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request. | Yes — `admin-approval.yml` is a required status check that fails unless an admin has approved. Dependabot patch/minor bypasses (auto-merge handles those); major bumps fall through to admin review. |
-
-> **Known limitation**: Gemini Code Assist silently ignores all files under `.github/workflows/**` — a hardcoded Google default that `.gemini/config.yaml`'s `ignore_patterns` can't remove. For workflow-heavy PRs, Claude review is the primary AI reviewer. Gemini still covers `CHANGELOG.md`, docs, source code, and configuration outside `.github/`.
 
 ## Branch Maintenance
 
@@ -248,8 +244,6 @@ Agents CAN re-request bot reviewers by mentioning them in PR comments (`gh pr co
 
 | Bot | Re-trigger via PR comment |
 | --- | -------------------------- |
-| Claude review | `@claude` or `/review` |
-| Gemini Code Assist | `@gemini-code-assist` or `/gemini review` |
 | CodeRabbit | `@coderabbitai review` |
 | Copilot Pull Request Reviewer | No comment-mention; humans use the GitHub UI's re-request button |
 
@@ -284,13 +278,7 @@ For "review PR <N>" workflows, use `.claude/skills/pr-review-locally/SKILL.md`. 
 wt switch pr:<N>                # worktrunk + gh CLI; or `gh pr checkout <N>` fallback
 ```
 
-Then invoke `pre-push-reviewer`. Findings stay local — agents must not post comments on the PR manually. To make the bot comment on the PR remotely, fire the CI workflow:
-
-```bash
-gh workflow run "Claude PR review" -f pr_number=<N>
-```
-
-That's the canonical path (also reachable via `@claude` / `/review` in a PR comment).
+Then invoke `pre-push-reviewer`. Findings stay local — agents must not post comments on the PR manually; surface them to the user, who decides what to act on.
 
 ## Documentation Sync
 
@@ -409,9 +397,7 @@ docs/                   → Project documentation
 ## Repository Automation
 
 - **Issue triage** (`triage.yml`): GitHub Models classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels.
-- **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate):
-  - **Gemini Code Assist App** configured via `.gemini/styleguide.md`.
-  - **Claude PR review** (`claude-review.yml`) runs only on manual trigger: `@claude` or `/review` from a trusted commenter on a PR, or `workflow_dispatch`. Gated on the HEAD commit's author or committer having ≥read permission so a comment on a fork PR can't run untrusted code with write tokens. Findings post as inline review comments (blocked by `required_review_thread_resolution`) plus a sticky verdict summary. Review-only — Claude can comment but not push. Requires the `CLAUDE_CODE_OAUTH_TOKEN` secret (`claude setup-token`).
+- **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate): handled by external marketplace apps (CodeRabbit, Copilot) configured at the org/repo level, not by in-repo workflows. Inline findings post as review threads that `required_review_thread_resolution: true` blocks merge on until resolved.
 - **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Patch/minor bypass `Admin approval` (the workflow + CI passing is the trust model); major bumps fall through to admin review like any human PR — this closed a hole where a bot's APPROVED review (e.g. CodeRabbit) could merge a major bump without admin involvement (see #130).
 - **Docs site deploy** (`wavehouse.dev`): driven by Cloudflare's Workers Builds (the native Git integration on the CF side), not a GitHub Actions workflow — so no `CLOUDFLARE_API_TOKEN` lives in the repo. Push to `main` runs `npx wrangler deploy` from `docs/` and updates `wavehouse.dev` within ~2 minutes; pushes to PR branches run `npx wrangler versions upload`, which publishes a per-version preview at `<version-prefix>-wavehouse-docs.wave-rf.workers.dev`. Wrangler config (custom domain, observability, source maps, preview URLs) lives in `docs/wrangler.jsonc`; the build command (`pnpm install --frozen-lockfile && pnpm build`) and `docs/` root directory are configured on the CF dashboard side. The worker (`docs/worker/index.ts`, delegating to `cloudflare-md-router`) deploys alongside the static assets so `Accept: text/markdown` content negotiation works in production.
 
@@ -420,6 +406,6 @@ docs/                   → Project documentation
 - **No `CODEOWNERS`**: replaced by workflow-driven reviewer assignment + approval enforcement.
   - `admin-approval.yml` — required status check that fails unless an admin has an `APPROVED` review. Dependabot patch/minor bypasses; major bumps go through admin review.
   - `housekeeping.yml` — requests review from a non-author admin on PR open / ready-for-review via the `assign-and-request-review` composite. Task Board placement is handled by native Projects v2 workflows configured in the project UI.
-- **`CLAUDE.md`** and **`.gemini/styleguide.md`**: thin pointer files to AGENTS.md. Keep those pointers short; never duplicate content.
+- **`CLAUDE.md`**: a thin pointer file to AGENTS.md. Keep the pointer short; never duplicate content.
 - **`CONTRIBUTING.md`**: the Conventional Commits type list must stay in sync with the regex in `housekeeping.yml`. The title linter validates squash-merge commit messages.
 - **`SUPPORT.md`** (alpha-stage public triage policy): the externally-promised cadence is **best-effort, 1–2 business days for an initial response** on bugs / features / usage questions; **security reports are prioritized** with the 48-hour acknowledge / 5-business-day initial-assessment targets in `SECURITY.md`. Usage questions ("how do I…") are routed to [GitHub Discussions → Q&A](https://github.com/Wave-RF/WaveHouse/discussions/categories/q-a) — do not file them as bug-report Issues; bug-reporters who use the wrong template get redirected. There is no Discord/Slack. Don't quietly let threads slip — if one sits longer than a week, that's a miss. **Out-of-scope items publicly stated in `SUPPORT.md` are only "Older releases" and "Non-ClickHouse backends"**. When tweaking the policy, update `SUPPORT.md` first and keep this paragraph in sync. The docs footer (`docs/src/components/Footer.astro`) and sidebar (`docs/src/config/sidebar.ts`) cross-link Discussions, `SUPPORT.md`, and `SECURITY.md` so they're one click from anywhere on `wavehouse.dev`; `README.md`, `CONTRIBUTING.md`, and both issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) also link out — change those together if the policy moves.

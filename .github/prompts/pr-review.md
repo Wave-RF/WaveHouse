@@ -48,9 +48,9 @@ Review against each of these, in this order:
 
 ## Output discipline
 
-**Use inline review comments for specific line-level findings.** Call `mcp__github_inline_comment__create_inline_comment` with `confirmed: true` for each concrete issue. These become real PR review threads that show next to the line in the diff, must be resolved before merge (the repo's ruleset has `required_review_thread_resolution: true`), and are the same mechanism Gemini Code Assist uses. *Do not* dump every finding into one giant prose blob — that pattern caused the sticky comment to bloat.
+**Use inline review comments for specific line-level findings.** Call `mcp__github_inline_comment__create_inline_comment` with `confirmed: true` for each concrete issue. These become real PR review threads that show next to the line in the diff and must be resolved before merge (the repo's ruleset has `required_review_thread_resolution: true`). *Do not* dump every finding into one giant prose blob — that pattern caused the sticky comment to bloat.
 
-**Tag every inline comment with exactly one severity** at the start of the body: `[MUST]`, `[SHOULD]`, or `[MAY]`. This matches `.gemini/styleguide.md` so both reviewers speak the same language and the author can filter on tag.
+**Tag every inline comment with exactly one severity** at the start of the body: `[MUST]`, `[SHOULD]`, or `[MAY]`, so the author can filter on tag.
 
 - `[MUST]` — correctness bug, security issue, broken invariant, missing required documentation sync. The PR can't merge until this is addressed.
 - `[SHOULD]` — quality / maintainability issue the author should fix, but isn't a release blocker if they push back with reasoning.
