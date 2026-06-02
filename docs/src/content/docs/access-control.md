@@ -207,11 +207,11 @@ The same policy drives every data path, but not every field is meaningful on eve
 | ------- | -------- | -------- |
 | Structured read | `POST /v1/query?table={table}` | table+role `select` required, then `allow`/`deny_columns`, row `filter`, aggregation rules, `max_rows`, `max_execution_time_ms` |
 | Ingest (write) | `POST /v1/ingest?table={table}` | table+role `insert` required, then `allow`/`deny_columns` and `check` (enforced and auto-injected) |
-| Live stream | `GET /v1/stream/sse`, `GET /v1/stream/ws` | table+role `select` required (a table the role can't read is skipped), then denied columns are masked from each event |
+| Live stream | `GET /v1/stream` | table+role `select` required (a table the role can't read is skipped), then denied columns are masked from each event |
 | Raw SQL | `POST /v1/admin/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
 | Named pipe | `GET/POST /v1/pipes/{name}` | not the policy engine — per-pipe `allowed_roles`; see [Named Pipes](/pipes) |
 
-> **Live streams enforce access, not row filters.** SSE and WebSocket subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and `max_rows`/`max_execution_time_ms` limits are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
+> **Live streams enforce access, not row filters.** SSE subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and `max_rows`/`max_execution_time_ms` limits are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
 
 ## Managing the policy
 
