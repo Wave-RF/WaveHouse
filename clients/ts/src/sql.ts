@@ -1,6 +1,6 @@
-import type { Result, HttpContext } from './types.js';
-import { request } from './http.js';
-import { ok, err } from './errors.js';
+import { err, ok } from "./errors.js";
+import { request } from "./http.js";
+import type { HttpContext, Result } from "./types.js";
 
 /**
  * Execute a raw SQL query against ClickHouse.
@@ -40,8 +40,8 @@ export async function sql<Row = Record<string, unknown>>(
   opts?: { signal?: AbortSignal },
 ): Promise<Result<Row[]>> {
   const { data, error } = await request<Row[]>(ctx, {
-    method: 'POST',
-    path: '/v1/admin/query',
+    method: "POST",
+    path: "/v1/admin/query",
     body: { sql: query },
     signal: opts?.signal,
   });

@@ -83,7 +83,7 @@ Examples:
 ```text
 feat(api): add rate limiting middleware
 fix(dedupe): handle external DB timeout gracefully
-docs(api): add WebSocket authentication example
+docs(api): add SSE authentication example
 test(cache): add tiered cache stampede test
 ```
 

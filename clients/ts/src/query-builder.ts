@@ -1,33 +1,33 @@
+import { err, okPage } from "./errors.js";
+import { request } from "./http.js";
+import type { StreamTransport } from "./stream/controller.js";
+import { StreamController } from "./stream/controller.js";
+import { LiveQuery } from "./stream/live-query.js";
 import type {
-  Result,
-  FilterOp,
-  FetchOptions,
-  HttpContext,
-  StructuredQuery,
   Aggregation,
-  QueryFilter,
+  FetchOptions,
+  FilterOp,
+  HttpContext,
   OrderClause,
-  TimeRange,
+  QueryFilter,
+  Result,
   StreamOptions,
   StreamSubscriber,
-} from './types.js';
-import { request } from './http.js';
-import { okPage, err } from './errors.js';
-import { StreamController } from './stream/controller.js';
-import type { StreamTransport } from './stream/controller.js';
-import { LiveQuery } from './stream/live-query.js';
+  StructuredQuery,
+  TimeRange,
+} from "./types.js";
 
 /** SDK operator → backend operator mapping. */
 const OP_MAP: Record<FilterOp, string> = {
-  '=': 'eq',
-  '!=': 'neq',
-  '>': 'gt',
-  '>=': 'gte',
-  '<': 'lt',
-  '<=': 'lte',
-  in: 'in',
-  like: 'like',
-  not_like: 'not_like',
+  "=": "eq",
+  "!=": "neq",
+  ">": "gt",
+  ">=": "gte",
+  "<": "lt",
+  "<=": "lte",
+  in: "in",
+  like: "like",
+  not_like: "not_like",
 };
 
 interface QueryState {
@@ -73,28 +73,28 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     return this._clone({ filters: [...this._state.filters, filter] });
   }
 
-  count(column = '*', alias = 'count'): QueryBuilder<Row> {
-    return this._addAgg('count', column, alias);
+  count(column = "*", alias = "count"): QueryBuilder<Row> {
+    return this._addAgg("count", column, alias);
   }
 
   sum(column: string, alias = `sum_${column}`): QueryBuilder<Row> {
-    return this._addAgg('sum', column, alias);
+    return this._addAgg("sum", column, alias);
   }
 
   avg(column: string, alias = `avg_${column}`): QueryBuilder<Row> {
-    return this._addAgg('avg', column, alias);
+    return this._addAgg("avg", column, alias);
   }
 
   min(column: string, alias = `min_${column}`): QueryBuilder<Row> {
-    return this._addAgg('min', column, alias);
+    return this._addAgg("min", column, alias);
   }
 
   max(column: string, alias = `max_${column}`): QueryBuilder<Row> {
-    return this._addAgg('max', column, alias);
+    return this._addAgg("max", column, alias);
   }
 
   countDistinct(column: string, alias = `count_distinct_${column}`): QueryBuilder<Row> {
-    return this._addAgg('countDistinct', column, alias);
+    return this._addAgg("countDistinct", column, alias);
   }
 
   aggregate(fn: string, column: string, alias: string): QueryBuilder<Row> {
@@ -105,7 +105,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     return this._clone({ groupBy: [...this._state.groupBy, ...columns] });
   }
 
-  orderBy(column: string, dir: 'asc' | 'desc' = 'asc'): QueryBuilder<Row> {
+  orderBy(column: string, dir: "asc" | "desc" = "asc"): QueryBuilder<Row> {
     return this._clone({ orderBy: [...this._state.orderBy, { column, dir }] });
   }
 
@@ -131,7 +131,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     const ast = this._buildAST(effectiveLimit);
 
     const { data, error } = await request<Row[]>(this._ctx, {
-      method: 'POST',
+      method: "POST",
       path: `/v1/query?table=${encodeURIComponent(this._state.table)}`,
       body: ast,
       signal: opts?.signal,
@@ -209,7 +209,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
       ast.order_by = this._state.orderBy;
     } else if (effectiveLimit != null && this._state.aggregations.length === 0) {
       // Default ordering for deterministic cursor pagination.
-      ast.order_by = [{ column: 'received_timestamp', dir: 'desc' }];
+      ast.order_by = [{ column: "received_timestamp", dir: "desc" }];
     }
     if (effectiveLimit != null) ast.limit = effectiveLimit;
     if (this._state.timeRange) ast.time_range = this._state.timeRange;
@@ -218,22 +218,21 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
   private async _fetchNext(
     prevRows: Row[],
-    limit: number,
+    _limit: number,
     opts?: FetchOptions,
   ): Promise<Result<Row[]>> {
-    const orderCol = this._state.orderBy[0]?.column ?? 'received_timestamp';
-    const orderDir = this._state.orderBy[0]?.dir ?? 'desc';
+    const orderCol = this._state.orderBy[0]?.column ?? "received_timestamp";
+    const orderDir = this._state.orderBy[0]?.dir ?? "desc";
     const lastRow = prevRows[prevRows.length - 1] as Record<string, unknown>;
     const lastValue = lastRow?.[orderCol];
 
     if (lastValue === undefined) return okPage([] as unknown as Row[], false);
 
-    const cursorOp = orderDir === 'desc' ? 'lt' : 'gt';
+    const cursorOp = orderDir === "desc" ? "lt" : "gt";
     const cursorFilter: QueryFilter = { column: orderCol, op: cursorOp, value: lastValue };
     // Ensure the next page uses the same order the cursor assumes.
-    const orderBy: OrderClause[] = this._state.orderBy.length > 0
-      ? this._state.orderBy
-      : [{ column: orderCol, dir: orderDir }];
+    const orderBy: OrderClause[] =
+      this._state.orderBy.length > 0 ? this._state.orderBy : [{ column: orderCol, dir: orderDir }];
     const nextBuilder = this._clone({
       filters: [...this._state.filters, cursorFilter],
       orderBy,
@@ -250,15 +249,18 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 /**
  * Wraps a StreamController, applying client-side filters and column projection
  * before delivering events to subscribers.
+ *
+ * Lifecycle: by the time we reach this constructor, `inner` has already been
+ * built (and is opening its own SSE connection). The outer transport's
+ * `connect()` doesn't open a new connection — it bridges `inner`'s events
+ * through a filter into the outer subscriber set. On `disconnect()`, closing
+ * `inner` is what actually tears down the SSE socket; the subscription we
+ * register on `inner` is left to be garbage-collected with it, which is why
+ * we don't bother saving the unsubscribe handle.
  * @internal
  */
 class FilteredStreamController<T = Record<string, unknown>> extends StreamController<T> {
-  constructor(
-    inner: StreamController<T>,
-    filters: QueryFilter[],
-    columns: string[],
-  ) {
-    // Create a transport that wraps the inner controller's events.
+  constructor(inner: StreamController<T>, filters: QueryFilter[], columns: string[]) {
     const transport: StreamTransport<T> = {
       onEvent: null,
       onStatus: null,
@@ -269,9 +271,13 @@ class FilteredStreamController<T = Record<string, unknown>> extends StreamContro
             if (!matchesFilters(event.data as Record<string, unknown>, filters)) {
               return;
             }
-            const projected = columns.length > 0
-              ? ({ ...event, data: projectColumns(event.data as Record<string, unknown>, columns) as T })
-              : event;
+            const projected =
+              columns.length > 0
+                ? {
+                    ...event,
+                    data: projectColumns(event.data as Record<string, unknown>, columns) as T,
+                  }
+                : event;
             this.onEvent?.(projected);
           },
           status: (s) => this.onStatus?.(s),
@@ -298,36 +304,59 @@ function matchesFilters(row: Record<string, unknown>, filters: QueryFilter[]): b
 /** @internal Evaluate a single filter predicate. */
 function evaluateFilter(actual: unknown, op: string, expected: unknown): boolean {
   switch (op) {
-    case 'eq':
+    case "eq":
       return actual === expected;
-    case 'neq':
+    case "neq":
       return actual !== expected;
-    case 'gt':
-      return (actual as number) > (expected as number);
-    case 'gte':
-      return (actual as number) >= (expected as number);
-    case 'lt':
-      return (actual as number) < (expected as number);
-    case 'lte':
-      return (actual as number) <= (expected as number);
-    case 'in':
+    case "gt":
+      return compareOrdered(actual, expected, (a, b) => a > b);
+    case "gte":
+      return compareOrdered(actual, expected, (a, b) => a >= b);
+    case "lt":
+      return compareOrdered(actual, expected, (a, b) => a < b);
+    case "lte":
+      return compareOrdered(actual, expected, (a, b) => a <= b);
+    case "in":
       return Array.isArray(expected) && expected.includes(actual);
-    case 'like': {
-      if (typeof actual !== 'string' || typeof expected !== 'string') return false;
+    case "like": {
+      if (typeof actual !== "string" || typeof expected !== "string") return false;
       // Convert SQL LIKE pattern to regex: % → .*, _ → .
-      const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = escaped.replace(/%/g, '.*').replace(/_/g, '.');
-      return new RegExp(`^${pattern}$`, 'i').test(actual);
+      const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = escaped.replace(/%/g, ".*").replace(/_/g, ".");
+      return new RegExp(`^${pattern}$`, "i").test(actual);
     }
-    case 'not_like': {
-      if (typeof actual !== 'string' || typeof expected !== 'string') return false;
-      const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = escaped.replace(/%/g, '.*').replace(/_/g, '.');
-      return !new RegExp(`^${pattern}$`, 'i').test(actual);
+    case "not_like": {
+      if (typeof actual !== "string" || typeof expected !== "string") return false;
+      const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = escaped.replace(/%/g, ".*").replace(/_/g, ".");
+      return !new RegExp(`^${pattern}$`, "i").test(actual);
     }
     default:
       return true; // unknown op — pass through
   }
+}
+
+/**
+ * @internal Apply an ordered comparison only when both sides are the same
+ * comparable primitive (number-vs-number or string-vs-string — strings are
+ * lexicographic, which is correct for ISO-8601 timestamps). Mismatched or
+ * unsupported types return false instead of relying on JS coercion.
+ */
+function compareOrdered(
+  actual: unknown,
+  expected: unknown,
+  cmp: (a: number, b: number) => boolean,
+): boolean {
+  if (typeof actual === "number" && typeof expected === "number") {
+    return cmp(actual, expected);
+  }
+  if (typeof actual === "string" && typeof expected === "string") {
+    // `>`/`<` on strings is lexicographic; reuse the same comparator by
+    // casting through `as unknown as number` — the runtime operator works
+    // identically on strings.
+    return cmp(actual as unknown as number, expected as unknown as number);
+  }
+  return false;
 }
 
 /** @internal Project a row to only the specified columns. */

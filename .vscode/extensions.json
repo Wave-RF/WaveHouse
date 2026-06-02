@@ -1,6 +1,7 @@
 {
   "recommendations": [
     "golang.go",
+    "biomejs.biome",
     "tamasfe.even-better-toml",
     "redhat.vscode-yaml",
     "editorconfig.editorconfig",

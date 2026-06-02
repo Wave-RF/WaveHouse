@@ -1,6 +1,6 @@
-import type { WaveHouseError, StreamEvent, StreamStatus, StreamSubscriber } from '../types.js';
+import type { StreamEvent, StreamStatus, StreamSubscriber, WaveHouseError } from "../types.js";
 
-/** @internal Transport abstraction for SSE and WebSocket backends. */
+/** @internal Transport abstraction for SSE backend. */
 export interface StreamTransport<T = Record<string, unknown>> {
   connect(): void;
   disconnect(): void;
@@ -16,7 +16,7 @@ export interface StreamTransport<T = Record<string, unknown>> {
 export class StreamController<T = Record<string, unknown>> {
   private _transport: StreamTransport<T>;
   private _subscribers = new Set<StreamSubscriber<T>>();
-  private _status: StreamStatus = 'connecting';
+  private _status: StreamStatus = "connecting";
   private _buffer: StreamEvent<T>[] = [];
   private _waiters: { resolve: (value: IteratorResult<StreamEvent<T>>) => void }[] = [];
   private _done = false;
@@ -45,7 +45,7 @@ export class StreamController<T = Record<string, unknown>> {
       for (const sub of this._subscribers) {
         sub.status?.(status);
       }
-      if (status === 'closed') {
+      if (status === "closed") {
         this._done = true;
         for (const w of this._waiters) {
           w.resolve({ value: undefined as never, done: true });
@@ -77,17 +77,15 @@ export class StreamController<T = Record<string, unknown>> {
    * the internal waiter is removed.
    *
    * `@example`
-   * const stream = client.from('events').stream({ transport: 'ws' });
+   * const stream = client.from('events').stream();
    * const unsub = stream.subscribe({ next: (e) => console.log(e) });
    * await stream.connected();   // waits until the transport is live
    * await client.from('events').insert({ ... });
    */
   connected(timeoutMs = 5_000): Promise<void> {
     if (this._status === "live") return Promise.resolve();
-    if (this._status === "closed")
-      return Promise.reject(new Error("Stream is closed"));
-    if (this._done)
-      return Promise.reject(new Error("Stream closed before connecting"));
+    if (this._status === "closed") return Promise.reject(new Error("Stream is closed"));
+    if (this._done) return Promise.reject(new Error("Stream closed before connecting"));
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -126,7 +124,6 @@ export class StreamController<T = Record<string, unknown>> {
     });
   }
 
-
   /** Subscribe to stream events via callbacks. Returns an unsubscribe function. */
   subscribe(subscriber: StreamSubscriber<T>): () => void {
     this._subscribers.add(subscriber);
@@ -146,16 +143,16 @@ export class StreamController<T = Record<string, unknown>> {
       this.close();
       return;
     }
-    signal.addEventListener('abort', () => this.close(), { once: true });
+    signal.addEventListener("abort", () => this.close(), { once: true });
   }
 
   /** Close the stream and release resources. */
   close(): void {
     this._transport.disconnect();
-    if (this._status !== 'closed') {
-      this._status = 'closed';
+    if (this._status !== "closed") {
+      this._status = "closed";
       for (const sub of this._subscribers) {
-        sub.status?.('closed');
+        sub.status?.("closed");
       }
     }
     this._done = true;

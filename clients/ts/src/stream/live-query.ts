@@ -1,12 +1,5 @@
-import type {
-  Result,
-  StreamEvent,
-  StreamSubscriber,
-  StreamStatus,
-  StreamOptions,
-  QueryFilter,
-} from '../types.js';
-import type { StreamController } from './controller.js';
+import type { QueryFilter, Result, StreamEvent, StreamSubscriber } from "../types.js";
+import type { StreamController } from "./controller.js";
 
 /**
  * Stream-first live query orchestrator.
@@ -30,7 +23,7 @@ export class LiveQuery<T = Record<string, unknown>> {
     stream: StreamController<T>,
     fetchFn: () => Promise<Result<T[]>>,
     subscriber: StreamSubscriber<T>,
-    filters: QueryFilter[],
+    _filters: QueryFilter[],
   ) {
     this._stream = stream;
     this._subscriber = subscriber;

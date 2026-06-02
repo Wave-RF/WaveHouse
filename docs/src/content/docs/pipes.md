@@ -1,0 +1,208 @@
+---
+title: "Named Pipes"
+description: "Pre-defined, parameterized SQL queries with role-based access and built-in caching."
+sidebar:
+  order: 6
+---
+
+A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator, expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
+
+Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
+
+## Anatomy of a pipe
+
+A pipe is defined by five fields:
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `name` | string | yes | The pipe's identifier; the last path segment of `/v1/pipes/{name}`. Set from the URL on create. |
+| `sql` | string | yes | A SQL template with `{{param}}` placeholders. Sent verbatim to ClickHouse after binding. |
+| `parameters` | object[] | no | Formal parameter declarations (see [Parameters](#parameters)). |
+| `description` | string | no | Human-readable note shown in the admin listing. |
+| `allowed_roles` | string[] | no | Roles permitted to execute the pipe. Empty = admin role only (see [Authorization](#authorizing-a-pipe)). |
+
+```json
+{
+  "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page ORDER BY views DESC LIMIT {{limit}}",
+  "parameters": [
+    {"name": "start_date", "type": "string", "required": true},
+    {"name": "limit", "type": "number", "required": false, "default": 100}
+  ],
+  "description": "Top pages by view count since a given date",
+  "allowed_roles": ["viewer", "admin"]
+}
+```
+
+> **Pipe SQL is operator-authored and admin-only to write.** Anyone who can create or edit a pipe can run arbitrary SQL, so pipe management lives entirely behind the admin gate. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
+
+## Parameters
+
+Pipes use `{{...}}` placeholders in the SQL template. There are two complementary ways to describe a parameter, and you can mix them freely.
+
+### Declared parameters
+
+The `parameters` array formally declares a parameter with metadata:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `name` | string | Placeholder name; matches `{{name}}` in the SQL. |
+| `type` | string | Documents the expected type (`"string"`, `"number"`, `"boolean"`). Descriptive — it advertises intent to callers and the SDK; binding itself keys off the runtime value. |
+| `required` | bool | If `true`, the caller must supply a value, even if the placeholder doesn't appear in the SQL. A missing required parameter is a `400`. |
+| `default` | any | Value used when the caller supplies none. |
+
+### Inline placeholders and defaults
+
+A placeholder can also carry an inline default with `{{name:default}}`, which works with **no** formal declaration at all:
+
+```sql
+SELECT * FROM clicks
+WHERE received_timestamp >= {{since:2024-01-01}}
+LIMIT {{limit:100}}
+```
+
+Here `since` defaults to `2024-01-01` and `limit` to `100` when the caller omits them — convenient for quick pipes where you don't need the `required`/`type` metadata.
+
+### How a value is resolved
+
+For each `{{name}}` occurrence, WaveHouse picks the first available of:
+
+1. The value the caller **supplied** (query string or request body).
+2. The **declared default** (`parameters[].default`), if a formal parameter exists.
+3. The **inline default** (`{{name:default}}`), if one is given.
+4. Otherwise → `400 missing required parameter: name`.
+
+Independently, every `required` declared parameter must be supplied regardless of whether it appears in the SQL — so you can require a parameter that gates execution even if it's only referenced in some branches.
+
+### How a value becomes SQL
+
+Bound values are **inlined directly into the SQL string** (not sent as positional driver parameters — that lets a parameter sit anywhere ClickHouse allows a literal, including `LIMIT`). Inlining is type-aware and escaped:
+
+| Supplied value | Rendered as | Note |
+| -------------- | ----------- | ---- |
+| string | `'escaped'` | single-quoted; `'` and `\` are escaped |
+| numeric string (e.g. `"100"`) | `100` | emitted bare, so `?limit=100` from a query string works as a number |
+| number | `42` / `42.5` | whole floats render as integers |
+| boolean | `1` / `0` | ClickHouse-style |
+| null | `NULL` | |
+
+Because string values are single-quote-escaped, a parameter value can't break out of its literal and inject SQL. The SQL *structure* still comes only from the operator-authored template.
+
+## Authorizing a pipe
+
+Pipe execution is gated by `allowed_roles` — a plain allowlist, evaluated independently of the table policy:
+
+- The caller's role (a roleless request first resolved to the policy [`default_role`](/access-control#default_role--public-unauthenticated-access)) must appear in `allowed_roles` by **exact** match. There is no `"*"` wildcard, and empty-string entries are ignored.
+- The **admin role always passes**, every pipe, by design — admins author pipes and can run arbitrary SQL anyway, so the allowlist is never a boundary against them.
+- An **empty or omitted `allowed_roles` authorizes nobody but admin.** Pipes fail closed: a role that isn't listed (or a roleless request with no usable `default_role`) is denied with `403 forbidden`.
+
+To make a pipe public, list the role that `default_role` resolves to. For example, with `default_role: viewer`, a pipe with `"allowed_roles": ["viewer"]` is reachable with no token at all.
+
+This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/admin/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** (or via a claim-templated predicate) rather than assuming policy column masking applies.
+
+## Creating and managing pipes
+
+Pipe CRUD is admin-only, under `/v1/admin/pipes`:
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| `GET` | `/v1/admin/pipes` | List all pipes. |
+| `GET` | `/v1/admin/pipes/{name}` | Get one pipe's definition. |
+| `PUT` | `/v1/admin/pipes/{name}` | Create or replace a pipe. |
+| `DELETE` | `/v1/admin/pipes/{name}` | Delete a pipe. |
+
+```bash
+# Create / update a pipe (admin token required)
+curl -X PUT http://localhost:8080/v1/admin/pipes/top_pages \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{start_date}} GROUP BY page ORDER BY views DESC LIMIT {{limit}}",
+    "parameters": [
+      {"name": "start_date", "type": "string", "required": true},
+      {"name": "limit", "type": "number", "required": false, "default": 100}
+    ],
+    "description": "Top pages by view count",
+    "allowed_roles": ["viewer", "admin"]
+  }'
+```
+
+A `PUT` is a full replace of that named pipe; `name` is taken from the URL. Definitions are stored in NATS KV and synced across nodes, so a create/update/delete applies cluster-wide without a restart. The [TypeScript SDK](/sdk) exposes the same operations as `client.pipes.list()`, `client.pipes.get(name)`, `client.pipes.set(name, def)`, and `client.pipes.delete(name)`.
+
+## Executing a pipe
+
+Callers run a pipe at `GET` or `POST /v1/pipes/{name}` — this route is **not** admin-gated; it's governed by the pipe's `allowed_roles`.
+
+- **`GET`** — parameters come from the query string: `GET /v1/pipes/top_pages?start_date=2024-01-01&limit=20`.
+- **`POST`** — parameters come from a JSON body, and may be combined with query-string parameters. When the same key appears in both, the **body wins**.
+
+```bash
+# GET with query-string params
+curl "http://localhost:8080/v1/pipes/top_pages?start_date=2024-01-01&limit=20" \
+  -H "Authorization: Bearer $VIEWER_TOKEN"
+
+# POST with a JSON body
+curl -X POST http://localhost:8080/v1/pipes/top_pages \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"start_date": "2024-01-01", "limit": 20}'
+```
+
+The response is a JSON array of rows. Results flow through the shared in-process L1 cache (Ristretto) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response.
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 404 | `{"error":"pipe not found"}` | No pipe registered under that name |
+| 403 | `{"error":"forbidden"}` | Caller's role isn't in `allowed_roles` (and isn't admin) |
+| 400 | `{"error":"missing required parameter: x"}` | A required parameter wasn't supplied |
+
+## Bootstrapping from `.sql` files
+
+For version-controlled, deploy-time pipe definitions, point `pipes.dir` at a directory of `.sql` files:
+
+```yaml
+# config.yaml
+pipes:
+  dir: /app/pipes        # seed .sql files into KV on startup
+```
+
+On startup, each top-level `*.sql` file is loaded as a pipe whose **name is the filename** (without the extension) and whose **SQL is the file contents**. So `pipes/top_pages.sql` becomes the pipe `top_pages`. The directory is a one-time **seed**, not authoritative storage:
+
+- It will **not overwrite** a pipe that already exists in KV — once a pipe is in the store (seeded earlier, or created via the API), the file is skipped.
+- After bootstrap, the API and KV are the source of truth; the directory is read-only at runtime. Mount it read-only in containers (e.g. `./my-pipes:/app/pipes:ro`).
+
+> **Bootstrapped pipes are admin-only until you grant roles.** A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/admin/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
+
+## End-to-end example
+
+Ship a curated "top pages" endpoint that the public dashboard can call with no token.
+
+1. **Open public access** so roleless requests assume a `viewer` identity — set `default_role` in the policy ([Access Control](/access-control#default_role--public-unauthenticated-access)). A pipe authorizes through its own `allowed_roles`, independent of any table-level `select` rules, so `default_role` is all the policy needs here:
+
+   ```yaml
+   default_role: viewer
+   ```
+
+2. **Register the pipe**, allowing `viewer`:
+
+   ```bash
+   curl -X PUT http://localhost:8080/v1/admin/pipes/top_pages \
+     -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+     -d '{
+       "sql": "SELECT page, count() AS views FROM clicks WHERE received_timestamp >= {{since:2024-01-01}} GROUP BY page ORDER BY views DESC LIMIT {{limit:50}}",
+       "description": "Top pages by view count",
+       "allowed_roles": ["viewer"]
+     }'
+   ```
+
+3. **Call it with no token** — the request resolves to `viewer`, which is allowed:
+
+   ```bash
+   curl "http://localhost:8080/v1/pipes/top_pages?limit=10"
+   # → [{"page":"/home","views":1422}, {"page":"/pricing","views":910}, ...]
+   ```
+
+## See also
+
+- **[Access Control](/access-control)** — roles, `default_role`, and the table-level policy engine that pipe `allowed_roles` builds on.
+- **[Configuration — Named Pipes](/configuration#named-pipes)** — the `pipes.dir` bootstrap knob.
+- **[API Reference](/api)** — the pipe execute and admin endpoints, with full error tables.

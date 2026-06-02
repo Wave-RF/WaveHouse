@@ -18,7 +18,7 @@ import (
 
 func TestSSE_ApplyStreamPolicy_NoPolicy(t *testing.T) {
 	t.Parallel()
-	h := &SSEHandler{Hub: NewHub()}
+	h := &StreamHandler{Hub: NewHub()}
 
 	evt := ingest.EventMessage{
 		TableName:         "clicks",
@@ -49,7 +49,7 @@ func TestSSE_ApplyStreamPolicy_FiltersColumns(t *testing.T) {
 			},
 		},
 	}
-	h := &SSEHandler{
+	h := &StreamHandler{
 		Hub:         NewHub(),
 		PolicyStore: policy.NewMemoryStore(p),
 	}
@@ -83,7 +83,7 @@ func TestSSE_ApplyStreamPolicy_ForbiddenTable(t *testing.T) {
 			},
 		},
 	}
-	h := &SSEHandler{
+	h := &StreamHandler{
 		Hub:         NewHub(),
 		PolicyStore: policy.NewMemoryStore(p),
 	}
@@ -102,7 +102,7 @@ func TestSSE_ApplyStreamPolicy_ForbiddenTable(t *testing.T) {
 
 func TestSSE_ApplyStreamPolicy_NonEventJSON(t *testing.T) {
 	t.Parallel()
-	h := &SSEHandler{Hub: NewHub()}
+	h := &StreamHandler{Hub: NewHub()}
 
 	// Non-EventMessage JSON — should be passed through.
 	raw := []byte(`{"custom":"data","value":42}`)
@@ -113,74 +113,15 @@ func TestSSE_ApplyStreamPolicy_NonEventJSON(t *testing.T) {
 
 func TestSSE_ApplyStreamPolicy_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	h := &SSEHandler{Hub: NewHub()}
+	h := &StreamHandler{Hub: NewHub()}
 
 	out := h.applyStreamPolicy([]byte(`not json`), "", nil)
 	assert.Nil(t, out)
 }
 
-// WS handler has same applyStreamPolicy logic — test parity.
-func TestWS_ApplyStreamPolicy_FiltersColumns(t *testing.T) {
-	t.Parallel()
-	p := &policy.Policy{
-		Tables: map[string]policy.TablePolicy{
-			"events": {
-				Select: map[string]policy.RolePermissions{
-					"user": {AllowColumns: []string{"name"}},
-				},
-			},
-		},
-	}
-	h := &WSHandler{
-		Hub:         NewHub(),
-		PolicyStore: policy.NewMemoryStore(p),
-	}
-
-	evt := ingest.EventMessage{
-		TableName:         "events",
-		ReceivedTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Data:              map[string]any{"name": "click", "internal_id": "abc"},
-	}
-	raw, _ := json.Marshal(evt)
-
-	out := h.applyStreamPolicy(raw, "user", nil, "events")
-	require.NotNil(t, out)
-
-	var got map[string]any
-	require.NoError(t, json.Unmarshal(out, &got))
-	// WS wraps in table envelope.
-	assert.Equal(t, "events", got["table"])
-	inner := got["data"].(map[string]any)
-	data := inner["data"].(map[string]any)
-	assert.Equal(t, "click", data["name"])
-	assert.NotContains(t, data, "internal_id")
-}
-
-func TestWS_ApplyStreamPolicy_NoPolicy(t *testing.T) {
-	t.Parallel()
-	h := &WSHandler{Hub: NewHub()}
-
-	evt := ingest.EventMessage{
-		TableName:         "clicks",
-		ReceivedTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Data:              map[string]any{"page": "/home"},
-	}
-	raw, _ := json.Marshal(evt)
-
-	out := h.applyStreamPolicy(raw, "", nil, "clicks")
-	require.NotNil(t, out)
-
-	var got map[string]any
-	require.NoError(t, json.Unmarshal(out, &got))
-	// WS wraps in table envelope.
-	assert.Equal(t, "clicks", got["table"])
-	inner := got["data"].(map[string]any)
-	assert.Equal(t, "clicks", inner["table_name"])
-}
-
 func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	t.Parallel()
-	h := &SSEHandler{Hub: NewHub()}
+	h := &StreamHandler{Hub: NewHub()}
 
 	cases := []struct {
 		name    string
@@ -193,7 +134,7 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			target := "/v1/stream/sse"
+			target := "/v1/stream"
 			if tc.table != "" {
 				target += "?table=" + url.QueryEscape(tc.table)
 			}
@@ -208,38 +149,19 @@ func TestSSE_RejectsMissingOrInvalidTable(t *testing.T) {
 
 func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	t.Parallel()
-	h := &SSEHandler{Hub: NewHub()}
+	h := &StreamHandler{Hub: NewHub()}
 
 	// Use a request context that's already cancelled so the handler exits
 	// the live-stream select loop immediately instead of blocking the test.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream/sse?table=clicks", nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 	// Past the validation gate — header set to text/event-stream, not the
 	// 400-path application/json.
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/event-stream", w.Header().Get("Content-Type"))
-}
-
-func TestWS_AcceptsUnsafeTableOnQuery(t *testing.T) {
-	t.Parallel()
-	h := &WSHandler{Hub: NewHub()}
-
-	cases := []string{">", "*", "ingest.>", "clicks ", "clicks.subpath"}
-	for _, tbl := range cases {
-		t.Run(tbl, func(t *testing.T) {
-			t.Parallel()
-			target := "/v1/stream/ws?table=" + url.QueryEscape(tbl)
-			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
-			w := httptest.NewRecorder()
-			h.Handle(w, req)
-			// Validation runs before websocket.Accept, so we get a plain 426 and not a 400
-			// (an upgrade-attempt error)
-			testutil.AssertBodyContains(t, w, http.StatusUpgradeRequired, "WebSocket protocol violation")
-		})
-	}
 }
 
 func TestExtractEventTimestamp(t *testing.T) {

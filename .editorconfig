@@ -18,6 +18,10 @@ indent_size = 2
 indent_style = space
 indent_size = 2
 
+[*.{ts,tsx,js,jsx,mjs,cjs,jsonc}]
+indent_style = space
+indent_size = 2
+
 [*.md]
 indent_style = space
 indent_size = 2

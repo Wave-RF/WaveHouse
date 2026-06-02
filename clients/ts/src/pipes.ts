@@ -1,7 +1,7 @@
-import type { Result, HttpContext, Pipe, FetchOptions, StreamOptions } from './types.js';
-import { request } from './http.js';
-import { ok, err } from './errors.js';
-import type { StreamController } from './stream/controller.js';
+import { err, ok } from "./errors.js";
+import { request } from "./http.js";
+import type { StreamController } from "./stream/controller.js";
+import type { FetchOptions, HttpContext, Pipe, Result, StreamOptions } from "./types.js";
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
 
@@ -27,7 +27,7 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
   /** Execute the pipe and return results. */
   async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
     const { data, error } = await request<Row[]>(this._ctx, {
-      method: 'POST',
+      method: "POST",
       path: `/v1/pipes/${encodeURIComponent(this._name)}`,
       body: this._params ?? {},
       signal: opts?.signal,
@@ -60,8 +60,8 @@ export class PipesNamespace {
   /** List all registered pipes. */
   async list(opts?: { signal?: AbortSignal }): Promise<Result<Pipe[]>> {
     const { data, error } = await request<Pipe[]>(this._ctx, {
-      method: 'GET',
-      path: '/v1/admin/pipes',
+      method: "GET",
+      path: "/v1/admin/pipes",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -71,7 +71,7 @@ export class PipesNamespace {
   /** Get a single pipe definition by name. */
   async get(name: string, opts?: { signal?: AbortSignal }): Promise<Result<Pipe>> {
     const { data, error } = await request<Pipe>(this._ctx, {
-      method: 'GET',
+      method: "GET",
       path: `/v1/admin/pipes/${encodeURIComponent(name)}`,
       signal: opts?.signal,
     });
@@ -82,27 +82,27 @@ export class PipesNamespace {
   /** Create or update a pipe. */
   async set(
     name: string,
-    def: Omit<Pipe, 'name'>,
+    def: Omit<Pipe, "name">,
     opts?: { signal?: AbortSignal },
   ): Promise<Result<void>> {
     const { error } = await request<{ ok: boolean }>(this._ctx, {
-      method: 'PUT',
+      method: "PUT",
       path: `/v1/admin/pipes/${encodeURIComponent(name)}`,
       body: def,
       signal: opts?.signal,
     });
     if (error) return err<void>(error);
-    return ok(undefined as void);
+    return ok(undefined as undefined);
   }
 
   /** Delete a pipe by name. */
   async delete(name: string, opts?: { signal?: AbortSignal }): Promise<Result<void>> {
     const { error } = await request<{ ok: boolean }>(this._ctx, {
-      method: 'DELETE',
+      method: "DELETE",
       path: `/v1/admin/pipes/${encodeURIComponent(name)}`,
       signal: opts?.signal,
     });
     if (error) return err<void>(error);
-    return ok(undefined as void);
+    return ok(undefined as undefined);
   }
 }

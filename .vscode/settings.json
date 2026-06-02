@@ -8,6 +8,15 @@
     "formatting.gofumpt": true
   },
 
+  // ── TypeScript / Biome ─────────────────────────────────────────
+  // Use the workspace TypeScript instead of VS Code's bundled one, so
+  // type errors match `pnpm run typecheck`. Re-open the project after
+  // changing this; cmd-shift-P → "TypeScript: Select TypeScript Version".
+  "js/ts.tsdk.path": "clients/ts/node_modules/typescript/lib",
+  "js/ts.tsdk.promptToUseWorkspaceVersion": true,
+  "js/ts.tsserver.maxMemory": 4096,
+  "js/ts.preferences.importModuleSpecifier": "non-relative",
+
   // ── Formatting ─────────────────────────────────────────────────
   "[go]": {
     "editor.defaultFormatter": "golang.go",
@@ -15,6 +24,34 @@
     "editor.codeActionsOnSave": {
       "source.organizeImports": "explicit"
     }
+  },
+  "[typescript]": {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "quickfix.biome": "explicit",
+      "source.organizeImports.biome": "explicit"
+    }
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "quickfix.biome": "explicit",
+      "source.organizeImports.biome": "explicit"
+    }
+  },
+  "[javascript]": {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.formatOnSave": true
+  },
+  "[json]": {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.formatOnSave": true
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.formatOnSave": true
   },
   "[yaml]": {
     "editor.tabSize": 2

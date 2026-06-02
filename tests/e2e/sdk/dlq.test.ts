@@ -1,11 +1,5 @@
-import { describe, it, expect } from "vitest";
-import {
-  dataClient,
-  adminClient,
-  testId,
-  waitForCondition,
-  chQuery,
-} from "./helpers.js";
+import { describe, expect, it } from "vitest";
+import { adminClient, chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Dead Letter Queue (DLQ) & Failures", () => {
   const wh = dataClient();
@@ -15,12 +9,11 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
     const runId = testId();
 
     // TODO: remove when #192 is fixed
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
 
     // Get baseline DLQ stats before we pollute them
     const initialDlq = await admin.dlq.list();
-    const initialClicksDlq =
-      (initialDlq.data?.tables as any)?.["clicks"] || 0;
+    const initialClicksDlq = (initialDlq.data?.tables as any)?.clicks || 0;
 
     // We are going to send 9 perfectly valid rows, and 1 critically malformed row.
     const rows = Array.from({ length: 10 }).map((_, i) => {
@@ -51,19 +44,18 @@ describe("Dead Letter Queue (DLQ) & Failures", () => {
       const chRows = await chQuery(
         `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
       );
-      return Number((chRows[0] as any).cnt) == 9;
+      return Number((chRows[0] as any).cnt) === 9;
     }, 6_000);
 
     // Verify exactly 1 message was added to the DLQ for the clicks table
     await waitForCondition(async () => {
       const dlqRes = await admin.dlq.list();
-      const currentClicksDlq =
-        (dlqRes.data?.tables as any)?.["clicks"] || 0;
+      const currentClicksDlq = (dlqRes.data?.tables as any)?.clicks || 0;
       return currentClicksDlq === initialClicksDlq + 1;
     }, 5_000);
 
     const finalDlq = await admin.dlq.list();
-    const finalClicksDlq = (finalDlq.data?.tables as any)?.["clicks"] || 0;
+    const finalClicksDlq = (finalDlq.data?.tables as any)?.clicks || 0;
 
     // Only 1 was rejected and routed to the DLQ
     expect(finalClicksDlq).toBe(initialClicksDlq + 1);

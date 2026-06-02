@@ -10,13 +10,12 @@
  * schema, and bootstraps a baseline policy.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { CH_URL, WH_URL, makeJWT } from "./helpers.js";
+import { CH_URL, makeJWT, WH_URL } from "./helpers.js";
 
 const FIXTURES_DIR = path.resolve(__dirname, "../fixtures");
-const setupAuth = () =>
-  `Bearer ${makeJWT({ sub: "e2e-setup", role: "admin", tenant_id: "acme" })}`;
+const setupAuth = () => `Bearer ${makeJWT({ sub: "e2e-setup", role: "admin", tenant_id: "acme" })}`;
 
 async function probe(url: string, timeoutMs = 2000): Promise<boolean> {
   try {
@@ -93,9 +92,7 @@ async function bootstrapTestPolicy(): Promise<void> {
     body: JSON.stringify(policy),
   });
   if (!res.ok) {
-    throw new Error(
-      `Failed to bootstrap test policy: ${res.status} ${await res.text()}`,
-    );
+    throw new Error(`Failed to bootstrap test policy: ${res.status} ${await res.text()}`);
   }
 }
 

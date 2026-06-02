@@ -12,8 +12,8 @@
 #
 # Edit docs/scripts/branding/mark.svg (one or more SVG elements, single line,
 # using `stroke="currentColor"` for any element that should pick up the brand
-# color) or the COLOR_* variables below, then run `make docs-branding` from
-# the repo root (or `make branding` from inside docs/).
+# color) or the COLOR_* variables below, then run `make branding-docs` from
+# the repo root.
 #
 # Requires rsvg-convert (librsvg) and magick (ImageMagick 7+) on PATH:
 #   brew install librsvg imagemagick

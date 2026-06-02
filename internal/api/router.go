@@ -20,9 +20,9 @@ import (
 type Dependencies struct {
 	Ingest          *IngestHandler
 	Query           *QueryHandler
-	SSE             *SSEHandler
-	WS              *WSHandler
+	SSE             *StreamHandler
 	Health          *HealthHandler
+	Version         *VersionHandler
 	Schema          *SchemaHandler
 	DLQ             *DLQHandler
 	Policy          *PolicyHandler
@@ -32,11 +32,9 @@ type Dependencies struct {
 	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the policy, so admin_role changes apply without a restart.
 	PolicyStore *policy.Store
-	JS          jetstream.JetStream // for SSE/WS gap-fill
+	JS          jetstream.JetStream // for SSE gap-fill
 	CORSOrigins []string            // allowed CORS origins; ["*"] = allow all
-	// Logger is the request-path logger the denial gates use (RequireAdmin and
-	// the handlers that call writeAuthzDenied). nil falls back to slog.Default().
-	Logger *slog.Logger
+	Logger      *slog.Logger
 	// MetricsHandler, if non-nil, is mounted at MetricsPath as an unauthenticated
 	// endpoint (Prometheus convention). Wired by main.go from the OTel Prometheus
 	// exporter when observability.metrics.prometheus.enabled is true AND port is 0.
@@ -68,9 +66,9 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip span creation on infra/probe paths:
-			//   /v1/stream/*  — long-lived streams (SSE/WS); the standard
+			//   /v1/stream    — long-lived streams (SSE); the standard
 			//                   HTTP tracer would emit one span per stream
-			//                   that lives until the client disconnects.
+			//                   that lives until the client disconnects. // TODO: do we not want this behavior?
 			//   prometheus    — scrape every ~15s would produce ~4 spans/min
 			//                   of pure infra cardinality, and creates a
 			//                   self-loop when the same backend stores both
@@ -78,7 +76,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			//   /health, /ready — liveness/readiness probes inflate span
 			//                   counts and skew latency percentiles.
 			p := r.URL.Path
-			if strings.HasPrefix(p, "/v1/stream/") || p == "/health" || p == "/ready" ||
+			if strings.HasPrefix(p, "/v1/stream") || p == "/health" || p == "/ready" ||
 				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return
@@ -91,6 +89,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	// Public endpoints.
 	r.Get("/health", deps.Health.Liveness)
 	r.Get("/ready", deps.Health.Readiness)
+	r.Get("/version", deps.Version.Handle)
 
 	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
 	// AND prometheus.port is 0 (mount on this router). When prometheus.port
@@ -110,8 +109,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		requireAdmin := RequireAdmin(deps.PolicyStore, deps.Logger)
 
 		r.Post("/ingest", deps.Ingest.Handle)
-		r.Get("/stream/sse", deps.SSE.Handle)
-		r.Get("/stream/ws", deps.WS.Handle)
+		r.Get("/stream", deps.SSE.Handle)
 
 		// Schema discovery — admin-only (no policy gate of its own).
 		r.With(requireAdmin).Get("/schema", deps.Schema.Get)

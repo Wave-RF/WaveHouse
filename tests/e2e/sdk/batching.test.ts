@@ -1,28 +1,26 @@
-import { describe, it, expect } from "vitest";
-import { dataClient, testId, waitForCondition, chQuery } from "./helpers.js";
+import { describe, expect, it } from "vitest";
+import { chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Ingest Batching Triggers", () => {
   const wh = dataClient();
 
-    it("flushes immediately when hitting the 500-item batch limit", async () => {
+  it("flushes immediately when hitting the 500-item batch limit", async () => {
     const runId = testId();
     const rows = Array.from({ length: 500 }).map((_, i) => ({
       event_id: `${runId}-${i}`,
-        page: `/batch-count-test`,
+      page: `/batch-count-test`,
       session_id: `session-${runId}`,
       user_id: `user-${runId}`,
     }));
 
     const startTime = Date.now();
 
-        // Insert all 500 at once
+    // Insert all 500 at once
     const res = await wh.from("clicks").insert(rows);
-        expect(res.error).toBeNull();
-        const apiEndTime = Date.now();
-        console.log(
-          `All 500 events uploaded (API fsync latency) in ${apiEndTime - startTime}ms`,
-        );
-        expect(apiEndTime - startTime).toBeLessThan(5_000);
+    expect(res.error).toBeNull();
+    const apiEndTime = Date.now();
+    console.log(`All 500 events uploaded (API fsync latency) in ${apiEndTime - startTime}ms`);
+    expect(apiEndTime - startTime).toBeLessThan(5_000);
 
     // It should hit ClickHouse almost instantly (< 2 seconds), well before the 5s timer
     await waitForCondition(
@@ -36,15 +34,13 @@ describe("Ingest Batching Triggers", () => {
       100,
     );
 
-        const elapsed = Date.now() - apiEndTime;
-        console.log(
-          `All 500 events uploaded (buffered CH insert) in ${elapsed}ms`,
-        );
+    const elapsed = Date.now() - apiEndTime;
+    console.log(`All 500 events uploaded (buffered CH insert) in ${elapsed}ms`);
     expect(elapsed).toBeLessThan(5000); // Prove it didn't wait for the 5s timer
   });
 
   it("waits for the 5-second period if batch limit is not met", async () => {
-      const runId = testId();
+    const runId = testId();
 
     const startTime = Date.now();
     const res = await wh.from("clicks").insert({
@@ -53,12 +49,12 @@ describe("Ingest Batching Triggers", () => {
       session_id: `session-${runId}`,
       user_id: `user-${runId}`,
     });
-      const apiEndTime = Date.now();
-      expect(res.error).toBeNull();
-      expect(apiEndTime - startTime).toBeLessThan(2_500);
+    const apiEndTime = Date.now();
+    expect(res.error).toBeNull();
+    expect(apiEndTime - startTime).toBeLessThan(2_500);
 
     // Check immediately (should NOT be there yet)
-    let r = await chQuery(
+    const r = await chQuery(
       `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
     );
     expect(Number((r[0] as any).cnt)).toBe(0);

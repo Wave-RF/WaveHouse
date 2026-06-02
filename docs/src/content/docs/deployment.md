@@ -2,7 +2,7 @@
 title: "Deployment"
 description: "Running WaveHouse in production: Docker images, releases, environment variables, health checks, and schema setup."
 sidebar:
-  order: 8
+  order: 10
 ---
 
 How to run WaveHouse in production — single binary, Docker images, releases, health checks, and the required ClickHouse schema.
@@ -143,7 +143,7 @@ WH_DEDUPE_ENABLED=true
 WH_DEDUPE_ID_FIELD=event_id
 
 # Standalone tuning
-WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE/WS gap-fill
+WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
 WH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers backpressure)
 
 # DLQ
@@ -154,7 +154,7 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
 
-- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE/WS gap-fill across restarts.
+- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
 In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose files in `deployments/compose/standalone.yaml`, `tests/e2e/compose.yaml`, and `clients/ts/playground/compose.yaml` set `WH_DATA_DIR=/app/data` and bind a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data/nats`, `/app/data/pebble`, and `/app/pipes` owned by the nonroot user (UID 65532).

@@ -1,5 +1,5 @@
-import type { HttpContext, WaveHouseError } from './types.js';
-import { parseErrorResponse, networkError } from './errors.js';
+import { networkError, parseErrorResponse } from "./errors.js";
+import type { HttpContext, WaveHouseError } from "./types.js";
 
 interface RequestOptions {
   method: string;
@@ -20,20 +20,17 @@ export interface HttpResult<T> {
  * Internal fetch wrapper with auth injection, retry, backoff, and Retry-After.
  * @internal
  */
-export async function request<T>(
-  ctx: HttpContext,
-  opts: RequestOptions,
-): Promise<HttpResult<T>> {
+export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promise<HttpResult<T>> {
   const url = buildURL(ctx.baseURL, opts.path, opts.params);
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
+    "Content-Type": "application/json",
+    Accept: "application/json",
   };
 
   if (ctx.auth) {
     const token = await ctx.auth();
     if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
   }
 
@@ -59,7 +56,7 @@ export async function request<T>(
 
       // 503 with Retry-After: wait the specified duration
       if (res.status === 503) {
-        const retryAfter = res.headers.get('Retry-After');
+        const retryAfter = res.headers.get("Retry-After");
         if (retryAfter && attempt < maxAttempts - 1) {
           const delay = parseInt(retryAfter, 10) * 1000 || 30_000;
           await sleep(delay, opts.signal);
@@ -78,10 +75,10 @@ export async function request<T>(
       return { data: null, error, headers: res.headers };
     } catch (e) {
       // AbortError — return immediately, no retry
-      if (e instanceof DOMException && e.name === 'AbortError') {
+      if (e instanceof DOMException && e.name === "AbortError") {
         return {
           data: null,
-          error: { status: 0, code: 'ABORTED', message: 'Request aborted', retryable: false },
+          error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
           headers: new Headers(),
         };
       }
@@ -89,7 +86,6 @@ export async function request<T>(
       lastError = networkError(e);
       if (attempt < maxAttempts - 1) {
         await sleep(backoff(attempt), opts.signal);
-        continue;
       }
     }
   }
@@ -98,7 +94,7 @@ export async function request<T>(
 }
 
 function buildURL(base: string, path: string, params?: Record<string, string>): string {
-  const url = new URL(path, base.endsWith('/') ? base : base + '/');
+  const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       url.searchParams.set(k, v);
@@ -114,15 +110,15 @@ function backoff(attempt: number): number {
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new DOMException('Aborted', 'AbortError'));
+      reject(new DOMException("Aborted", "AbortError"));
       return;
     }
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener(
-      'abort',
+      "abort",
       () => {
         clearTimeout(timer);
-        reject(new DOMException('Aborted', 'AbortError'));
+        reject(new DOMException("Aborted", "AbortError"));
       },
       { once: true },
     );

@@ -13,7 +13,7 @@ import (
 // Sweeper implements the Active Sweeper pattern. It runs every minute and
 // purges messages from the JetStream stream that satisfy BOTH conditions:
 //   - ACKed by the buffer consumer (written to ClickHouse)
-//   - Older than the gap window (no longer needed for SSE/WS replay)
+//   - Older than the gap window (no longer needed for SSE replay)
 //
 // Purge target = MIN(buffer_ack_floor + 1, gap_window_seq).
 // This guarantees: healthy state keeps exactly gap_window of rolling data;
