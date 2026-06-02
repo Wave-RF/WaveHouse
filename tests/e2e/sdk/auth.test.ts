@@ -1,12 +1,6 @@
-import { describe, it, expect } from "vitest";
-import {
-  publicClient,
-  viewerClient,
-  adminClient,
-  makeExpiredJWT,
-  WH_URL,
-} from "./helpers.js";
 import { createClient } from "@wavehouse/sdk";
+import { describe, expect, it } from "vitest";
+import { adminClient, makeExpiredJWT, publicClient, viewerClient, WH_URL } from "./helpers.js";
 
 describe("Auth", () => {
   it("health endpoint is accessible without auth", async () => {

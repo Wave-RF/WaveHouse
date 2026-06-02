@@ -18,7 +18,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/` and `tests/e2e/compose.yaml`; integration tests boot a ClickHouse testcontainer | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.1+ (pinned via `packageManager` in `clients/ts/package.json`, `tests/e2e/sdk/package.json`, and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site; `make build-sdk`, `make test-sdk`, `make test-e2e`, `make docs-build`, `make docs-dev`, `make docs-preview` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json` and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make docs-build` / `make docs-dev` via the `docs-install-playwright` target, so Go-only contributors don't pay the download cost. When you do hit `docs-build` / `docs-dev`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. Root-side targets (`docs-*`) auto-forward to `docs/Makefile` via a pattern rule — from inside `docs/`, run `make help` to see the un-prefixed names (`install`, `dev`, `build`, `preview`).
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
 
 ### Verify your setup
 
@@ -40,7 +40,7 @@ node --version      # v22.x (matches .nvmrc and CI)
 pnpm --version      # 11.1+
 ```
 
-If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-sdk`).
+If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
 
 ### Optional but recommended
 
@@ -106,10 +106,10 @@ curl -s -X POST http://localhost:8080/v1/admin/query \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
 # Open an SSE stream for a specific table (Ctrl+C to stop)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
+curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 # With gap-fill (replays events since the given timestamp, then switches to live)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks&since=2026-03-24T11:00:00Z"
+curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 
 # Health check (no auth required)
 curl http://localhost:8080/health
@@ -278,7 +278,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed.
 
-All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE/WS hubs) — the race detector catches data races that would panic in production.
+All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
 ### Quick Reference
 
@@ -289,10 +289,11 @@ make test ARGS="-run TestValidate"     # Run specific test(s)
 V=1 make test ARGS="-run TestValidate" # Specific test, verbose
 make test-integration                  # Go integration tests (requires Docker)
 V=1 make test-integration              # Integration tests, verbose
-make test-sdk                          # SDK vitest unit tests
+make test-ts                           # SDK vitest unit tests + coverage + gate against suites.ts-unit
+                                       # (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
 make test-e2e                          # E2E SDK suite against bin/wavehouse-cov
 make test-all                          # All four suites sequentially + merged coverage
-make ci                                # Full CI: parallel verify+builds+test+test-sdk, then test-integration+test-e2e+cov
+make ci                                # Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts, then test-integration + test-e2e + cov
 make cov                               # Merge available covdata + gate against total threshold
 ```
 
@@ -309,7 +310,7 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | Category | Location | Docker? | Command |
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
-| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-sdk` |
+| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
@@ -441,25 +442,25 @@ Run `make help` to see all targets. Key ones:
 | `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
 | `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
 | **Static checks** | |
-| `make fmt` | Check formatting (run `make fix` to apply) |
+| `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run `golangci-lint` |
+| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | All four above (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-apply: `tidy` + `gofumpt` + `goimports` + `lint --fix` |
+| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
+| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
-| `make build-sdk` | Build TypeScript SDK → `clients/ts/dist/` |
+| `make build-ts` | Build TypeScript SDK → `clients/ts/dist/` |
 | **Test** | |
 | `make test` | Alias for `test-unit` |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |
 | `make test-integration` | Go integration tests (requires Docker) + coverage gate |
-| `make test-sdk` | SDK vitest unit tests + coverage gate |
+| `make test-ts` | SDK vitest unit tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
+| `make cov` | Merge Go + TS coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." Each side skips silently if its data is missing, but `make cov` fails if *both* are empty (you ran it before any test target). |
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All four suites sequentially + merged coverage gate |
-| `make cov` | Merge available `covdata` + gate against total threshold |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |

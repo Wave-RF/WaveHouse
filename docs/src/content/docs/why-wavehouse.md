@@ -65,7 +65,7 @@ ClickHouse has no pub/sub. If a dashboard needs to see new events within a secon
 - **Poll.** Every client issues `SELECT ... WHERE received_timestamp > ?` every N seconds. For a dashboard with 100 concurrent viewers polling every 2s, that's **3,000 queries/min against ClickHouse** — most returning zero rows.
 - **Add another system** (Kafka, Pulsar, Redis pub/sub) and duplicate the event stream.
 
-WaveHouse's SSE/WebSocket layer broadcasts events **before** they flush to ClickHouse, with NATS JetStream history for gap-fill when a client reconnects. Same binary, no separate pub/sub stack.
+WaveHouse's SSE layer broadcasts events **before** they flush to ClickHouse, with NATS JetStream history for gap-fill when a client reconnects. Same binary, no separate pub/sub stack.
 
 ```mermaid
 flowchart TB
@@ -82,7 +82,7 @@ flowchart TB
         CH1 --> LOAD["3,000 queries/min<br/>~95% return 0 rows"]:::pain
     end
 
-    subgraph push["SSE / WEBSOCKET PUSH"]
+    subgraph push["SSE PUSH"]
         direction TB
         E["ingest event"]:::neutral
         E --> HUB["WaveHouse Hub"]:::wh
@@ -164,7 +164,7 @@ flowchart TB
 | Durable ingest buffer | Kafka / Redpanda cluster (3+ brokers, Zookeeper/KRaft) | Embedded NATS JetStream |
 | Batch consumer | Custom Go/Rust/Java service you write and operate | Built in |
 | Query cache | Redis + singleflight middleware you write | Built in (Ristretto + singleflight) |
-| Real-time push | WebSocket service + bridge from Kafka | Built in (`/v1/stream/sse`, `/v1/stream/ws`) |
+| Real-time push | WebSocket service + bridge from Kafka | Built in (`/v1/stream`) |
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
 | Dead letter queue | Custom retry + dead topic on Kafka | Built in (`WAVEHOUSE_DLQ`) |
@@ -187,7 +187,7 @@ Where it differs from WaveHouse:
 | Data residency | Their infrastructure | Your infrastructure |
 | Source of truth for schema | Tinybird datasource definitions | Your ClickHouse tables (`system.columns`) |
 | Deployment workflow | Tinybird CLI against Tinybird Cloud | `docker compose up` or any K8s |
-| Real-time push | Pipe endpoints (request/response) | Native SSE + WebSocket |
+| Real-time push | Pipe endpoints (request/response) | Native SSE |
 | Access control | Tinybird tokens (API-level) | JWT + Hasura-style row/column policies |
 | Vendor lock-in | Queries run on Tinybird; moving off = rewriting | None — WaveHouse is MIT, ClickHouse is yours |
 
@@ -204,7 +204,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Dead letter queue | ✗ | Custom | Partial | ✓ `WAVEHOUSE_DLQ` |
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
 | Exact-once dedup | ✗ | Custom | ✓ | ✓ optional |
-| Real-time push (SSE/WS) | ✗ | Custom service | Partial | ✓ native, gap-fill |
+| Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
 | Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |
 | Named parameterized pipes | ✗ | Custom | ✓ | ✓ stored in NATS KV |
@@ -233,7 +233,7 @@ flowchart TB
     DD -. "200 OK — ~2ms p50" .-> C
 
     NATS --> HUB["Hub broadcast"]:::wh
-    HUB --> RT["SSE / WebSocket<br/>subscribers"]:::client
+    HUB --> RT["SSE subscribers"]:::client
 
     NATS --> BC["Buffer consumer<br/>5-second batches"]:::wh
     BC --> CH[("ClickHouse")]:::store
@@ -262,7 +262,7 @@ flowchart TB
 | API auth + validation | < 1 ms | ~3 ms |
 | NATS JetStream publish | ~1 ms | ~5 ms |
 | API `200 OK` to client | ~2 ms | ~8 ms |
-| Hub broadcast to SSE/WS subscriber | ~1 ms | ~10 ms |
+| Hub broadcast to SSE subscriber | ~1 ms | ~10 ms |
 | Batch flush to ClickHouse | 5 s (configurable) | 5 s + ClickHouse insert time |
 | Query cache hit (L1) | < 0.5 ms | ~1 ms |
 | Query cache miss → ClickHouse | depends on query | depends on query |

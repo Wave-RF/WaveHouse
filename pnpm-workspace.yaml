@@ -1,0 +1,27 @@
+# pnpm workspace root for WaveHouse.
+#
+# Three TypeScript packages live in this repo:
+#   - clients/ts        — @wavehouse/sdk (the SDK we publish to npm)
+#   - tests/e2e/sdk     — wavehouse-e2e (E2E suite that exercises the SDK)
+#   - docs              — wavehouse-docs (Astro Starlight site)
+
+packages:
+  - "clients/ts"
+  - "tests/e2e/sdk"
+  - "docs"
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
+
+minimumReleaseAge: 10080
+
+# Fail an install when the active Node doesn't satisfy a package's engines.node
+# (floor is ">=22" in every package.json; exact dev/CI version pinned in .nvmrc).
+engineStrict: true
+
+catalog:
+  typescript: "^6.0.3"
+  vitest: "^4.1.6"
+  "@types/node": "^25.9.1"

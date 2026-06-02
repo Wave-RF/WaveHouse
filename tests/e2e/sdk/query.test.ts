@@ -1,11 +1,5 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import {
-  dataClient,
-  adminClient,
-  waitForCondition,
-  testId,
-  chQuery,
-} from "./helpers.js";
+import { beforeAll, describe, expect, it } from "vitest";
+import { adminClient, chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Query", () => {
   const wh = dataClient();
@@ -122,7 +116,9 @@ describe("Query", () => {
     const weirdName = "read-test; 2026";
 
     // 1. Create table and refresh schema
-    await chQuery(`CREATE TABLE IF NOT EXISTS \`${weirdName}\` (id String, received_timestamp DateTime) ENGINE = Memory`);
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS \`${weirdName}\` (id String, received_timestamp DateTime) ENGINE = Memory`,
+    );
     await admin.schema.refresh();
 
     // 2. Add it to the policy
@@ -172,10 +168,10 @@ describe("Query", () => {
         clicks: {
           ...((currentPolicyRes.data as any).tables.clicks || {}),
           select: {
-            viewer: { allow_columns: ["page", "duration_ms"] }
-          }
-        }
-      }
+            viewer: { allow_columns: ["page", "duration_ms"] },
+          },
+        },
+      },
     });
 
     // Try to explicitly select the forbidden column

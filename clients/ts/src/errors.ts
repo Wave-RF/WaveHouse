@@ -1,4 +1,4 @@
-import type { WaveHouseError, Result } from './types.js';
+import type { Result, WaveHouseError } from "./types.js";
 
 /** Create a WaveHouseError from an HTTP response. */
 export async function parseErrorResponse(res: Response): Promise<WaveHouseError> {
@@ -10,9 +10,9 @@ export async function parseErrorResponse(res: Response): Promise<WaveHouseError>
   }
 
   const message =
-    typeof body?.error === 'string'
+    typeof body?.error === "string"
       ? body.error
-      : typeof body?.message === 'string'
+      : typeof body?.message === "string"
         ? body.message
         : res.statusText;
 
@@ -31,7 +31,7 @@ export function networkError(cause: unknown): WaveHouseError {
   const message = cause instanceof Error ? cause.message : String(cause);
   return {
     status: 0,
-    code: 'NETWORK_ERROR',
+    code: "NETWORK_ERROR",
     message,
     retryable: true,
   };

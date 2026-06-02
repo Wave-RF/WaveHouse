@@ -171,24 +171,6 @@ help: ## Show this help menu
 			tname = $$0; sub(/:.*/, "", tname); \
 			printf "  $(CYAN)%-18s$(RESET) %s\n", tname, $$2 \
 		}' $(MAKEFILE_LIST)
-	@# Per-subproject sections are auto-generated from $(SUBPROJECTS). Adding
-	@# a subproject (or a `## `-annotated target inside one) shows up here
-	@# automatically — no edit to this target needed. Each sub-Makefile's own
-	@# `help` entry is filtered out (would be redundant with this menu).
-	@for sp in $(SUBPROJECTS); do \
-		name=$$(basename "$$sp"); \
-		awk -v name="$$name" -v y='$(YELLOW)' -v c='$(CYAN)' -v r='$(RESET)' \
-			'BEGIN { \
-				FS = "## "; \
-				title = toupper(substr(name,1,1)) substr(name,2); \
-				printf "\n%s%s%s (%s%s-%%%s)\n", y, title, r, c, name, r \
-			} \
-			/^[a-zA-Z0-9_-]+:.*## / { \
-				tname = $$0; sub(/:.*/, "", tname); \
-				if (tname == "help") next; \
-				printf "  %s%-18s%s %s\n", c, name "-" tname, r, $$2 \
-			}' "$$sp/Makefile"; \
-	done
 	@printf "\nTunable variables are documented at the top of the Makefile.\n"
 
 ##@ Dev
@@ -216,6 +198,24 @@ dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveH
 	@echo "    WaveHouse:  $(GREEN)http://localhost:8080$(RESET)  (CORS=*, auth disabled by default)"
 	@echo "    ClickHouse: $(GREEN)http://localhost:8123$(RESET)  (HTTP), $(GREEN)localhost:9000$(RESET) (native)"
 	WH_CONFIG=.config.local.yaml $(AIR) -c .air.toml
+
+.PHONY: dev-ts
+dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
+	@$(PNPM) --filter $(SDK_NAME) run dev
+
+.PHONY: dev-docs
+dev-docs: install-playwright-docs ## Hot-reload Astro dev server on :4321
+	@$(PNPM) --filter $(DOCS_FILTER) run dev
+
+# preview-docs serves the production build through wrangler (Cloudflare Workers
+# preview), building docs/dist/ first if it's missing.
+.PHONY: preview-docs
+preview-docs: install-playwright-docs ## Wrangler preview of the docs production build (auto-builds if dist/ missing)
+	@if [ ! -d $(DOCS_DIR)/dist ]; then \
+		echo "$(CYAN)==> No docs/dist — building first...$(RESET)"; \
+		$(MAKE) build-docs; \
+	fi
+	@$(PNPM) --filter $(DOCS_FILTER) run preview
 
 # `up -d --wait` blocks until the compose healthcheck transitions to
 # healthy, so callers can chain on success without a polling loop. The
@@ -262,8 +262,24 @@ obs-front: ## Start local OTel Front UI
 # Dynamically find all directories containing Go files, safely ignoring hidden folders like .worktrees
 GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
 
+# fmt/lint/fix: Biome is workspace-wide — one config (biome.json), one binary,
+# scanning whatever its files.includes glob covers (SDK + e2e today). It's
+# invoked directly here, not via a per-subproject target. All three depend on
+# pnpm-install so Biome never runs before node_modules exists (fresh clone, or
+# as a sibling under `make -j verify`).
+#
+# fmt = format only (quick). lint = `biome check --error-on-warnings` (format +
+# lint + organize-imports) — the read-only inverse of fix's `biome check
+# --write`, so `make verify` gates precisely what `make fix` would change. The
+# --error-on-warnings flag makes warn-level rules hard-fail (not just print),
+# matching gofumpt/golangci-lint. NOTE: Biome demotes style nits to a
+# non-blocking "info" severity by default — bump a rule to "warn"/"error" in
+# biome.json (as we do for useTemplate) to make it actually gate.
 .PHONY: fmt
-fmt: ## Check formatting (run `make fix` to apply)
+fmt: pnpm-install ## Check formatting across Go (gofumpt) + TS (Biome). Run `make fix` to apply.
+	@echo "$(CYAN)==> Checking TypeScript formatting (Biome)...$(RESET)"
+	@$(PNPM) -w run format || { echo "$(RED)==> Biome found formatting issues.$(RESET) Run $(CYAN)make fix$(RESET) to apply."; exit 1; }
+	@echo "$(CYAN)==> Checking Go formatting (gofumpt)...$(RESET)"
 	@if ! OUT=$$($(GOFUMPT) -l $(GO_DIRS)); then \
 		echo "$(RED)==> gofumpt failed$(RESET)"; \
 		exit 1; \
@@ -276,10 +292,14 @@ fmt: ## Check formatting (run `make fix` to apply)
 	fi
 	@echo "$(GREEN)==> Formatting OK$(RESET)"
 
+# lint: Go (golangci-lint) + TS. The TS side runs `biome check` (lint +
+# format + import order) — see the fmt block for why it mirrors fix.
 .PHONY: lint
-lint: $(GOLANGCI_LINT) go-mod-download ## Run golangci-lint (run `make fix` to apply --fix)
-	@echo "$(CYAN)==> Running linters...$(RESET)"
-	@$(GOLANGCI_LINT) run ./...
+lint: $(GOLANGCI_LINT) go-mod-download pnpm-install ## Lint across Go (golangci-lint) + TS (biome check). Run `make fix` to apply --fix.
+	@echo "$(CYAN)==> Running Biome check (lint + format + imports)...$(RESET)"
+	@$(PNPM) -w run check || { echo "$(RED)==> Biome found issues.$(RESET) Run $(CYAN)make fix$(RESET) to auto-fix (warnings without a safe fix need a manual edit)."; exit 1; }
+	@echo "$(CYAN)==> Running golangci-lint...$(RESET)"
+	@$(GOLANGCI_LINT) run ./... --allow-parallel-runners
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
@@ -303,19 +323,30 @@ tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 	fi
 	@echo "$(GREEN)==> Modules OK$(RESET)"
 
+# fix: apply auto-fixes everywhere — Go (tidy + gofumpt + goimports +
+# golangci-lint --fix) + Biome (`check --write`: format + lint + imports).
 .PHONY: fix
-fix: $(GOLANGCI_LINT) ## Apply all auto-fixes (tidy + gofumpt + goimports + lint --fix)
-	@echo "$(CYAN)==> Applying all auto-fixes...$(RESET)"
+fix: $(GOLANGCI_LINT) pnpm-install ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS (Biome --write)
+	@echo "$(CYAN)==> Applying Biome fixes...$(RESET)"
+	@$(PNPM) -w run fix
+	@echo "$(CYAN)==> Applying Go auto-fixes...$(RESET)"
 	@go mod tidy
 	@$(GOFUMPT) -w $(GO_DIRS)
 	@$(GOIMPORTS) -w $(GO_DIRS)
-	@$(GOLANGCI_LINT) run --fix ./...
+	@$(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
 	@echo "$(GREEN)==> Done$(RESET)"
 
+# verify: all static checks across the repo. fmt and lint above already
+# span Go + Biome; the recipe adds tidy + vulncheck (Go-side) and a TS
+# type-check (`tsc --noEmit`) — Biome doesn't type-check, so this fills
+# the gap that golangci-lint implicitly covers on the Go side.
 .PHONY: verify
-verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -j verify`)
+verify: tidy fmt vulncheck lint pnpm-install ## Run all static checks across the repo (Go + TS, parallel-safe)
+	@echo "$(CYAN)==> Type-checking SDK (tsc --noEmit)...$(RESET)"
+	@$(PNPM) --filter $(SDK_NAME) run typecheck
 	@scripts/ci-marker.sh write-verify
 	@echo "$(GREEN)==> All static checks passed$(RESET)"
+
 
 ##@ Build
 
@@ -330,7 +361,7 @@ verify: tidy fmt vulncheck lint ## Run all static checks (parallel-safe: `make -
 # go-mod-download is a no-doc intermediate target — every Go-toolchain target
 # (build/test/lint variants) declares it as a prereq so `make -j` doesn't
 # kick off N parallel `go mod download` calls racing on the module cache.
-# Symmetric with install-sdk for the Node side.
+# Symmetric with pnpm-install for the Node side.
 .PHONY: go-mod-download
 go-mod-download:
 	@go mod download
@@ -372,85 +403,71 @@ build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumenta
 .PHONY: build-all
 build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
-	@$(MAKE) -j 4 build build-sdk subprojects-build
+	@$(MAKE) -j 4 build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
-# --- TypeScript SDK build / install ------------------------------------------
+# build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts).
+# Required by test-e2e (e2e tests import the built artifact) and by
+# build-all. Standalone via `make build-ts`.
+.PHONY: build-ts
+build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
+	@$(PNPM) --filter $(SDK_NAME) run build
+
+# build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)
+# because rehype-mermaid renders diagrams via headless Chrome at build time and
+# starlight-links-validator needs it too.
+.PHONY: build-docs
+build-docs: install-playwright-docs ## Build docs site → docs/dist/
+	@echo "$(CYAN)==> Building docs site...$(RESET)"
+	@$(PNPM) --filter $(DOCS_FILTER) run build
+
+# branding-docs: regenerate logo/favicon/OG assets from the brand SVG.
+# Not a `build-docs` prereq — derived assets are committed so contributors
+# don't need rsvg + ImageMagick to build docs. The script self-locates via
+# git, so it runs the same from the repo root.
+.PHONY: branding-docs
+branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/scripts/branding/mark.svg
+	@docs/scripts/branding/generate.sh
+
+# --- Node workspace: SDK + docs ----------------------------------------------
 # pnpm is the canonical package manager (migrated from npm). Locally available
 # via PATH; CI installs/caches it via actions/cache + setup-node. Three pnpm
-# projects share a single store: the SDK (clients/ts/), the E2E test harness
-# (tests/e2e/sdk/), and the docs site (docs/).
+# packages share one workspace + store: the SDK (clients/ts/, @wavehouse/sdk),
+# the E2E harness (tests/e2e/sdk/, wavehouse-e2e), and the docs site
+# (docs/, wavehouse-docs). One root `pnpm install` installs all three.
+#
+# Everything is driven directly via `pnpm --filter <pkg>` — no per-subproject
+# Makefiles. The user-facing Node targets live inline in their natural verb
+# sections (build-ts/dev-ts/test-ts/clean-ts; build-docs/dev-docs/preview-docs/
+# branding-docs/clean-docs) and declare pnpm-install as a prereq so a fresh
+# clone or a changed lockfile is handled lazily. `make tools` does the full
+# bootstrap.
+#
+# Not exposed as targets: ts fmt/lint/fix/verify (Biome is workspace-wide — see
+# Code Quality); ts typecheck (runs inline inside `verify` via `tsc --noEmit`,
+# the way Go's golangci-lint implicitly type-checks); ts codegen (the SDK's own
+# published CLI, clients/ts/src/cli/codegen.ts — not a dev build step).
 PNPM        ?= pnpm
-SDK_DIR     := clients/ts
-E2E_SDK_DIR := tests/e2e/sdk
 DOCS_DIR    := docs
+SDK_NAME    := @wavehouse/sdk
+DOCS_FILTER := wavehouse-docs
 
-# install-sdk + install-e2e-sdk are intermediate prereqs — they have no doc
-# comment so they don't show in `make help`. User-facing targets below
-# (build-sdk, test-sdk, test-e2e) depend on them. The docs project is wired
-# through the subproject orchestration block below (`SUBPROJECTS`, fan-out,
-# per-subproject pattern rule) rather than per-target prereqs here. When the
-# SDK is later extracted into a sibling Makefile, the same pattern absorbs it.
-.PHONY: install-sdk
-install-sdk:
-	@cd $(SDK_DIR) && $(PNPM) install --frozen-lockfile
+# pnpm-install: hidden internal target. Node targets depend on it to ensure
+# workspace deps are present; on a warm tree `--frozen-lockfile` is a fast
+# no-op. No doc string → hidden from `make help`.
+.PHONY: pnpm-install
+pnpm-install:
+	@$(PNPM) install --frozen-lockfile
 
-# --- Subproject orchestration ------------------------------------------------
-# Sub-projects (docs today; per-language SDKs eventually) live in their own
-# directories with their own Makefiles. The root iterates over $(SUBPROJECTS)
-# and fans out the common verbs in parallel — adding a subproject is one line
-# below plus a Makefile in the new directory that implements the verb set
-# (no-op allowed for verbs that don't apply yet).
-#
-# Direct invocation from root: `make <sub>-<name>` (e.g. `make docs-dev`) via
-# the per-subproject pattern rules at the end of this section.
-SUBPROJECTS  := $(DOCS_DIR)
-COMMON_VERBS := install build test lint verify clean
-
-# `<dir>/.<verb>` — hidden phony ticket that recurses into the subproject.
-# Hidden-file shape avoids ever colliding with a real file or directory.
-SUBPROJECT_TICKETS := $(foreach d,$(SUBPROJECTS),$(addprefix $(d)/.,$(COMMON_VERBS)))
-.PHONY: $(SUBPROJECT_TICKETS)
-$(SUBPROJECT_TICKETS):
-	@$(MAKE) -C $(@D) $(patsubst .%,%,$(@F))
-
-# `subprojects-<verb>` — fan-out aggregator. `make -jN subprojects-build` runs
-# each subproject's build concurrently; --output-sync keeps logs readable.
-SUBPROJECT_FANOUTS := $(addprefix subprojects-,$(COMMON_VERBS))
-.PHONY: $(SUBPROJECT_FANOUTS)
-$(SUBPROJECT_FANOUTS): subprojects-%: $(addsuffix /.%,$(SUBPROJECTS))
-
-# Per-subproject targets for direct invocation:
-#   make docs-<name>  → cd docs && make <name>
-#
-# The static pattern rule below enumerates docs-<name> aliases as literal,
-# explicit, phony targets. That gives us two things:
-#   1. zsh `_make` completion parses the Makefile to enumerate targets — it
-#      can't expand `%`, so without literal names `make docs-<TAB>` falls back
-#      to filename completion and surfaces the `docs/` directory contents.
-#   2. `.PHONY` coverage means a stray file or directory named e.g.
-#      `docs-build` can't shadow the target (and the implicit-rule search is
-#      skipped, so phony targets need an explicit recipe — that's what the
-#      static pattern rule provides).
-# The catch-all pattern rule at the bottom keeps the "add a target in
-# docs/Makefile, free fanout from root" property — newly-added recipes work
-# immediately, just without tab-completion or phony coverage until promoted
-# into the literal list.
-.PHONY: docs-install docs-install-playwright docs-dev docs-preview docs-build docs-branding docs-test docs-lint docs-verify docs-clean docs-clean-tools
-docs-install docs-install-playwright docs-dev docs-preview docs-build docs-branding docs-test docs-lint docs-verify docs-clean docs-clean-tools: docs-%:
-	@$(MAKE) -C $(DOCS_DIR) $*
-
-docs-%:
-	@$(MAKE) -C $(DOCS_DIR) $*
-
-.PHONY: install-e2e-sdk
-install-e2e-sdk:
-	@cd $(E2E_SDK_DIR) && $(PNPM) install --frozen-lockfile
-
-.PHONY: build-sdk
-build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by E2E imports)
-	@echo "$(CYAN)==> Building SDK...$(RESET)"
-	@cd $(SDK_DIR) && $(PNPM) build
+# install-playwright-docs: hidden helper — fetch the Chromium build the docs
+# site needs (rehype-mermaid build-time SSR + starlight-links-validator). It's
+# ~130 MB, so it's lazy: only the docs build/dev/preview targets pull it in,
+# never plain pnpm-install, so Go-only contributors don't pay for it. The
+# --with-deps apt step needs sudo and only helps on CI's minimal images, so
+# gate it on $CI. Both steps are idempotent. No doc string → hidden.
+.PHONY: install-playwright-docs
+install-playwright-docs: pnpm-install
+	@$(PNPM) --filter $(DOCS_FILTER) exec playwright install chromium $${CI:+--with-deps} >/dev/null
 
 ##@ Test
 
@@ -462,6 +479,16 @@ build-sdk: install-sdk ## Build TypeScript SDK → clients/ts/dist/ (required by
 #   e2e:          covdata flushed on SIGINT by the running cover binary,
 #                 captured by the orchestrator
 # Thresholds (per suite + total) live in .testcoverage.yml.
+#
+# COV_DEFER: when set (ci / test-all pass COV_DEFER=1 to the suite sub-makes),
+# the per-suite test targets still COLLECT coverage but skip their inline
+# render + gate — `make cov` (scripts/cov report) then renders ONE consolidated
+# report and applies every gate at the end, so a full run prints a single
+# coverage block instead of a render after each suite. Unset (standalone
+# `make test-e2e` etc.) renders + gates inline as before. Exported so the
+# vitest configs can drop their console table under the same flag.
+COV_DEFER ?=
+export COV_DEFER
 
 .PHONY: test-unit
 test-unit: go-mod-download ## Run Go unit tests + render coverage + gate threshold
@@ -470,7 +497,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 	@GOCOVERDIR="$(CURDIR)/$(COV_UNIT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
 		-tags="$(TAGS)" -cover -race -timeout 15s ./internal/... ./cmd/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_UNIT)/data"
-	@go run ./scripts/cov render unit
+	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render unit; fi
 
 # Hidden alias: `make test` matches `go test ./...` muscle memory; test-unit
 # is the explicit form.
@@ -485,66 +512,79 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
 		./tests/integration/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
-	@go run ./scripts/cov render integration
-
-# test-sdk: vitest unit tests for the SDK. SDK_COVERAGE_DIR points vitest
-# at tmp/coverage/sdk/ (see clients/ts/vitest.config.ts), and the threshold
-# is read from .testcoverage.yml's `suites.sdk` and passed to vitest's
-# inline gate. Independent of Go — separate toolchain.
-.PHONY: test-sdk
-test-sdk: install-sdk ## Run SDK vitest unit tests + render coverage + gate threshold
-	@printf "$(CYAN)==> Running SDK Tests...$(RESET)\n"
-	@rm -rf tmp/coverage/sdk && mkdir -p tmp/coverage/sdk
-	@SDK_COVERAGE_DIR="$(CURDIR)/tmp/coverage/sdk" \
-		pnpm --dir clients/ts exec vitest run --coverage \
-		--coverage.thresholds.statements=$$(go run ./scripts/cov threshold sdk) $(ARGS)
-	@printf "$(GREEN)==> sdk gate passed$(RESET)  HTML: tmp/coverage/sdk/index.html\n"
+	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
 
 # test-e2e starts ClickHouse + bin/wavehouse-cov via the orchestrator under
 # scripts/, then runs the SDK vitest harness against the live stack so both
-# halves are exercised. covdata flushes on SIGINT into tmp/coverage/e2e/data/.
+# halves are exercised. Coverage is collected on both sides (Go covdata
+# from the cover binary → tmp/coverage/e2e/data/; vitest v8 coverage of
+# the SDK source → tmp/coverage/ts-e2e/) — same "always coverage" pattern
+# as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
 .PHONY: test-e2e
-test-e2e: build-sdk build-cover install-e2e-sdk ## Run E2E SDK suite against cover binary + render coverage + gate
+test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
-	@rm -rf $(COV_E2E)/data && mkdir -p $(COV_E2E)/data tmp
-	@go run ./scripts/orchestrator
-	@go run ./scripts/cov render e2e
+	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
+	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp
+	@TS_E2E_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-e2e" \
+		go run ./scripts/orchestrator
+	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render e2e; fi
+
+# test-ts: vitest unit tests for the SDK, always with v8 coverage. Standalone
+# it also gates against suites.ts-unit (via vitest's --coverage.thresholds);
+# under COV_DEFER it only collects, leaving the gate to `make cov` (cov report)
+# so CI emits one consolidated coverage block. THRESHOLD is read live from
+# .testcoverage.yml via scripts/cov; override with
+# `make test-ts ARGS='--coverage.thresholds.statements=70'`.
+.PHONY: test-ts
+test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against suites.ts-unit
+	@printf "$(CYAN)==> Running SDK unit tests...$(RESET)\n"
+	@rm -rf tmp/coverage/ts-unit && mkdir -p tmp/coverage/ts-unit
+	@TS_UNIT_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-unit" \
+		$(PNPM) --filter $(SDK_NAME) exec vitest run --coverage \
+		$(if $(COV_DEFER),,--coverage.thresholds.statements=$$(go run ./scripts/cov threshold ts-unit)) $(ARGS)
+	@if [ -z "$(COV_DEFER)" ]; then printf "$(GREEN)==> ts-unit gate passed$(RESET)  HTML: tmp/coverage/ts-unit/index.html\n"; fi
 
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
 # under `make -j N`. The suites bind ports / spin testcontainers / start the
 # release binary, so concurrent execution is unsafe.
 .PHONY: test-all
-test-all: ## Run all suites sequentially + merged Go coverage + gate
-	@$(MAKE) test-unit
-	@$(MAKE) test-sdk
-	@$(MAKE) test-integration
-	@$(MAKE) test-e2e
+test-all: ## Run all suites sequentially + one consolidated Go + TS coverage report + gates
+	@$(MAKE) test-unit COV_DEFER=1
+	@$(MAKE) test-ts COV_DEFER=1
+	@$(MAKE) test-integration COV_DEFER=1
+	@$(MAKE) test-e2e COV_DEFER=1
 	@$(MAKE) cov
 
 ##@ Coverage
 
-# cov: merges whichever Go suites have covdata into tmp/coverage/total/,
-# prints a per-suite breakdown (plus SDK as informational), and gates
-# against threshold.total in .testcoverage.yml. Does NOT run tests — call
-# the test targets first (or run `make test-all` for the full pipeline).
+# cov: renders ONE consolidated coverage report (scripts/cov report) — every
+# suite that has data plus the merged Go-total and ts-total, each with its
+# gate status + a clickable HTML report path, then a single aggregate
+# pass/fail. Generates whatever artifacts it needs, so it stands alone at the
+# end of `make ci` / `make test-all` even when the suites ran under COV_DEFER
+# (collect-only). Standalone `make cov` is "show me the numbers without
+# re-running tests." Fails if NO suite has data (a stray `make cov`).
 .PHONY: cov
-cov: ## Merge all available covdata + gate against total threshold
-	@go run ./scripts/cov merge
+cov: ## Consolidated coverage report (Go + TS) + gate against thresholds (auto-runs after test-all / ci)
+	@go run ./scripts/cov report
 
 ##@ CI
 
-# ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so
-# it stays out of `make help`; users invoke `make ci`, not this directly.
+# ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so it
+# stays out of `make help`; users invoke `make ci`, not this directly.
+# Everything is listed explicitly (no subproject fan-out): `verify` already
+# spans Go + TS (Biome + tsc), and the build/test leaves are few enough that
+# an explicit list reads clearer than an abstraction.
 .PHONY: ci-parallel
-ci-parallel: verify subprojects-verify build build-cover build-sdk subprojects-build test test-sdk subprojects-test
+ci-parallel: verify build build-cover build-ts build-docs test test-ts
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
 	@echo "$(CYAN)==> Phase 1: Parallel Build & Static Checks$(RESET)"
-	@$(MAKE) -j 4 ci-parallel
+	@$(MAKE) -j 4 ci-parallel COV_DEFER=1
 	@echo "$(CYAN)==> Phase 2: Sequential Heavy Tests$(RESET)"
-	@$(MAKE) test-integration
-	@$(MAKE) test-e2e
+	@$(MAKE) test-integration COV_DEFER=1
+	@$(MAKE) test-e2e COV_DEFER=1
 	@$(MAKE) cov
 	@scripts/ci-marker.sh write
 	@echo "$(GREEN)$(BOLD)✔ All CI checks passed$(RESET)"
@@ -619,6 +659,16 @@ clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
 	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/
 
+.PHONY: clean-ts
+clean-ts: ## Remove SDK build artifacts only (clients/ts/dist/)
+	@echo "$(YELLOW)==> Cleaning SDK build artifacts...$(RESET)"
+	@rm -rf clients/ts/dist/
+
+.PHONY: clean-docs
+clean-docs: ## Remove docs build artifacts only (docs/dist/)
+	@echo "$(YELLOW)==> Cleaning docs dist/...$(RESET)"
+	@rm -rf $(DOCS_DIR)/dist/
+
 .PHONY: clean-test
 clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)
 	@echo "$(YELLOW)==> Cleaning test artifacts...$(RESET)"
@@ -643,7 +693,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # tools: bootstrap a fresh clone.
 #   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
 #   - Downloads Go modules so go.mod tool deps are available offline.
-#   - Installs SDK + E2E pnpm deps so test-sdk / test-e2e are runnable
+#   - Installs SDK + E2E pnpm deps so test-ts / test-e2e are runnable
 #     without a separate manual setup step.
 #
 # Note: go.mod tool deps (gotestsum, gofumpt, etc.) are *downloaded* by
@@ -651,7 +701,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download install-sdk install-e2e-sdk subprojects-install ## Install pinned tools, Go modules, pnpm deps, and git hooks
+tools: $(GOLANGCI_LINT) $(AIR) go-mod-download pnpm-install ## Install pinned tools, Go modules, pnpm deps, and git hooks
 	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
 	@# `make tools` repeatedly just re-asserts the config. The .githooks/
 	@# directory is committed; this line plumbs git to it. Users can opt out

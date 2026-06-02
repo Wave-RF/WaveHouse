@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { dataClient, testId, WH_URL, makeJWT, waitForCondition, chQuery } from "./helpers.js";
+import { describe, expect, it } from "vitest";
+import { chQuery, dataClient, makeJWT, testId, WH_URL, waitForCondition } from "./helpers.js";
 
 describe("Cache", () => {
   const wh = dataClient();
@@ -49,9 +49,7 @@ describe("Cache", () => {
     // 4. Wait for the async worker to flush to ClickHouse and invalidate the cache.
     // By querying ClickHouse directly, we don't accidentally trigger a cache re-prime!
     await waitForCondition(async () => {
-      const r = await chQuery(
-        `SELECT event_id FROM default.clicks WHERE event_id = '${eventId}'`,
-      );
+      const r = await chQuery(`SELECT event_id FROM default.clicks WHERE event_id = '${eventId}'`);
       return r.length === 1;
     }, 10_000);
 
@@ -89,7 +87,9 @@ describe("Cache", () => {
     const ttl = Math.max(10_000, queryTime * 1000); // queryTime * 1000 is what our cache.QueryTimeToTTL does
     console.log(`Query [MISS] took ${queryTime}ms, so expected TTL: ${ttl}`);
     if (ttl > 20_000) {
-      console.warn("Query took a longer time than expected, this could be flakiness or a fundamental regression in some part of the query api flow. Please continue monitoring.");
+      console.warn(
+        "Query took a longer time than expected, this could be flakiness or a fundamental regression in some part of the query api flow. Please continue monitoring.",
+      );
     }
 
     // Fetch again immediately (HIT)
@@ -100,10 +100,9 @@ describe("Cache", () => {
     expect(res2.headers.get("x-cache")).toBe("HIT");
     console.log(`Query [HIT] took ${hotTime}ms`);
 
-    expect(
-      queryTime,
-      "Cold DB Query expected to take longer than hot from cache",
-    ).toBeGreaterThan(hotTime);
+    expect(queryTime, "Cold DB Query expected to take longer than hot from cache").toBeGreaterThan(
+      hotTime,
+    );
 
     // Wait for the ttl to expire.
     // Wait an extra 1 second to be safe.

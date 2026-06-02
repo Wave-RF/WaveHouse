@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { dataClient, testId, waitForCondition, chQuery } from "./helpers.js";
+import { describe, expect, it } from "vitest";
+import { chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
 
 describe("Stress & Concurrency", () => {
   const wh = dataClient();
@@ -10,23 +10,21 @@ describe("Stress & Concurrency", () => {
     const runId = testId();
 
     // Blast inserts concurrently
-    const workers = Array.from({ length: concurrency }).map(
-        async (_, workerIdx) => {
-            const rows = Array.from({ length: insertsPerWorker }).map((_, i) => ({
-                event_id: `${runId}-${workerIdx}-${i}`,
-                page: `/stress-test`,
-                user_id: `user-${workerIdx}`,
-                session_id: `session-${runId}`,
-                duration_ms: Math.floor(Math.random() * 1000),
-            }));
+    const workers = Array.from({ length: concurrency }).map(async (_, workerIdx) => {
+      const rows = Array.from({ length: insertsPerWorker }).map((_, i) => ({
+        event_id: `${runId}-${workerIdx}-${i}`,
+        page: `/stress-test`,
+        user_id: `user-${workerIdx}`,
+        session_id: `session-${runId}`,
+        duration_ms: Math.floor(Math.random() * 1000),
+      }));
 
-            // SDK handles chunking internally if we pass an array, but we are simulating
-            // parallel individual/small-batch network requests here.
-            const res = await wh.from("clicks").insert(rows);
-            expect(res.error).toBeNull();
-            return res;
-        },
-    );
+      // SDK handles chunking internally if we pass an array, but we are simulating
+      // parallel individual/small-batch network requests here.
+      const res = await wh.from("clicks").insert(rows);
+      expect(res.error).toBeNull();
+      return res;
+    });
 
     //  Also spin up concurrent reads while writes are happening to test cache / DB locks
     const readWorkers = Array.from({ length: 10 }).map(async () => {
@@ -50,8 +48,6 @@ describe("Stress & Concurrency", () => {
     const finalCount = await chQuery(
       `SELECT count() as cnt FROM default.clicks WHERE session_id = 'session-${runId}'`,
     );
-    expect(Number((finalCount[0] as any).cnt)).toBe(
-      concurrency * insertsPerWorker,
-    );
+    expect(Number((finalCount[0] as any).cnt)).toBe(concurrency * insertsPerWorker);
   }, 20_000); // Extended timeout for stress test
 });
