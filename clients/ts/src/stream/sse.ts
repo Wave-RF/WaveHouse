@@ -59,7 +59,8 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       url.searchParams.set("since", this._opts.since);
     }
 
-    // Inject auth token for upgrade
+    // EventSource can't set request headers, so the JWT goes in ?token=
+    // (the server also accepts an Authorization header for non-browser clients)
     if (this._opts.auth) {
       const token = await this._opts.auth();
       if (token) {

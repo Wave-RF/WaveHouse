@@ -2,6 +2,9 @@
   "private": true,
   "name": "wavehouse-e2e",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"

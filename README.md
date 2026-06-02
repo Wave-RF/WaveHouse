@@ -78,7 +78,7 @@ curl -s -X POST http://localhost:8080/v1/admin/query \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 
 # Open a real-time SSE stream for a specific table (Ctrl+C to stop)
-curl -N "http://localhost:8080/v1/stream/sse?table=clicks"
+curl -N "http://localhost:8080/v1/stream?table=clicks"
 ```
 
 WaveHouse is now accepting API requests on `http://localhost:8080`.
