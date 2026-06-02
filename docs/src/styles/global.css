@@ -27,55 +27,70 @@
     Menlo, monospace;
   --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
 
-  /* Brand palette — raw values exposed as utilities (text-wave-blue etc.) */
-  --color-wave-blue: #06B0BF;
-  --color-wave-blue-hi: #1DC9D8;
-  --color-wave-sky: #9CD9DF;
-  --color-wave-olive: #708D57;
-  --color-wave-terracotta: #A0573B;
-  --color-wave-charcoal: #2E2E2E;
+  /* Brand color utilities (text-wave-blue etc.) used to live here but were
+     unused; the brand hues now live once in the BRAND PALETTE block below. */
 
   --radius-card: 0.75rem;
   --radius-pill: 999px;
 }
 
-/* ---------- Semantic tokens (dark mode is default) ---------- */
-
-/* Brand Charcoal Gray mirrored at :root. The four other brand colors
-   already have mode-aware semantic siblings (--wh-accent, --wh-sky,
-   --wh-olive, --wh-terracotta) defined below, so they're not duplicated
-   here — but Charcoal had no equivalent, so it lived only inside the
-   Tailwind-only @theme block and couldn't be referenced by SVG vars.
-   Slightly tilted toward slate (Tailwind gray-800) so it reads as
-   present on light backgrounds; pure #2E2E2E was visually flat next
-   to the saturated brand fills. */
+/* ============================================================
+   BRAND PALETTE — the single source of truth for brand colors.
+   Change a hue here and it flows everywhere: the semantic --wh-*
+   tokens below (light + dark), and the Mermaid diagram palette
+   wired up in astro.config.mjs (the mermaid plugin holds no
+   colors of its own — it references these var names). The
+   "-deep" variants are darkened for WCAG AA contrast in light
+   mode / on white fills.
+   ============================================================ */
 :root {
-  --wh-charcoal: #1F2937;
+  --brand-blue: #06B0BF;             /* electric blue — primary accent */
+  --brand-blue-hi: #1DC9D8;          /* brighter — hover / active / dark rims */
+  --brand-blue-deep: #086D77;        /* darkened — light-mode accent (AA) */
+  --brand-sky: #9CD9DF;
+  --brand-sky-deep: #2B7E87;         /* light-mode (AA on white) */
+  --brand-olive: #708D57;
+  --brand-olive-deep: #5C7A45;       /* light-mode (AA) */
+  --brand-terracotta: #A0573B;
+  --brand-terracotta-deep: #8A4729;  /* light-mode (AA) */
+  --brand-charcoal: #1F2937;         /* slate-tilted charcoal */
+
+  /* Dark "chrome" — the dark-mode UI surfaces/ink. They live in the brand
+     palette (not only in --wh-* below) because the generated brand assets
+     (the OG card, the favicon/app-icon tile) are dark and reuse them, and the
+     branding script (scripts/branding/generate.sh) reads ALL its colors from
+     these --brand-* declarations. Keep brand-asset colors expressed here. */
+  --brand-bg: #0A0B0E;               /* darkest surface / page bg */
+  --brand-surface: #14171C;          /* raised surface */
+  --brand-ink: #F1F3F7;              /* primary text on dark */
+  --brand-ink-muted: #9CA3AF;        /* secondary text on dark */
 }
 
+/* ---------- Semantic tokens (dark mode is default) ---------- */
+
 :root {
-  --wh-bg: #0A0B0E;
+  --wh-bg: var(--brand-bg);
   --wh-bg-grid: #0E1014;
-  --wh-surface: #14171C;
+  --wh-surface: var(--brand-surface);
   --wh-surface-elevated: #1B1F26;
   --wh-surface-overlay: #232830;
   --wh-border: #23272F;
   --wh-border-strong: #2F343F;
 
-  --wh-ink: #F1F3F7;
-  --wh-ink-muted: #9CA3AF;
+  --wh-ink: var(--brand-ink);
+  --wh-ink-muted: var(--brand-ink-muted);
   --wh-ink-subtle: #6B7280;
 
-  --wh-accent: #06B0BF;
-  --wh-accent-hi: #1DC9D8;
+  --wh-accent: var(--brand-blue);
+  --wh-accent-hi: var(--brand-blue-hi);
   --wh-accent-lo: #054249;
   --wh-accent-ink: #04171A;
-  --wh-accent-glow: rgba(6, 176, 191, 0.18);
-  --wh-accent-glow-strong: rgba(6, 176, 191, 0.32);
+  --wh-accent-glow: rgba(6, 176, 191, 0.18); /* --brand-blue @ 18% */
+  --wh-accent-glow-strong: rgba(6, 176, 191, 0.32); /* --brand-blue @ 32% */
 
-  --wh-sky: #9CD9DF;
-  --wh-olive: #708D57;
-  --wh-terracotta: #A0573B;
+  --wh-sky: var(--brand-sky);
+  --wh-olive: var(--brand-olive);
+  --wh-terracotta: var(--brand-terracotta);
   --wh-amber: #F59E0B;
   --wh-rose: #F43F5E;
   --wh-emerald: #10B981;
@@ -114,15 +129,15 @@
      fails AA against white (~2.5:1), pure brand olive #708D57 fails
      too (~4.0:1). Borders are brighter than fills for clean
      definition and to carry the brand-bright signature. */
-  --wh-mermaid-wh-bg:        #086D77;   /* AA: 5.8:1 vs white */
-  --wh-mermaid-wh-border:    #1DC9D8;   /* bright cyan rim */
-  --wh-mermaid-win-bg:       #4F6A3B;   /* AA: 5.9:1 */
+  --wh-mermaid-wh-bg:        var(--brand-blue-deep);  /* AA: 5.8:1 vs white */
+  --wh-mermaid-wh-border:    var(--brand-blue-hi);    /* bright cyan rim */
+  --wh-mermaid-win-bg:       #4F6A3B;   /* AA: 5.9:1 (olive, pulled down) */
   --wh-mermaid-win-border:   #8FA975;   /* lifted olive rim */
-  --wh-mermaid-pain-bg:      #8A4729;   /* AAA: 7.0:1 */
+  --wh-mermaid-pain-bg:      var(--brand-terracotta-deep); /* AAA: 7.0:1 */
   --wh-mermaid-pain-border:  #C9785C;   /* lifted terracotta rim */
-  --wh-mermaid-fail-bg:      #5C2F1B;   /* AAA: 11:1 */
-  --wh-mermaid-fail-border:  #A0573B;   /* brand terracotta rim */
-  --wh-mermaid-neutral-bg:   #1F2937;   /* AAA: 17:1 (slate-tilted charcoal) */
+  --wh-mermaid-fail-bg:      #5C2F1B;   /* AAA: 11:1 (deeper terracotta) */
+  --wh-mermaid-fail-border:  var(--brand-terracotta);  /* brand terracotta rim */
+  --wh-mermaid-neutral-bg:   var(--brand-charcoal);   /* AAA: 17:1 (slate charcoal) */
   --wh-mermaid-neutral-border: #4B5563;
   --wh-mermaid-infra-bg:     #0F1721;   /* AAA: 20:1 (deeper slate) */
   --wh-mermaid-infra-border: #374151;
@@ -141,18 +156,17 @@
   --wh-ink-muted: #4B5563;
   --wh-ink-subtle: #6B7280;
 
-  --wh-accent: #086D77;
-  --wh-accent-hi: #06B0BF;
+  --wh-accent: var(--brand-blue-deep);
+  --wh-accent-hi: var(--brand-blue);
   --wh-accent-lo: #D8EFF2;
   --wh-accent-ink: #FFFFFF;
-  --wh-accent-glow: rgba(8, 109, 119, 0.14);
-  --wh-accent-glow-strong: rgba(8, 109, 119, 0.28);
+  --wh-accent-glow: rgba(8, 109, 119, 0.14); /* --brand-blue-deep @ 14% */
+  --wh-accent-glow-strong: rgba(8, 109, 119, 0.28); /* --brand-blue-deep @ 28% */
 
-  /* --wh-sky darkened from #4FA8B1 → #2B7E87 so the .wh-stat__unit labels
-     clear WCAG AA 4.5:1 against the white --wh-surface (was ~2.6:1). */
-  --wh-sky: #2B7E87;
-  --wh-olive: #5C7A45;
-  --wh-terracotta: #8A4729;
+  /* Section accents use the AA-safe "-deep" brand variants on white. */
+  --wh-sky: var(--brand-sky-deep);
+  --wh-olive: var(--brand-olive-deep);
+  --wh-terracotta: var(--brand-terracotta-deep);
 
   --wh-code-bg: #F4F5F7;
   --wh-code-border: #E4E6EB;
@@ -261,6 +275,19 @@ svg[aria-roledescription^="state"] {
     overflow-y: visible;
     scroll-padding-inline: 1rem;
     scrollbar-width: thin;
+  }
+  /* Standalone diagrams sit DIRECTLY in the content flow (rehype-mermaid emits
+     the <svg> as a direct child of .sl-markdown-content, not inside a <p>/<div>),
+     so the scroll-wrapper rule above never matches them and the 540px min-width
+     would overflow the viewport — clipped now that the page can't scroll
+     sideways. Let those scale down to fit instead; wrapped diagrams (e.g.
+     .diagram-pair) keep the min-width and scroll inside their wrapper. */
+  .sl-markdown-content > svg[aria-roledescription^="flowchart"],
+  .sl-markdown-content > svg[aria-roledescription^="sequence"],
+  .sl-markdown-content > svg[aria-roledescription^="class"],
+  .sl-markdown-content > svg[aria-roledescription^="state"] {
+    min-width: 0;
+    max-width: 100%;
   }
 }
 
@@ -466,6 +493,15 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   html {
     background: var(--wh-bg);
     color-scheme: dark;
+    /* Never scroll the page sideways. The splash full-width footer is 100vw
+       (which INCLUDES the scrollbar, so it overshoots by the scrollbar width on
+       classic/non-overlay scrollbars), and wide code/diagram content can run
+       past narrow viewports. `hidden` on the ROOT element propagates to the
+       viewport (unlike `clip`, which doesn't in Chromium), reliably killing the
+       horizontal scroll. Vertical scroll is unaffected (overflow-y stays auto),
+       Starlight's chrome is position:fixed (no sticky to break), and wide
+       content still scrolls inside its OWN overflow-x:auto wrappers. */
+    overflow-x: hidden;
   }
   html[data-theme="light"] {
     color-scheme: light;

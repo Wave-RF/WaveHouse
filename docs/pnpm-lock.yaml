@@ -29,6 +29,9 @@ importers:
       astro:
         specifier: ^6.1.5
         version: 6.1.7(@types/node@24.12.2)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)
+      astro-themed-mermaid:
+        specifier: github:Wave-RF/astro-themed-mermaid#v0.1.1
+        version: https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38(astro@6.1.7(@types/node@24.12.2)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.60.0))
       cloudflare-md-router:
         specifier: github:Wave-RF/cloudflare-md-router
         version: https://codeload.github.com/Wave-RF/cloudflare-md-router/tar.gz/792cfd3f34cef958cbe54d20ceb71011e2549e42(@cloudflare/workers-types@4.20260511.1)
@@ -69,9 +72,6 @@ importers:
       playwright:
         specifier: ^1.59.1
         version: 1.60.0
-      unist-util-visit:
-        specifier: ^5.0.0
-        version: 5.1.0
       wrangler:
         specifier: ^4.81.0
         version: 4.90.0(@cloudflare/workers-types@4.20260511.1)
@@ -1358,6 +1358,14 @@ packages:
     peerDependencies:
       astro: ^4.0.0-beta || ^5.0.0-beta || ^3.3.0 || ^6.0.0-beta
 
+  astro-themed-mermaid@https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38:
+    resolution: {gitHosted: true, integrity: sha512-LqapJ6LrFgylaccatIta+AdAT8CAL9umnt/a+G6TPgWIApmcUfQMMO17v1GSvYD46gqJZCG2Z2HYuJfdvYmTqQ==, tarball: https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38}
+    version: 0.1.1
+    engines: {node: '>=20'}
+    peerDependencies:
+      astro: '>=5.0.0'
+      rehype-mermaid: '>=3.0.0'
+
   astro@6.1.7:
     resolution: {integrity: sha512-pvZysIUV2C2nRv8N7cXAkCLcfDQz/axAxF09SqiTz1B+xnvbhy6KzL2I6J15ZBXk8k0TfMD75dJ151QyQmAqZA==}
     engines: {node: '>=22.12.0', npm: '>=9.6.5', pnpm: '>=7.1.0'}
@@ -1414,7 +1422,7 @@ packages:
     engines: {node: '>=12'}
 
   cloudflare-md-router@https://codeload.github.com/Wave-RF/cloudflare-md-router/tar.gz/792cfd3f34cef958cbe54d20ceb71011e2549e42:
-    resolution: {tarball: https://codeload.github.com/Wave-RF/cloudflare-md-router/tar.gz/792cfd3f34cef958cbe54d20ceb71011e2549e42}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/Wave-RF/cloudflare-md-router/tar.gz/792cfd3f34cef958cbe54d20ceb71011e2549e42}
     version: 0.1.0
     engines: {node: '>=18.0.0'}
     peerDependencies:
@@ -2684,7 +2692,7 @@ packages:
       astro: '>=6.0.0'
 
   starlight-llm-tools@https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e:
-    resolution: {tarball: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/Wave-RF/starlight-llm-tools/tar.gz/89e0d652cf0f296c2206f04b9e55a44a589f340e}
     version: 0.3.0
     engines: {node: '>=18.0.0'}
     peerDependencies:
@@ -4287,6 +4295,12 @@ snapshots:
     dependencies:
       astro: 6.1.7(@types/node@24.12.2)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)
       rehype-expressive-code: 0.41.7
+
+  astro-themed-mermaid@https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38(astro@6.1.7(@types/node@24.12.2)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.60.0)):
+    dependencies:
+      astro: 6.1.7(@types/node@24.12.2)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0)
+      rehype-mermaid: 3.0.0(playwright@1.60.0)
+      unist-util-visit: 5.1.0
 
   astro@6.1.7(@types/node@24.12.2)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.1)(typescript@5.9.3)(yaml@2.9.0):
     dependencies:

@@ -20,6 +20,7 @@
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@tailwindcss/vite": "^4.3.0",
     "astro": "^6.1.5",
+    "astro-themed-mermaid": "github:Wave-RF/astro-themed-mermaid#v0.1.1",
     "cloudflare-md-router": "github:Wave-RF/cloudflare-md-router",
     "katex": "^0.16.11",
     "rehype-katex": "^7.0.1",
@@ -35,7 +36,6 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240208.0",
     "playwright": "^1.59.1",
-    "unist-util-visit": "^5.0.0",
     "wrangler": "^4.81.0"
   },
   "engines": {

@@ -1,5 +1,6 @@
 ---
 import config from "virtual:starlight/user-config";
+import WaveMark from "./WaveMark.astro";
 
 const title =
   typeof config.title === "string" ? config.title : config.title.en ?? "WaveHouse";
@@ -7,15 +8,7 @@ const title =
 
 <a href={import.meta.env.BASE_URL} class="wh-site-title" aria-label={`${title} home`}>
   <span class="wh-site-title__mark" aria-hidden="true">
-    <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-      <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round">
-        <path d="M10 14 Q18 32 10 50 T10 86"/>
-        <path d="M30 14 Q38 32 30 50 T30 86"/>
-        <path d="M50 14 Q58 32 50 50 T50 86"/>
-        <path d="M70 14 Q78 32 70 50 T70 86"/>
-      </g>
-      <rect x="84" y="44" width="12" height="12" fill="currentColor"/>
-    </svg>
+    <WaveMark />
   </span>
   <span class="wh-site-title__text">{title}</span>
 </a>
@@ -48,11 +41,6 @@ const title =
     place-items: center;
     transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
       color 0.15s ease;
-  }
-  .wh-site-title__mark svg {
-    width: 100%;
-    height: 100%;
-    display: block;
   }
   .wh-site-title__text {
     font-feature-settings: "ss01";

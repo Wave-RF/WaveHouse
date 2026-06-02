@@ -98,14 +98,16 @@ build: install-playwright ## Build the docs site for production → dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@$(PNPM) build
 
-# Single-source-of-truth logo pipeline. Edit scripts/branding/mark.svg and run
-# `make branding` (or `make docs-branding` from root) to regenerate favicon
-# .{svg,ico}, apple-touch-icon.png, og.png, and the Starlight nav light/dark
-# SVGs. Requires librsvg (rsvg-convert) + ImageMagick 7 (magick) — `brew install
+# Single-source-of-truth brand pipeline. Sources: src/assets/branding/*.svg
+# (shapes) + the --brand-* palette in src/styles/global.css (colors). Edit
+# either, then run `make branding` (or `make docs-branding` from root) to
+# regenerate the brand kit in public/branding/ (favicon.{svg,ico},
+# apple-touch-icon.png, og.png, mark + lockup SVGs) plus the root favicon.ico.
+# Requires librsvg (rsvg-convert) + ImageMagick 7 (magick) — `brew install
 # librsvg imagemagick`. Not a `build` prereq: derived assets are committed so
 # contributors don't need the raster toolchain to build docs.
 .PHONY: branding
-branding: ## Regenerate logo/favicon/OG assets from scripts/branding/mark.svg
+branding: ## Regenerate the brand kit (public/branding/) from the SVG sources + --brand-* palette
 	@scripts/branding/generate.sh
 
 # --- Common-verb contract ----------------------------------------------------

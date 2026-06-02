@@ -1,76 +1,268 @@
 ---
+// Starlight's default Footer renders these three; overriding Footer drops
+// them, so we re-render them on doc pages below (prev/next nav especially).
+// They read from Astro.locals and self-style; EditLink/LastUpdated honour the
+// `editLink` / `lastUpdated` config and render nothing when disabled.
+import EditLink from "virtual:starlight/components/EditLink";
+import LastUpdated from "virtual:starlight/components/LastUpdated";
+import Pagination from "virtual:starlight/components/Pagination";
+import WaveMark from "./WaveMark.astro";
+
 const year = new Date().getFullYear();
+
+// Doc pages have the persistent fixed left sidebar; splash / landing pages
+// (template: splash) don't. We render two different footers accordingly — the
+// pattern every polished docs site uses (Astro docs, Stripe, Linear, Vercel):
+//   - no sidebar  → full-width, multi-column "marketing" footer (room to breathe)
+//   - has sidebar → slim, content-aligned footer (a big band crammed next to a
+//                    fixed sidebar reads as broken; a slim one reads as native)
+const { hasSidebar } = Astro.locals.starlightRoute;
+const repo = "https://github.com/Wave-RF/WaveHouse";
 ---
 
-<footer class="wh-footer not-content">
-  <div class="wh-footer__inner">
-    <div class="wh-footer__brand">
-      <span class="wh-footer__mark" aria-hidden="true">
-        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-          <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round">
-            <path d="M10 14 Q18 32 10 50 T10 86"/>
-            <path d="M30 14 Q38 32 30 50 T30 86"/>
-            <path d="M50 14 Q58 32 50 50 T50 86"/>
-            <path d="M70 14 Q78 32 70 50 T70 86"/>
-          </g>
-          <rect x="84" y="44" width="12" height="12" fill="currentColor"/>
-        </svg>
-      </span>
-      <div>
-        <strong>WaveHouse</strong>
+{
+  hasSidebar ? (
+    <footer class="wh-footer wh-footer--compact not-content">
+      <div class="wh-footer__meta">
+        <EditLink />
+        <LastUpdated />
+      </div>
+      <Pagination />
+
+      <div class="wh-footer__brandblock">
+        <div class="wh-footer__bar">
+          <span class="wh-footer__mark" aria-hidden="true">
+            <WaveMark />
+          </span>
+        <strong class="wh-footer__name">WaveHouse</strong>
         <span class="wh-footer__sub">
-          A <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">Wave RF</a> open-source project ·
-          <a href="https://github.com/Wave-RF/WaveHouse" target="_blank" rel="noopener noreferrer">GitHub</a>
+          A{" "}
+          <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
+            Wave RF
+          </a>{" "}
+          open-source project
         </span>
+        <nav class="wh-footer__links" aria-label="Footer">
+          <a href={repo} target="_blank" rel="noopener noreferrer">
+            GitHub
+          </a>
+          <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer">
+            Discussions
+          </a>
+          <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer">
+            Changelog
+          </a>
+          <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
+            License
+          </a>
+        </nav>
       </div>
-    </div>
 
-    <div class="wh-footer__cols">
-      <div class="wh-footer__col">
-        <span class="wh-footer__label">Docs</span>
-        <a href="/getting-started">Getting Started</a>
-        <a href="/architecture">Architecture</a>
-        <a href="/api">API Reference</a>
-        <a href="/sdk">TypeScript SDK</a>
+        <div class="wh-footer__sign">
+          <span>© {year} Wave RF</span>
+          <span aria-hidden="true">·</span>
+          <span class="wh-footer__motto">No cell service? No problem.</span>
+        </div>
       </div>
-      <div class="wh-footer__col">
-        <span class="wh-footer__label">Operations</span>
-        <a href="/configuration">Configuration</a>
-        <a href="/deployment">Deployment</a>
-        <a href="/development">Development</a>
-      </div>
-      <div class="wh-footer__col">
-        <span class="wh-footer__label">Project</span>
-        <a href="https://github.com/Wave-RF/WaveHouse" target="_blank" rel="noopener noreferrer">Source</a>
-        <a href="https://github.com/Wave-RF/WaveHouse/discussions" target="_blank" rel="noopener noreferrer">Discussions</a>
-        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Changelog</a>
-        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">Contributing</a>
-        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md" target="_blank" rel="noopener noreferrer">Support</a>
-        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a>
-        <a href="https://github.com/Wave-RF/WaveHouse/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
-      </div>
-    </div>
+    </footer>
+  ) : (
+    <footer class="wh-footer wh-footer--full not-content">
+      <div class="wh-footer__inner">
+        <div class="wh-footer__brand">
+          <span class="wh-footer__mark" aria-hidden="true">
+            <WaveMark />
+          </span>
+          <div>
+            <strong>WaveHouse</strong>
+            <span class="wh-footer__sub">
+              A{" "}
+              <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
+                Wave RF
+              </a>{" "}
+              open-source project ·{" "}
+              <a href={repo} target="_blank" rel="noopener noreferrer">
+                GitHub
+              </a>
+            </span>
+          </div>
+        </div>
 
-    <div class="wh-footer__sign">
-      <span>© {year} Wave RF</span>
-      <span aria-hidden="true">·</span>
-      <span class="wh-footer__motto">No cell service? No problem.</span>
-    </div>
-  </div>
-</footer>
+        <div class="wh-footer__cols">
+          <div class="wh-footer__col">
+            <span class="wh-footer__label">Docs</span>
+            <a href="/getting-started">Getting Started</a>
+            <a href="/architecture">Architecture</a>
+            <a href="/api">API Reference</a>
+            <a href="/sdk">TypeScript SDK</a>
+          </div>
+          <div class="wh-footer__col">
+            <span class="wh-footer__label">Operations</span>
+            <a href="/configuration">Configuration</a>
+            <a href="/deployment">Deployment</a>
+            <a href="/development">Development</a>
+          </div>
+          <div class="wh-footer__col">
+            <span class="wh-footer__label">Project</span>
+            <a href={repo} target="_blank" rel="noopener noreferrer">Source</a>
+            <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer">Discussions</a>
+            <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer">Changelog</a>
+            <a href={`${repo}/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener noreferrer">Contributing</a>
+            <a href={`${repo}/blob/main/SUPPORT.md`} target="_blank" rel="noopener noreferrer">Support</a>
+            <a href={`${repo}/blob/main/SECURITY.md`} target="_blank" rel="noopener noreferrer">Security</a>
+            <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">License</a>
+          </div>
+        </div>
+
+        <div class="wh-footer__sign">
+          <span>© {year} Wave RF</span>
+          <span aria-hidden="true">·</span>
+          <span class="wh-footer__motto">No cell service? No problem.</span>
+        </div>
+      </div>
+    </footer>
+  )
+}
 
 <style>
-  .wh-footer {
-    margin-top: 6rem;
-    padding: 3rem 1.5rem 2rem;
-    border-top: 1px solid var(--wh-border);
-    background: linear-gradient(
-      180deg,
-      transparent 0%,
-      color-mix(in oklab, var(--wh-surface) 60%, transparent) 100%
-    );
+  /* ---------- shared bits (both variants) ---------- */
+  .wh-footer__mark {
+    color: var(--wh-accent-hi);
+    display: grid;
+    place-items: center;
+    flex: none;
   }
-  .wh-footer__inner {
+  .wh-footer__sub {
+    color: var(--wh-ink-muted);
+    font-size: 0.875rem;
+  }
+  .wh-footer__sub a {
+    color: var(--wh-ink-muted);
+    text-decoration: none;
+    transition: color 0.12s ease;
+  }
+  .wh-footer__sub a:hover {
+    color: var(--wh-accent-hi);
+  }
+  .wh-footer__sign {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.8125rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-footer__motto {
+    font-style: italic;
+    color: var(--wh-ink-muted);
+  }
+
+  /* Starlight pads the bottom of both the content panel (1.5rem) and <main>
+     (--sl-main-pad's 3vh) BELOW the footer, leaving a strip of page background
+     under it. Zero those for the panel/main that contain the footer so it sits
+     flush at the page bottom (the footer supplies its own bottom padding).
+     :has scopes this to the footer's panel — the page-title panel keeps its
+     padding. */
+  :global(main:has(.wh-footer)) {
+    padding-bottom: 0;
+  }
+  :global(.content-panel:has(.wh-footer)) {
+    padding-bottom: 0;
+  }
+
+  /* ---------- compact footer (doc pages, with sidebar) ---------- */
+  /* Content-aligned: it sits inside Starlight's content column with no width
+     breakout, so it can't fight the fixed sidebar or the TOC rail. */
+  .wh-footer--compact {
+    margin-top: 3rem;
+    padding-bottom: 1.5rem;
+    display: grid;
+    gap: 1.5rem;
+  }
+  /* Edit-link + last-updated row — mirrors Starlight's default `.meta`. */
+  .wh-footer__meta {
+    display: flex;
+    gap: 0.75rem 3rem;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  /* When only one of edit-link / last-updated is present, push it to the end
+     (the lone <p> from LastUpdated) — same as Starlight's default. */
+  .wh-footer__meta > :global(p:only-child) {
+    margin-inline-start: auto;
+  }
+  /* The WaveHouse brand line sits below the prev/next nav, set off by a rule. */
+  .wh-footer__brandblock {
+    padding-top: 1.75rem;
+    border-top: 1px solid var(--wh-border);
+    display: grid;
+    gap: 1rem;
+  }
+  .wh-footer--compact .wh-footer__mark {
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+  .wh-footer__bar {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    flex-wrap: wrap;
+  }
+  .wh-footer__name {
+    font-size: 0.9375rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    color: var(--wh-ink);
+  }
+  /* push the links to the trailing edge of the content column */
+  .wh-footer__links {
+    margin-inline-start: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    font-size: 0.875rem;
+  }
+  .wh-footer__links a {
+    color: var(--wh-ink-muted);
+    text-decoration: none;
+    transition: color 0.12s ease;
+  }
+  .wh-footer__links a:hover {
+    color: var(--wh-accent-hi);
+  }
+
+  /* On narrow content columns, let the brand line and links stack cleanly
+     rather than cramming onto one row. */
+  @media (max-width: 34rem) {
+    .wh-footer__links {
+      margin-inline-start: 0;
+      width: 100%;
+      gap: 1rem 1.25rem;
+    }
+  }
+
+  /* ---------- full footer (splash / no-sidebar pages) ---------- */
+  /* Splash content is centered in the viewport, so the classic
+     `margin-inline: 50% - 50vw` + `width: 100vw` full-bleed reaches both edges.
+     (overflow-x: clip on <html> in global.css guards the scrollbar-width edge
+     case on classic, non-overlay scrollbars.) */
+  .wh-footer--full {
+    width: 100vw;
+    margin-top: 6rem;
+    margin-inline: calc(50% - 50vw);
+    padding: 3rem var(--sl-content-pad-x) 2rem;
+    border-top: 1px solid var(--wh-border);
+    /* Solid page-bg base under the fade so the band reads as opaque while its
+       transparent top still blends into the page above. */
+    background:
+      linear-gradient(
+        180deg,
+        transparent 0%,
+        color-mix(in oklab, var(--wh-surface) 60%, transparent) 100%
+      ),
+      var(--wh-bg);
+  }
+  .wh-footer--full .wh-footer__inner {
     max-width: 70rem;
     margin: 0 auto;
     display: grid;
@@ -81,16 +273,9 @@ const year = new Date().getFullYear();
     align-items: center;
     gap: 1rem;
   }
-  .wh-footer__mark {
+  .wh-footer--full .wh-footer__mark {
     width: 2.25rem;
     height: 2.25rem;
-    color: var(--wh-accent-hi);
-    display: grid;
-    place-items: center;
-  }
-  .wh-footer__mark svg {
-    width: 100%;
-    height: 100%;
   }
   .wh-footer__brand strong {
     display: block;
@@ -99,21 +284,10 @@ const year = new Date().getFullYear();
     letter-spacing: -0.02em;
     color: var(--wh-ink);
   }
-  .wh-footer__sub {
+  .wh-footer--full .wh-footer__sub {
     display: block;
-    color: var(--wh-ink-muted);
-    font-size: 0.875rem;
     margin-top: 0.125rem;
   }
-  .wh-footer__sub a {
-    color: var(--wh-ink-muted);
-    text-decoration: none;
-    transition: color 0.12s ease;
-  }
-  .wh-footer__sub a:hover {
-    color: var(--wh-accent-hi);
-  }
-
   .wh-footer__cols {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -141,19 +315,9 @@ const year = new Date().getFullYear();
     font-weight: 600;
     margin-bottom: 0.25rem;
   }
-
-  .wh-footer__sign {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
+  .wh-footer--full .wh-footer__sign {
     padding-top: 1.5rem;
     border-top: 1px solid var(--wh-border);
-    font-size: 0.8125rem;
-    color: var(--wh-ink-subtle);
-  }
-  .wh-footer__motto {
-    font-style: italic;
-    color: var(--wh-ink-muted);
   }
 
   @media (max-width: 50rem) {
