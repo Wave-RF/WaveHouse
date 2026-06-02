@@ -2,7 +2,7 @@
 title: "Configuration"
 description: "Full configuration reference — YAML settings and environment variables."
 sidebar:
-  order: 7
+  order: 9
 ---
 
 WaveHouse is configured via a YAML file with environment variable overrides. All environment variables use the `WH_` prefix.

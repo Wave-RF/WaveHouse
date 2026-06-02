@@ -2,7 +2,7 @@
 title: "API Reference"
 description: "All endpoints, authentication, request/response formats for the WaveHouse API."
 sidebar:
-  order: 5
+  order: 7
 ---
 
 Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema introspection, and admin — with request/response formats, error codes, and examples. The JWT middleware always runs; what a caller can do is driven by the policy; see [Configuration](/configuration#authentication) for the full auth config surface.

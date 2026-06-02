@@ -2,7 +2,7 @@
 title: "TypeScript SDK"
 description: "Zero-dependency client SDK — query builder, real-time streaming, codegen."
 sidebar:
-  order: 6
+  order: 8
 ---
 
 `@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
