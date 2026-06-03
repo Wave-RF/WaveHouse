@@ -1,61 +1,33 @@
-import { afterAll, describe, expect, it } from "vitest";
+import type { Policy } from "@wavehouse/sdk";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { adminClient } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Admin", () => {
   const wh = adminClient();
+  const T = suiteTables("admin");
 
   // Track resources created during tests for cleanup
   const createdPipes: string[] = [];
   let policyWasSet = false;
+  // Snapshot of the real (multi-suite) baseline policy, captured before any
+  // mutation so afterAll restores exactly what setup.ts bootstrapped — not a
+  // hand-written reconstruction, which would wipe every other suite's entries.
+  let baselinePolicy: Policy | undefined;
+
+  beforeAll(async () => {
+    const res = await wh.policy.get();
+    if (res.error) throw new Error(`Failed to fetch baseline policy: ${res.error.message}`);
+    baselinePolicy = structuredClone(res.data);
+  });
 
   afterAll(async () => {
     // Clean up test pipes
     for (const name of createdPipes) {
       await wh.pipes.delete(name);
     }
-    // Restore the baseline test policy if we modified it.
-    // Must run in both modes — setup.ts always bootstraps a policy now.
-    if (policyWasSet) {
-      const baselinePolicy = {
-        tables: {
-          clicks: {
-            select: {
-              "*": { allow_columns: ["*"] },
-              viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"] },
-            },
-            insert: {
-              "*": { allow_columns: ["*"] },
-              viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"] },
-            },
-          },
-          events: {
-            select: {
-              "*": { allow_columns: ["*"] },
-              viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"] },
-            },
-            insert: {
-              "*": { allow_columns: ["*"] },
-              viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"] },
-            },
-          },
-          users: {
-            select: {
-              "*": { allow_columns: ["*"] },
-              viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"] },
-            },
-            insert: {
-              "*": { allow_columns: ["*"] },
-              viewer: { allow_columns: ["*"] },
-              admin: { allow_columns: ["*"] },
-            },
-          },
-        },
-      };
+    // Restore the captured baseline policy if we modified it.
+    if (policyWasSet && baselinePolicy) {
       await wh.policy.set(baselinePolicy);
     }
   });
@@ -67,13 +39,13 @@ describe("Admin", () => {
       expect(result.data).toBeDefined();
 
       const tables = result.data!;
-      // We created clicks, events, users in fixtures
-      expect(tables).toHaveProperty("clicks");
-      expect(tables).toHaveProperty("events");
-      expect(tables).toHaveProperty("users");
+      // setup.ts creates this suite's clicks/events/users tables
+      expect(tables).toHaveProperty(T.clicks);
+      expect(tables).toHaveProperty(T.events);
+      expect(tables).toHaveProperty(T.users);
 
       // Verify column metadata on clicks
-      const clicks = tables.clicks;
+      const clicks = tables[T.clicks];
       expect(clicks.columns).toBeInstanceOf(Array);
       const colNames = clicks.columns.map((c: any) => c.name);
       expect(colNames).toContain("event_id");
@@ -87,7 +59,7 @@ describe("Admin", () => {
     });
 
     it("gets per-table schema", async () => {
-      const result = await wh.from("clicks").schema();
+      const result = await wh.from(T.clicks).schema();
       expect(result.error).toBeNull();
       expect(result.data).toBeDefined();
       expect((result.data as any).columns).toBeInstanceOf(Array);
@@ -97,7 +69,7 @@ describe("Admin", () => {
   describe("Policy", () => {
     const testPolicy = {
       tables: {
-        clicks: {
+        [T.clicks]: {
           select: {
             viewer: {
               allow_columns: ["page", "country", "duration_ms", "received_timestamp"],
@@ -122,7 +94,12 @@ describe("Admin", () => {
     });
 
     it("sets and gets a policy", async () => {
-      const setResult = await wh.policy.set(testPolicy);
+      // Spread the baseline so we override only this suite's clicks entry —
+      // setting the bare testPolicy would wipe every other suite's tables from
+      // the live policy until afterAll restores it.
+      const setResult = await wh.policy.set({
+        tables: { ...(baselinePolicy?.tables ?? {}), ...testPolicy.tables },
+      });
       expect(setResult.error).toBeNull();
       policyWasSet = true;
 
@@ -138,7 +115,7 @@ describe("Admin", () => {
 
     it("creates a pipe", async () => {
       const result = await wh.pipes.set(pipeName, {
-        sql: "SELECT page, count() as views FROM default.clicks GROUP BY page ORDER BY views DESC LIMIT {{limit:10}}",
+        sql: `SELECT page, count() as views FROM default.${T.clicks} GROUP BY page ORDER BY views DESC LIMIT {{limit:10}}`,
         description: "E2E test pipe",
         allowed_roles: ["admin", "viewer"],
       });
@@ -194,14 +171,14 @@ describe("Admin", () => {
   });
 
   describe("System", () => {
-    it("health endpoint returns status", async () => {
+    it("health endpoint reports the server is online", async () => {
       const result = await wh.sys.health();
+      // /v1/health is content-free (200/503, no body) — a null error means online.
       expect(result.error).toBeNull();
-      expect(result.data).toHaveProperty("status");
     });
 
     it("raw SQL: row counts", async () => {
-      for (const table of ["clicks", "events", "users"]) {
+      for (const table of [T.clicks, T.events, T.users]) {
         const result = await wh.sql(`SELECT count() as cnt FROM default.${table}`);
         expect(result.error).toBeNull();
         expect(result.data).toBeInstanceOf(Array);

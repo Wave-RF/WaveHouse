@@ -1,9 +1,11 @@
 import type { Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { adminClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Streaming", () => {
   const admin = adminClient();
+  const T = suiteTables("streaming");
   let baselinePolicy: Policy | undefined;
 
   beforeAll(async () => {
@@ -16,13 +18,13 @@ describe("Streaming", () => {
     const publicPolicy = structuredClone(baselinePolicy);
     publicPolicy.default_role = "anon";
 
-    // Explicitly allow the 'anon' role to SELECT (stream) from these tables
-    publicPolicy.tables.clicks.select = {
-      ...(publicPolicy.tables.clicks.select || {}),
+    // Explicitly allow the 'anon' role to SELECT (stream) from this suite's tables
+    publicPolicy.tables[T.clicks].select = {
+      ...(publicPolicy.tables[T.clicks].select || {}),
       anon: { allow_columns: ["*"] },
     };
-    publicPolicy.tables.events.select = {
-      ...(publicPolicy.tables.events.select || {}),
+    publicPolicy.tables[T.events].select = {
+      ...(publicPolicy.tables[T.events].select || {}),
       anon: { allow_columns: ["*"] },
     };
 
@@ -43,7 +45,7 @@ describe("Streaming", () => {
       const receivedEvents: any[] = [];
       const id = testId();
 
-      const stream = whPublic.from("clicks").stream();
+      const stream = whPublic.from(T.clicks).stream();
       let unsub: (() => void) | undefined;
       try {
         unsub = stream.subscribe({
@@ -55,7 +57,7 @@ describe("Streaming", () => {
 
         await stream.connected(5_000);
 
-        await whAuth.from("clicks").insert({
+        await whAuth.from(T.clicks).insert({
           event_id: id,
           page: "/sse-public-test",
           user_id: "public-user",
@@ -81,7 +83,7 @@ describe("Streaming", () => {
       const id = testId();
 
       // The SDK should automatically append the JWT as ?token= here
-      const stream = whAuth.from("clicks").stream();
+      const stream = whAuth.from(T.clicks).stream();
 
       let unsub: (() => void) | undefined;
       try {
@@ -94,7 +96,7 @@ describe("Streaming", () => {
 
         await stream.connected(20_000);
 
-        await whAuth.from("clicks").insert({
+        await whAuth.from(T.clicks).insert({
           event_id: id,
           page: "/sse-auth-test",
           user_id: "auth-user",

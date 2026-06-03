@@ -174,8 +174,8 @@ func run() error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	log.Printf("→ waiting for WaveHouse /health at %s ...", whURL)
-	if err := waitForHealth(ctx, whURL+"/health", 30*time.Second); err != nil {
+	log.Printf("→ waiting for WaveHouse /livez at %s ...", whURL)
+	if err := waitForHealth(ctx, whURL+"/livez", 30*time.Second); err != nil {
 		_ = whCmd.Process.Signal(syscall.SIGINT)
 		<-whDone
 		dumpLogHeadTail(whLogPath, "wavehouse never became healthy")

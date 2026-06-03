@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { chQuery, dataClient, makeJWT, testId, WH_URL, waitForCondition } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Cache", () => {
   const wh = dataClient();
+  const T = suiteTables("cache");
 
   it("verifies X-Cache headers and invalidation lifecycle", async () => {
     // We use raw fetch here because the SDK abstracts away HTTP headers
@@ -21,7 +23,7 @@ describe("Cache", () => {
       body: JSON.stringify({ columns: ["*"], limit: 69 }), // must make sure we never use this anywhere else in our tests!
     };
 
-    const url = `${WH_URL}/v1/query?table=clicks`;
+    const url = `${WH_URL}/v1/query?table=${T.clicks}`;
 
     // 1. Prime the cache (MISS)
     const res1 = await fetch(url, reqOpts);
@@ -37,7 +39,7 @@ describe("Cache", () => {
     // 3. Invalidate the cache by ingesting a new row.
     // (We can use the SDK here since we don't care about the ingest headers)
     const eventId = testId();
-    const insertRes = await wh.from("clicks").insert({
+    const insertRes = await wh.from(T.clicks).insert({
       event_id: eventId,
       page: "/cache-header-test",
       user_id: "u-cache",
@@ -49,7 +51,9 @@ describe("Cache", () => {
     // 4. Wait for the async worker to flush to ClickHouse and invalidate the cache.
     // By querying ClickHouse directly, we don't accidentally trigger a cache re-prime!
     await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.clicks WHERE event_id = '${eventId}'`);
+      const r = await chQuery(
+        `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${eventId}'`,
+      );
       return r.length === 1;
     }, 10_000);
 
@@ -74,7 +78,7 @@ describe("Cache", () => {
       body: JSON.stringify({ columns: ["*"], limit: 420 }), // Unique body for this test
     };
 
-    const url = `${WH_URL}/v1/query?table=clicks`;
+    const url = `${WH_URL}/v1/query?table=${T.clicks}`;
 
     // Prime the cache (MISS) and test how long the query takes
     const start = Date.now();

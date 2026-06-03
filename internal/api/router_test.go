@@ -269,9 +269,16 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		path   string
 		expect int // expected status (not 404/405)
 	}{
+		// Canonical K8s-convention probes.
+		{http.MethodGet, "/livez", http.StatusOK},
+		{http.MethodGet, "/readyz", http.StatusOK},
+		// Deprecated aliases (kept for v0.1.x, removed in v0.2.0).
+		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
 		{http.MethodGet, "/version", http.StatusOK},
+		// Public content-free liveness ping for the SDK (under /v1, no auth gate).
+		{http.MethodGet, "/v1/health", http.StatusOK},
 		// Schema is admin-only (see TestNewRouter_SchemaAdminOnly); a roleless
 		// request is denied 403 — the route still exists, which is what this
 		// registration test asserts (not 404/405).
@@ -456,8 +463,8 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	}
 	router := NewRouter(deps)
 
-	// /health is registered for GET only; POST should hit MethodNotAllowed.
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/health", nil)
+	// /livez is registered for GET only; POST should hit MethodNotAllowed.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/livez", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 

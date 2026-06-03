@@ -39,15 +39,15 @@ export function networkError(cause: unknown): WaveHouseError {
 
 /** Wrap a successful value in a Result. */
 export function ok<T>(data: T): Result<T> {
-  return { data, error: null };
+  return { ok: true, data, error: null };
 }
 
 /** Wrap a successful paginated value in a Result. */
 export function okPage<T>(data: T, hasMore: boolean, next?: () => Promise<Result<T>>): Result<T> {
-  return { data, error: null, hasMore, next };
+  return { ok: true, data, error: null, hasMore, next };
 }
 
 /** Wrap an error in a Result. */
 export function err<T = unknown>(error: WaveHouseError): Result<T> {
-  return { data: null, error };
+  return { ok: false, data: null, error };
 }

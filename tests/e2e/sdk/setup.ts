@@ -6,15 +6,15 @@
  * enabled. CLICKHOUSE_URL / WAVEHOUSE_URL come in via env. See
  * helpers.ts for client factories.
  *
- * Setup probes both URLs, applies fixtures to CH, refreshes WH's
- * schema, and bootstraps a baseline policy.
+ * Setup probes both URLs, creates the per-suite tables (see tables.ts —
+ * each test file gets its own clicks_<suite>/events_<suite>/users_<suite>),
+ * refreshes WH's schema until they all appear, and bootstraps a baseline
+ * policy that covers every generated table.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
-import path from "node:path";
 import { CH_URL, makeJWT, WH_URL } from "./helpers.js";
+import { allTableSpecs, TABLE_DDL } from "./tables.js";
 
-const FIXTURES_DIR = path.resolve(__dirname, "../fixtures");
 const setupAuth = () => `Bearer ${makeJWT({ sub: "e2e-setup", role: "admin", tenant_id: "acme" })}`;
 
 async function probe(url: string, timeoutMs = 2000): Promise<boolean> {
@@ -29,33 +29,31 @@ async function probe(url: string, timeoutMs = 2000): Promise<boolean> {
   }
 }
 
-async function applyFixtures(): Promise<void> {
-  const files = readdirSync(FIXTURES_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-
-  for (const file of files) {
-    const sql = readFileSync(path.join(FIXTURES_DIR, file), "utf-8");
-    const res = await fetch(CH_URL, { method: "POST", body: sql });
+// Create one physical table per (suite, kind). DDL is templated in tables.ts
+// (CREATE TABLE IF NOT EXISTS), so this is idempotent: re-runs against an
+// existing stack are no-ops.
+async function createTables(): Promise<void> {
+  for (const { name, kind } of allTableSpecs()) {
+    const res = await fetch(CH_URL, { method: "POST", body: TABLE_DDL[kind](name) });
     if (!res.ok) {
       const text = await res.text();
-      // Idempotent: tolerate "already exists" so re-runs against an
-      // existing stack don't fail on the CREATE TABLE statements.
+      // Belt-and-suspenders: IF NOT EXISTS already makes this idempotent, but
+      // tolerate a racing "already exists" too.
       if (!text.includes("already exists")) {
-        throw new Error(`Fixture ${file} failed: ${text}`);
+        throw new Error(`Create table ${name} failed: ${text}`);
       }
     }
   }
 }
 
-// /v1/schema returns an array of { name, columns, ... } — wait until
-// every expected table is present so we don't burn the full timeout
-// on the happy path.
+// /v1/schema returns an array of { name, columns, ... } — wait until every
+// generated table is present so we don't burn the full timeout on the happy
+// path.
 async function refreshSchema(): Promise<void> {
   const headers = { Authorization: setupAuth() };
   await fetch(`${WH_URL}/v1/schema/refresh`, { method: "POST", headers });
 
-  const expected = ["clicks", "events", "users"];
+  const expected = allTableSpecs().map((t) => t.name);
   const start = Date.now();
   while (Date.now() - start < 30_000) {
     const res = await fetch(`${WH_URL}/v1/schema`, { headers });
@@ -75,13 +73,15 @@ async function bootstrapTestPolicy(): Promise<void> {
     viewer: { allow_columns: ["*"], ...extra },
     admin: { allow_columns: ["*"], ...extra },
   });
-  const policy = {
-    tables: {
-      clicks: { select: rolePerms(), insert: rolePerms() },
-      events: { select: rolePerms(), insert: rolePerms() },
-      users: { select: rolePerms(), insert: rolePerms() },
-    },
-  };
+  // Permissive select+insert for every generated table. Tests that exercise
+  // policy enforcement snapshot this baseline, mutate their own table's entry,
+  // and restore it (the suite runs sequentially, so the snapshot/restore is
+  // race-free — see tables.ts).
+  const tables: Record<string, { select: unknown; insert: unknown }> = {};
+  for (const { name } of allTableSpecs()) {
+    tables[name] = { select: rolePerms(), insert: rolePerms() };
+  }
+  const policy = { tables };
 
   const res = await fetch(`${WH_URL}/v1/admin/policy`, {
     method: "PUT",
@@ -106,14 +106,14 @@ export async function setup(): Promise<void> {
       `ClickHouse not reachable at ${CH_URL}. Use the orchestrator (\`make test-e2e\`).`,
     );
   }
-  if (!(await probe(`${WH_URL}/health`))) {
+  if (!(await probe(`${WH_URL}/livez`))) {
     throw new Error(
       `WaveHouse not reachable at ${WH_URL}. Use the orchestrator (\`make test-e2e\`).`,
     );
   }
 
-  console.log("  📦 Applying SQL fixtures...");
-  await applyFixtures();
+  console.log("  📦 Creating per-suite tables...");
+  await createTables();
 
   console.log("  🔄 Refreshing schema...");
   await refreshSchema();

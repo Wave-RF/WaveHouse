@@ -1,13 +1,17 @@
 import { createClient } from "@wavehouse/sdk";
 import { describe, expect, it } from "vitest";
 import { adminClient, makeExpiredJWT, publicClient, viewerClient, WH_URL } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Auth", () => {
+  const T = suiteTables("auth");
+
   it("health endpoint is accessible without auth", async () => {
     const wh = publicClient();
     const result = await wh.sys.health();
+    // /v1/health is content-free (200/503, no body) — a null error means the
+    // server returned 200, i.e. reachable, with no token.
     expect(result.error).toBeNull();
-    expect(result.data).toHaveProperty("status");
   });
 
   it("admin role has full access", async () => {
@@ -23,7 +27,7 @@ describe("Auth", () => {
 
   it("viewer role can read data", async () => {
     const wh = viewerClient();
-    const result = await wh.from("clicks").fetch({ limit: 1 });
+    const result = await wh.from(T.clicks).fetch({ limit: 1 });
     expect(result.error).toBeNull();
     expect(result.data).toBeInstanceOf(Array);
   });
@@ -39,7 +43,7 @@ describe("Auth", () => {
         }),
     });
 
-    const result = await wh.from("clicks").fetch({ limit: 1 });
+    const result = await wh.from(T.clicks).fetch({ limit: 1 });
     expect(result.error).not.toBeNull();
     expect(result.error!.status).toBe(401);
   });
@@ -50,7 +54,7 @@ describe("Auth", () => {
       auth: () => "not-a-valid-jwt",
     });
 
-    const result = await wh.from("clicks").fetch({ limit: 1 });
+    const result = await wh.from(T.clicks).fetch({ limit: 1 });
     expect(result.error).not.toBeNull();
     expect(result.error!.status).toBe(401);
   });
@@ -61,7 +65,7 @@ describe("Auth", () => {
     // with 403 — not 401, since there's no bad token to report (unlike the
     // expired/invalid cases above, which fail loud with 401).
     const wh = publicClient();
-    const result = await wh.from("clicks").fetch({ limit: 1 });
+    const result = await wh.from(T.clicks).fetch({ limit: 1 });
     expect(result.error).not.toBeNull();
     expect(result.error!.status).toBe(403);
   });
