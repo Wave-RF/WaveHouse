@@ -24,14 +24,14 @@ import (
 // post-#95 contract matrix against a real ClickHouse testcontainer that we
 // stop/start mid-test:
 //
-//	| State                    | /health | /ready |
+//	| State                    | /healthz | /readyz |
 //	|--------------------------|---------|--------|
 //	| Boot, CH down            | 503     | 503    |
 //	| Boot, CH up after retry  | 200     | 200    |
 //	| Post-boot, CH dies       | 200 ★   | 503    |
 //	| Post-boot, CH back       | 200     | 200    |
 //
-// ★ — the sticky-/health invariant the PR adds, where /health stays at
+// ★ — the sticky-/healthz invariant the PR adds, where /healthz stays at
 // "boot completed once" rather than reflecting current ClickHouse state.
 // The unit chain test (internal/api/boot_chain_test.go) pins the same
 // wiring with a fake conn; this test additionally pins it against a real
@@ -80,8 +80,8 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	h := api.NewHealthHandler(ch.conn)
 	h.Boot = bootState
 
-	assertHealth(t, "/health", h.Liveness, http.StatusServiceUnavailable, `"status":"degraded"`)
-	assertHealth(t, "/ready", h.Readiness, http.StatusServiceUnavailable, `"status":"not ready"`)
+	assertHealth(t, "/healthz", h.Liveness, http.StatusServiceUnavailable, `"status":"degraded"`)
+	assertHealth(t, "/readyz", h.Readiness, http.StatusServiceUnavailable, `"status":"not ready"`)
 
 	// Restart CH and refresh the cached mapped port — Docker may reassign
 	// the host port on Stop+Start, so the chInstance.nativePort cached at
@@ -104,22 +104,22 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	bootState.Set(nil)
 
 	// === Row 2: Boot, CH up after retry ===
-	assertHealth(t, "/health", h.Liveness, http.StatusOK, `"status":"ok"`)
-	assertHealth(t, "/ready", h.Readiness, http.StatusOK, `"status":"ready"`)
+	assertHealth(t, "/healthz", h.Liveness, http.StatusOK, `"status":"ok"`)
+	assertHealth(t, "/readyz", h.Readiness, http.StatusOK, `"status":"ready"`)
 
 	// Now simulate "CH dies post-boot" — the runtime side of the contract.
 	require.NoError(t, ch.container.Stop(ctx, &stopTimeout), "stop CH for post-boot outage")
 
 	// === Row 3: Post-boot, CH dies ===
-	// /health must stay 200 — BootState is nil and never gets touched
-	// again, that's the sticky invariant. /ready must drop to 503 because
+	// /healthz must stay 200 — BootState is nil and never gets touched
+	// again, that's the sticky invariant. /readyz must drop to 503 because
 	// the readiness handler still pings CH on every call.
-	assertHealth(t, "/health", h.Liveness, http.StatusOK, `"status":"ok"`)
-	assertHealth(t, "/ready", h.Readiness, http.StatusServiceUnavailable, `"status":"not ready"`)
+	assertHealth(t, "/healthz", h.Liveness, http.StatusOK, `"status":"ok"`)
+	assertHealth(t, "/readyz", h.Readiness, http.StatusServiceUnavailable, `"status":"not ready"`)
 
 	// Restart CH a final time. Same port-may-have-changed dance — refresh
 	// the mapped port, rebuild the driver, point the health handler at
-	// the new conn. /ready is the only assertion here, so registry is
+	// the new conn. /readyz is the only assertion here, so registry is
 	// not re-wired (it has cached schemas from the earlier success and
 	// the StartAutoRefresh ticker isn't running in this test).
 	require.NoError(t, ch.container.Start(ctx), "restart CH for final recovery")
@@ -131,8 +131,8 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	require.NoError(t, waitForNativeReady(ctx, ch.conn, 30*time.Second), "CH native should be ready after second restart")
 
 	// === Row 4: Post-boot, CH back ===
-	assertHealth(t, "/health", h.Liveness, http.StatusOK, `"status":"ok"`)
-	assertHealth(t, "/ready", h.Readiness, http.StatusOK, `"status":"ready"`)
+	assertHealth(t, "/healthz", h.Liveness, http.StatusOK, `"status":"ok"`)
+	assertHealth(t, "/readyz", h.Readiness, http.StatusOK, `"status":"ready"`)
 }
 
 // assertHealth invokes the given handler with a GET to path and asserts the

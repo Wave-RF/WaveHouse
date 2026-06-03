@@ -460,8 +460,8 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	}
 	router := NewRouter(deps)
 
-	// /health is registered for GET only; POST should hit MethodNotAllowed.
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/health", nil)
+	// /healthz is registered for GET only; POST should hit MethodNotAllowed.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 

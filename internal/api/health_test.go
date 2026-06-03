@@ -135,7 +135,7 @@ func TestHealth_Liveness_BootReadyFlipsTo200(t *testing.T) {
 	bs.Set(nil)
 
 	w = httptest.NewRecorder()
-	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil)
 	h.Liveness(w, r)
 	assert.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]string

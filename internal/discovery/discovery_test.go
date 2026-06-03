@@ -188,7 +188,7 @@ func TestRetryRefresh_ReturnsOnContextCancel(t *testing.T) {
 // cancelled going into the loop, the failed Refresh's error is a downstream
 // reflection of cancellation (or arrives before the select can catch
 // ctx.Done() — either way), and surfacing it via onAttempt would write
-// "context canceled" into BootState as a spurious /health diagnostic during
+// "context canceled" into BootState as a spurious /healthz diagnostic during
 // the normal shutdown window. The guard is a single `ctx.Err() == nil`
 // check on the callback site; this test pins it.
 func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
@@ -211,7 +211,7 @@ func TestRetryRefresh_DoesNotFireOnAttemptDuringCancel(t *testing.T) {
 
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, int32(0), attempts.Load(),
-		"onAttempt must not fire when ctx is already cancelled — that would surface shutdown as a /health diagnostic")
+		"onAttempt must not fire when ctx is already cancelled — that would surface shutdown as a /healthz diagnostic")
 	// Sanity: Refresh actually ran at least once (so we exercised the
 	// callback site, not a short-circuit that skipped Refresh entirely).
 	assert.Equal(t, int32(1), conn.calls.Load(), "Refresh should have been called exactly once before the select caught ctx.Done()")
