@@ -6,8 +6,9 @@ describe("Auth", () => {
   it("health endpoint is accessible without auth", async () => {
     const wh = publicClient();
     const result = await wh.sys.health();
+    // /v1/health is content-free (200/503, no body) — a null error means the
+    // server returned 200, i.e. reachable, with no token.
     expect(result.error).toBeNull();
-    expect(result.data).toHaveProperty("status");
   });
 
   it("admin role has full access", async () => {

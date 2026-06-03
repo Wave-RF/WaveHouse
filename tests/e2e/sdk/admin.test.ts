@@ -194,10 +194,10 @@ describe("Admin", () => {
   });
 
   describe("System", () => {
-    it("health endpoint returns status", async () => {
+    it("health endpoint reports the server is online", async () => {
       const result = await wh.sys.health();
+      // /v1/health is content-free (200/503, no body) — a null error means online.
       expect(result.error).toBeNull();
-      expect(result.data).toHaveProperty("status");
     });
 
     it("raw SQL: row counts", async () => {
