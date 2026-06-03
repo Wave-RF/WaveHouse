@@ -464,6 +464,8 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
+**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
+
 **curl example:**
 
 ```bash
