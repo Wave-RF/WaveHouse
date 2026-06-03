@@ -25,7 +25,7 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/components';
 
 <div class="wh-stats not-content">
   <div class="wh-stat">
@@ -54,6 +54,28 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it comes with sharp edges: custom APIs, Kafka queues to avoid "too many parts" errors, replacing-merge logic for deduplication. WaveHouse abstracts all of that into a single, deployable binary so you stop interacting with ClickHouse directly.
 
+<div class="wh-versus not-content">
+  <div class="wh-versus__col wh-versus__col--pain">
+    <span class="wh-versus__head">Frontend → ClickHouse, directly</span>
+    <ul>
+      <li>One insert per event → <strong>Too many parts</strong>, HTTP 500 under load</li>
+      <li>No backpressure, no edge validation — bad rows fail late</li>
+      <li>No real-time push — poll every 2s or bolt on Kafka + WebSockets</li>
+      <li>No row/column security — hand-write tenant filters on every query</li>
+    </ul>
+  </div>
+  <div class="wh-versus__arrow">→</div>
+  <div class="wh-versus__col wh-versus__col--win">
+    <span class="wh-versus__head">Frontend → WaveHouse → ClickHouse</span>
+    <ul>
+      <li>Async WAL + batched flush — <strong>never</strong> "too many parts"</li>
+      <li>Schema-validated at the edge, <strong>503 + Retry-After</strong> under load</li>
+      <li>Native SSE push, gap-filled from history — no extra stack</li>
+      <li>Hasura-style JWT row/column policies, built in</li>
+    </ul>
+  </div>
+</div>
+
 If you're building user-facing analytics, **WaveHouse is like Supabase for ClickHouse** — or an open-source Tinybird that pushes data to the frontend in real time over SSE, not just via pull-based REST.
 
 <CardGrid>
@@ -75,13 +97,9 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 	<Card title="TypeScript SDK" icon="seti:typescript">
 		`@wavehouse/sdk` — zero-dependency client with type-safe query builder, live queries, real-time streaming, and codegen from your schemas.
 	</Card>
-	<Card title="Exact-once dedup (optional)" icon="seti:json">
-		Drop duplicate payloads before they reach ClickHouse — embedded Pebble key-value store, exact-match by event ID.
-	</Card>
-	<Card title="Dead Letter Queue" icon="warning">
-		Failed batch inserts land in a dedicated DLQ stream instead of blocking retries. Inspect depth via `GET /v1/dlq/stats`.
-	</Card>
 </CardGrid>
+
+**Plus** — optional exact-once [deduplication](/configuration#deduplication), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
 
 ## Up in five minutes
 
@@ -133,35 +151,13 @@ Five minutes from `git clone` to a live event stream. See the [Getting Started](
 		description="Query builder, live queries, streaming, and schema codegen."
 		href="/sdk"
 	/>
-	<LinkCard
-		title="Configuration"
-		description="YAML settings and `WH_*` environment variables — full reference."
-		href="/configuration"
-	/>
-	<LinkCard
-		title="Deployment"
-		description="Docker images, releases, environment variables, and health checks."
-		href="/deployment"
-	/>
 </CardGrid>
 
-## Project policies
-
-WaveHouse is in **alpha** — what we ship is built openly with honest expectations.
-
-<CardGrid>
-	<LinkCard
-		title="Security"
-		description="Report vulnerabilities privately to security@wave-rf.com. Acknowledged within 48 hours; initial assessment within 5 business days. Do not open a public issue."
-		href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md"
-		target="_blank"
-		rel="noopener noreferrer"
-	/>
-	<LinkCard
-		title="Support"
-		description="Where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now."
-		href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md"
-		target="_blank"
-		rel="noopener noreferrer"
-	/>
-</CardGrid>
+<div class="wh-closer not-content">
+  <p class="wh-closer__title">WaveHouse is <span class="wh-closer__alpha">alpha</span> — and built entirely in the open.</p>
+  <p class="wh-closer__sub">MIT-licensed, single binary, no SaaS tier, no vendor lock-in. We ship with honest expectations — see the <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SUPPORT.md" target="_blank" rel="noopener noreferrer">support cadence</a> and <a href="https://github.com/Wave-RF/WaveHouse/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">security policy</a>. Kick the tires and tell us where it breaks.</p>
+  <div class="wh-closer__actions">
+    <LinkButton href="/getting-started" icon="right-arrow">Get started in five minutes</LinkButton>
+    <LinkButton href="https://github.com/Wave-RF/WaveHouse" variant="secondary" icon="external">Star on GitHub</LinkButton>
+  </div>
+</div>
