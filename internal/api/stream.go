@@ -30,11 +30,8 @@ func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
 }
 
 func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	// CORS for this endpoint is handled by the router-level corsMiddleware
-	// (see NewRouter), not here: it echoes Access-Control-Allow-Origin onto
-	// the streaming response and answers the OPTIONS preflight. The SSE-
-	// specific Last-Event-ID resumption header (read below) is allow-listed
-	// there so cross-origin browser clients can resume a stream.
+	// CORS (including the Last-Event-ID resumption header read below) is
+	// handled by the router-level corsMiddleware, not here. See NewRouter.
 	// TODO: for servers or clients that don't support SSE or are having issues, should we use this path and build in the full mechanisms for a fallback, like long-polling (probably bad idea) or just periodic fetch queries, or have them fallback to structured queries or a pipe or something? Or no fallback at all?
 	flusher, ok := w.(http.Flusher)
 	if !ok {

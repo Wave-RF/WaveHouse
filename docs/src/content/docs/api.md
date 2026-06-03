@@ -400,7 +400,7 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
-**CORS:** Like every endpoint, `/v1/stream` honors the `server.cors_allowed_origins` allowlist — a browser `EventSource` from an allowed origin receives the `Access-Control-Allow-Origin` header on the stream and connects normally. `Last-Event-ID` is included in `Access-Control-Allow-Headers`, so fetch-based SSE clients that resume cross-origin by setting that header clear the preflight. Because `EventSource` can't attach an `Authorization` header, browser clients pass the JWT via `?token=` (above).
+**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
 
 **curl example:**
 

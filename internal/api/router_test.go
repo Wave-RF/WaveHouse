@@ -302,11 +302,9 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	}
 }
 
-// TestNewRouter_CORSOnStream pins that the SSE streaming endpoint participates
-// in CORS through the router-level corsMiddleware (issue #215). The corsMiddleware
-// is generic, but these assertions are end-to-end through NewRouter against
-// /v1/stream specifically, so a future change that excluded the stream path from
-// the middleware (or short-circuited it before CORS) would fail loudly here.
+// TestNewRouter_CORSOnStream pins CORS on the SSE endpoint end-to-end through
+// NewRouter against /v1/stream specifically (issue #215), so excluding the
+// stream path from the middleware would fail here.
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
@@ -319,27 +317,28 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 		Logger:      testutil.NopLogger(),
 	})
 
-	// Browsers can't attach an Authorization header to an EventSource, so a
-	// fetch-based SSE client that resumes via Last-Event-ID issues a preflight
-	// listing it. The preflight must echo the origin and allow-list the header.
-	t.Run("preflight advertises Last-Event-ID", func(t *testing.T) {
+	// A fetch-based EventSource resuming cross-origin sends both Authorization
+	// (the #203 auth migration off ?token=) and Last-Event-ID; the preflight
+	// must allow-list both or the browser blocks the request. Last-Event-ID is
+	// the header this PR added — without it this subtest fails.
+	t.Run("preflight advertises Authorization and Last-Event-ID", func(t *testing.T) {
 		t.Parallel()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/v1/stream?table=events", nil)
 		req.Header.Set("Origin", "https://app.example.com")
 		req.Header.Set("Access-Control-Request-Method", http.MethodGet)
-		req.Header.Set("Access-Control-Request-Headers", "Last-Event-ID")
+		req.Header.Set("Access-Control-Request-Headers", "Authorization, Last-Event-ID")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusNoContent, rec.Code)
 		assert.Equal(t, "https://app.example.com", rec.Header().Get("Access-Control-Allow-Origin"))
-		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "Last-Event-ID",
-			"SSE resumption header must be allow-listed for cross-origin clients")
+		allow := rec.Header().Get("Access-Control-Allow-Headers")
+		assert.Contains(t, allow, "Last-Event-ID", "SSE resumption header must be allow-listed")
+		assert.Contains(t, allow, "Authorization", "fetch-based EventSource auth (#203) must clear preflight")
 	})
 
-	// The actual streaming GET must also carry Access-Control-Allow-Origin so
-	// the browser delivers events to the page. A pre-cancelled context lets the
-	// handler exit its select loop immediately after writing headers.
+	// The streaming GET itself must carry Allow-Origin so the browser delivers
+	// events. A pre-cancelled context exits the select loop after writing headers.
 	t.Run("streaming GET echoes allowed origin", func(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
@@ -353,8 +352,7 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 		assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
 	})
 
-	// A disallowed origin gets no Allow-Origin header; the browser then blocks
-	// the EventSource client-side (the server still streams, but to nobody).
+	// A disallowed origin gets no Allow-Origin header, so the browser blocks it.
 	t.Run("disallowed origin gets no CORS header", func(t *testing.T) {
 		t.Parallel()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/v1/stream?table=events", nil)
