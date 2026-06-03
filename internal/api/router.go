@@ -318,7 +318,15 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
+				// Last-Event-ID is the SSE resumption header: the /v1/stream
+				// handler reads it to gap-fill from the client's last seen event
+				// (see StreamHandler.Handle). Native EventSource sends it on
+				// reconnect without a preflight, but fetch-based SSE clients that
+				// set it explicitly cross-origin need it allow-listed or the
+				// preflight fails. Browsers can't attach Authorization to an
+				// EventSource, so the JWT rides in ?token= (see internal/auth);
+				// Authorization stays allow-listed for non-EventSource clients.
+				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, X-Request-ID")
 				w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
 				w.Header().Set("Access-Control-Max-Age", "3600")
 			}
