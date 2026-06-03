@@ -15,11 +15,20 @@
   //
   // NOTE: .mdx is intentionally NOT linted — markdownlint parses CommonMark, not
   // MDX's JSX/import syntax (docs/src/content/docs/index.mdx).
+  //
+  // markdownlint-cli2 globs with dot:true, so `**/*.md` descends into hidden
+  // dirs — including .worktrees/, where this repo nests git worktrees. Honor
+  // .gitignore so a `make lint` / `make fix` from the *main* checkout never
+  // reaches into sibling worktrees, tmp/, or vendored Markdown — and `fix:md`
+  // (`--fix`) never rewrites another branch's files. The explicit ignores below
+  // stay as a fallback for the case where .gitignore is absent.
+  "gitignore": true,
   "globs": ["**/*.md"],
   "ignores": [
     "**/node_modules/**",
     "**/dist/**",
     "**/.astro/**",
-    "**/.pnpm/**"
+    "**/.pnpm/**",
+    "**/.worktrees/**"
   ]
 }
