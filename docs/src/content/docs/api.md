@@ -160,7 +160,14 @@ A binary built without the `-ldflags` injection (e.g. a bare `go build` rather t
 
 ### `POST /v1/ingest?table={table}` — Ingest Data
 
-Accepts a flat JSON object, validates it against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
+Accepts either a single flat JSON object or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
+
+The body format is selected by the request `Content-Type`:
+
+| `Content-Type` | Body | Response |
+| -------------- | ---- | -------- |
+| `application/json` *(default)* | one flat JSON object | `{"ok":true}` (or `{"duplicate":true}`) |
+| `application/x-ndjson` | one JSON object per line (NDJSON batch) | per-record summary — see [NDJSON Batch Ingest](#ndjson-batch-ingest) |
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -209,6 +216,8 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
+| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -219,6 +228,61 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
+```
+
+#### NDJSON Batch Ingest
+
+Send `Content-Type: application/x-ndjson` with **one JSON object per line** to ingest a batch in a single request — a streaming-friendly alternative to one large JSON array. Blank lines are skipped. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses this path automatically.)
+
+**Request:**
+
+```http
+POST /v1/ingest?table=clicks
+Content-Type: application/x-ndjson
+
+{"page": "/home", "score": 42.5}
+{"page": "/about"}
+{"page": "/pricing", "score": 7}
+```
+
+**Response (`200`):** a per-record summary.
+
+```json
+{
+  "total": 3,
+  "succeeded": 2,
+  "failed": 1,
+  "duplicates": 0,
+  "errors": [{ "line": 2, "error": "validation failed: ..." }]
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `total` | records read from the body (non-blank lines) |
+| `succeeded` | records validated and published |
+| `failed` | records rejected — see `errors` |
+| `duplicates` | records skipped by dedup (when enabled) |
+| `errors` | per-record rejections, each `{ line, error }` with `line` the 1-based record index. Omitted when empty; truncated to the first 100 (`failed` stays the authoritative count). |
+
+A `200` is returned whenever the body was read and at least one record was attempted — **even if every record failed**, so branch on `failed`/`errors`, not the status code. Per-record problems (malformed JSON, schema validation, column/check permission failures) are reported in `errors` and the batch continues. Whole-request conditions abort with a non-`200` instead:
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 400 | `{"error":"empty ndjson body"}` | No non-blank lines in the body |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
+| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
+| 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
+| 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
+
+> **At-least-once on retry.** A batch aborted partway (a `503`/`500` after some records were already published) re-publishes its leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+
+**curl example:**
+
+```bash
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
 ```
 
 ---

@@ -12,6 +12,7 @@ export { SchemaNamespace } from "./schema.js";
 export { StreamController } from "./stream/controller.js";
 export { LiveQuery } from "./stream/live-query.js";
 export { SysNamespace } from "./sys.js";
+export type { NDJSONSource } from "./table.js";
 // --- Core classes ---
 export { TableRef } from "./table.js";
 
@@ -31,6 +32,7 @@ export type {
   // Query
   FilterOp,
   // Ingest
+  InsertRecordError,
   InsertResult,
   OrderClause,
   ParamDef,

@@ -67,28 +67,115 @@ describe("TableRef", () => {
     expect(JSON.parse(init.body)).toEqual({ page: "/home", score: 42 });
   });
 
-  it("insert() array sends one request per row", async () => {
-    fetchSpy.mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 })),
+  it("insert() array sends a single NDJSON request", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ total: 2, succeeded: 2, failed: 0, duplicates: 0 }), {
+        status: 200,
+      }),
     );
 
     const result = await table().insert([{ page: "/a" }, { page: "/b" }]);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(result.data).toEqual({ ok: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toContain("/v1/ingest?table=clicks");
+    expect(init.method).toBe("POST");
+    expect(init.headers["Content-Type"]).toBe("application/x-ndjson");
+    // One JSON record per line, no trailing newline.
+    expect(init.body).toBe('{"page":"/a"}\n{"page":"/b"}');
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ ok: true, total: 2, succeeded: 2, failed: 0 });
   });
 
-  it("insert() returns error if any row fails", async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: "invalid json" }), { status: 400 }),
-      );
+  it("insert() empty array is a no-op with no request", async () => {
+    const result = await table().insert([]);
 
-    const result = await table().insert([{ page: "/a" }, { page: "/b" }]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ ok: true, total: 0, succeeded: 0, failed: 0 });
+  });
 
+  it("insert() array surfaces per-record failures without erroring", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          total: 2,
+          succeeded: 1,
+          failed: 1,
+          duplicates: 0,
+          errors: [{ line: 2, error: "validation failed" }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await table().insert([{ page: "/a" }, { bad: "row" } as never]);
+
+    // The request itself succeeded...
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeNull();
+    // ...but not every record did.
+    expect(result.data?.ok).toBe(false);
+    expect(result.data?.failed).toBe(1);
+    expect(result.data?.errors).toEqual([{ line: 2, error: "validation failed" }]);
+  });
+
+  it("insert() array tolerates a 200 with an empty body without throwing", async () => {
+    // An intermediary could strip the body off a 200; the Result contract must
+    // hold (never throws) and degrade to a zeroed summary.
+    fetchSpy.mockResolvedValue(new Response("", { status: 200 }));
+
+    const result = await table().insert([{ page: "/a" }]);
+
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({ ok: true, total: 0, succeeded: 0, failed: 0 });
+  });
+
+  it("insert() array returns the error arm on a whole-request failure", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ error: "unknown table: clicks" }), { status: 404 }),
+    );
+
+    const result = await table().insert([{ page: "/a" }]);
+
+    expect(result.ok).toBe(false);
     expect(result.data).toBeNull();
-    expect(result.error?.status).toBe(400);
+    expect(result.error?.status).toBe(404);
+  });
+
+  it("insertNDJSON() sends a raw NDJSON string verbatim", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ total: 2, succeeded: 2, failed: 0, duplicates: 0 }), {
+        status: 200,
+      }),
+    );
+
+    const ndjson = '{"page":"/a"}\n{"page":"/b"}\n';
+    const result = await table().insertNDJSON(ndjson);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toContain("/v1/ingest?table=clicks");
+    expect(init.headers["Content-Type"]).toBe("application/x-ndjson");
+    expect(init.body).toBe(ndjson);
+    expect(result.data).toMatchObject({ succeeded: 2 });
+  });
+
+  it("insertNDJSON() reads a non-string source (Blob) before sending", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ total: 1, succeeded: 1, failed: 0, duplicates: 0 }), {
+        status: 200,
+      }),
+    );
+
+    const blob = new Blob(['{"page":"/a"}\n'], { type: "application/x-ndjson" });
+    const result = await table().insertNDJSON(blob);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init.body).toBe('{"page":"/a"}\n');
+    expect(result.data?.succeeded).toBe(1);
   });
 
   it("insert() returns duplicate info", async () => {

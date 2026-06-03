@@ -54,6 +54,23 @@ describe("request", () => {
     expect(init.headers["Content-Type"]).toBe("application/json");
   });
 
+  it("sends rawBody verbatim with a custom Content-Type", async () => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ total: 1 }), { status: 200 }));
+
+    const ndjson = '{"page":"/a"}\n{"page":"/b"}';
+    await request(makeCtx(), {
+      method: "POST",
+      path: "/v1/ingest?table=clicks",
+      rawBody: ndjson,
+      contentType: "application/x-ndjson",
+    });
+
+    const [, init] = fetchSpy.mock.calls[0];
+    // rawBody is sent as-is — no JSON.stringify wrapping.
+    expect(init.body).toBe(ndjson);
+    expect(init.headers["Content-Type"]).toBe("application/x-ndjson");
+  });
+
   it("injects auth token when auth function provided", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 

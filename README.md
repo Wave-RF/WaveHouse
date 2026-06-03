@@ -67,6 +67,12 @@ curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
+# Ingest a batch as NDJSON (one record per line; partial failures reported per-line)
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary $'{"page":"/home"}\n{"page":"/pricing","score":7}\n'
+# → {"total":2,"succeeded":2,"failed":0,"duplicates":0}
+
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 
