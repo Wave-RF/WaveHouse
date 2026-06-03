@@ -4,7 +4,7 @@ description: "How the internal/ingest worker batches events per table into Click
 ---
 
 This page is the deep-dive on `internal/ingest` — the worker that turns the
-stream of ingest events into batched ClickHouse inserts. The [Architecture](/architecture/)
+stream of ingest events into batched ClickHouse inserts. The [Architecture](/architecture)
 page covers where it sits in the system; this page covers **how the code itself
 works** so contributors and reviewers can reason about (and safely change) it.
 
@@ -78,12 +78,12 @@ sequenceDiagram
     CB->>D: msgChan channel send
     D->>D: parseMsg (route key = table_name)
     D->>TL: per-table channel send
-    TL->>TL: add row; arm deadline timer on first row
+    TL->>TL: add row#59; arm deadline timer on first row
     Note over TL: flush on size (maxBatch) OR deadline (maxWait)
     TL->>CH: POST JSONEachRow (flush goroutine)
     CH-->>TL: 200 OK
     TL->>JS: DoubleAck each row (background, ackWg)
-    Note over JS: consumer AckFloor advances; Sweeper may now purge
+    Note over JS: consumer AckFloor advances#59; Sweeper may now purge
 ```
 
 ## Goroutine topology
