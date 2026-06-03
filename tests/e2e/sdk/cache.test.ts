@@ -104,9 +104,13 @@ describe("Cache", () => {
     expect(res2.headers.get("x-cache")).toBe("HIT");
     console.log(`Query [HIT] took ${hotTime}ms`);
 
-    expect(queryTime, "Cold DB Query expected to take longer than hot from cache").toBeGreaterThan(
-      hotTime,
-    );
+    // We deliberately do NOT assert `queryTime > hotTime`. Wall-clock timing at
+    // millisecond resolution is too coarse for these sub-5ms queries: cold and
+    // hot both routinely measure ~2ms on fast CI runners, so a strict `>` flaked
+    // ("expected 2 to be greater than 2"), and jitter can even make a hot hit
+    // clock slower than the cold miss. The deterministic proof that the cache
+    // served the second request is the `x-cache: HIT` header asserted above; the
+    // timings are logged for humans, not asserted.
 
     // Wait for the ttl to expire.
     // Wait an extra 1 second to be safe.
