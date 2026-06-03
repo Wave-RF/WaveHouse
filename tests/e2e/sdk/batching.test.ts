@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Ingest Batching Triggers", () => {
   const wh = dataClient();
+  const T = suiteTables("batching");
 
   it("flushes immediately when hitting the 500-item batch limit", async () => {
     const runId = testId();
@@ -16,7 +18,7 @@ describe("Ingest Batching Triggers", () => {
     const startTime = Date.now();
 
     // Insert all 500 at once
-    const res = await wh.from("clicks").insert(rows);
+    const res = await wh.from(T.clicks).insert(rows);
     expect(res.error).toBeNull();
     const apiEndTime = Date.now();
     console.log(`All 500 events uploaded (API fsync latency) in ${apiEndTime - startTime}ms`);
@@ -26,7 +28,7 @@ describe("Ingest Batching Triggers", () => {
     await waitForCondition(
       async () => {
         const r = await chQuery(
-          `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
+          `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
         );
         return Number((r[0] as any).cnt) === 500;
       },
@@ -43,7 +45,7 @@ describe("Ingest Batching Triggers", () => {
     const runId = testId();
 
     const startTime = Date.now();
-    const res = await wh.from("clicks").insert({
+    const res = await wh.from(T.clicks).insert({
       event_id: runId,
       page: `/batch-time-test`,
       session_id: `session-${runId}`,
@@ -55,7 +57,7 @@ describe("Ingest Batching Triggers", () => {
 
     // Check immediately (should NOT be there yet)
     const r = await chQuery(
-      `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
+      `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
     );
     expect(Number((r[0] as any).cnt)).toBe(0);
 
@@ -63,7 +65,7 @@ describe("Ingest Batching Triggers", () => {
     await waitForCondition(
       async () => {
         const check = await chQuery(
-          `SELECT count() as cnt FROM default.clicks WHERE user_id = 'user-${runId}'`,
+          `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
         );
         return Number((check[0] as any).cnt) === 1;
       },
