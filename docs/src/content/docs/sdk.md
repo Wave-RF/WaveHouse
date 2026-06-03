@@ -86,8 +86,8 @@ Every async SDK operation returns `Result<T>` — a discriminated union that nev
 
 ```ts
 type Result<T> =
-  | { data: T; error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
-  | { data: null; error: WaveHouseError }
+  | { ok: true;  data: T;    error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
+  | { ok: false; data: null; error: WaveHouseError }
 
 interface WaveHouseError {
   status: number;     // HTTP status (0 for network errors)
@@ -98,15 +98,15 @@ interface WaveHouseError {
 }
 ```
 
-Usage pattern:
+Usage pattern — branch on `result.ok` (or destructure `{ data, error }` if you prefer):
 
 ```ts
-const { data, error } = await wh.from('clicks').select('page').limit(10);
-if (error) {
-  console.error(error.message); // never throws
-  return;
+const result = await wh.from('clicks').select('page').limit(10);
+if (result.ok) {
+  console.log(result.data); // Row[] — TypeScript knows data is non-null here
+} else {
+  console.error(result.error.message); // never throws
 }
-console.log(data); // Row[]
 ```
 
 ---
@@ -428,15 +428,19 @@ const stream = wh.dlq.stream();
 
 ## System — `wh.sys`
 
-Health and readiness probes.
+Content-free server-online check.
 
 ```ts
-const { data } = await wh.sys.health();
-// data: { status: 'ok' }
-
-const { data } = await wh.sys.ready();
-// data: { status: 'ready' } or { status: 'not ready', error: '...' }
+// health() hits the public, content-free /v1/health route — 200/503, no body.
+// Use it to check a server is reachable before sending data.
+const result = await wh.sys.health();
+if (result.ok) {
+  // server is up and past boot
+}
+// on failure, result.error carries the reason (network vs. server error)
 ```
+
+> Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.
 
 ---
 
@@ -659,8 +663,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .table(name) → Promise<Result<DLQStats>>
 │   └── .stream() → StreamController
 └── .sys
-    ├── .health() → Promise<Result<Health>>
-    └── .ready() → Promise<Result<Ready>>
+    └── .health() → Promise<Result<void>>
 
 StreamController (NOT thenable)
 ├── .subscribe({ next, status?, error? }) → unsubscribe()

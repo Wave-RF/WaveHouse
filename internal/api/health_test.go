@@ -29,7 +29,7 @@ func TestHealth_Liveness(t *testing.T) {
 	h := NewHealthHandler(nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil)
 	h.Liveness(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -38,6 +38,7 @@ func TestHealth_Liveness(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "ok", resp["status"])
+	assert.NotContains(t, resp, "error", "liveness success body must not carry an error field (api.md contract)")
 }
 
 func TestHealth_Readiness_NilConn(t *testing.T) {
@@ -45,7 +46,7 @@ func TestHealth_Readiness_NilConn(t *testing.T) {
 	h := NewHealthHandler(nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ready", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 	h.Readiness(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -54,6 +55,7 @@ func TestHealth_Readiness_NilConn(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "ready", resp["status"])
+	assert.NotContains(t, resp, "error", "readiness success body must not carry an error field (api.md contract)")
 }
 
 func TestHealth_Readiness_PingFails(t *testing.T) {
@@ -66,7 +68,7 @@ func TestHealth_Readiness_PingFails(t *testing.T) {
 	h := NewHealthHandler(pingFailConn{err: errors.New("ch ping failed")})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ready", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 	h.Readiness(w, r)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
@@ -101,13 +103,13 @@ func TestHealth_Liveness_BootDegraded(t *testing.T) {
 	t.Parallel()
 	// When BootState reports a non-nil error, Liveness must return 503 with
 	// the diagnostic in the JSON body. This is the behavior the gateway
-	// relies on so an operator can `curl /health` during a boot-time
+	// relies on so an operator can `curl /livez` during a boot-time
 	// ClickHouse outage instead of grepping a restart-loop log.
 	h := NewHealthHandler(nil)
 	h.Boot = NewBootState(errors.New("schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil)
 	h.Liveness(w, r)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
@@ -128,14 +130,14 @@ func TestHealth_Liveness_BootReadyFlipsTo200(t *testing.T) {
 	h.Boot = bs
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil)
 	h.Liveness(w, r)
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 
 	bs.Set(nil)
 
 	w = httptest.NewRecorder()
-	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil)
 	h.Liveness(w, r)
 	assert.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]string
@@ -152,7 +154,7 @@ func TestHealth_Readiness_BootDegradedReports503(t *testing.T) {
 	h.Boot = NewBootState(errors.New("schema discovery: code: 81, Database wavehouse does not exist"))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ready", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 	h.Readiness(w, r)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
@@ -162,4 +164,29 @@ func TestHealth_Readiness_BootDegradedReports503(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "not ready", resp["status"])
 	assert.Contains(t, resp["error"], "Database wavehouse does not exist")
+}
+
+func TestHealth_Online(t *testing.T) {
+	t.Parallel()
+	// /v1/health is the content-free SDK liveness ping: 200 with an empty body
+	// once boot has completed, 503 (also empty) while boot is still degraded.
+	// Pin both the status mapping AND the empty-body contract — the whole point
+	// is that nothing is JSON-encoded or cached per request.
+	t.Run("past boot -> 200 empty", func(t *testing.T) {
+		t.Parallel()
+		h := NewHealthHandler(nil) // nil Boot = boot completed
+		w := httptest.NewRecorder()
+		h.Online(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/health", nil))
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, w.Body.String(), "Online must write no body")
+	})
+	t.Run("boot-degraded -> 503 empty", func(t *testing.T) {
+		t.Parallel()
+		h := NewHealthHandler(nil)
+		h.Boot = NewBootState(errors.New("schema discovery: connection refused"))
+		w := httptest.NewRecorder()
+		h.Online(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/health", nil))
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Empty(t, w.Body.String(), "Online must write no body even on 503")
+	})
 }

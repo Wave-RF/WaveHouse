@@ -94,6 +94,7 @@ describe("networkError", () => {
 describe("ok", () => {
   it("wraps data with null error", () => {
     const result = ok({ name: "test" });
+    expect(result.ok).toBe(true);
     expect(result.data).toEqual({ name: "test" });
     expect(result.error).toBeNull();
   });
@@ -103,6 +104,7 @@ describe("okPage", () => {
   it("includes pagination fields", () => {
     const nextFn = vi.fn();
     const result = okPage([1, 2, 3], true, nextFn);
+    expect(result.ok).toBe(true);
     expect(result.data).toEqual([1, 2, 3]);
     expect(result.error).toBeNull();
     expect(result.hasMore).toBe(true);
@@ -120,6 +122,7 @@ describe("err", () => {
   it("wraps error with null data", () => {
     const error = { status: 500, code: "ERR", message: "fail", retryable: true };
     const result = err(error);
+    expect(result.ok).toBe(false);
     expect(result.data).toBeNull();
     expect(result.error).toBe(error);
   });
