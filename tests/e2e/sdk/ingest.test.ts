@@ -9,13 +9,15 @@ import {
   WH_URL,
   waitForCondition,
 } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Ingest", () => {
   const wh = dataClient();
+  const T = suiteTables("ingest");
 
   it("inserts a valid row and verifies via query", async () => {
     const id = testId();
-    const result = await wh.from("clicks").insert({
+    const result = await wh.from(T.clicks).insert({
       event_id: id,
       page: "/test-ingest",
       user_id: "u1",
@@ -29,11 +31,11 @@ describe("Ingest", () => {
 
     // Poll ClickHouse — pipeline flush timing varies
     await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.clicks WHERE event_id = '${id}'`);
+      const r = await chQuery(`SELECT event_id FROM default.${T.clicks} WHERE event_id = '${id}'`);
       return r.length === 1;
     }, 10_000);
 
-    const rows = await chQuery(`SELECT event_id FROM default.clicks WHERE event_id = '${id}'`);
+    const rows = await chQuery(`SELECT event_id FROM default.${T.clicks} WHERE event_id = '${id}'`);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveProperty("event_id", id);
   });
@@ -47,26 +49,26 @@ describe("Ingest", () => {
       session_id: "s-batch",
     }));
 
-    const result = await wh.from("clicks").insert(rows);
+    const result = await wh.from(T.clicks).insert(rows);
     expect(result.error).toBeNull();
     expect(result.data).toMatchObject({ ok: true });
 
     // Poll ClickHouse — pipeline flush timing varies
     await waitForCondition(async () => {
       const r = await chQuery(
-        `SELECT event_id FROM default.clicks WHERE event_id IN ('${ids.join("','")}')`,
+        `SELECT event_id FROM default.${T.clicks} WHERE event_id IN ('${ids.join("','")}')`,
       );
       return r.length === 3;
     }, 10_000);
 
     const inCH = await chQuery(
-      `SELECT event_id FROM default.clicks WHERE event_id IN ('${ids.join("','")}')`,
+      `SELECT event_id FROM default.${T.clicks} WHERE event_id IN ('${ids.join("','")}')`,
     );
     expect(inCH).toHaveLength(3);
   });
 
   it("rejects unknown fields with a validation error", async () => {
-    const result = await wh.from("clicks").insert({
+    const result = await wh.from(T.clicks).insert({
       event_id: testId(),
       page: "/bad",
       user_id: "u1",
@@ -91,7 +93,7 @@ describe("Ingest", () => {
     const viewer = viewerClient();
     const id = testId();
 
-    const result = await viewer.from("events").insert({
+    const result = await viewer.from(T.events).insert({
       event_id: id,
       type: "page_view",
       user_id: "viewer-1",
@@ -103,11 +105,11 @@ describe("Ingest", () => {
 
     // Poll ClickHouse — on cold-start the pipeline may take longer than 4s
     await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
+      const r = await chQuery(`SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`);
       return r.length === 1;
     }, 10_000);
 
-    const rows = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
+    const rows = await chQuery(`SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`);
     expect(rows).toHaveLength(1);
   });
 
@@ -115,7 +117,7 @@ describe("Ingest", () => {
     const viewer = viewerClient();
     const id = testId();
 
-    const result = await viewer.from("events").insert({
+    const result = await viewer.from(T.events).insert({
       event_id: id,
       type: "page_view",
       user_id: "dupe-test",
@@ -125,7 +127,7 @@ describe("Ingest", () => {
     expect(result.data).toMatchObject({ ok: true });
 
     // Insert the same event_id again
-    const result2 = await viewer.from("events").insert({
+    const result2 = await viewer.from(T.events).insert({
       event_id: id,
       type: "page_view",
       user_id: "dupe-test",
@@ -136,11 +138,11 @@ describe("Ingest", () => {
 
     // Poll ClickHouse — on cold-start the pipeline may take longer than 4s
     await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
+      const r = await chQuery(`SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`);
       return r.length === 1;
     }, 10_000);
 
-    const rows = await chQuery(`SELECT event_id FROM default.events WHERE event_id = '${id}'`);
+    const rows = await chQuery(`SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`);
     expect(rows).toHaveLength(1);
   });
 
@@ -245,9 +247,9 @@ describe("Ingest", () => {
       return r.length === 1;
     }, 10_000);
 
-    // 6. ULTIMATE ASSERTION: Verify the actual 'clicks' table was NOT dropped!
+    // 6. ULTIMATE ASSERTION: Verify a real table was NOT dropped!
     // In ClickHouse, EXISTS returns a row with { result: 1 } if it exists.
-    const clicksExists = await chQuery(`EXISTS TABLE default.clicks`);
+    const clicksExists = await chQuery(`EXISTS TABLE default.${T.clicks}`);
     expect(clicksExists[0]).toHaveProperty("result", 1);
 
     // Clean up
@@ -255,7 +257,7 @@ describe("Ingest", () => {
   });
 
   it("rejects ingest containing the reserved received_timestamp field", async () => {
-    const result = await wh.from("clicks").insert({
+    const result = await wh.from(T.clicks).insert({
       event_id: testId(),
       received_timestamp: "2026-01-01T00:00:00Z",
     } as any);
@@ -265,7 +267,7 @@ describe("Ingest", () => {
   });
 
   it("rejects invalid JSON payloads", async () => {
-    const res = await fetch(`${WH_URL}/v1/ingest?table=clicks`, {
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` },
       body: "{ bad json",
@@ -278,12 +280,12 @@ describe("Ingest", () => {
     const currentPolicyRes = await admin.policy.get();
     expect(currentPolicyRes.data).not.toBeNull();
 
-    // Restrict clicks inserts so the 'country' column MUST be 'US'
+    // Restrict this suite's clicks inserts so the 'country' column MUST be 'US'
     await admin.policy.set({
       tables: {
         ...(currentPolicyRes.data as any).tables,
-        clicks: {
-          ...((currentPolicyRes.data as any).tables.clicks || {}),
+        [T.clicks]: {
+          ...((currentPolicyRes.data as any).tables[T.clicks] || {}),
           insert: {
             // We MUST override the `*` wildcard policy as well because WaveHouse
             // grants access if ANY matching role allows it, and the setup script
@@ -302,7 +304,7 @@ describe("Ingest", () => {
     });
 
     // Reject if we explicitly send country=GB
-    const badRes = await wh.from("clicks").insert({
+    const badRes = await wh.from(T.clicks).insert({
       page: "/policy-check",
       user_id: "u-policy",
       session_id: "s-policy",
@@ -314,7 +316,7 @@ describe("Ingest", () => {
 
     // 2. Should auto-inject country=US if we omit it entirely
     const autoId = testId();
-    const goodRes = await wh.from("clicks").insert({
+    const goodRes = await wh.from(T.clicks).insert({
       event_id: autoId,
       page: "/auto-inject",
       user_id: "u-policy",
@@ -324,7 +326,9 @@ describe("Ingest", () => {
 
     // Verify the auto-injected row in CH has country=US
     await waitForCondition(async () => {
-      const r = await chQuery(`SELECT country FROM default.clicks WHERE event_id = '${autoId}'`);
+      const r = await chQuery(
+        `SELECT country FROM default.${T.clicks} WHERE event_id = '${autoId}'`,
+      );
       return r.length === 1 && r[0].country === "US";
     }, 10_000);
 
@@ -333,7 +337,7 @@ describe("Ingest", () => {
   });
 
   it("rejects invalid JSON queries", async () => {
-    const res = await fetch(`${WH_URL}/v1/query?table=clicks`, {
+    const res = await fetch(`${WH_URL}/v1/query?table=${T.clicks}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${makeJWT({ sub: "test", role: "viewer" })}` },
       body: "{ bad json",
@@ -346,12 +350,12 @@ describe("Ingest", () => {
     const currentPolicyRes = await admin.policy.get();
     expect(currentPolicyRes.data).not.toBeNull();
 
-    // Restrict viewer to only return 2 rows max from clicks
+    // Restrict viewer to only return 2 rows max from this suite's clicks
     await admin.policy.set({
       tables: {
         ...(currentPolicyRes.data as any).tables,
-        clicks: {
-          ...((currentPolicyRes.data as any).tables.clicks || {}),
+        [T.clicks]: {
+          ...((currentPolicyRes.data as any).tables[T.clicks] || {}),
           select: {
             viewer: { allow_columns: ["*"], max_rows: 2 },
           },
@@ -360,7 +364,7 @@ describe("Ingest", () => {
     });
 
     // Even if we ask for 10 rows via the SDK, the policy should cap it at 2 at the backend
-    const result = await wh.from("clicks").select("*").limit(10).fetch();
+    const result = await wh.from(T.clicks).select("*").limit(10).fetch();
     expect(result.error).toBeNull();
     expect(result.data).toHaveLength(2);
 

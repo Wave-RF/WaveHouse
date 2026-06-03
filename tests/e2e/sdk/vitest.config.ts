@@ -47,7 +47,14 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 120_000,
     pool: "forks",
-    // Run test files sequentially to avoid port/stream conflicts.
+    // Run test files sequentially (one fork, shared module state). Tables are
+    // now isolated per file (see tables.ts), so data no longer contaminates
+    // across files — but parallel files are still blocked by shared *global*
+    // policy state: several files do read-modify-write on the single policy
+    // document and streaming.test.ts flips the global default_role, so
+    // concurrent files would race those writes. Dropping maxWorkers:1 is
+    // deferred to follow-up issue #214 (per-table policy storage); see the
+    // "Deferred" section of docs/src/content/docs/ingest-pipeline.md.
     // (Vitest 4 replaced poolOptions.forks.singleFork with these two
     // top-level keys — see https://vitest.dev/guide/migration#pool-rework)
     maxWorkers: 1,

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
+import { suiteTables } from "./tables.js";
 
 describe("Stress & Concurrency", () => {
   const wh = dataClient();
+  const T = suiteTables("stress");
 
   it("handles high-volume concurrent inserts and reads", async () => {
     const concurrency = 20; // Number of parallel workers
@@ -21,14 +23,14 @@ describe("Stress & Concurrency", () => {
 
       // SDK handles chunking internally if we pass an array, but we are simulating
       // parallel individual/small-batch network requests here.
-      const res = await wh.from("clicks").insert(rows);
+      const res = await wh.from(T.clicks).insert(rows);
       expect(res.error).toBeNull();
       return res;
     });
 
     //  Also spin up concurrent reads while writes are happening to test cache / DB locks
     const readWorkers = Array.from({ length: 10 }).map(async () => {
-      const res = await wh.from("clicks").select("page").limit(5).fetch();
+      const res = await wh.from(T.clicks).select("page").limit(5).fetch();
       expect(res.error).toBeNull();
       return res;
     });
@@ -40,13 +42,13 @@ describe("Stress & Concurrency", () => {
     // making this relatively fast.
     await waitForCondition(async () => {
       const r = await chQuery(
-        `SELECT count() as cnt FROM default.clicks WHERE session_id = 'session-${runId}'`,
+        `SELECT count() as cnt FROM default.${T.clicks} WHERE session_id = 'session-${runId}'`,
       );
       return Number((r[0] as any).cnt) === concurrency * insertsPerWorker;
     }, 10_000);
 
     const finalCount = await chQuery(
-      `SELECT count() as cnt FROM default.clicks WHERE session_id = 'session-${runId}'`,
+      `SELECT count() as cnt FROM default.${T.clicks} WHERE session_id = 'session-${runId}'`,
     );
     expect(Number((finalCount[0] as any).cnt)).toBe(concurrency * insertsPerWorker);
   }, 20_000); // Extended timeout for stress test

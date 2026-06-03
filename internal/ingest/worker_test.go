@@ -169,17 +169,42 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	cache := &testutil.MockCache{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 
-	stopFn, err := StartIngestWorker(ctx, emb.NatsConn(), cache,
-		host, port, "http", "u", "p", "db")
+	js, err := jetstream.New(emb.NatsConn())
 	require.NoError(t, err)
-	require.NotNil(t, stopFn)
+	cons, err := js.CreateOrUpdateConsumer(ctx, mq.StreamName(), jetstream.ConsumerConfig{
+		Durable:       BufferConsumerName,
+		FilterSubject: "ingest.>",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		MaxAckPending: 1000,
+	})
+	require.NoError(t, err)
+
+	// Construct the worker directly so the flush timer can use a short maxWait —
+	// the single-event batch then flushes on the timer in ~200ms instead of the
+	// 5s default. StartIngestWorker's own setup is covered by
+	// TestStartIngestWorker_Validation + _StopFunc.
+	worker := &IngestWorker{
+		js:         js,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cache:      cache,
+		logger:     testutil.NopLogger(),
+		chURL:      fmt.Sprintf("http://%s:%s", host, port),
+		user:       "u",
+		password:   "p",
+		db:         "db",
+		maxBatch:   defaultMaxBatch,
+		maxWait:    200 * time.Millisecond,
+	}
+	worker.wg.Add(1)
+	go worker.dispatchLoop(ctx, cons)
+	t.Cleanup(func() {
+		cancel()
+		worker.wg.Wait()
+	})
 
 	// ── Publish an envelope on ingest.events ──
 	envelope := makeEnvelope(t, "events", "org_42", map[string]any{"id": 1, "v": "x"})
-	js, err := jetstream.New(emb.NatsConn())
-	require.NoError(t, err)
 	_, err = js.Publish(ctx, "ingest.events.org_42", envelope)
 	require.NoError(t, err)
 
@@ -212,10 +237,7 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 		return hasTable && hasSubject
 	}, 4*time.Second, 25*time.Millisecond, "cache must be invalidated for table + subject")
 
-	// ── stopFn must return cleanly ──
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	t.Cleanup(shutCancel)
-	require.NoError(t, stopFn(shutCtx))
+	// Shutdown (cancel + drain) is handled by t.Cleanup above.
 }
 
 // TestStartIngestWorker_StopFunc_RespectsShutdownDeadline verifies that if
@@ -265,6 +287,30 @@ func TestStartIngestWorker_StopFunc_RespectsShutdownDeadline(t *testing.T) {
 
 	err = stopFn(shutCtx)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestStartIngestWorker_StopFunc_CleanShutdown verifies the graceful path: with
+// no in-flight work, stopFn drains the dispatch loop and returns nil well within
+// the deadline — the success arm of waitOrDeadline. Complements the
+// deadline-exceeded test above.
+func TestStartIngestWorker_StopFunc_CleanShutdown(t *testing.T) {
+	t.Parallel()
+
+	emb, err := mq.NewEmbedded(t.TempDir(), 1024*1024, testutil.NopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = emb.Close() })
+
+	// chURL is never dialed: with no messages there is no flush, so a dummy
+	// host/port is fine.
+	stopFn, err := StartIngestWorker(context.Background(), emb.NatsConn(), &testutil.MockCache{},
+		"localhost", "8123", "http", "u", "p", "db")
+	require.NoError(t, err)
+
+	// Nothing to flush, so shutdown drains immediately and returns nil before the
+	// ample deadline.
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	require.NoError(t, stopFn(shutCtx))
 }
 
 // ---------------------------------------------------------------------------

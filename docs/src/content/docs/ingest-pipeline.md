@@ -350,5 +350,15 @@ Tracked under [#191](https://github.com/Wave-RF/WaveHouse/issues/191):
   reaped; safe while table names are bounded (schema-validated, in-process
   publishers only). Needs idle-reaping before untrusted/remote publishers can
   create unbounded cardinality.
-- **Per-table / partitioned consumers**, the **two-stream retention redesign**,
-  and **e2e test isolation** (per-test table names; dropping `singleFork`).
+- **Per-table / partitioned consumers** and the **two-stream retention
+  redesign**.
+- **Parallel e2e test files.** The e2e suite now isolates tables **per file**
+  (`tests/e2e/sdk/tables.ts` — each file gets its own
+  `clicks_<suite>`/`events_<suite>`/`users_<suite>`), so cross-file *data*
+  contamination is structurally impossible. Running the files in parallel
+  (dropping `maxWorkers: 1` in `vitest.config.ts`) is still deferred: several
+  files do read-modify-write on the **single global policy document** and
+  `streaming.test.ts` flips the global `default_role`, so concurrent files would
+  race those writes. Parallelism needs per-table policy storage with atomic
+  per-table updates first — tracked in
+  [#214](https://github.com/Wave-RF/WaveHouse/issues/214).
