@@ -73,13 +73,15 @@ func NewRouter(deps Dependencies) http.Handler {
 			//                   of pure infra cardinality, and creates a
 			//                   self-loop when the same backend stores both
 			//                   traces and scraped metrics.
-			//   /healthz, /readyz — liveness/readiness probes (and the
-			//                   deprecated /health, /ready aliases) inflate
-			//                   span counts and skew latency percentiles.
+			//   /livez, /readyz — liveness/readiness probes (and the
+			//                   deprecated /healthz, /health, /ready aliases),
+			//                   plus the SDK's /v1/health ping, inflate span
+			//                   counts and skew latency percentiles.
 			p := r.URL.Path
 			if strings.HasPrefix(p, "/v1/stream") ||
-				p == "/healthz" || p == "/readyz" ||
-				p == "/health" || p == "/ready" ||
+				p == "/livez" || p == "/readyz" ||
+				p == "/healthz" || p == "/health" || p == "/ready" ||
+				p == "/v1/health" ||
 				(metricsPath != "" && p == metricsPath) {
 				next.ServeHTTP(w, r)
 				return
@@ -89,13 +91,17 @@ func NewRouter(deps Dependencies) http.Handler {
 		})
 	})
 
-	// Public endpoints. /healthz and /readyz are the canonical probe names
-	// (Kubernetes convention); /health and /ready are deprecated aliases kept
-	// for v0.1.x and scheduled for removal in v0.2.0 (see CHANGELOG).
-	r.Get("/healthz", deps.Health.Liveness)
+	// Public endpoints. /livez and /readyz are the canonical probe names
+	// (current Kubernetes convention — the kube-apiserver split that replaced
+	// the older conflated /healthz). /healthz is kept as a permanent alias of
+	// /livez (it's the most widely-recognized name); /health and /ready are
+	// deprecated aliases, kept for v0.1.x and scheduled for removal in v0.2.0
+	// (see CHANGELOG). The SDK-facing public liveness ping is /v1/health.
+	r.Get("/livez", deps.Health.Liveness)
 	r.Get("/readyz", deps.Health.Readiness)
-	r.Get("/health", deps.Health.Liveness) // deprecated alias of /healthz
-	r.Get("/ready", deps.Health.Readiness) // deprecated alias of /readyz
+	r.Get("/healthz", deps.Health.Liveness) // permanent alias of /livez
+	r.Get("/health", deps.Health.Liveness)  // deprecated alias of /livez
+	r.Get("/ready", deps.Health.Readiness)  // deprecated alias of /readyz
 	r.Get("/version", deps.Version.Handle)
 
 	// Prometheus scrape endpoint — wired only when prometheus.enabled is true
@@ -108,6 +114,15 @@ func NewRouter(deps Dependencies) http.Handler {
 	// API v1 endpoints. The JWT auth middleware always runs (no enable/disable switch).
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(deps.AuthMW)
+
+		// Public content-free liveness ping. Lives under /v1 deliberately:
+		// it's documented API surface the SDK relies on to check "is this
+		// server reachable" before sending data, so it must stay public even
+		// in deployments that filter the bare /livez|/readyz|/healthz probe
+		// paths at the reverse proxy. AuthMW runs but never rejects, so no
+		// token is required and there's no authz gate. Mirrors /livez under
+		// the hood (200 past boot, 503 while degraded), no body.
+		r.Get("/health", deps.Health.Online)
 
 		// Single admin gate for every admin-equivalent surface. The admin role
 		// is policy.AdminRole (configurable via admin_role, "admin" by default),

@@ -22,21 +22,18 @@ import (
 
 // TestBootResilience_StickyHealthVsConditionalReady exercises the full
 // post-#95 contract matrix against a real ClickHouse testcontainer that we
-// stop/start mid-test:
+// stop/start mid-test. The matrix it pins — how /livez and /readyz respond
+// across boot-time and runtime ClickHouse outages — is documented for
+// operators in docs/src/content/docs/api.md, section "Liveness vs readiness
+// — behavior matrix"; this test is the executable proof of that table.
 //
-//	| State                    | /healthz | /readyz |
-//	|--------------------------|---------|--------|
-//	| Boot, CH down            | 503     | 503    |
-//	| Boot, CH up after retry  | 200     | 200    |
-//	| Post-boot, CH dies       | 200 ★   | 503    |
-//	| Post-boot, CH back       | 200     | 200    |
-//
-// ★ — the sticky-/healthz invariant the PR adds, where /healthz stays at
-// "boot completed once" rather than reflecting current ClickHouse state.
-// The unit chain test (internal/api/boot_chain_test.go) pins the same
-// wiring with a fake conn; this test additionally pins it against a real
-// CH driver dial AND covers the sticky-vs-conditional dichotomy that the
-// unit test can't exercise (it has no concept of "CH dies post-boot").
+// The invariant: /livez is sticky (stays 200 once boot completes, even if
+// ClickHouse later dies), while /readyz stays conditional on current
+// ClickHouse reachability and drops to 503 on a post-boot outage. The unit
+// chain test (internal/api/boot_chain_test.go) pins the same wiring with a
+// fake conn; this test additionally pins it against a real CH driver dial AND
+// covers the sticky-vs-conditional dichotomy that the unit test can't
+// exercise (it has no concept of "CH dies post-boot").
 //
 // Uses its own per-test CH testcontainer rather than sharedEnv — the
 // shared env assumes CH stays up for the duration of every test in this
@@ -80,7 +77,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	h := api.NewHealthHandler(ch.conn)
 	h.Boot = bootState
 
-	assertHealth(t, "/healthz", h.Liveness, http.StatusServiceUnavailable, `"status":"degraded"`)
+	assertHealth(t, "/livez", h.Liveness, http.StatusServiceUnavailable, `"status":"degraded"`)
 	assertHealth(t, "/readyz", h.Readiness, http.StatusServiceUnavailable, `"status":"not ready"`)
 
 	// Restart CH and refresh the cached mapped port — Docker may reassign
@@ -104,17 +101,17 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	bootState.Set(nil)
 
 	// === Row 2: Boot, CH up after retry ===
-	assertHealth(t, "/healthz", h.Liveness, http.StatusOK, `"status":"ok"`)
+	assertHealth(t, "/livez", h.Liveness, http.StatusOK, `"status":"ok"`)
 	assertHealth(t, "/readyz", h.Readiness, http.StatusOK, `"status":"ready"`)
 
 	// Now simulate "CH dies post-boot" — the runtime side of the contract.
 	require.NoError(t, ch.container.Stop(ctx, &stopTimeout), "stop CH for post-boot outage")
 
 	// === Row 3: Post-boot, CH dies ===
-	// /healthz must stay 200 — BootState is nil and never gets touched
+	// /livez must stay 200 — BootState is nil and never gets touched
 	// again, that's the sticky invariant. /readyz must drop to 503 because
 	// the readiness handler still pings CH on every call.
-	assertHealth(t, "/healthz", h.Liveness, http.StatusOK, `"status":"ok"`)
+	assertHealth(t, "/livez", h.Liveness, http.StatusOK, `"status":"ok"`)
 	assertHealth(t, "/readyz", h.Readiness, http.StatusServiceUnavailable, `"status":"not ready"`)
 
 	// Restart CH a final time. Same port-may-have-changed dance — refresh
@@ -131,7 +128,7 @@ func TestBootResilience_StickyHealthVsConditionalReady(t *testing.T) {
 	require.NoError(t, waitForNativeReady(ctx, ch.conn, 30*time.Second), "CH native should be ready after second restart")
 
 	// === Row 4: Post-boot, CH back ===
-	assertHealth(t, "/healthz", h.Liveness, http.StatusOK, `"status":"ok"`)
+	assertHealth(t, "/livez", h.Liveness, http.StatusOK, `"status":"ok"`)
 	assertHealth(t, "/readyz", h.Readiness, http.StatusOK, `"status":"ready"`)
 }
 

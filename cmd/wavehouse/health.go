@@ -9,8 +9,19 @@ import (
 	"time"
 )
 
-// runHealthCheck performs a liveness probe by GETting /healthz on the local
+// runHealthCheck performs a liveness probe by GETting /livez on the local
 // HTTP listener. Returns 0 if the server responds with 200, 1 otherwise.
+//
+// Liveness (/livez), deliberately not readiness (/readyz): a container
+// HEALTHCHECK drives the daemon's (healthy)/(unhealthy) state — and, under
+// orchestrators that act on it, restart/recreate decisions. We want those
+// tied to "is the WaveHouse process itself alive," not "is ClickHouse
+// reachable this second." Probing /readyz would flap the container to
+// (unhealthy) on every transient ClickHouse blip even though WaveHouse is
+// fine and recovers on its own; /livez is sticky once boot completes, so it
+// reflects process liveness only. This is also the right target for compose
+// `depends_on: service_healthy` waits. (cmd/wavehouse/health_test.go pins the
+// choice so a refactor can't silently repoint the probe at /readyz.)
 //
 // This exists so the distroless `Dockerfile`s can ship a self-probing
 // HEALTHCHECK without bundling curl/wget. The standard distroless pattern
@@ -32,14 +43,14 @@ func runHealthCheck() int {
 	}
 
 	// URL components are all locally controlled: literal `127.0.0.1`,
-	// integer-parsed port, literal `/healthz`. Gosec's G704 taint
+	// integer-parsed port, literal `/livez`. Gosec's G704 taint
 	// analysis flags the env-var flow regardless of validation, so the
 	// nosec annotations are explicit acknowledgements. Uses the canonical
-	// /healthz name rather than the deprecated /health alias so our own
-	// tooling doesn't break when the alias is removed in v0.2.0.
-	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+	// /livez name rather than a deprecated alias (/healthz, /health) so our
+	// own tooling doesn't break when those aliases are removed in v0.2.0.
+	url := fmt.Sprintf("http://127.0.0.1:%d/livez", port)
 
-	// Short timeout. The /healthz handler is in-memory only — no DB, no
+	// Short timeout. The /livez handler is in-memory only — no DB, no
 	// network — so a healthy server responds in microseconds. 3s is the
 	// HEALTHCHECK --timeout value; we want to fail well before that so
 	// the docker daemon's timeout never trips.

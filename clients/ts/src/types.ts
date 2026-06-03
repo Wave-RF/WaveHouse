@@ -130,11 +130,7 @@ export interface DLQStats {
   total: number;
 }
 
-// --- Health types ---
-
-export interface Health {
-  status: string;
-}
+// --- Readiness type ---
 
 export interface Ready {
   status: string;

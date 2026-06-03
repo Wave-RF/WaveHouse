@@ -112,7 +112,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 
 # Liveness check (no auth required)
-curl http://localhost:8080/healthz
+curl http://localhost:8080/livez
 # → {"status":"ok"}
 
 # Readiness check (no auth required)

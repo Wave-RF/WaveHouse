@@ -8,12 +8,12 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// BootState tracks a one-shot startup diagnostic surfaced by /healthz. While
+// BootState tracks a one-shot startup diagnostic surfaced by /livez. While
 // Err() returns non-nil the binary is considered to be in degraded-boot mode:
-// /healthz responds 503 with the diagnostic message instead of 200, so an
+// /livez responds 503 with the diagnostic message instead of 200, so an
 // operator can curl the endpoint to learn why the gateway isn't accepting
 // traffic yet. Once boot work (today: ClickHouse schema discovery) succeeds,
-// Set(nil) flips /healthz back to 200.
+// Set(nil) flips /livez back to 200.
 //
 // BootState is safe for concurrent use.
 type BootState struct {
@@ -91,4 +91,24 @@ func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+}
+
+// Online is a content-free public liveness ping served at /v1/health for the
+// SDK's "is this server reachable / accepting data" check (and for picking
+// among servers in a distributed setup). It mirrors Liveness's status logic —
+// 200 once boot completes, 503 while boot-time schema discovery is still
+// failing — but writes no body: the caller only branches on the status code,
+// so there's nothing to JSON-encode or cache per request.
+//
+// It deliberately lives under /v1 rather than reusing /livez: /livez (and
+// /readyz, /healthz) are Kubernetes probe paths an operator may filter out at
+// the reverse proxy, whereas /v1/health is documented public API surface the
+// SDK can rely on staying reachable. It does NOT ping ClickHouse — readiness-
+// based load balancing is the proxy/LB's job (via /readyz), not the client's.
+func (h *HealthHandler) Online(w http.ResponseWriter, _ *http.Request) {
+	if h.Boot != nil && h.Boot.Err() != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

@@ -30,8 +30,6 @@ export type {
   FetchOptions,
   // Query
   FilterOp,
-  // Health
-  Health,
   // Ingest
   InsertResult,
   OrderClause,

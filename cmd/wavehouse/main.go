@@ -38,7 +38,7 @@ var (
 
 func main() {
 	// Subcommand dispatch. Currently only `health` exists — used by the
-	// Dockerfile HEALTHCHECK to self-probe /healthz without needing curl
+	// Dockerfile HEALTHCHECK to self-probe /livez without needing curl
 	// or wget in the (distroless) image. If we ever need more, swap to
 	// a real argv router.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
@@ -170,11 +170,11 @@ func run() int {
 
 	// Schema discovery — non-fatal on boot. If the first Refresh fails
 	// (ClickHouse unreachable, database missing, etc.) we mark the binary
-	// degraded via bootState (which /healthz surfaces as 503 + diagnostic)
+	// degraded via bootState (which /livez surfaces as 503 + diagnostic)
 	// and retry in the background with exponential backoff. The process
-	// still binds :8080 so operators can `curl /healthz` instead of grepping
+	// still binds :8080 so operators can `curl /livez` instead of grepping
 	// a restart-loop log. Once a Refresh succeeds, bootState flips to nil
-	// and /healthz returns 200. The periodic auto-refresh ticker is started
+	// and /livez returns 200. The periodic auto-refresh ticker is started
 	// only after the first successful Refresh (sync or retry) so it never
 	// races RetryRefresh on Refresh calls or on bootState writes.
 	bootState := api.NewBootState(nil)
@@ -192,7 +192,7 @@ func run() int {
 				// ctx cancelled before success — process is shutting down.
 				return
 			}
-			logger.Info("schema discovery succeeded after retry, /healthz now 200")
+			logger.Info("schema discovery succeeded after retry, /livez now 200")
 			bootState.Set(nil)
 			go registry.StartAutoRefresh(ctx)
 		}()

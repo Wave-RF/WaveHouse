@@ -27,7 +27,7 @@ describe("request", () => {
 
     const result = await request<{ status: string }>(makeCtx(), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/health",
     });
 
     expect(result.data).toEqual({ status: "ok" });
@@ -35,7 +35,7 @@ describe("request", () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
 
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain("/v1/schema");
+    expect(url).toContain("/health");
     expect(init.method).toBe("GET");
   });
 
@@ -98,7 +98,7 @@ describe("request", () => {
 
     const result = await request(makeCtx({ options: { maxRetries: 0 } }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/health",
     });
 
     expect(result.error?.status).toBe(500);
@@ -113,7 +113,7 @@ describe("request", () => {
 
     const result = await request(makeCtx({ options: { maxRetries: 2 } }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/health",
     });
 
     expect(result.data).toEqual({ ok: true });
@@ -127,7 +127,7 @@ describe("request", () => {
 
     const result = await request(makeCtx({ options: { maxRetries: 1 } }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/health",
     });
 
     expect(result.data).toEqual({ ok: true });
@@ -142,7 +142,7 @@ describe("request", () => {
 
     const result = await request(makeCtx(), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/health",
       signal: ac.signal,
     });
 

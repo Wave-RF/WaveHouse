@@ -428,11 +428,15 @@ const stream = wh.dlq.stream();
 
 ## System — `wh.sys`
 
-Health and readiness probes.
+Liveness ping and readiness probe.
 
 ```ts
-const { data } = await wh.sys.health();
-// data: { status: 'ok' }
+// health() hits the public, content-free /v1/health route — 200/503, no body.
+// Use it to check a server is reachable before sending data.
+const { error } = await wh.sys.health();
+if (!error) {
+  // server is up and past boot
+}
 
 const { data } = await wh.sys.ready();
 // data: { status: 'ready' } or { status: 'not ready', error: '...' }
@@ -659,7 +663,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .table(name) → Promise<Result<DLQStats>>
 │   └── .stream() → StreamController
 └── .sys
-    ├── .health() → Promise<Result<Health>>
+    ├── .health() → Promise<Result<void>>
     └── .ready() → Promise<Result<Ready>>
 
 StreamController (NOT thenable)

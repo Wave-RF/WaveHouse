@@ -76,7 +76,7 @@ ENV WH_SERVER_PORT=8080
 EXPOSE 8080
 
 # Liveness probe via the binary's built-in `health` subcommand — does an
-# HTTP GET to /healthz on localhost. Distroless has no shell or curl, so
+# HTTP GET to /livez on localhost. Distroless has no shell or curl, so
 # the subcommand approach is the standard pattern here.
 #
 # --interval=10s: probe every 10 seconds (default 30s is conservative

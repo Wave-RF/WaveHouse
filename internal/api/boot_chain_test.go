@@ -47,9 +47,9 @@ func (*chainEmptyRows) ColumnTypes() []driver.ColumnType { return nil }
 
 // TestBoot_Chain_DegradedThenRecovers nails down the full sequence the PR
 // adds: the initial Refresh on a stopped/unreachable ClickHouse fails →
-// BootState carries the diagnostic → /healthz returns 503 with the wrapped
+// BootState carries the diagnostic → /livez returns 503 with the wrapped
 // error → RetryRefresh keeps trying with backoff → success clears BootState
-// → /healthz flips to 200.
+// → /livez flips to 200.
 //
 // The pieces are unit-tested in isolation (BootState set/get in this file,
 // RetryRefresh happy/retry/cancel paths in discovery_test.go, Liveness 503
@@ -81,12 +81,12 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	handler := NewHealthHandler(nil)
 	handler.Boot = bootState
 
-	// Phase 1 — /healthz surfaces the diagnostic verbatim with 503. This is
-	// the operator-facing contract: `curl /healthz` answers "why can't this
+	// Phase 1 — /livez surfaces the diagnostic verbatim with 503. This is
+	// the operator-facing contract: `curl /livez` answers "why can't this
 	// process serve traffic" instead of the operator having to grep a
 	// restart-loop log.
 	rec := httptest.NewRecorder()
-	handler.Liveness(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil))
+	handler.Liveness(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"degraded"`)
 	assert.Contains(t, rec.Body.String(), "connection refused")
@@ -102,14 +102,14 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	require.NoError(t, retryErr, "retry loop should succeed on the 4th attempt")
 	bootState.Set(nil)
 
-	// Phase 3 — /healthz flips to 200 once BootState is cleared. This is
+	// Phase 3 — /livez flips to 200 once BootState is cleared. This is
 	// the sticky-from-here invariant the CHANGELOG calls out: BootState
 	// won't be touched again for the rest of the process lifetime, so
-	// /healthz remains 200 even if ClickHouse goes unreachable later
-	// (that case is reflected in /readyz, not /healthz — covered by the
+	// /livez remains 200 even if ClickHouse goes unreachable later
+	// (that case is reflected in /readyz, not /livez — covered by the
 	// integration test in tests/integration/boot_resilience_test.go).
 	rec = httptest.NewRecorder()
-	handler.Liveness(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil))
+	handler.Liveness(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"ok"`)
 

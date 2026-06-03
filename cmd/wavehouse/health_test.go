@@ -13,9 +13,9 @@ import (
 )
 
 // runHealthCheck is the Dockerfile HEALTHCHECK probe — the bridge between
-// the in-process /healthz endpoint and the docker daemon's container-health
+// the in-process /livez endpoint and the docker daemon's container-health
 // state. These tests pin the contract that holds the boot-non-fatal promise
-// together: when wavehouse is boot-degraded, /healthz returns 503 and the
+// together: when wavehouse is boot-degraded, /livez returns 503 and the
 // probe must return 1 so Docker marks the container unhealthy. Without this
 // coverage, a regression that swallowed non-200 responses would silently
 // re-create the "stuck container" failure mode the PR is solving.
@@ -36,10 +36,10 @@ func portFromListener(t *testing.T, ln net.Listener) string {
 
 func TestRunHealthCheck_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The probe targets /healthz specifically — pin that contract here
+		// The probe targets /livez specifically — pin that contract here
 		// so a refactor that points the probe at /readyz (which requires
 		// ClickHouse) doesn't slip through silently.
-		assert.Equal(t, "/healthz", r.URL.Path)
+		assert.Equal(t, "/livez", r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -50,7 +50,7 @@ func TestRunHealthCheck_Success(t *testing.T) {
 
 func TestRunHealthCheck_BootDegraded503(t *testing.T) {
 	// This is the user-facing contract under boot-degraded state: the
-	// in-process /healthz returns 503 with a diagnostic body, the probe
+	// in-process /livez returns 503 with a diagnostic body, the probe
 	// sees the non-200, returns 1, and Docker's HEALTHCHECK marks the
 	// container unhealthy. The K8s startupProbe path in deployment.md
 	// relies on exactly this signal.
