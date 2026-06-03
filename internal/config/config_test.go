@@ -368,6 +368,10 @@ func TestValidate_PrometheusPathReservedConflicts(t *testing.T) {
 		port    int
 		wantSub string
 	}{
+		// Canonical K8s-convention probe names.
+		{"healthz probe", "/healthz", 0, "reserved endpoint"},
+		{"readyz probe", "/readyz", 0, "reserved endpoint"},
+		// Deprecated aliases (kept for v0.1.x, removed in v0.2.0).
 		{"health probe", "/health", 0, "reserved endpoint"},
 		{"ready probe", "/ready", 0, "reserved endpoint"},
 		{"v1 root same-port", "/v1", 0, "authenticated /v1"},

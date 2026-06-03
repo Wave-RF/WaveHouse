@@ -180,24 +180,24 @@ describe("SysNamespace", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("health() GETs /health", async () => {
+  it("health() GETs /healthz", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
 
     const ns = new SysNamespace(makeCtx());
     const result = await ns.health();
 
     expect(result.data).toEqual({ status: "ok" });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/health");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/healthz");
   });
 
-  it("ready() GETs /ready", async () => {
+  it("ready() GETs /readyz", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ status: "ready" }), { status: 200 }));
 
     const ns = new SysNamespace(makeCtx());
     const result = await ns.ready();
 
     expect(result.data).toEqual({ status: "ready" });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/ready");
+    expect(fetchSpy.mock.calls[0][0]).toContain("/readyz");
   });
 
   it("ready() returns error when service is down", async () => {

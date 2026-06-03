@@ -14,7 +14,7 @@ export class SysNamespace {
   async health(opts?: { signal?: AbortSignal }): Promise<Result<Health>> {
     const { data, error } = await request<Health>(this._ctx, {
       method: "GET",
-      path: "/health",
+      path: "/healthz",
       signal: opts?.signal,
     });
     if (error) return err(error);
@@ -25,7 +25,7 @@ export class SysNamespace {
   async ready(opts?: { signal?: AbortSignal }): Promise<Result<Ready>> {
     const { data, error } = await request<Ready>(this._ctx, {
       method: "GET",
-      path: "/ready",
+      path: "/readyz",
       signal: opts?.signal,
     });
     if (error) return err(error);
