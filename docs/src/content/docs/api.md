@@ -55,7 +55,7 @@ The body is always a JSON object that includes an `error` field describing the f
 {"error": "invalid json"}
 ```
 
-Some endpoints (notably `/ready`) include additional fields like `status` alongside `error`; the guarantee is that an `error` field is always present and parseable.
+Some endpoints attach extra fields alongside `error` on their **failure** responses — e.g. a failing `/readyz` returns `{"status":"not ready","error":"…"}`. The guarantee is scoped to failures: whenever a response signals an error (any 4xx/5xx), an `error` field is present and parseable. Success responses carry each endpoint's own shape and need **not** include `error` — a healthy `/readyz` returns just `{"status":"ready"}`.
 
 This contract holds for:
 
@@ -72,7 +72,9 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 
 ## Endpoints
 
-### `GET /health` — Liveness Probe
+### `GET /livez` — Liveness Probe
+
+> Canonical name (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). Also served at **`/healthz`** (a permanent alias — the most widely-recognized name) and **`/health`** (deprecated, removed in v0.2.0).
 
 Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
@@ -90,11 +92,13 @@ Returns `200 OK` once the gateway has discovered ClickHouse table schemas at lea
 
 Status code: `503 Service Unavailable`
 
-The boot-degraded response lets an operator `curl /health` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
+The boot-degraded response lets an operator `curl /livez` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/livez` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/readyz`, not `/livez`.
 
 ---
 
-### `GET /ready` — Readiness Probe
+### `GET /readyz` — Readiness Probe
+
+> Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
 
 Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
 
@@ -111,6 +115,27 @@ Returns `200 OK` if the process is fully booted (schema discovery complete) and 
 ```
 
 Status code: `503 Service Unavailable`
+
+### Liveness vs readiness — behavior matrix
+
+`/livez` (liveness) and `/readyz` (readiness) answer different questions, so they diverge once the process has booted. `/livez` is **sticky**: after the first successful schema discovery it stays `200` for the rest of the process lifetime, even if ClickHouse later becomes unreachable — liveness asks "is the process alive and past boot," not "is its backend up right now." `/readyz` stays **conditional**: it pings ClickHouse on every call and drops back to `503` whenever ClickHouse is unreachable.
+
+| State                      | `/livez` | `/readyz` |
+|----------------------------|:--------:|:---------:|
+| Booting, ClickHouse down   | 503      | 503       |
+| ClickHouse up after retry  | 200      | 200       |
+| Post-boot, ClickHouse dies | 200 ★    | 503       |
+| Post-boot, ClickHouse back | 200      | 200       |
+
+★ Once boot completes, `/livez` no longer tracks ClickHouse state — a runtime ClickHouse outage surfaces in `/readyz` only. This is what keeps a Kubernetes `livenessProbe` from restart-looping the pod during a transient backend blip (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)).
+
+---
+
+### `GET /v1/health` — Liveness ping (public, content-free)
+
+Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
+
+This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
 
 ---
 

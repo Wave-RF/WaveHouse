@@ -30,8 +30,6 @@ export type {
   FetchOptions,
   // Query
   FilterOp,
-  // Health
-  Health,
   // Ingest
   InsertResult,
   OrderClause,
@@ -42,7 +40,6 @@ export type {
   Policy,
   PolicyFilter,
   QueryFilter,
-  Ready,
   Result,
   RolePermissions,
   Schemas,

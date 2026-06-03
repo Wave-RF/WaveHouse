@@ -180,35 +180,14 @@ describe("SysNamespace", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("health() GETs /health", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+  it("health() GETs /v1/health (content-free)", async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 200 }));
 
     const ns = new SysNamespace(makeCtx());
     const result = await ns.health();
 
-    expect(result.data).toEqual({ status: "ok" });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/health");
-  });
-
-  it("ready() GETs /ready", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ status: "ready" }), { status: 200 }));
-
-    const ns = new SysNamespace(makeCtx());
-    const result = await ns.ready();
-
-    expect(result.data).toEqual({ status: "ready" });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/ready");
-  });
-
-  it("ready() returns error when service is down", async () => {
-    fetchSpy.mockResolvedValue(
-      new Response(JSON.stringify({ error: "clickhouse unreachable" }), { status: 503 }),
-    );
-
-    const ns = new SysNamespace(makeCtx());
-    const result = await ns.ready();
-
-    expect(result.error?.status).toBe(503);
-    expect(result.error?.retryable).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeNull();
+    expect(fetchSpy.mock.calls[0][0]).toContain("/v1/health");
   });
 });
