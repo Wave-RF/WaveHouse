@@ -9,10 +9,16 @@ export type Database = Record<string, Record<string, unknown>>;
 
 // --- Result types ---
 
-/** Discriminated union for all async SDK operations. Never throws. */
+/**
+ * Discriminated union for all async SDK operations. Never throws.
+ *
+ * Discriminated on `ok`: `if (result.ok)` narrows to the success arm (and tells
+ * the compiler `data` is present), while `error` is always available for
+ * debugging on failure. `data`/`error` remain populated as before.
+ */
 export type Result<T> =
-  | { data: T; error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
-  | { data: null; error: WaveHouseError; hasMore?: false; next?: undefined };
+  | { ok: true; data: T; error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
+  | { ok: false; data: null; error: WaveHouseError; hasMore?: false; next?: undefined };
 
 /** Structured error returned by all SDK operations. */
 export interface WaveHouseError {

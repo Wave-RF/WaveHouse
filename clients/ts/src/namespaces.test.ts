@@ -186,6 +186,7 @@ describe("SysNamespace", () => {
     const ns = new SysNamespace(makeCtx());
     const result = await ns.health();
 
+    expect(result.ok).toBe(true);
     expect(result.error).toBeNull();
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/health");
   });
