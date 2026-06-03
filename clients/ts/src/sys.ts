@@ -1,8 +1,8 @@
 import { err, ok } from "./errors.js";
 import { request } from "./http.js";
-import type { HttpContext, Ready, Result } from "./types.js";
+import type { HttpContext, Result } from "./types.js";
 
-/** Namespace for system health and readiness probes. */
+/** Namespace for the SDK's content-free server-online check. */
 export class SysNamespace {
   private readonly _ctx: HttpContext;
 
@@ -26,16 +26,5 @@ export class SysNamespace {
     });
     if (error) return err(error);
     return ok<void>(undefined);
-  }
-
-  /** Readiness probe — returns `{ status: "ready" }` or 503 with error details. */
-  async ready(opts?: { signal?: AbortSignal }): Promise<Result<Ready>> {
-    const { data, error } = await request<Ready>(this._ctx, {
-      method: "GET",
-      path: "/readyz",
-      signal: opts?.signal,
-    });
-    if (error) return err(error);
-    return ok(data!);
   }
 }

@@ -189,26 +189,4 @@ describe("SysNamespace", () => {
     expect(result.error).toBeNull();
     expect(fetchSpy.mock.calls[0][0]).toContain("/v1/health");
   });
-
-  it("ready() GETs /readyz", async () => {
-    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ status: "ready" }), { status: 200 }));
-
-    const ns = new SysNamespace(makeCtx());
-    const result = await ns.ready();
-
-    expect(result.data).toEqual({ status: "ready" });
-    expect(fetchSpy.mock.calls[0][0]).toContain("/readyz");
-  });
-
-  it("ready() returns error when service is down", async () => {
-    fetchSpy.mockResolvedValue(
-      new Response(JSON.stringify({ error: "clickhouse unreachable" }), { status: 503 }),
-    );
-
-    const ns = new SysNamespace(makeCtx());
-    const result = await ns.ready();
-
-    expect(result.error?.status).toBe(503);
-    expect(result.error?.retryable).toBe(true);
-  });
 });

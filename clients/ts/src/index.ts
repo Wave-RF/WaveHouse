@@ -40,7 +40,6 @@ export type {
   Policy,
   PolicyFilter,
   QueryFilter,
-  Ready,
   Result,
   RolePermissions,
   Schemas,

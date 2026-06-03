@@ -130,13 +130,6 @@ export interface DLQStats {
   total: number;
 }
 
-// --- Readiness type ---
-
-export interface Ready {
-  status: string;
-  error?: string;
-}
-
 // --- Pipe types ---
 
 export interface Pipe {

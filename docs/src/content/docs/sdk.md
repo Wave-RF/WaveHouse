@@ -428,7 +428,7 @@ const stream = wh.dlq.stream();
 
 ## System — `wh.sys`
 
-Liveness ping and readiness probe.
+Content-free server-online check.
 
 ```ts
 // health() hits the public, content-free /v1/health route — 200/503, no body.
@@ -437,10 +437,9 @@ const { error } = await wh.sys.health();
 if (!error) {
   // server is up and past boot
 }
-
-const { data } = await wh.sys.ready();
-// data: { status: 'ready' } or { status: 'not ready', error: '...' }
 ```
+
+> Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.
 
 ---
 
@@ -663,8 +662,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .table(name) → Promise<Result<DLQStats>>
 │   └── .stream() → StreamController
 └── .sys
-    ├── .health() → Promise<Result<void>>
-    └── .ready() → Promise<Result<Ready>>
+    └── .health() → Promise<Result<void>>
 
 StreamController (NOT thenable)
 ├── .subscribe({ next, status?, error? }) → unsubscribe()
