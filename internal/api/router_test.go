@@ -269,6 +269,10 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		path   string
 		expect int // expected status (not 404/405)
 	}{
+		// Canonical K8s-convention probes.
+		{http.MethodGet, "/healthz", http.StatusOK},
+		{http.MethodGet, "/readyz", http.StatusOK},
+		// Deprecated aliases (kept for v0.1.x, removed in v0.2.0).
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodGet, "/ready", http.StatusOK},
 		{http.MethodGet, "/version", http.StatusOK},

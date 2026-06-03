@@ -130,7 +130,7 @@ func clampBackoff(initialBackoff, maxBackoff time.Duration) (time.Duration, time
 // RetryRefresh repeatedly calls Refresh with exponential backoff until it
 // succeeds or ctx is cancelled. onAttempt is invoked after each failed
 // attempt with the resulting error, letting callers surface the latest
-// diagnostic (e.g. via /health) while the registry is still degraded.
+// diagnostic (e.g. via /healthz) while the registry is still degraded.
 //
 // The first attempt fires immediately. After a failure the loop sleeps for
 // initialBackoff, then doubles up to maxBackoff between attempts. Returns
@@ -149,7 +149,7 @@ func (sr *SchemaRegistry) RetryRefresh(ctx context.Context, initialBackoff, maxB
 			// fires onAttempt with `context.Canceled`, which the wavehouse
 			// boot path then writes into BootState as
 			//   "schema discovery: context canceled"
-			// — visible to anyone curl'ing /health during the shutdown
+			// — visible to anyone curl'ing /healthz during the shutdown
 			// window. Not wrong, just noise.
 			onAttempt(err)
 		}

@@ -231,35 +231,37 @@ The directory is a *seed*, not authoritative storage: after bootstrap, the API +
 
 ## Health Checks
 
-API servers in standalone mode expose two health endpoints:
+API servers in standalone mode expose liveness and readiness endpoints under the Kubernetes-convention names `/healthz` and `/readyz`:
 
-- `GET /health` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/health` stays 200 — transient ClickHouse blips at runtime are reflected in `/ready`, not `/health`.
-- `GET /ready` — Readiness probe. Returns 200 if the gateway is fully booted and ClickHouse is currently reachable, 503 otherwise.
+- `GET /healthz` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/healthz` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/healthz`.
+- `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and ClickHouse is currently reachable, 503 otherwise.
+
+`/health` and `/ready` remain registered as **deprecated aliases** of `/healthz` and `/readyz` for the v0.1.x line, and will be removed in v0.2.0. Point new deployments at the `/healthz` / `/readyz` names.
 
 Configure your load balancer or orchestrator to use these endpoints.
 
 ### Boot-time degraded mode
 
-If ClickHouse is unreachable when WaveHouse starts (connection refused, missing database, DNS failure, etc.), the gateway no longer exits — it binds `:8080` and serves `/health` 503 with the latest schema-discovery error as the diagnostic. Schema discovery retries in the background with exponential backoff (2s → 60s cap). Once a Refresh succeeds, `/health` flips to 200 and normal serving begins automatically.
+If ClickHouse is unreachable when WaveHouse starts (connection refused, missing database, DNS failure, etc.), the gateway no longer exits — it binds `:8080` and serves `/healthz` 503 with the latest schema-discovery error as the diagnostic. Schema discovery retries in the background with exponential backoff (2s → 60s cap). Once a Refresh succeeds, `/healthz` flips to 200 and normal serving begins automatically.
 
 This means:
 
 - The binary itself no longer exits and crash-loops every ~10s under a supervisor. Process state is preserved across CH outages.
-- An operator can `curl /health` and read the exact failure mode instead of grepping a restart-loop log.
+- An operator can `curl /healthz` and read the exact failure mode instead of grepping a restart-loop log.
 - `/v1/ingest?table={table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
 
-**Important — orchestrator restart semantics.** `/health` returning 503 during the retry window is what most LB / `depends_on` setups want (route around the unready instance, hold dependents), but a Kubernetes `livenessProbe` pointed at `/health` will still mark the pod unhealthy and restart it after `failureThreshold × periodSeconds` elapses (default ~30s) — effectively re-creating the restart loop at a slower cadence. Use a `startupProbe` to gate liveness/readiness until the first successful schema discovery (see the K8s example below). Docker `HEALTHCHECK` marks the container `(unhealthy)` but does not restart it by default, so docker-compose deployments don't need a separate startupProbe-equivalent — the `HEALTHCHECK`'s `--start-period=15s` plus `service_healthy` dependency wait covers the same idea at a smaller scale.
+**Important — orchestrator restart semantics.** `/healthz` returning 503 during the retry window is what most LB / `depends_on` setups want (route around the unready instance, hold dependents), but a Kubernetes `livenessProbe` pointed at `/healthz` will still mark the pod unhealthy and restart it after `failureThreshold × periodSeconds` elapses (default ~30s) — effectively re-creating the restart loop at a slower cadence. Use a `startupProbe` to gate liveness/readiness until the first successful schema discovery (see the K8s example below). Docker `HEALTHCHECK` marks the container `(unhealthy)` but does not restart it by default, so docker-compose deployments don't need a separate startupProbe-equivalent — the `HEALTHCHECK`'s `--start-period=15s` plus `service_healthy` dependency wait covers the same idea at a smaller scale.
 
 ### Docker `HEALTHCHECK`
 
-Both bundled Dockerfiles (`deployments/Dockerfile` and `deployments/Dockerfile.goreleaser`) ship a built-in `HEALTHCHECK` that probes `/health` every 10 seconds. Because the runtime image is distroless (no shell, no `curl`/`wget`), the check uses the binary's own `health` subcommand:
+Both bundled Dockerfiles (`deployments/Dockerfile` and `deployments/Dockerfile.goreleaser`) ship a built-in `HEALTHCHECK` that probes `/healthz` every 10 seconds. Because the runtime image is distroless (no shell, no `curl`/`wget`), the check uses the binary's own `health` subcommand:
 
 ```dockerfile
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
   CMD ["/app/wavehouse", "health"]
 ```
 
-The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/health` and exits 0 (200 OK) or 1 (anything else). It honours `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
+The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/healthz` and exits 0 (200 OK) or 1 (anything else). It honours `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
 
 You can run it manually for debugging:
 
@@ -291,17 +293,17 @@ If you need different intervals (e.g. faster probes for E2E tests), override per
 
 ### Kubernetes / orchestrator note
 
-K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside the container — they don't go through the Dockerfile `HEALTHCHECK` at all. Configure them directly against `/health` and `/ready` in the PodSpec, and add a `startupProbe` so the boot-time schema-discovery retry window doesn't trip liveness and restart the pod:
+K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside the container — they don't go through the Dockerfile `HEALTHCHECK` at all. Configure them directly against `/healthz` and `/readyz` in the PodSpec, and add a `startupProbe` so the boot-time schema-discovery retry window doesn't trip liveness and restart the pod:
 
 ```yaml
 startupProbe:
-  httpGet: { path: /health, port: 8080 }
+  httpGet: { path: /healthz, port: 8080 }
   failureThreshold: 30    # allow up to 5 min for first schema discovery (30 × periodSeconds)
   periodSeconds: 10
 livenessProbe:
-  httpGet: { path: /health, port: 8080 }
+  httpGet: { path: /healthz, port: 8080 }
 readinessProbe:
-  httpGet: { path: /ready,  port: 8080 }
+  httpGet: { path: /readyz,  port: 8080 }
 ```
 
 Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readinessProbe` against the pod — so a slow or temporarily-unreachable ClickHouse can't restart-loop the pod via the liveness path. Size `failureThreshold` to your expected worst-case CH boot time; the default 30 × 10s = 5min is generous and works for compose-on-NAS-style deployments where CH and WaveHouse can race during a host reboot.

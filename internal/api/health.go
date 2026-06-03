@@ -8,12 +8,12 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// BootState tracks a one-shot startup diagnostic surfaced by /health. While
+// BootState tracks a one-shot startup diagnostic surfaced by /healthz. While
 // Err() returns non-nil the binary is considered to be in degraded-boot mode:
-// /health responds 503 with the diagnostic message instead of 200, so an
+// /healthz responds 503 with the diagnostic message instead of 200, so an
 // operator can curl the endpoint to learn why the gateway isn't accepting
 // traffic yet. Once boot work (today: ClickHouse schema discovery) succeeds,
-// Set(nil) flips /health back to 200.
+// Set(nil) flips /healthz back to 200.
 //
 // BootState is safe for concurrent use.
 type BootState struct {

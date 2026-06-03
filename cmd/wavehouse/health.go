@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// runHealthCheck performs a liveness probe by GETting /health on the local
+// runHealthCheck performs a liveness probe by GETting /healthz on the local
 // HTTP listener. Returns 0 if the server responds with 200, 1 otherwise.
 //
 // This exists so the distroless `Dockerfile`s can ship a self-probing
@@ -32,12 +32,14 @@ func runHealthCheck() int {
 	}
 
 	// URL components are all locally controlled: literal `127.0.0.1`,
-	// integer-parsed port, literal `/health`. Gosec's G704 taint
+	// integer-parsed port, literal `/healthz`. Gosec's G704 taint
 	// analysis flags the env-var flow regardless of validation, so the
-	// nosec annotations are explicit acknowledgements.
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	// nosec annotations are explicit acknowledgements. Uses the canonical
+	// /healthz name rather than the deprecated /health alias so our own
+	// tooling doesn't break when the alias is removed in v0.2.0.
+	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
 
-	// Short timeout. The /health handler is in-memory only — no DB, no
+	// Short timeout. The /healthz handler is in-memory only — no DB, no
 	// network — so a healthy server responds in microseconds. 3s is the
 	// HEALTHCHECK --timeout value; we want to fail well before that so
 	// the docker daemon's timeout never trips.

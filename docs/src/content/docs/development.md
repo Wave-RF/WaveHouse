@@ -111,9 +111,13 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 # With gap-fill (replays events since the given timestamp, then switches to live)
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 
-# Health check (no auth required)
-curl http://localhost:8080/health
+# Liveness check (no auth required)
+curl http://localhost:8080/healthz
 # → {"status":"ok"}
+
+# Readiness check (no auth required)
+curl http://localhost:8080/readyz
+# → {"status":"ready"}
 
 # DLQ stats
 curl http://localhost:8080/v1/dlq/stats

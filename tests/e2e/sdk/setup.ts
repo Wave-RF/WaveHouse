@@ -106,7 +106,7 @@ export async function setup(): Promise<void> {
       `ClickHouse not reachable at ${CH_URL}. Use the orchestrator (\`make test-e2e\`).`,
     );
   }
-  if (!(await probe(`${WH_URL}/health`))) {
+  if (!(await probe(`${WH_URL}/healthz`))) {
     throw new Error(
       `WaveHouse not reachable at ${WH_URL}. Use the orchestrator (\`make test-e2e\`).`,
     );

@@ -55,7 +55,7 @@ The body is always a JSON object that includes an `error` field describing the f
 {"error": "invalid json"}
 ```
 
-Some endpoints (notably `/ready`) include additional fields like `status` alongside `error`; the guarantee is that an `error` field is always present and parseable.
+Some endpoints (notably `/readyz`) include additional fields like `status` alongside `error`; the guarantee is that an `error` field is always present and parseable.
 
 This contract holds for:
 
@@ -72,7 +72,9 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 
 ## Endpoints
 
-### `GET /health` — Liveness Probe
+### `GET /healthz` — Liveness Probe
+
+> Canonical name (Kubernetes convention). Also served at **`/health`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
 
 Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
@@ -90,11 +92,13 @@ Returns `200 OK` once the gateway has discovered ClickHouse table schemas at lea
 
 Status code: `503 Service Unavailable`
 
-The boot-degraded response lets an operator `curl /health` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/health` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/ready`, not `/health`.
+The boot-degraded response lets an operator `curl /healthz` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/healthz` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/readyz`, not `/healthz`.
 
 ---
 
-### `GET /ready` — Readiness Probe
+### `GET /readyz` — Readiness Probe
+
+> Canonical name (Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
 
 Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
 
