@@ -1,6 +1,6 @@
 ---
 name: pr-review-locally
-description: Use when a user wants to review someone else's open PR locally without commenting on the PR. Triggers on phrases like "review PR <N>", "look at PR <N>", "audit PR <N>", "pull down PR <N> and review", "check out PR <N> for me". Covers worktrunk's `wt switch pr:<N>` syntax (gh-CLI-backed), the `gh pr checkout` fallback, and how to optionally fire the CI claude-review for the bot to comment on the PR remotely. Pairs with the pre-push-reviewer subagent.
+description: Use when a user wants to review someone else's open PR locally without commenting on the PR. Triggers on phrases like "review PR <N>", "look at PR <N>", "audit PR <N>", "pull down PR <N> and review", "check out PR <N> for me". Covers worktrunk's `wt switch pr:<N>` syntax (gh-CLI-backed) and the `gh pr checkout` fallback. Pairs with the pre-push-reviewer subagent.
 ---
 
 # Reviewing someone else's PR locally
@@ -53,32 +53,13 @@ Present the subagent's output. Don't auto-fix anything — the PR belongs to som
 
 If the user asks "should I approve?", that's their call — you can summarize the verdict (`Ship it` / `Iterate` / `Block`) and highlight the highest-severity findings, but the actual approval decision is theirs.
 
-## Two modes
+## Findings stay local
 
-### Local-only (default)
-
-The above procedure. Findings stay in your local session. Nothing is posted to the PR. Use for "I want a thorough read of this PR before I review it manually," "what would Claude flag here?", or "audit this PR for me."
-
-### Make the bot comment on the PR remotely
-
-If the user explicitly asks for the bot to post on the PR (not just local feedback), the mechanism is the **CI claude-review workflow** — NOT manual comments from the local session. Trigger it:
-
-```bash
-gh workflow run "Claude PR review" -f pr_number=<N>
-```
-
-That fires `.github/workflows/claude-review.yml` against PR `<N>`. `gh` picks up the repo from the current worktree, matching the convention used elsewhere in AGENTS.md. The workflow:
-
-- Runs the same `.github/prompts/pr-review.md` prompt
-- Posts inline review comments at line-level
-- Edits a sticky verdict summary comment (one per PR)
-- Gates on trust (HEAD's author / committer must have ≥read on the repo)
-
-This is the same path as posting `@claude` or `/review` as a PR comment — both end up firing the workflow.
+This is a local-only audit — findings stay in your session and nothing is posted to the PR. Use it for "I want a thorough read of this PR before I review it manually," "what would the reviewer flag here?", or "audit this PR for me." There is no bot-comment path from this skill; surface the findings to the user and let them decide what to act on.
 
 ## What NOT to do
 
-- ❌ **Don't run the reviewer locally and then post comments on the PR manually.** The CI workflow exists for that and handles trust gating + sticky-comment editing properly. Manual comments fragment the dialog and don't match the bot's conventions.
+- ❌ **Don't run the reviewer locally and then post comments on the PR manually.** This is a local-only audit — surface findings to the user. The PR belongs to someone else; the human reviewer decides what to post.
 - ❌ **Don't `--add-reviewer` yourself or others to the PR.** Blocked by `.claude/hooks/agent-bash-gate.sh` anyway. Bot reviewers re-trigger via comment mentions; humans add themselves.
 - ❌ **Don't switch back to your own branch before presenting findings.** Stay in the PR's worktree until you've reported to the user.
 - ❌ **Don't approve, request-changes, or merge the PR.** Approval is humans-only (`gh pr review --approve` is denied). Merge is denied. Request-changes is denied. Surface findings, let the human reviewer act.
