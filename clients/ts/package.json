@@ -43,12 +43,15 @@
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
+  "author": "Wave RF",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Wave-RF/WaveHouse",
+    "url": "git+https://github.com/Wave-RF/WaveHouse.git",
     "directory": "clients/ts"
   },
+  "homepage": "https://wavehouse.dev",
+  "bugs": "https://github.com/Wave-RF/WaveHouse/issues",
   "keywords": [
     "wavehouse",
     "clickhouse",

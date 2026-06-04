@@ -132,4 +132,4 @@ See the full [SDK API Reference](https://wavehouse.dev/sdk) for detailed documen
 
 ## License
 
-Apache-2.0
+Apache-2.0 © Wave RF — see [LICENSE](./LICENSE).

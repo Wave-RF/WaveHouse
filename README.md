@@ -23,7 +23,7 @@
     <img src="https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse" alt="Go Version">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT">
+    <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0">
   </a>
   <a href="https://github.com/Wave-RF/WaveHouse/stargazers">
     <img src="https://img.shields.io/github/stars/Wave-RF/WaveHouse?style=social" alt="Stars">
@@ -153,4 +153,4 @@ Found a vulnerability? **Don't open a public issue.** Email `security@wave-rf.co
 
 ## 📜 License
 
-Open source under the [MIT License](LICENSE).
+WaveHouse is open source under the [Apache License 2.0](LICENSE).
