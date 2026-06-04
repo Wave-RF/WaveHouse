@@ -4,9 +4,12 @@ name: Publish SDK (npm)
 # ONE trusted publisher (workflow file) per package, so the dev channel and
 # tagged releases can't be split across two files. Two jobs:
 #
-#   dev      push to main (when clients/ts changed) → 0.0.0-dev.<sha> under
-#            the `dev` dist-tag. The npm analog of the GHCR :dev image (which
-#            rides publish-dev.yml); this runs as its own job/pod.
+#   dev      push to main → 0.0.0-dev.<build-hash> under the `dev` dist-tag,
+#            published only when the built dist actually changed. The version
+#            IS a hash of the build output, so an unchanged build maps to an
+#            already-published version and is skipped. No clients/ts path guard
+#            (a shared-dep or build-config change is caught too) and no manual
+#            trigger. The npm analog of the GHCR :dev image (publish-dev.yml).
 #
 #   release  sdk-v* tag → version under `latest` (stable) or
 #            `alpha`/`beta`/`rc`/`next` (prerelease) + a GitHub Release. The
@@ -24,7 +27,6 @@ on:
   push:
     branches: [main]
     tags: ["sdk-v*"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,54 +46,48 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          # Need the previous commit to tell whether the SDK changed. Assumes
-          # one commit per main push (squash-merge), the repo's merge style.
-          fetch-depth: 2
-
-      - name: Did the SDK change?
-        id: changed
-        shell: bash
-        run: |
-          if git diff --quiet HEAD^ HEAD -- clients/ts/; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "clients/ts/ unchanged on this push — skipping npm dev publish."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
 
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
-        if: steps.changed.outputs.changed == 'true'
         with:
           version: "11.1.3"
           run_install: false
 
+      # Node 24 ships npm >= 11.5.1 for OIDC trusted publishing, and dodges the
+      # broken in-place npm self-upgrade on the Node 22.22.2 runner image
+      # (actions/runner-images#13883). The SDK build is Node-version-agnostic.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        if: steps.changed.outputs.changed == 'true'
         with:
-          node-version-file: ".nvmrc"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Upgrade npm
-        # Node 22 bundles npm 10.x; OIDC trusted publishing needs npm >= 11.5.
-        if: steps.changed.outputs.changed == 'true'
-        run: npm install --global npm@latest
-
       - name: Install workspace
-        if: steps.changed.outputs.changed == 'true'
         run: pnpm install --frozen-lockfile
 
-      - name: Publish @wavehouse/sdk@dev
-        if: steps.changed.outputs.changed == 'true'
+      - name: Typecheck and build the SDK
+        run: |
+          pnpm --filter @wavehouse/sdk run typecheck
+          pnpm --filter @wavehouse/sdk run build
+
+      - name: Publish @wavehouse/sdk@dev when the build changes
         working-directory: clients/ts
         shell: bash
         run: |
-          # 0.0.0-dev.<sha>: unique, sorts below every real release, reachable
-          # only via the `dev` dist-tag. Mirrors publish-dev.yml's synthetic
-          # v0.0.0-dev.<sha> image tag. The edit isn't committed.
-          # `npm publish` typechecks + builds via the package's prepublishOnly.
-          npm version "0.0.0-dev.${GITHUB_SHA::7}" --no-git-tag-version --allow-same-version
-          npm publish --access public --tag dev
+          # Content-addressed: the version is a hash of the built dist (file
+          # names + contents), so an unchanged build resolves to a version that
+          # already exists and we skip. Runs on every push to main; npm stamps
+          # the commit into the published manifest's gitHead for traceability.
+          hash=$(find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
+          # h-prefix keeps it a valid semver pre-release identifier even on the
+          # rare all-digit hash (a numeric identifier can't have a leading zero).
+          version="0.0.0-dev.h${hash}"
+          if npm view "@wavehouse/sdk@${version}" version >/dev/null 2>&1; then
+            echo "Build unchanged — @wavehouse/sdk@${version} already published; nothing to do."
+            exit 0
+          fi
+          npm version "${version}" --no-git-tag-version --allow-same-version
+          # --ignore-scripts publishes exactly the dist we just hashed (the
+          # typecheck + build already ran above; this skips a redundant rebuild).
+          npm publish --access public --tag dev --ignore-scripts
           # Add --provenance once Wave-RF/WaveHouse is public (#149).
 
   release:
@@ -110,13 +106,11 @@ jobs:
           version: "11.1.3"
           run_install: false
 
+      # Node 24 ships npm >= 11.5.1 for OIDC trusted publishing — see the dev job.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version-file: ".nvmrc"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
-
-      - name: Upgrade npm
-        run: npm install --global npm@latest
 
       - name: Install workspace
         run: pnpm install --frozen-lockfile
