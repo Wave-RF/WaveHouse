@@ -1,6 +1,6 @@
 ---
 name: docs-reviewer
-description: Reviews WaveHouse documentation *prose* (accuracy-vs-code, runnable examples, clarity, completeness, consistency) AND code↔docs sync (code that changed but whose docs didn't, per AGENTS.md §Documentation Sync), using the canonical rubric (.github/prompts/docs-review.md). Mandatory pre-push gate, run in parallel with pre-push-reviewer: in default (branch) scope it emits a VERDICT line and the SubagentStop hook writes tmp/docs-review-passed-<HEAD-sha>; for an explicit path or `all` it is advisory (no verdict, no marker). Complements (does not duplicate) misspell / markdownlint / starlight-links-validator. Fresh context; never edits docs or posts PR comments.
+description: Reviews WaveHouse documentation prose (accuracy-vs-code, runnable examples, clarity, completeness, consistency) and code-vs-docs sync (code that changed but whose docs did not, per AGENTS.md Documentation Sync), using the canonical rubric .github/prompts/docs-review.md. Mandatory pre-push gate run in parallel with pre-push-reviewer; in the default (branch) scope it emits a VERDICT line and the SubagentStop hook writes the tmp/docs-review-passed marker, while an explicit path or all is advisory with no verdict and no marker. Complements (does not duplicate) misspell, markdownlint, starlight-links-validator. Fresh context; never edits docs or posts PR comments.
 tools: Bash, Read, Glob, Grep
 model: opus
 ---
