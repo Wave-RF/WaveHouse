@@ -188,13 +188,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm exec wrangler deploy
 
-      # PRs: upload a non-active version and capture its preview URL.
-      # Best-effort (continue-on-error) — a flaky preview upload shouldn't
-      # block an otherwise-green PR.
+      # PRs: upload a non-active version and capture its preview URL. A real
+      # upload failure (e.g. a misscoped CLOUDFLARE_API_TOKEN → "Authentication
+      # error [code: 10000]") reds the PR instead of hiding — the retry loop
+      # first absorbs transient Cloudflare API blips so a one-off hiccup
+      # doesn't. (Still gated behind the whole `make ci` above, so an unrelated
+      # test flake there can also block it.)
       - name: Upload docs preview
         id: preview
         if: steps.cfsecrets.outputs.ok == 'true' && github.event_name == 'pull_request'
-        continue-on-error: true
         working-directory: docs
         shell: bash
         env:
@@ -202,14 +204,25 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           log="$RUNNER_TEMP/wrangler-upload.log"
-          pnpm exec wrangler versions upload 2>&1 | tee "$log"
+          # Retry absorbs transient CF API blips; a persistent failure falls
+          # through to exit 1 and reds the PR.
+          n=0
+          until pnpm exec wrangler versions upload 2>&1 | tee "$log"; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::wrangler versions upload failed after $n attempts — see log above."
+              exit 1
+            fi
+            echo "::warning::wrangler versions upload failed (attempt $n/3) — retrying in 10s."
+            sleep 10
+          done
           url="$(grep -iE 'Version Preview URL' "$log" | grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' | head -1 || true)"
           [ -z "$url" ] && url="$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' "$log" | head -1 || true)"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           if [ -n "$url" ]; then
             { echo "### 📚 Docs preview"; echo "$url"; } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::Could not parse a preview URL from the wrangler output."
+            echo "::warning::Upload succeeded but no preview URL was parsed from the wrangler output."
           fi
 
       # One sticky comment, updated in place (matched by the marker) so
