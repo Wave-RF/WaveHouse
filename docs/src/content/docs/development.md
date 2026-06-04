@@ -82,28 +82,31 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no external cache needed
-- **No JWT secret** by default — requests resolve to the policy `default_role`
+- **Fail-closed** by default — `config.yaml` seeds no policy, so every request is denied until you seed one (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
 
 ### Test the API
 
+`make dev` is **fail-closed** — `config.yaml` seeds no policy, so every request is denied. Point it at the shipped dev policy (the `public` trial role: read/write `clicks`/`events`, no token) and (re)start it:
+
 ```bash
-# Ingest data — `make dev` is fail-closed (no policy seeded). Seed one first, e.g. WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml, then restart (seeds only while the policy store is empty). See Access Control.
+WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
+```
+
+Then the tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
+
+```bash
+# Ingest an event
 curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
-# Check discovered schemas
-curl -s http://localhost:8080/v1/schema | jq
-
-# Query events (wait a few seconds for the batch flush). `/v1/admin/query` is
-# admin-only: send a valid JWT whose role is the policy `admin_role`
-# ("admin" by default) via `Authorization: Bearer <jwt>`.
-curl -s -X POST http://localhost:8080/v1/admin/query \
+# Query it back (wait ~5s for the batch flush)
+curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
+  -d '{"columns": ["page", "button", "score"], "limit": 10}'
 
 # Open an SSE stream for a specific table (Ctrl+C to stop)
 curl -N "http://localhost:8080/v1/stream?table=clicks"
@@ -111,16 +114,18 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 # With gap-fill (replays events since the given timestamp, then switches to live)
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 
-# Liveness check (no auth required)
-curl http://localhost:8080/livez
-# → {"status":"ok"}
+# Liveness / readiness (no auth required)
+curl http://localhost:8080/livez   # → {"status":"ok"}
+curl http://localhost:8080/readyz  # → {"status":"ready"}
+```
 
-# Readiness check (no auth required)
-curl http://localhost:8080/readyz
-# → {"status":"ready"}
+The admin surface — `/v1/schema`, `/v1/admin/query` (raw SQL), `/v1/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
 
-# DLQ stats
-curl http://localhost:8080/v1/dlq/stats
+```bash
+curl -s http://localhost:8080/v1/schema -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X POST http://localhost:8080/v1/admin/query -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
+curl -s http://localhost:8080/v1/dlq/stats -H "Authorization: Bearer $TOKEN"
 ```
 
 ### How `make dev` works
@@ -139,8 +144,8 @@ dev: deps-up $(AIR)
 
 **While `make dev` is running you get:**
 
-- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
-- No JWT secret set by default, so every request resolves to the policy `default_role`. Override with env vars (see below).
+- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
+- A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
 - Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
@@ -181,43 +186,36 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 2. Open Tab 2: run `make dev` (or `make test-e2e`)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
-### Using the SDK playground against `make dev`
+### Using the SDK against `make dev`
 
-The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse signing JWTs with the secret `sdk-dev-secret`. To match under `make dev`:
-
-```bash
-WH_AUTH_JWT_SECRET=sdk-dev-secret make dev
-```
-
-Then in another terminal:
+There's no bundled playground — point the published `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`), with the dev policy seeded so requests are authorized:
 
 ```bash
-cd clients/ts
-pnpm install
-npx tsx playground/setup.ts          # seed sample tables + data
-npx tsx playground/public.ts         # SDK demo against the live server
+WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 ```
+
+See the [SDK guide](/sdk) for the client API and examples.
 
 Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs. Set `WH_AUTH_JWT_SECRET` so tokens can be validated; without it, every request resolves to the policy `default_role`. Mint a JWT signed with that secret (role == the policy `admin_role`) to reach admin/elevated endpoints:
+There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies everyone, admins included). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
 
 ```bash
-WH_AUTH_JWT_SECRET=my-secret make dev
+WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
-Then generate a test token:
+Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
-export TOKEN=$(jwt encode --secret "my-secret" '{"exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "my-secret" '{"role": "admin", "exp": 9999999999}')
 
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"page": "/home", "button": "signup"}'
+  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
 
 ### Enable Dedup (Optional)

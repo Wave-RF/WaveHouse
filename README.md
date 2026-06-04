@@ -47,16 +47,19 @@
 
 ## ⚡ Try it in 30 seconds
 
-<!-- TODO: update this -->
-
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
-docker compose -f deployments/compose/standalone.yaml up -d   # ClickHouse + WaveHouse
+docker compose -f deployments/compose/standalone.yaml up -d   # ClickHouse + WaveHouse (ships a dev policy)
 
-# ingest an event, then watch it stream back live
+# create a table (Bring Your Own Schema)
+docker compose -f deployments/compose/standalone.yaml exec clickhouse \
+  clickhouse-client --query "CREATE TABLE IF NOT EXISTS events (kind String, user String, received_timestamp DateTime64(3,'UTC') DEFAULT now64(3,'UTC')) ENGINE=MergeTree ORDER BY kind"
+
+# stream live events in one terminal, then ingest one in another and watch it arrive
+curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
+# in another terminal, ingest an event (no auth needed with the dev policy)
 curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
   -H 'content-type: application/json' -d '{"kind":"click","user":"u_42"}'
-curl -N "http://localhost:8080/v1/stream?table=events"
 ```
 
 Full walkthrough → **[wavehouse.dev/getting-started](https://wavehouse.dev/getting-started)**.
@@ -67,7 +70,7 @@ ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it
 
 If you're building user-facing analytics, WaveHouse is like **Supabase for ClickHouse** — or an **open-source Tinybird** that pushes data to the frontend in real time over SSE, not just pull-based REST.
 
-- **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional exact-match dedup; dead-letter queue for failed inserts.
+- **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional ID-based dedup (idempotent ingest); dead-letter queue for failed inserts.
 - **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
 - **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
@@ -93,14 +96,12 @@ Pick whichever fits — each ends with WaveHouse listening on `http://localhost:
 
 ### A. Docker Compose (recommended first run)
 
-<!-- TODO: update this -->
-
 ```bash
 git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 ```
 
-Then create a table in ClickHouse (Bring Your Own Schema) and ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
+The stack ships a permissive dev policy, so you can ingest without a token. Create a table in ClickHouse (Bring Your Own Schema), then ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
 
 ### B. Prebuilt container image
 
@@ -115,31 +116,20 @@ docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
 ```
 
-You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR`.
+You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR` (defaults to `localhost:9000`).
 See [Configuration](https://wavehouse.dev/configuration).
 
 ## 🚦 Project status
 
 WaveHouse is in **alpha** — built in the open, MIT-licensed, no vendor lock-in. See [SUPPORT.md](SUPPORT.md) for where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now.
 
-Here's the high-level status of the major capabilities:
+Track what's shipped, in progress, and planned on the [**project board**](https://github.com/orgs/Wave-RF/projects/7).
 
-| Capability                    | Status |
-| ----------------------------- | ------ |
-| Async ingest + batch flush    |   ✅   |
-| Schema validation             |   ⚠️   |
-| Real-time SSE + gap-fill      |   ✅   |
-| Query cache + singleflight    |   ✅   |
-| Access control (JWT policies) |   ⚠️   |
-| Named pipes                   |   ⚠️   |
-| Exact-match dedup             |   ⚠️   |
-| TypeScript SDK                |   ⚠️   |
-
-<!-- TODO: update the above list and/or switch to roadmap somewhere? Maybe link to project board? -->
+> **Alpha — expect change.** WaveHouse is pre-1.0: APIs, configuration, wire formats, and on-disk state can change between releases without a migration path, and some capabilities are still hardening. Pin a version and don't rely on stability guarantees until a tagged GA release.
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11+**. See [development docs](https://wavehouse.dev/development) for the authoratative source of truth with the full list, version requirements, and gotchas.
+You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
 
 ```bash
 make tools    # one-time bootstrap
@@ -149,7 +139,7 @@ make dev      # hot-reload on .go save
 
 ## 🤖 Working with Claude Code
 
-<!-- TODO: disclaimer about AI-generated content -->
+> **AI-assisted, human-reviewed.** Much of WaveHouse — code and docs alike — is written with AI assistance ([Claude Code](https://claude.com/claude-code)). Every change, whether AI- or human-authored, goes through the same review gates, tests, and CI before it lands. We note it for transparency: treat the docs as the source of truth, and please [open an issue](https://github.com/Wave-RF/WaveHouse/issues) if anything reads as off or out of date.
 
 The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / subagents, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
