@@ -6,7 +6,8 @@
 #   - gh pr edit --add-reviewer / --add-assignee
 #   - gh api .../requested_reviewers (write verbs)
 #   - gh pr review --approve / --request-changes
-#   - git push to a PR branch without a pre-push-reviewer review-passed marker
+#   - git push to a PR branch missing either pre-push review marker
+#     (pre-push-reviewer code review + docs-reviewer docs review)
 #
 # Universal git checks (ci-passed marker, no-verify, etc.) live in .githooks/
 # and apply to humans and agents equally. Bypass surface acknowledged: an
@@ -81,8 +82,12 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
     && block "Agents post inline review comments instead of --request-changes."
 fi
 
-# git push to a PR branch requires a pre-push-reviewer review-passed marker.
-# (The universal .githooks/pre-push handles ci-passed for everyone.)
+# git push to a PR branch requires BOTH pre-push review markers — the
+# pre-push-reviewer (code) marker AND the docs-reviewer (docs) marker. Both are
+# unconditional: even a code-only change goes through docs review, because
+# catching "code changed but the docs should have and didn't" is the docs
+# reviewer's job. (The universal .githooks/pre-push handles ci-passed for
+# everyone.)
 if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
   head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
   branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
@@ -96,16 +101,27 @@ if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
     elif ! printf '%s' "$pr_view_out" | grep -qiE 'no (open )?pull request'; then
       block "Could not determine PR state for '${branch}': ${pr_view_out}"
     fi
-    if [ "$pr_state" = "OPEN" ] && [ ! -f "tmp/review-passed-${head_sha}" ]; then
-      cat >&2 <<EOF
+    if [ "$pr_state" = "OPEN" ]; then
+      missing=""
+      [ -f "tmp/review-passed-${head_sha}" ] \
+        || missing="${missing}  - pre-push-reviewer (code)            -> tmp/review-passed-${head_sha:0:8}
+"
+      [ -f "tmp/docs-review-passed-${head_sha}" ] \
+        || missing="${missing}  - docs-reviewer (docs prose + doc-sync) -> tmp/docs-review-passed-${head_sha:0:8}
+"
+      if [ -n "$missing" ]; then
+        cat >&2 <<EOF
 
-🛑 Claude PR discipline gate: no review marker for HEAD (${head_sha:0:8}) on PR branch '${branch}'.
+🛑 Claude PR discipline gate: missing pre-push review marker(s) for HEAD (${head_sha:0:8}) on PR branch '${branch}':
 
-Invoke the pre-push-reviewer subagent in fresh context before pushing. When
-it returns VERDICT: ship_it, tmp/review-passed-${head_sha:0:8} is written
-automatically and this push will succeed.
+${missing}
+Invoke the missing subagent(s) above in fresh context — run both in parallel.
+Each writes its marker automatically on VERDICT: ship_it, and the push then
+succeeds. Both reviewers must reach ship_it (zero findings) — see AGENTS.md
+§"Agent PR Discipline".
 EOF
-      exit 2
+        exit 2
+      fi
     fi
   fi
 fi
