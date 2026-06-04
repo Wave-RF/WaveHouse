@@ -334,13 +334,51 @@ When `dlq.enabled` is `true` (default), failed batch inserts are published to th
 
 ## Observability
 
-Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. Each signal can be toggled independently — see `docs/configuration.md` for the full table of knobs.
+Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. `otel.addr` is scheme-aware — `https://` selects TLS, a bare `host:port` or `http://` stays plaintext — and `otel.headers` carries cloud auth, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled (and pointed at its own endpoint) independently — see [Configuration → OTel](./configuration.md#otel) for the full table of knobs.
 
 WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
-### Pattern: SigNoz / Honeycomb / OTel-native backends
+### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
-Point `otel.addr` at the OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
+Point `otel.addr` at a plaintext OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
+
+```yaml
+otel:
+  enabled: true
+  addr: 127.0.0.1:4317   # bare host:port — plaintext gRPC
+```
+
+### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud)
+
+`otel.addr` is scheme-aware: `https://` selects TLS (system root CAs), `http://` or no scheme stays plaintext. Combine with `otel.headers` for the per-RPC auth every cloud OTLP gateway expects — no sidecar required to terminate TLS or inject auth.
+
+**Honeycomb** (single endpoint, per-RPC auth):
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=https://api.honeycomb.io:443
+export WH_OTEL_HEADERS=x-honeycomb-team=YOUR_API_KEY
+```
+
+**Grafana Cloud OTLP gateway** (Basic auth):
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
+# instanceID:token, base64-encoded (tr -d '\n' strips base64's line wrap)
+export WH_OTEL_HEADERS="authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')"
+```
+
+If different signals need different gateway hosts, set `WH_OTEL_TRACES_ADDR` / `WH_OTEL_METRICS_ADDR` / `WH_OTEL_LOGS_ADDR` to override `otel.addr` per signal (empty inherits). Headers always apply to every exporter — there is intentionally no per-signal header override. mTLS / client-certificate auth is not yet supported.
+
+### Pattern: Datadog (via local DDOT Collector)
+
+Datadog has no public direct-to-cloud OTLP endpoint — telemetry must transit a local OTLP receiver that re-exports over Datadog's own protocol. The supported receiver is the [DDOT Collector](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/) embedded in the Datadog Agent, which exposes a standard OTLP receiver on `4317`. Point WaveHouse at the local receiver as plaintext — the API-key auth lives on the Agent, so `otel.headers` stays empty:
+
+```bash
+export WH_OTEL_ENABLED=true
+export WH_OTEL_ADDR=127.0.0.1:4317   # plaintext gRPC; DD_API_KEY is on the Agent
+```
 
 ### Pattern: Grafana Cloud / Mimir / Loki / Tempo via Grafana Alloy
 

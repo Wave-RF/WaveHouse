@@ -104,12 +104,33 @@ func run() int {
 	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
 	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
+		// Parse WH_OTEL_HEADERS here — this is the only validation point for
+		// the header map, deliberately in main rather than config.Validate()
+		// so internal/config stays free of the OTel SDK import graph. A
+		// malformed value is FATAL: the InitProvider error below is non-fatal
+		// (we fall back to stdout), so a bad header reaching the exporter would
+		// silently ship telemetry with no auth — fail the boot loudly instead.
+		// Skipped in Prometheus-only mode: no OTLP push, so headers are
+		// irrelevant and a stale value shouldn't block boot.
+		var headers map[string]string
+		if cfg.OTel.Enabled {
+			var err error
+			headers, err = observability.ParseOTelHeaders(cfg.OTel.Headers)
+			if err != nil {
+				logger.Error("invalid otel.headers (WH_OTEL_HEADERS); refusing to start with bad auth config", "error", err)
+				return 1
+			}
+		}
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
 			Endpoint:          cfg.OTel.Addr,
+			Headers:           headers,
+			TracesEndpoint:    cfg.OTel.Traces.Addr,
 			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
 			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
+			MetricsEndpoint:   cfg.OTel.Metrics.Addr,
 			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
 			PrometheusEnabled: cfg.Prometheus.Enabled,
+			LogsEndpoint:      cfg.OTel.Logs.Addr,
 			LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
 		})
 		if err != nil {
