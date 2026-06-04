@@ -165,6 +165,14 @@ GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 AIR_VERSION := v1.65.1
 AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
 
+# misspell: curated common-typo corrector + US/UK locale enforcer. Installed
+# standalone to .bin/ (pure Go, `go install` — same pattern as air) so it can
+# lint Markdown/MDX prose. DISTINCT from the misspell analyzer bundled inside
+# golangci-lint, which only inspects Go source; same maintained fork
+# (github.com/golangci/misspell), two entry points. Drives `make lint-prose`.
+MISSPELL_VERSION := v0.8.0
+MISSPELL         := $(LOCAL_BIN)/misspell-$(MISSPELL_VERSION)
+
 # --- Coverage Directories -----------------------------------------------------
 # One path per suite. Internal layout (managed by scripts/coverage.sh):
 #   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
@@ -329,7 +337,7 @@ fmt-ts: pnpm-install
 	$(call run,Biome (format),$(PNPM) -s -w run format,run make fix to apply formatting)
 
 .PHONY: lint
-lint: lint-go lint-ts lint-md ## Lint across Go (golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint). Run `make fix` to apply --fix.
+lint: lint-go lint-ts lint-md lint-prose ## Lint across Go (golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell). Run `make fix` to apply --fix.
 
 .PHONY: lint-go
 lint-go: $(GOLANGCI_LINT) go-mod-download
@@ -342,6 +350,20 @@ lint-ts: pnpm-install
 .PHONY: lint-md
 lint-md: pnpm-install
 	$(call run,markdownlint,$(PNPM) -s -w run lint:md,run make fix to auto-fix what is fixable)
+
+# lint-prose: docs prose quality, owned by misspell — a curated common-typo +
+# US-locale (UK → US) checker over the Starlight content (.md + .mdx). Its word
+# list is finite and maintained upstream, so it gates with ~zero false positives
+# and no project dictionary to babysit. `-error` makes it exit non-zero on
+# findings; `make fix` (fix-prose) auto-applies the corrections. Distinct domain
+# from markdownlint (*style*) and Biome (JS/TS/JSON) — no overlap. (A full
+# dictionary spell-checker, cspell, was trialled and dropped: on these jargon-
+# dense docs it flagged ~64 legitimate terms and zero real typos — an unbounded
+# dictionary tax for no signal. Catching novel typos is left to human/LLM
+# review, which can judge a word in context; a finite checker can't.)
+.PHONY: lint-prose
+lint-prose: $(MISSPELL)
+	$(call run,misspell (US spelling),$(MISSPELL) -locale US -source text -error $(DOCS_PROSE),run make fix to auto-correct)
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
@@ -365,8 +387,8 @@ tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 # goimports → golangci --fix): order matters there, since each rewrites the same
 # files and the formatters must settle before lint --fix runs.
 .PHONY: fix
-fix: ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS/JSON (Biome) + Markdown (markdownlint)
-	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-md
+fix: ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell)
+	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-md fix-prose
 	@echo "$(GREEN)==> Done$(RESET)"
 
 .PHONY: fix-go
@@ -387,6 +409,14 @@ fix-md: pnpm-install
 	@echo "$(CYAN)==> Applying markdownlint fixes...$(RESET)"
 	@$(PNPM) -w run fix:md
 
+# fix-prose: misspell autofix (common typos + UK → US) over the docs prose. Its
+# corrections come from a curated list and are unambiguous, so applying them
+# wholesale is safe.
+.PHONY: fix-prose
+fix-prose: $(MISSPELL)
+	@echo "$(CYAN)==> Applying misspell fixes (common typos + US spelling)...$(RESET)"
+	@$(MISSPELL) -locale US -source text -w $(DOCS_PROSE)
+
 # verify: all static checks across the repo, split into a parallel-safe leaf
 # list (verify-parallel) and a thin wrapper that fans it out under `-j`, exactly
 # like ci/ci-parallel. A bare `make verify` self-parallelizes instead of running
@@ -394,8 +424,9 @@ fix-md: pnpm-install
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (8): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
-# side; lint-ts (biome check) + lint-md (markdownlint) for JS/TS + Markdown;
+# Leaves (9): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
+# docs spelling) for JS/TS + Markdown + prose;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
 # nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
 # (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
@@ -409,7 +440,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -504,8 +535,9 @@ build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 
 # branding-docs: regenerate logo/favicon/OG assets from the brand SVG.
 # Not a `build-docs` prereq — derived assets are committed so contributors
-# don't need rsvg + ImageMagick to build docs. The script self-locates via
-# git, so it runs the same from the repo root.
+# don't need rsvg, ImageMagick, resvg, or usvg to build docs (only someone
+# iterating on the mark does). The script self-locates via git, so it runs the
+# same from the repo root.
 .PHONY: branding-docs
 branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/scripts/branding/mark.svg
 	@docs/scripts/branding/generate.sh
@@ -532,6 +564,12 @@ PNPM        ?= pnpm
 DOCS_DIR    := docs
 SDK_NAME    := @wavehouse/sdk
 DOCS_FILTER := wavehouse-docs
+
+# Markdown + MDX prose sources under the Starlight content dir. lint-prose /
+# fix-prose hand misspell this explicit list (lazily expanded via `=`, so the
+# find only runs when those targets run) rather than a directory — so misspell
+# never reads a .ts content-config as text.
+DOCS_PROSE   = $(shell find $(DOCS_DIR)/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null)
 
 # pnpm-install: hidden internal target. Node targets depend on it to ensure
 # workspace deps are present; on a warm tree `--frozen-lockfile` is a fast
@@ -778,7 +816,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 ##@ Tooling
 
 # tools: bootstrap a fresh clone.
-#   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
+#   - Installs pinned external binaries to .bin/ (golangci-lint, air, misspell).
 #   - Downloads Go modules so go.mod tool deps are available offline.
 #   - Installs SDK + E2E pnpm deps so test-ts / test-e2e are runnable
 #     without a separate manual setup step.
@@ -789,10 +827,10 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
 tools: ## Install pinned tools, Go modules, pnpm deps, and git hooks
-	@# The four installs are independent — fan them out under -j (golangci-lint
-	@# download ∥ air ∥ go-mod-download ∥ pnpm-install). Go's module cache is
-	@# concurrency-safe, so this is just faster on a cold clone, not riskier.
-	@$(MAKE) -j $(JOBS) $(GOLANGCI_LINT) $(AIR) go-mod-download pnpm-install
+	@# The five installs are independent — fan them out under -j (golangci-lint
+	@# download ∥ air ∥ misspell ∥ go-mod-download ∥ pnpm-install). Go's module
+	@# cache is concurrency-safe, so this is just faster on a cold clone.
+	@$(MAKE) -j $(JOBS) $(GOLANGCI_LINT) $(AIR) $(MISSPELL) go-mod-download pnpm-install
 	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
 	@# `make tools` repeatedly just re-asserts the config. The .githooks/
 	@# directory is committed; this line plumbs git to it. Users can opt out
@@ -823,4 +861,14 @@ $(AIR):
 	@mkdir -p $(LOCAL_BIN)
 	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
 	@mv $(LOCAL_BIN)/air $@
+	@echo "$(GREEN)==> Installed: $@$(RESET)"
+
+# misspell installs cleanly via `go install` (pure Go), GOBIN-pinned to .bin/
+# like air. cmd/misspell is the CLI entry point of the golangci fork — the same
+# codebase golangci-lint vendors as a library for its Go-only misspell linter.
+$(MISSPELL):
+	@echo "$(YELLOW)==> Installing misspell $(MISSPELL_VERSION) for $(OS)_$(ARCH)...$(RESET)"
+	@mkdir -p $(LOCAL_BIN)
+	@GOBIN=$(LOCAL_BIN) go install github.com/golangci/misspell/cmd/misspell@$(MISSPELL_VERSION)
+	@mv $(LOCAL_BIN)/misspell $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"

@@ -42,6 +42,7 @@ The diff source here is the local working state, computed as `git diff main...HE
    - **Testing** — new code on critical paths without tests, missing edge cases, mocks where integration would catch more.
    - **Documentation sync** — per AGENTS.md §Documentation Sync table.
    - **SDK sync** — per AGENTS.md §SDK Sync table. Did `internal/api/` change without `clients/ts/src/` consideration?
+   - **Docs prose** — if the diff touches docs prose (`docs/src/content/**`, top-level `*.md`), its *quality* (accuracy-vs-code, runnable examples, clarity, completeness) is the **`docs-reviewer`** subagent's job, not this review. You can't spawn subagents here, so raise a `[SHOULD]` recommending `/docs-review` be run — under the strict rubric below that forces `iterate`, and the orchestrator runs it before re-review. Don't line-edit prose yourself.
 
 6. Apply the noise filter from `pr-review.md` before finalizing: drop findings you wouldn't personally ask the author to change in-person.
 
@@ -88,7 +89,7 @@ VERDICT: ship_it
 
 WaveHouse uses a stricter rule than `.github/prompts/pr-review.md`: **`ship_it` requires zero findings at any severity**. If there is anything left to do, the PR isn't shippable — "ship it, just do this one thing first" is iteration, not shipping.
 
-- **`Ship it`** + `VERDICT: ship_it` — `[MUST]`, `[SHOULD]`, and `[MAY]` sections are all empty. Pre-push marker auto-writes, push proceeds.
+- **`Ship it`** + `VERDICT: ship_it` — `[MUST]`, `[SHOULD]`, and `[MAY]` sections are all empty. Pre-push marker auto-writes, push proceeds. **Docs soft-gate:** if the diff changed docs prose and `/docs-review` wasn't run/folded in, raise the `[SHOULD]` recommending it — which makes this `iterate`, not `ship_it`. A docs-prose change shouldn't reach `ship_it` un-reviewed.
 - **`Iterate`** + `VERDICT: iterate` — any `[MUST]` / `[SHOULD]` / `[MAY]` finding exists, but none are block-level. The orchestrator fixes the findings and re-invokes this subagent (always in fresh context) until ship_it.
 - **`Block`** + `VERDICT: block` — a `[MUST]` that's CRITICAL/HIGH security, data-loss risk, broken core invariant, or otherwise needs human/maintainer attention (architectural disagreement, missing CI signal, etc.). Cannot proceed without addressing.
 

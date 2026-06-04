@@ -263,7 +263,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
   CMD ["/app/wavehouse", "health"]
 ```
 
-The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/livez` and exits 0 (200 OK) or 1 (anything else). It honours `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
+The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/livez` and exits 0 (200 OK) or 1 (anything else). It honors `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
 
 You can run it manually for debugging:
 

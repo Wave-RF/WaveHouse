@@ -13,16 +13,20 @@
 #   branding/og.png                 1200x630 social card
 #   branding/mark-light.svg         mark in the light-mode accent
 #   branding/mark-dark.svg          mark in the dark-mode accent
-#   branding/lockup-dark.svg        mark + wordmark, for dark backgrounds
+#   branding/lockup-dark.svg        mark + wordmark (outlined), dark backgrounds
+#   branding/lockup-light.svg       mark + wordmark (outlined), light backgrounds
+#   branding/mark-{light,dark}.png  1024x1024 transparent raster marks
+#   branding/lockup-{light,dark}.png 1200-wide transparent raster lockups
 #   favicon.ico                     (site root, for /favicon.ico auto-probe)
 #
 # To change the brand: edit a hue in docs/src/styles/global.css (--brand-*) or
 # a source SVG, then run `make branding-docs` from the repo root. The live site
 # picks up CSS instantly; this script propagates the same colors into the
-# generated raster/SVG assets. Requires rsvg-convert (librsvg) and magick
-# (ImageMagick 7+):
-#   brew install librsvg imagemagick      (macOS)
-#   apt install librsvg2-bin imagemagick  (Debian/Ubuntu)
+# generated raster/SVG assets. Requires rsvg-convert (librsvg), magick
+# (ImageMagick 7+), and resvg (text-bearing PNGs, pinned to the vendored Inter
+# in fonts/Inter-Variable.ttf — see the INTER_FONT note below):
+#   brew install librsvg imagemagick resvg     (macOS)
+#   apt install librsvg2-bin imagemagick; cargo install resvg  (Debian/Ubuntu)
 
 set -euo pipefail
 
@@ -52,8 +56,9 @@ COLOR_LIGHT=$(brand_color brand-blue-deep)   # mark on light backgrounds (AA)
 COLOR_DARK=$(brand_color brand-blue)         # mark on dark backgrounds / accent
 OG_BG=$(brand_color brand-bg)                # OG gradient start / touch tile bg
 OG_SURFACE=$(brand_color brand-surface)      # OG gradient end
-OG_INK=$(brand_color brand-ink)              # wordmark / OG headline text
+OG_INK=$(brand_color brand-ink)              # wordmark / OG headline text (dark bg)
 OG_INK_MUTED=$(brand_color brand-ink-muted)  # OG tagline / footer text
+WORDMARK_LIGHT=$(brand_color brand-charcoal) # lockup wordmark on light bg (dark ink)
 COLOR_TOUCH_BG=$OG_BG
 COLOR_TOUCH_FG=$COLOR_DARK
 
@@ -65,19 +70,50 @@ OG_TEMPLATE="$SRC/og.template.svg"
 OUT_KIT="$ROOT/docs/public/branding"
 OUT_ROOT="$ROOT/docs/public"
 
+# Vendored Inter (SIL OFL 1.1, see fonts/OFL.txt) — the SAME file the live site
+# loads via @fontsource-variable/inter, so rasterized text matches the site
+# exactly. Text-bearing assets are rendered with resvg + this explicit font file
+# (NOT rsvg-convert): rsvg/Pango here resolves fonts through Core Text, which
+# only sees installed fonts and would silently fall back to the system sans —
+# resvg's --use-font-file pins the real Inter deterministically on any machine.
+INTER_FONT="$HERE/fonts/Inter-Variable.ttf"
+
 # --- Tool availability check --------------------------------------------------
 missing=0
-for tool in rsvg-convert magick; do
+for tool in rsvg-convert magick resvg usvg; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     printf '%serror:%s %s not found on PATH\n' "$RED" "$RESET" "$tool" >&2
     missing=1
   fi
 done
+if [ ! -f "$INTER_FONT" ]; then
+  printf '%serror:%s vendored font not found: %s\n' "$RED" "$RESET" "${INTER_FONT#"$ROOT/"}" >&2
+  missing=1
+fi
 if [ "$missing" -ne 0 ]; then
-  printf '%shint:%s  brew install librsvg imagemagick   (macOS)\n' "$YELLOW" "$RESET" >&2
-  printf '       apt install librsvg2-bin imagemagick    (Debian/Ubuntu)\n' >&2
+  printf '%shint:%s  brew install librsvg imagemagick resvg   (macOS, resvg ships usvg too)\n' "$YELLOW" "$RESET" >&2
+  printf '       apt install librsvg2-bin imagemagick; cargo install resvg usvg  (Debian/Ubuntu)\n' >&2
   exit 1
 fi
+
+# Render a text-bearing SVG to PNG with the pinned Inter (deterministic, no
+# system-font fallback). Args: <in.svg> <out.png> <width> <height>.
+render_text_png() {
+  resvg --skip-system-fonts --use-font-file "$INTER_FONT" \
+        -w "$3" -h "$4" "$1" "$2"
+}
+
+# Outline the wordmark <text> to vector paths, in place, using the pinned Inter.
+# GitHub/markdown render SVG <text> in the VIEWER's system font (no webfonts), so
+# a text-based lockup would show the wrong typeface there. usvg flattens text →
+# paths so the shipped lockup is true Inter everywhere with zero font dependency.
+# usvg drops the viewBox (emits width/height) + a11y attrs, so we restore the
+# canonical <svg> header. Args: <lockup.svg>.
+outline_lockup_svg() {
+  usvg --skip-system-fonts --use-font-file "$INTER_FONT" "$1" "$TMP/outlined.svg"
+  sed -E "1 s|<svg[^>]*>|<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"$LOCKUP_VIEWBOX\" role=\"img\" aria-label=\"WaveHouse\">|" \
+    "$TMP/outlined.svg" > "$1"
+}
 
 # --- Parse the master mark + lockup -------------------------------------------
 # Pull viewBox + inner content (between <svg ...> and </svg>) from each source.
@@ -120,10 +156,21 @@ cat > "$OUT_KIT/mark-dark.svg" <<EOF
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$(mark_with_color "$COLOR_DARK")</svg>
 EOF
 
-# --- 3. lockup-dark.svg (mark + wordmark for dark backgrounds) -----------------
+# --- 3. Lockup (mark + wordmark) — dark + light variants ----------------------
+# Two-color: mark = accent, wordmark = ink. Dark bg uses the dark accent + near-
+# white ink; light bg uses the AA light accent + charcoal ink. The light variant
+# is what a README <picture>/<source media="(prefers-color-scheme:light)"> needs.
+# Emitted with the wordmark as <text>, then outlined to paths (see
+# outline_lockup_svg) so they render true Inter on GitHub / in markdown, which
+# ignore webfonts and would otherwise show the wordmark in a system font.
 cat > "$OUT_KIT/lockup-dark.svg" <<EOF
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="$LOCKUP_VIEWBOX" role="img" aria-label="WaveHouse">$(lockup_with_colors "$COLOR_DARK" "$OG_INK")</svg>
 EOF
+outline_lockup_svg "$OUT_KIT/lockup-dark.svg"
+cat > "$OUT_KIT/lockup-light.svg" <<EOF
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="$LOCKUP_VIEWBOX" role="img" aria-label="WaveHouse">$(lockup_with_colors "$COLOR_LIGHT" "$WORDMARK_LIGHT")</svg>
+EOF
+outline_lockup_svg "$OUT_KIT/lockup-light.svg"
 
 # --- 4. favicon.ico (16/32/48) → kit + site root ------------------------------
 rsvg-convert -w 16 -h 16 "$OUT_KIT/favicon.svg" -o "$TMP/fav-16.png"
@@ -148,13 +195,26 @@ sed -e "s|__BG__|$OG_BG|g" \
     -e "s|__INK_MUTED__|$OG_INK_MUTED|g" \
     -e "s|__LOCKUP_GROUP__|$lockup_og_escaped|" \
     "$OG_TEMPLATE" > "$TMP/og.svg"
-rsvg-convert -w 1200 -h 630 "$TMP/og.svg" -o "$OUT_KIT/og.png"
+# Text-bearing → resvg + pinned Inter (wordmark, tagline, footer all real Inter).
+render_text_png "$TMP/og.svg" "$OUT_KIT/og.png" 1200 630
+
+# --- 7. Raster marks + lockups (PNG, transparent) -----------------------------
+# For non-SVG consumers: slide decks, GitHub social-preview upload, email sig,
+# anywhere SVG isn't accepted. Marks are pure geometry → rsvg-convert is fine.
+# Lockups carry the wordmark, so they go through resvg + pinned Inter; the
+# committed lockup-*.svg still hold <text> (the SVG-outlining step is separate),
+# but their PNG renders are now true Inter.
+rsvg-convert -w 1024 -h 1024 "$OUT_KIT/mark-light.svg" -o "$OUT_KIT/mark-light.png"
+rsvg-convert -w 1024 -h 1024 "$OUT_KIT/mark-dark.svg"  -o "$OUT_KIT/mark-dark.png"
+render_text_png "$OUT_KIT/lockup-light.svg" "$OUT_KIT/lockup-light.png" 1200 250
+render_text_png "$OUT_KIT/lockup-dark.svg"  "$OUT_KIT/lockup-dark.png"  1200 250
 
 # --- Report -------------------------------------------------------------------
 printf '%s    colors%s light=%s dark=%s bg=%s ink=%s\n' \
   "$CYAN" "$RESET" "$COLOR_LIGHT" "$COLOR_DARK" "$OG_BG" "$OG_INK"
 for out in favicon.svg favicon.ico apple-touch-icon.png og.png \
-           mark-light.svg mark-dark.svg lockup-dark.svg; do
+           mark-light.svg mark-dark.svg lockup-dark.svg lockup-light.svg \
+           mark-light.png mark-dark.png lockup-light.png lockup-dark.png; do
   printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/branding/$out"
 done
 printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/favicon.ico (site root)"

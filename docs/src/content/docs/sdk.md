@@ -622,7 +622,7 @@ The SDK **never throws**. All errors are returned in `Result.error`.
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
-| 0 | `ABORTED` | No | Request cancelled via `AbortSignal` |
+| 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 
 ---
 

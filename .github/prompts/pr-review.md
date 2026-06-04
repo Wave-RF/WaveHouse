@@ -44,7 +44,7 @@ Review against each of these, in this order:
 
 4. **Testing** — new code without tests (especially on critical paths: auth middleware, ingest pipeline, policy evaluation, structured query builder, cache coherence, dedup). Missing edge-case coverage. Mocks where a real integration test would catch more (per the "no mocking DB" rule in the test conventions). Unit tests that don't actually exercise the code path they claim to.
 
-5. **Documentation & doc-sync** — AGENTS.md has a hard rule that code changes affecting API / config / architecture / event format / deployment must update the corresponding docs, `CHANGELOG.md` (under `[Unreleased]`), and the compose files / `config.yaml` defaults. The table in AGENTS.md §"Documentation Sync" is authoritative — diff changed files against that map and flag every missed sync.
+5. **Documentation & doc-sync** — AGENTS.md has a hard rule that code changes affecting API / config / architecture / event format / deployment must update the corresponding docs, `CHANGELOG.md` (under `[Unreleased]`), and the compose files / `config.yaml` defaults. The table in AGENTS.md §"Documentation Sync" is authoritative — diff changed files against that map and flag every missed sync. This check is about whether code changes *updated* the docs — not whether the docs *prose* is correct and clear. **If the PR changes docs prose itself** (`docs/src/content/**`, top-level `*.md`), prose quality (accuracy-vs-code, runnable examples, clarity, completeness) is the **`docs-reviewer`** subagent's job — canonical rubric in `.github/prompts/docs-review.md`. Either run `/docs-review` on the changed docs and fold its findings in here, or — if you can't spawn subagents — raise a `[SHOULD]` recommending it be run. Don't hand-review prose line-by-line in this pass.
 
 ## Output discipline
 
@@ -67,6 +67,8 @@ Verdict rules (matched to the styleguide):
 - `Block` — a `[MUST]` finding that's a CRITICAL/HIGH security issue, data-loss risk, or broken core invariant. Cannot proceed without addressing.
 - `Iterate` — one or more `[MUST]` findings that aren't `Block`-level, or multiple `[SHOULD]` findings that collectively need a pass.
 - `Ship it` — no `[MUST]`s and few or no `[SHOULD]`s. `[MAY]` findings alone don't preclude `Ship it`.
+
+**Docs soft-gate:** if the PR changed docs prose and a docs review (`/docs-review` / the `docs-reviewer` subagent) was neither run nor folded in, don't return `Ship it` — prefer `Iterate` with the single action "run `/docs-review`". Docs review is advisory, so this is a nudge, not a hard gate; but a docs-prose change shouldn't ship un-reviewed.
 
 What not to comment on:
 

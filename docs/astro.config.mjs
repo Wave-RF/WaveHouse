@@ -46,7 +46,7 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         // (→ /branding/favicon.svg). Here we add the .ico fallback (legacy /
         // non-SVG browsers; also auto-probed at the site root) and the
         // apple-touch icon. The whole brand kit is generated into /branding/ by
-        // scripts/branding/generate.sh.
+        // docs/scripts/branding/generate.sh.
         {
           tag: "link",
           attrs: {
