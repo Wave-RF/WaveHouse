@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse)](https://go.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **The Open-Source Real-Time API Gateway for ClickHouse.**
 
@@ -170,4 +170,4 @@ WaveHouse is in **alpha**. See [SUPPORT.md](SUPPORT.md) for where to ask what, t
 
 ## 📜 License
 
-WaveHouse is open source under the [MIT License](LICENSE).
+WaveHouse is open source under the [Apache License 2.0](LICENSE).

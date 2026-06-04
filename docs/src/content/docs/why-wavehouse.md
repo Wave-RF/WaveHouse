@@ -189,7 +189,7 @@ Where it differs from WaveHouse:
 | Deployment workflow | Tinybird CLI against Tinybird Cloud | `docker compose up` or any K8s |
 | Real-time push | Pipe endpoints (request/response) | Native SSE |
 | Access control | Tinybird tokens (API-level) | JWT + Hasura-style row/column policies |
-| Vendor lock-in | Queries run on Tinybird; moving off = rewriting | None — WaveHouse is MIT, ClickHouse is yours |
+| Vendor lock-in | Queries run on Tinybird; moving off = rewriting | None — WaveHouse is Apache 2.0, ClickHouse is yours |
 
 Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and pay AWS, not a second vendor" — which gets more compelling at scale, on sensitive data, or for anyone who needs on-prem.
 

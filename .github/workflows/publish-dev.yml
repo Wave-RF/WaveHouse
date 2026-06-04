@@ -14,6 +14,8 @@ name: Publish dev image
 # same .goreleaser.yaml without WAVEHOUSE_DEV set, producing
 # `:vX.Y.Z` + `:latest`. Cleanup of old dev-<sha> tags is handled
 # by cleanup-ghcr.yml.
+#
+# The TypeScript SDK publishes separately — see publish-npm.yml.
 on:
   push:
     branches: [main]
