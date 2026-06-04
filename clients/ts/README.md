@@ -124,11 +124,11 @@ npm run test:coverage  # coverage report
 
 ### E2E Integration Tests
 
-E2E tests live in `tests/sdk/` (repo root) and exercise the full pipeline through the SDK. See `make test-e2e` in the [Development Guide](../../docs/development.md#e2e-tests-via-sdk).
+E2E tests live in `tests/e2e/sdk/` (repo root) and exercise the full pipeline through the SDK. See `make test-e2e` in the [Development Guide](https://wavehouse.dev/development#e2e-tests-via-sdk).
 
 ## API Reference
 
-See the full [SDK API Reference](../../docs/sdk.md) for detailed documentation of every method, type, and option.
+See the full [SDK API Reference](https://wavehouse.dev/sdk) for detailed documentation of every method, type, and option.
 
 ## License
 
