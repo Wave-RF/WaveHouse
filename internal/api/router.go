@@ -318,7 +318,9 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID")
+				// Last-Event-ID lets a cross-origin SSE client resume a stream
+				// (read by StreamHandler.Handle); without it the preflight fails.
+				w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, X-Request-ID")
 				w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Request-ID")
 				w.Header().Set("Access-Control-Max-Age", "3600")
 			}
