@@ -52,7 +52,9 @@ Tree-keyed so commit-then-push works without a re-run when the tree is unchanged
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, pre-push-reviewer marker required on PR pushes) |
 | `.claude/hooks/review-marker.sh` | SubagentStop: writes `tmp/review-passed-<HEAD-sha>` when `pre-push-reviewer` returns `VERDICT: ship_it`. Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |
+| `.claude/commands/docs-review.md` | `/docs-review [path\|all]` — launches the `docs-reviewer` subagent over the docs prose |
 | `.claude/agents/pre-push-reviewer.md` | `pre-push-reviewer` subagent — canonical pre-push review, also used for auditing others' PRs locally |
+| `.claude/agents/docs-reviewer.md` | `docs-reviewer` subagent — docs-prose review (accuracy vs code, runnable examples, clarity); advisory, writes no marker |
 | `.claude/skills/pr-sync-with-main/SKILL.md` | "Fix this stale PR" workflow — merge origin/main, never rebase or force-push |
 | `.claude/skills/pr-review-locally/SKILL.md` | "Review PR <N> locally" workflow — `wt switch pr:<N>` + `pre-push-reviewer`, no PR comments |
 | `.claude/settings.local.json` | **Your personal overrides** — gitignored; put model choice, status line, allow lists, etc. here |
@@ -60,11 +62,12 @@ Tree-keyed so commit-then-push works without a re-run when the tree is unchanged
 
 Notably absent: no `.mcp.json`, no committed status line, no `permissions.allow` list. See [GitHub access](#github-access-gh-cli-vs-mcp) and [Permission posture](#permission-posture) below.
 
-## The one slash command
+## Slash commands
 
 | Command | What it does |
 | ------- | ------------ |
 | `/cover [suite]` | Renders coverage for a suite (unit / integration / e2e / sdk / all / merge) and surfaces drops below threshold |
+| `/docs-review [path\|all]` | Runs the `docs-reviewer` subagent over the docs prose — accuracy vs code, runnable examples, clarity, completeness (advisory; complements misspell / markdownlint / links-validator) |
 
 To add a command: drop a `.md` file in `.claude/commands/`. Filename becomes the slash command. Frontmatter: `description` and `argument-hint`; body is the prompt with `$ARGUMENTS`.
 
@@ -73,6 +76,7 @@ To add a command: drop a `.md` file in `.claude/commands/`. Filename becomes the
 | Subagent | When to use |
 | -------- | ----------- |
 | `pre-push-reviewer` | **Mandatory before pushing to a PR branch** (enforced by `.claude/hooks/agent-bash-gate.sh`). Also used for auditing someone else's PR after `wt switch pr:<N>`. Runs the canonical `.github/prompts/pr-review.md` workflow against the local branch in fresh context. Fetches PR comments + CI status + linked-issue acceptance criteria when on a PR branch. Returns `[MUST]`/`[SHOULD]`/`[MAY]` findings + a parseable `VERDICT: ship_it\|iterate\|block` line that drives the pre-push marker. |
+| `docs-reviewer` | Reviews docs **prose** — accuracy-vs-code, runnable examples, clarity, completeness — using `.github/prompts/docs-review.md`. Run via `/docs-review` or before pushing docs changes. Fresh context, **advisory**: surfaces `[MUST]`/`[SHOULD]`/`[MAY]` findings, posts no PR comments, and writes **no** marker (so it can't gate a push). Complements misspell / markdownlint / starlight-links-validator, never duplicates them. |
 
 Invoke via the `Agent` tool with `subagent_type: pre-push-reviewer`, or via `/agents`.
 

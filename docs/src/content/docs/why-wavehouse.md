@@ -189,7 +189,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Schema validation at the edge | ✗ | Custom | ✓ | ✓ (discovers schema) |
 | Dead letter queue | ✗ | Custom | Partial | ✓ `WAVEHOUSE_DLQ` |
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
-| Exact-once dedup | ✗ | Custom | ✓ | ✓ optional |
+| Idempotent ingest (dedup by ID) | ✗ | Custom | ✓ | ✓ optional |
 | Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
 | Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |

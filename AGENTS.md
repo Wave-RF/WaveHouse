@@ -383,12 +383,11 @@ internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
-tests/e2e/              → E2E test stack
+tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
 tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
-tests/e2e/compose.yaml  → Docker Compose with profiles (ClickHouse always; WaveHouse via --profile app)
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
-deployments/compose/    → Docker Compose files
-deployments/docker/     → Dockerfiles
+deployments/compose/    → Docker Compose files (standalone.yaml, dependencies.yaml)
+deployments/Dockerfile  → Runtime image (+ Dockerfile.goreleaser for release builds)
 docs/                   → Project documentation
 .vscode/                → Workspace settings (gopls build flags, recommended extensions)
 ```

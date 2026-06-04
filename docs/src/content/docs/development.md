@@ -16,7 +16,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
-| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/` and `tests/e2e/compose.yaml`; integration tests boot a ClickHouse testcontainer | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
+| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json` and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
@@ -89,7 +89,7 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 ### Test the API
 
 ```bash
-# Ingest data (no auth required by default)
+# Ingest data — `make dev` is fail-closed (no policy seeded). Seed one first, e.g. WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml, then restart (seeds only while the policy store is empty). See Access Control.
 curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
@@ -133,7 +133,7 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` plus `config.yaml`, rebuilds `tmp/wavehouse` on change, and restarts the binary.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file.
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
@@ -142,7 +142,7 @@ dev: deps-up $(AIR)
 - WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
 - No JWT secret set by default, so every request resolves to the policy `default_role`. Override with env vars (see below).
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` (or `config.yaml`) triggers a debounced rebuild + restart. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets
 
@@ -336,7 +336,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `tests/e2e/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app`, so you can also point the suite at a hot-reload `make dev` instance instead.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
@@ -351,7 +351,7 @@ KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
 
 **If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
 
-**Test files**: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress`.
 
 ## Linting
 
@@ -404,12 +404,14 @@ WaveHouse/
 │   ├── query/              # Structured query AST + SQL builder
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
-│   ├── compose.yaml        # Shared Docker Compose (ClickHouse + optional WaveHouse)
-│   ├── fixtures/           # Idempotent ClickHouse DDL scripts
-│   └── sdk/                # E2E tests via TypeScript SDK (Vitest)
+│   ├── integration/        # Go integration tests (//go:build integration)
+│   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
+│       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
+│       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── deployments/
-│   ├── compose/            # Docker Compose files
-│   └── docker/             # Dockerfiles
+│   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
+│   ├── Dockerfile          # Runtime image
+│   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets

@@ -40,8 +40,8 @@ import { Card, CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/compone
   </div>
   <div class="wh-stat">
     <span class="wh-stat__value">SSE</span>
-    <span class="wh-stat__unit">+ polling fallback</span>
-    <span class="wh-stat__label">real-time push, gap-filled</span>
+    <span class="wh-stat__unit">streaming</span>
+    <span class="wh-stat__label">real-time push, gap-filled from history</span>
   </div>
   <div class="wh-stat">
     <span class="wh-stat__value">MIT</span>
@@ -99,7 +99,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 	</Card>
 </CardGrid>
 
-**Plus** — optional exact-once [deduplication](/configuration#deduplication), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
+**Plus** — optional [deduplication](/configuration#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
 
 ## Up in five minutes
 
@@ -111,16 +111,16 @@ git clone https://github.com/Wave-RF/WaveHouse.git
 cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
-# Ingest an event
-curl -X POST http://localhost:8080/v1/ingest?table=events \
+# Ingest an event (run Getting Started first to create the `clicks` table; the dev stack ships a trial policy)
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H 'content-type: application/json' \
-  -d '{"event_type":"page_view","user_id":"u_42","ts":"2026-05-15T12:00:00Z"}'
+  -d '{"page":"/home","button":"signup","score":42.5}'
 
 # Subscribe to the live stream
-curl -N "http://localhost:8080/v1/stream?table=events"
+curl -N "http://localhost:8080/v1/stream?table=clicks"
 ```
 
-Five minutes from `git clone` to a live event stream. See the [Getting Started](/getting-started) walkthrough for the full guided tour.
+WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, seeded on first boot) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
 ## How it ships
 
