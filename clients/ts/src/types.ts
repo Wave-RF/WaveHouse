@@ -124,12 +124,20 @@ export type Schemas = Record<string, TableSchema>;
 
 // --- Insert result ---
 
-/** A per-record rejection from a batch (array / NDJSON) insert. */
-export interface InsertRecordError {
+/**
+ * A per-record outcome from a batch (array / NDJSON) insert. Mirrors the
+ * single-object response shape plus the record's position. Exactly one of
+ * `ok` / `duplicate` / `error` is set.
+ */
+export interface InsertRecordResult {
   /** 1-based index of the record within the submitted batch. */
-  line: number;
-  /** Human-readable reason the record was rejected. */
-  error: string;
+  index: number;
+  /** Set when the record was validated and published. */
+  ok?: boolean;
+  /** Set when dedup skipped the record. */
+  duplicate?: boolean;
+  /** Set (with `ok`/`duplicate` absent) when the record was rejected. */
+  error?: string;
 }
 
 export interface InsertResult {
@@ -141,12 +149,12 @@ export interface InsertResult {
   total?: number;
   /** Batch insert: records validated and published. */
   succeeded?: number;
-  /** Batch insert: records rejected — see `errors`. */
+  /** Batch insert: records rejected — see `results`. */
   failed?: number;
   /** Batch insert: records skipped by dedup. */
   duplicates?: number;
-  /** Batch insert: per-record rejections (may be truncated for very large batches). */
-  errors?: InsertRecordError[];
+  /** Batch insert: per-record outcomes, each `{index, ok|duplicate|error}` (may be truncated for very large batches; the counts stay authoritative). */
+  results?: InsertRecordResult[];
 }
 
 // --- DLQ types ---

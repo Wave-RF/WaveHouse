@@ -160,14 +160,17 @@ A binary built without the `-ldflags` injection (e.g. a bare `go build` rather t
 
 ### `POST /v1/ingest?table={table}` — Ingest Data
 
-Accepts either a single flat JSON object or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
+Accepts a single flat JSON object, a JSON array of objects, or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
 
-The body format is selected by the request `Content-Type`:
+**The format is auto-detected from the body — `Content-Type` is only a hint.** The first non-whitespace byte decides: `[` selects a JSON array, anything else a single JSON object. An explicit `Content-Type: application/x-ndjson` selects NDJSON line-framing *unless* the body starts with `[` (the array wins), so a batch works whether or not the header matches.
 
-| `Content-Type` | Body | Response |
-| -------------- | ---- | -------- |
-| `application/json` *(default)* | one flat JSON object | `{"ok":true}` (or `{"duplicate":true}`) |
-| `application/x-ndjson` | one JSON object per line (NDJSON batch) | per-record summary — see [NDJSON Batch Ingest](#ndjson-batch-ingest) |
+| Body | Typical `Content-Type` | Response |
+| ---- | ---------------------- | -------- |
+| one flat JSON object | `application/json` *(default)* | `{"ok":true}` (or `{"duplicate":true}`) |
+| a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
+| one JSON object per line (NDJSON) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
+
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -218,6 +221,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
+| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -230,11 +234,23 @@ curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
 
-#### NDJSON Batch Ingest
+#### Batch Ingest
 
-Send `Content-Type: application/x-ndjson` with **one JSON object per line** to ingest a batch in a single request — a streaming-friendly alternative to one large JSON array. Blank lines are skipped. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses this path automatically.)
+A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
 
-**Request:**
+- **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
+- **NDJSON** — the streaming-friendly form for very large uploads. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+
+**Request (JSON array):**
+
+```http
+POST /v1/ingest?table=clicks
+Content-Type: application/json
+
+[{"page": "/home", "score": 42.5}, {"page": "/about"}, {"page": "/pricing", "score": 7}]
+```
+
+**Request (NDJSON):**
 
 ```http
 POST /v1/ingest?table=clicks
@@ -245,7 +261,7 @@ Content-Type: application/x-ndjson
 {"page": "/pricing", "score": 7}
 ```
 
-**Response (`200`):** a per-record summary.
+**Response (`200`):** a per-record summary. Each `results` entry mirrors the single-object response (`ok` / `duplicate` / `error`) plus its 1-based `index`.
 
 ```json
 {
@@ -253,31 +269,45 @@ Content-Type: application/x-ndjson
   "succeeded": 2,
   "failed": 1,
   "duplicates": 0,
-  "errors": [{ "line": 2, "error": "validation failed: ..." }]
+  "results": [
+    { "index": 1, "ok": true },
+    { "index": 2, "ok": true },
+    { "index": 3, "error": "validation failed: ..." }
+  ]
 }
 ```
 
 | Field | Meaning |
 | ----- | ------- |
-| `total` | records read from the body (non-blank lines) |
+| `total` | records read from the body |
 | `succeeded` | records validated and published |
-| `failed` | records rejected — see `errors` |
+| `failed` | records rejected — see `results` |
 | `duplicates` | records skipped by dedup (when enabled) |
-| `errors` | per-record rejections, each `{ line, error }` with `line` the 1-based record index. Omitted when empty; truncated to the first 100 (`failed` stays the authoritative count). |
+| `results` | per-record outcomes, each `{ index, ok\|duplicate\|error }` with `index` the 1-based record position. Truncated to the first 10,000 entries for very large batches (the counts stay authoritative). |
 
-A `200` is returned whenever the body was read and at least one record was attempted — **even if every record failed**, so branch on `failed`/`errors`, not the status code. Per-record problems (malformed JSON, schema validation, column/check permission failures) are reported in `errors` and the batch continues. Whole-request conditions abort with a non-`200` instead:
+A `200` is returned whenever the body was read and the records were processed — **even if every record failed**, so branch on `failed`/`results`, not the status code. Per-record problems (a malformed NDJSON line, a non-object array element, schema validation, column/check permission failures) are reported in `results` and the batch continues. Whole-request conditions abort with a non-`200` instead:
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"empty ndjson body"}` | No non-blank lines in the body |
+| 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
+| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
+| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
 
-> **At-least-once on retry.** A batch aborted partway (a `503`/`500` after some records were already published) re-publishes its leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+> **At-least-once on retry.** A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
 
-**curl example:**
+**curl example (JSON array):**
+
+```bash
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+  -H "Content-Type: application/json" \
+  -d '[{"page":"/home"},{"page":"/about"}]'
+```
+
+**curl example (NDJSON):**
 
 ```bash
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \

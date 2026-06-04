@@ -103,7 +103,10 @@ describe("TableRef", () => {
           succeeded: 1,
           failed: 1,
           duplicates: 0,
-          errors: [{ line: 2, error: "validation failed" }],
+          results: [
+            { index: 1, ok: true },
+            { index: 2, error: "validation failed" },
+          ],
         }),
         { status: 200 },
       ),
@@ -117,7 +120,10 @@ describe("TableRef", () => {
     // ...but not every record did.
     expect(result.data?.ok).toBe(false);
     expect(result.data?.failed).toBe(1);
-    expect(result.data?.errors).toEqual([{ line: 2, error: "validation failed" }]);
+    expect(result.data?.results).toEqual([
+      { index: 1, ok: true },
+      { index: 2, error: "validation failed" },
+    ]);
   });
 
   it("insert() array tolerates a 200 with an empty body without throwing", async () => {

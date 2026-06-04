@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
+import { chQuery, dataClient, makeJWT, testId, WH_URL, waitForCondition } from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 /**
@@ -57,7 +57,8 @@ describe("NDJSON ingest", () => {
     expect(result.data?.total).toBe(3);
     expect(result.data?.succeeded).toBe(2);
     expect(result.data?.failed).toBe(1);
-    expect(result.data?.errors?.[0]?.line).toBe(2);
+    const failed = result.data?.results?.find((r) => r.error);
+    expect(failed?.index).toBe(2);
 
     // Exactly the two good rows reach ClickHouse; the bad one does not.
     await waitForCondition(async () => {
@@ -116,14 +117,46 @@ describe("NDJSON ingest", () => {
     expect(result.data?.total).toBe(2);
     expect(result.data?.succeeded).toBe(1);
     expect(result.data?.failed).toBe(1);
-    expect(result.data?.errors?.[0]?.line).toBe(2);
-    expect(result.data?.errors?.[0]?.error).toContain("invalid json");
+    const failed = result.data?.results?.find((r) => r.error);
+    expect(failed?.index).toBe(2);
+    expect(failed?.error).toContain("invalid json");
 
     await waitForCondition(async () => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${good}'`,
       );
       return r.length === 1;
+    }, 10_000);
+  });
+
+  it("accepts a raw JSON array body (Content-Type: application/json) and lands every row", async () => {
+    const runId = testId();
+    const rows = [1, 2].map((n) => ({
+      event_id: `${runId}-${n}`,
+      page: "/json-array",
+      user_id: `user-${runId}`,
+      session_id: `s-${runId}`,
+    }));
+
+    // The SDK serializes arrays to NDJSON, so hit the server's JSON-array
+    // decoder directly with a raw fetch to prove the wire path end-to-end.
+    const res = await fetch(`${WH_URL}/v1/ingest?table=${T.clicks}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${makeJWT({ sub: "test-viewer", role: "viewer", tenant_id: "acme" })}`,
+      },
+      body: JSON.stringify(rows),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { total: number; succeeded: number; failed: number };
+    expect(body).toMatchObject({ total: 2, succeeded: 2, failed: 0 });
+
+    await waitForCondition(async () => {
+      const r = await chQuery(
+        `SELECT count() AS cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+      );
+      return Number((r[0] as { cnt: number }).cnt) === 2;
     }, 10_000);
   });
 });

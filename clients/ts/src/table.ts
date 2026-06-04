@@ -5,7 +5,7 @@ import type { StreamController } from "./stream/controller.js";
 import type {
   FetchOptions,
   HttpContext,
-  InsertRecordError,
+  InsertRecordResult,
   InsertResult,
   Result,
   StreamOptions,
@@ -24,13 +24,13 @@ const NDJSON_CONTENT_TYPE = "application/x-ndjson";
  */
 export type NDJSONSource = string | Uint8Array | Blob | ReadableStream<Uint8Array>;
 
-/** Wire shape of the server's NDJSON batch ingest response. */
+/** Wire shape of the server's batch ingest response (JSON array or NDJSON). */
 interface BatchIngestResponse {
   total: number;
   succeeded: number;
   failed: number;
   duplicates: number;
-  errors?: InsertRecordError[];
+  results?: InsertRecordResult[];
 }
 
 /** Read an {@link NDJSONSource} fully into a UTF-8 string. */
@@ -87,7 +87,7 @@ export class TableRef<Row = Record<string, unknown>> {
    * serialized to NDJSON (one record per line) and sent as a single
    * `application/x-ndjson` request: a bad record no longer fails or hides the
    * rest of the batch — per-record outcomes come back in the result
-   * (`failed` / `errors`), and `ok` is true only when every record succeeded.
+   * (`failed` / `results`), and `ok` is true only when every record succeeded.
    *
    * The array path sends one request regardless of size; bounded-concurrency
    * chunking of very large arrays is tracked separately (#196). For NDJSON you
@@ -100,7 +100,7 @@ export class TableRef<Row = Record<string, unknown>> {
     if (Array.isArray(data)) {
       if (data.length === 0) {
         // Nothing to send — succeed without a round trip.
-        return ok({ ok: true, total: 0, succeeded: 0, failed: 0, duplicates: 0 });
+        return ok({ ok: true, total: 0, succeeded: 0, failed: 0, duplicates: 0, results: [] });
       }
       const ndjson = data.map((row) => JSON.stringify(row)).join("\n");
       return this._sendNDJSON(ndjson, opts);
@@ -167,7 +167,7 @@ export class TableRef<Row = Record<string, unknown>> {
       failed: r.failed,
       duplicates: r.duplicates,
     };
-    if (r.errors && r.errors.length > 0) result.errors = r.errors;
+    if (r.results && r.results.length > 0) result.results = r.results;
     return ok(result);
   }
 

@@ -67,6 +67,12 @@ curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
+# A JSON array (or NDJSON) ingests a batch and returns a per-record summary
+curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
+  -H "Content-Type: application/json" \
+  -d '[{"page": "/a"}, {"page": "/b"}]'
+# → {"total":2,"succeeded":2,"failed":0,"duplicates":0,"results":[{"index":1,"ok":true},{"index":2,"ok":true}]}
+
 # Check discovered schemas
 curl -s http://localhost:8080/v1/schema | jq
 

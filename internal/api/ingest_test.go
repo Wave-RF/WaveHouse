@@ -472,11 +472,24 @@ func jsonLine(t *testing.T, obj any) string {
 	return string(b)
 }
 
-func decodeNDJSONResult(t *testing.T, w *httptest.ResponseRecorder) ndjsonResult {
+func decodeBatchResult(t *testing.T, w *httptest.ResponseRecorder) batchResult {
 	t.Helper()
-	var resp ndjsonResult
+	var resp batchResult
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	return resp
+}
+
+// resultAt returns the per-record result with the given 1-based index, failing
+// the test if it is absent (e.g. truncated away).
+func resultAt(t *testing.T, resp batchResult, index int) recordResult {
+	t.Helper()
+	for _, r := range resp.Results {
+		if r.Index == index {
+			return r
+		}
+	}
+	t.Fatalf("no result with index %d in %+v", index, resp.Results)
+	return recordResult{}
 }
 
 func TestIngest_NDJSON_AllValid(t *testing.T) {
@@ -493,12 +506,17 @@ func TestIngest_NDJSON_AllValid(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 3, resp.Total)
 	assert.Equal(t, 3, resp.Succeeded)
 	assert.Equal(t, 0, resp.Failed)
 	assert.Equal(t, 0, resp.Duplicates)
-	assert.Empty(t, resp.Errors)
+	require.Len(t, resp.Results, 3)
+	for i, rr := range resp.Results {
+		assert.Equal(t, i+1, rr.Index)
+		assert.True(t, rr.Ok)
+		assert.Empty(t, rr.Error)
+	}
 	assert.Len(t, pub.Messages, 3)
 }
 
@@ -516,12 +534,14 @@ func TestIngest_NDJSON_PartialFailure_Validation(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 3, resp.Total)
 	assert.Equal(t, 2, resp.Succeeded)
 	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Errors, 1)
-	assert.Equal(t, 2, resp.Errors[0].Line)
+	require.Len(t, resp.Results, 3)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
+	assert.True(t, resultAt(t, resp, 3).Ok)
 	// The two good rows are still published; the bad one is not.
 	assert.Len(t, pub.Messages, 2)
 }
@@ -540,13 +560,14 @@ func TestIngest_NDJSON_MalformedLine(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 3, resp.Total)
 	assert.Equal(t, 2, resp.Succeeded)
 	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Errors, 1)
-	assert.Equal(t, 2, resp.Errors[0].Line)
-	assert.Contains(t, resp.Errors[0].Error, "invalid json")
+	require.Len(t, resp.Results, 3)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Contains(t, resultAt(t, resp, 2).Error, "invalid json")
+	assert.True(t, resultAt(t, resp, 3).Ok)
 	assert.Len(t, pub.Messages, 2)
 }
 
@@ -569,7 +590,7 @@ func TestIngest_NDJSON_BlankLinesSkipped(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 2, resp.Total)
 	assert.Equal(t, 2, resp.Succeeded)
 	assert.Len(t, pub.Messages, 2)
@@ -621,11 +642,14 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 3, resp.Total)
 	assert.Equal(t, 2, resp.Succeeded)
 	assert.Equal(t, 1, resp.Duplicates)
 	assert.Equal(t, 0, resp.Failed)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.True(t, resultAt(t, resp, 2).Duplicate)
+	assert.True(t, resultAt(t, resp, 3).Ok)
 	assert.Len(t, pub.Messages, 2)
 }
 
@@ -687,13 +711,13 @@ func TestIngest_NDJSON_Policy_ColumnDenied_PerLine(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 2, resp.Total)
 	assert.Equal(t, 1, resp.Succeeded)
 	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Errors, 1)
-	assert.Equal(t, 2, resp.Errors[0].Line)
-	assert.Contains(t, resp.Errors[0].Error, "not allowed for insert")
+	require.Len(t, resp.Results, 2)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Contains(t, resultAt(t, resp, 2).Error, "not allowed for insert")
 	assert.Len(t, pub.Messages, 1)
 }
 
@@ -753,13 +777,14 @@ func TestIngest_NDJSON_Policy_CheckClause_PerLineAndAutoInject(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 3, resp.Total)
 	assert.Equal(t, 2, resp.Succeeded)
 	assert.Equal(t, 1, resp.Failed)
-	require.Len(t, resp.Errors, 1)
-	assert.Equal(t, 2, resp.Errors[0].Line)
-	assert.Contains(t, resp.Errors[0].Error, "check failed")
+	require.Len(t, resp.Results, 3)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Contains(t, resultAt(t, resp, 2).Error, "check failed")
+	assert.True(t, resultAt(t, resp, 3).Ok)
 	require.Len(t, pub.Messages, 2)
 	// The auto-injected record (line 3) carries the claim-derived org_id.
 	assert.Contains(t, string(pub.Messages[1].Data), "my-org")
@@ -777,7 +802,7 @@ func TestIngest_NDJSON_ContentTypeWithCharset(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, 1, resp.Total)
 	assert.Equal(t, 1, resp.Succeeded)
 }
@@ -787,7 +812,7 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 
-	const total = maxReportedNDJSONErrors + 50
+	const total = maxReportedResults + 50
 	lines := make([]string, total)
 	for i := range lines {
 		lines[i] = "{ not valid json"
@@ -797,11 +822,11 @@ func TestIngest_NDJSON_ErrorsTruncated(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	resp := decodeNDJSONResult(t, w)
+	resp := decodeBatchResult(t, w)
 	assert.Equal(t, total, resp.Total)
 	assert.Equal(t, total, resp.Failed)
-	// Failed counts everything; the echoed errors are capped.
-	assert.Len(t, resp.Errors, maxReportedNDJSONErrors)
+	// Failed counts everything; the echoed per-record results are capped.
+	assert.Len(t, resp.Results, maxReportedResults)
 	assert.Empty(t, pub.Messages)
 }
 
@@ -827,6 +852,371 @@ func TestIsNDJSONContentType(t *testing.T) {
 		t.Run(tt.ct, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, isNDJSONContentType(tt.ct))
+		})
+	}
+}
+
+// ── Forgiving multi-format ingest (JSON array, sniffing, body cap) ──────────
+
+// rawIngestRequest builds a POST /v1/ingest request with a verbatim body and an
+// optional Content-Type (empty string → no header), so tests can exercise the
+// body sniffer and malformed-input paths directly.
+func rawIngestRequest(t *testing.T, table, contentType, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"/v1/ingest?table="+url.QueryEscape(table),
+		strings.NewReader(body),
+	)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return req
+}
+
+func TestIngest_JSONArray_AllValid(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// A bare JSON array with no Content-Type must be accepted as a batch.
+	req := ingestRequest(t, "clicks", []map[string]any{
+		{"page": "/a", "count": 1},
+		{"page": "/b", "count": 2},
+	})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Equal(t, 0, resp.Failed)
+	require.Len(t, resp.Results, 2)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.True(t, resultAt(t, resp, 2).Ok)
+	assert.Len(t, pub.Messages, 2)
+}
+
+func TestIngest_JSONArray_SingleElement(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// A one-element array is still a batch (returns the results envelope, not
+	// the single-object {"ok":true}).
+	req := ingestRequest(t, "clicks", []map[string]any{{"page": "/solo"}})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 1, resp.Total)
+	assert.Equal(t, 1, resp.Succeeded)
+	require.Len(t, resp.Results, 1)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Len(t, pub.Messages, 1)
+}
+
+func TestIngest_JSONArray_WithJSONContentType(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// Content-Type: application/json must NOT force the single-object path when
+	// the body is an array — the sniffer wins.
+	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"},{"page":"/b"}]`)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Len(t, pub.Messages, 2)
+}
+
+func TestIngest_JSONArray_PartialValidationFailure(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	req := ingestRequest(t, "clicks", []map[string]any{
+		{"page": "/a"},
+		{"page": "/b", "nonexistent_field": 42}, // unknown column → rejected
+		{"page": "/c"},
+	})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	// The bad element is reported per-record; the request itself is 200.
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Equal(t, 1, resp.Failed)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
+	assert.True(t, resultAt(t, resp, 3).Ok)
+	assert.Len(t, pub.Messages, 2)
+}
+
+func TestIngest_JSONArray_ScalarElements(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// Non-object elements (number, string, nested array) are wrong-typed: the
+	// decoder stays in sync, so each is a per-record error and the objects
+	// around them still ingest.
+	req := ingestRequest(t, "clicks", []any{
+		map[string]any{"page": "/a"},
+		5,
+		"x",
+		[]any{1, 2},
+		map[string]any{"page": "/b"},
+	})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 5, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Equal(t, 3, resp.Failed)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.NotEmpty(t, resultAt(t, resp, 2).Error)
+	assert.NotEmpty(t, resultAt(t, resp, 3).Error)
+	assert.NotEmpty(t, resultAt(t, resp, 4).Error)
+	assert.True(t, resultAt(t, resp, 5).Ok)
+	assert.Len(t, pub.Messages, 2)
+}
+
+func TestIngest_JSONArray_SyntaxError_Fatal(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// A structural syntax error desyncs the decoder — the whole request fails
+	// (400), unlike a per-element type error. The leading good element may have
+	// already published (at-least-once on retry).
+	req := rawIngestRequest(t, "clicks", "application/json", `[{"page":"/a"}, {bad]`)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid json")
+	testutil.AssertJSONErrorResponse(t, w)
+	assert.Len(t, pub.Messages, 1) // the leading record published before the abort
+}
+
+func TestIngest_JSONArray_Truncated_Fatal(t *testing.T) {
+	t.Parallel()
+
+	// A JSON array body cut off before its closing ']' (connection drop, partial
+	// write) must fail the whole request — never report the records that did
+	// arrive as a complete, successful 200 batch.
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing closing bracket", body: `[{"page":"/a"}`},
+		{name: "trailing comma cut off", body: `[{"page":"/a"},`},
+		{name: "bare open bracket", body: `[`},
+		{name: "truncated mid element", body: `[{"page":"/a"},{"pa`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+			req := rawIngestRequest(t, "clicks", "application/json", tt.body)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "invalid json")
+			testutil.AssertJSONErrorResponse(t, w)
+		})
+	}
+}
+
+func TestIngest_JSONArray_Empty(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// An explicit empty array is a valid, record-less batch → 200 with no rows.
+	req := rawIngestRequest(t, "clicks", "application/json", `[]`)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 0, resp.Total)
+	assert.Empty(t, resp.Results)
+	assert.Empty(t, pub.Messages)
+}
+
+func TestIngest_Sniff_ArrayBodyBeatsNDJSONHeader(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// Body starts with '[' → array path, even though the header says NDJSON.
+	req := rawIngestRequest(t, "clicks", "application/x-ndjson", `[{"page":"/a"},{"page":"/b"}]`)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Len(t, pub.Messages, 2)
+}
+
+func TestIngest_SingleObject_PrettyPrinted(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// A multi-line (pretty-printed) single object must not be mistaken for
+	// NDJSON — it's one record on the single-object path.
+	req := rawIngestRequest(t, "clicks", "application/json", "{\n  \"page\": \"/a\",\n  \"count\": 1\n}")
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]bool
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp["ok"])
+	assert.Len(t, pub.Messages, 1)
+}
+
+func TestIngest_Unlabeled_ConcatenatedObjects_FirstOnly(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+	// Two concatenated objects with no NDJSON header take the single-object
+	// path and ingest only the first (matching the historical behavior — send
+	// application/x-ndjson to batch them).
+	req := rawIngestRequest(t, "clicks", "", `{"page":"/first"}{"page":"/second"}`)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]bool
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp["ok"])
+	require.Len(t, pub.Messages, 1)
+	assert.Contains(t, string(pub.Messages[0].Data), "/first")
+	assert.NotContains(t, string(pub.Messages[0].Data), "/second")
+}
+
+func TestIngest_LeadingWhitespace_Sniff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		body  string
+		batch bool
+	}{
+		{name: "array after whitespace", body: "  \n\t [{\"page\":\"/a\"}] ", batch: true},
+		{name: "object after whitespace", body: "  \n {\"page\":\"/a\"}", batch: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+			req := rawIngestRequest(t, "clicks", "application/json", tt.body)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			if tt.batch {
+				resp := decodeBatchResult(t, w)
+				assert.Equal(t, 1, resp.Total)
+			} else {
+				var resp map[string]bool
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+				assert.True(t, resp["ok"])
+			}
+			assert.Len(t, pub.Messages, 1)
+		})
+	}
+}
+
+func TestIngest_EmptyBody(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		wantMsg     string
+	}{
+		{name: "no content type", contentType: "", body: "", wantMsg: "empty body"},
+		{name: "whitespace only", contentType: "application/json", body: "   \n\t ", wantMsg: "empty body"},
+		{name: "ndjson empty", contentType: "application/x-ndjson", body: "", wantMsg: "empty ndjson body"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+
+			req := rawIngestRequest(t, "clicks", tt.contentType, tt.body)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), tt.wantMsg)
+			testutil.AssertJSONErrorResponse(t, w)
+			assert.Empty(t, pub.Messages)
+		})
+	}
+}
+
+func TestIngest_BodyCap_413(t *testing.T) {
+	t.Parallel()
+
+	const elem = `{"page":"/a"}`
+	big := `{"page":"/` + strings.Repeat("a", 200) + `"}`
+	tests := []struct {
+		name string
+		ct   string
+		body string
+		cap  int64
+	}{
+		{name: "single object", ct: "application/json", body: big, cap: 50},
+		{name: "json array mid-element", ct: "application/json", body: "[" + big + "]", cap: 50},
+		// Cap lands exactly between elements (just past '[' + the first element,
+		// before the comma) so the overflow surfaces at arrayReader's
+		// More()/Token boundary — the path that used to swallow the read error
+		// and silently truncate to a partial 200 instead of 413.
+		{name: "json array between elements", ct: "application/json", body: "[" + elem + "," + elem + "]", cap: int64(1 + len(elem))},
+		// NDJSON over cap surfaces via the scanner's Err() (MaxBytesError).
+		{name: "ndjson", ct: "application/x-ndjson", body: big, cap: 50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+			h.maxRequestBytes = tt.cap // below the body
+
+			req := rawIngestRequest(t, "clicks", tt.ct, tt.body)
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+			assert.Contains(t, w.Body.String(), "request body exceeded")
+			testutil.AssertJSONErrorResponse(t, w)
 		})
 	}
 }

@@ -32,7 +32,7 @@ export type {
   // Query
   FilterOp,
   // Ingest
-  InsertRecordError,
+  InsertRecordResult,
   InsertResult,
   OrderClause,
   ParamDef,
