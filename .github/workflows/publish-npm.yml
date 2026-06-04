@@ -53,11 +53,13 @@ jobs:
         id: changed
         shell: bash
         run: |
-          if git diff --quiet HEAD^ HEAD -- clients/ts/; then
+          # workflow_dispatch is a manual "force a dev publish" (e.g. to verify
+          # the pipeline); otherwise publish only when clients/ts actually changed.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || ! git diff --quiet HEAD^ HEAD -- clients/ts/; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "clients/ts/ unchanged on this push — skipping npm dev publish."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
