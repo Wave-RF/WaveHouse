@@ -121,7 +121,7 @@ See [Configuration](https://wavehouse.dev/configuration).
 
 ## 🚦 Project status
 
-WaveHouse is in **alpha** — built in the open, MIT-licensed, no vendor lock-in. See [SUPPORT.md](SUPPORT.md) for where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now.
+WaveHouse is in **alpha** — built in the open, Apache-2.0-licensed, no vendor lock-in. See [SUPPORT.md](SUPPORT.md) for where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now.
 
 Track what's shipped, in progress, and planned on the [**project board**](https://github.com/orgs/Wave-RF/projects/7).
 
