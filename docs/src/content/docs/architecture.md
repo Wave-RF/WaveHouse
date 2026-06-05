@@ -13,7 +13,7 @@ WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the 
 
 ```mermaid
 flowchart TD
-    Clients["Clients<br/>(REST API, SSE)"]
+    Clients["Clients<br/>(REST API, SSE)"]:::client
 
     Clients --> IH
     Clients --> QH
@@ -24,7 +24,7 @@ flowchart TD
         SR --> DD["Dedupe (optional)"]
         DD --> MQ["MQ (NATS)"]
         MQ --> BC["Buffer Consumer<br/>(batch flush)"]
-        BC -.->|failed inserts| DLQ["DLQ"]
+        BC -.->|failed inserts| DLQ["DLQ"]:::fail
 
         QH["Query Handler"] --> Cache["Cache<br/>(Ristretto + singleflight)"]
 
@@ -35,7 +35,7 @@ flowchart TD
         NATS["NATS JetStream retains messages<br/>for SSE gap-fill<br/>via DeliverByStartTime"]
     end
 
-    BC --> CH[("ClickHouse<br/>(analytics storage)")]
+    BC --> CH[("ClickHouse<br/>(analytics storage)")]:::store
     Cache --> CH
 
     style NATS fill:none,stroke-dasharray:5 5,stroke:#888,color:#888
@@ -64,7 +64,7 @@ internal/
 
 ### `api/` — HTTP Layer
 
-The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standard middleware (RequestID, RealIP, Recoverer).
+The API layer uses [Chi](https://github.com/go-chi/chi) for routing with RequestID, RealIP, and a custom JSON recoverer (`jsonRecoverer`) that emits a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
 
 - **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin`, role == `policy.admin_role`): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
 - **`internal/auth`** — JWT auth middleware supporting HMAC and JWKS validation and role extraction from a configurable claim path. It always runs (no on/off flag) and never rejects: a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud.
@@ -72,7 +72,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with standar
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table{.scope}}`.
-- **query.go** — Executes SQL queries directly against ClickHouse. Results are cached. UUID/DateTime columns are converted to strings.
+- **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
 - **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
@@ -151,8 +151,7 @@ Client POST /v1/ingest?table={table}
 
 Ingest worker pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
-  → Validate table name against safeIdentifierRe
-  → Validate payload presence (reject envelopes with empty `data`)
+  → Parse the event envelope (a malformed envelope is the only poison pill: it's acked-and-dropped)
   → Batch events per table, bulk INSERT to ClickHouse
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry

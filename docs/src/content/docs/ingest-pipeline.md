@@ -184,7 +184,7 @@ There are three contexts, each with one job.
 ```mermaid
 flowchart LR
     PC["process ctx<br/>(main, WithCancel)"] -->|"SIGINT/SIGTERM cancels"| WC["workerCtx<br/>(child — the STOP signal)"]
-    WC -->|"context.WithoutCancel"| FC["flushCtx<br/>(values only; never cancelled)"]
+    WC -->|"context.WithoutCancel"| FC["flushCtx<br/>(values only; never canceled)"]
     WC -.->|"only dispatchLoop watches Done()"| D[dispatchLoop]
     FC -.->|"passed down; never watched"| TL["tableLoops + flushes"]
 ```
@@ -193,12 +193,12 @@ flowchart LR
   downstream goroutine stops via channel-close instead, which gives a
   deterministic drain with no select race that could abandon buffered rows.
 - **`flushCtx` = `context.WithoutCancel(workerCtx)`** carries trace values but is
-  never cancelled. A flush that has started must finish, so data already written
+  never canceled. A flush that has started must finish, so data already written
   to ClickHouse gets acked rather than redelivered. It is bounded by the HTTP
   client timeout (30s); shutdown bounds the *wait* for it with a deadline.
 - A separate **shutdown-deadline context** lives only in `main`'s signal handler
   and is rooted in `context.Background()` (so it survives `workerCtx` being
-  cancelled) — it caps how long shutdown waits.
+  canceled) — it caps how long shutdown waits.
 
 The principle: **`ctx` cancellation is the stop mechanism for long-running
 loops; `Close()`/stop-funcs are the mechanism for resources.**

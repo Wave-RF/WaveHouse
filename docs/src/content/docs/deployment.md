@@ -29,7 +29,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
     ORDER BY (page)
   "
 
-# Ingest data (no auth required by default)
+# Ingest data (the standalone stack ships a permissive trial policy; WaveHouse is fail-closed otherwise — see Getting Started)
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
@@ -63,12 +63,10 @@ WH_SCHEMA_REFRESH_INTERVAL=30 \
 ### Building
 
 ```bash
-make docker
+docker build -f deployments/Dockerfile -t wavehouse:latest .
 ```
 
-This builds one image:
-
-- `wavehouse:latest`
+This builds the runtime image `wavehouse:latest`. (The published `ghcr.io` images are built by GoReleaser from `deployments/Dockerfile.goreleaser`, not this command — see Registry below.)
 
 All images use multi-stage builds (Go Alpine builder → distroless runtime) for minimal attack surface.
 
@@ -91,6 +89,7 @@ Releases are built with [GoReleaser](https://goreleaser.com/). The configuration
 | Linux | amd64, arm64 |
 | macOS | amd64, arm64 |
 | Windows | amd64, arm64 |
+| FreeBSD | amd64, arm64 |
 
 ### Creating a Release
 
@@ -157,7 +156,7 @@ WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DI
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
-In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose files in `deployments/compose/standalone.yaml`, `tests/e2e/compose.yaml`, and `clients/ts/playground/compose.yaml` set `WH_DATA_DIR=/app/data` and bind a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data/nats`, `/app/data/pebble`, and `/app/pipes` owned by the nonroot user (UID 65532).
+In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
 
 If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
 
@@ -227,7 +226,7 @@ services:
       - ./my-pipes:/app/pipes:ro     # ← read-only seed
 ```
 
-The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `POST /v1/pipes`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
+The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/admin/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
 
 ## Health Checks
 
@@ -263,7 +262,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
   CMD ["/app/wavehouse", "health"]
 ```
 
-The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/livez` and exits 0 (200 OK) or 1 (anything else). It honours `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
+The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/livez` and exits 0 (200 OK) or 1 (anything else). It honors `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
 
 You can run it manually for debugging:
 
@@ -406,7 +405,7 @@ docker compose -f deployments/compose/standalone.yaml up -d
 ### Option 3: Reset for Local Binary Development
 
 ```bash
-rm -rf data/         # Removes embedded NATS + Pebble data
-make clean           # Removes bin/, tmp/, data/, dist/
+rm -rf data/         # Removes embedded NATS + Pebble data (run `make clean-all` to also drop docker volumes)
+make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/
 make build && ./bin/wavehouse
 ```

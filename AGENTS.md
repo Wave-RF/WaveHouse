@@ -122,7 +122,7 @@ make clean-all         # Full reset: above + data/ + docker volumes
 make dev-docs          # Hot-reload Astro dev server on :4321
 make build-docs        # Production build → docs/dist/
 make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
-make branding-docs     # Regenerate logo/favicon/OG assets from docs/scripts/branding/mark.svg
+make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 ```
 
 Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
@@ -133,7 +133,7 @@ Tooling notes:
 - Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
 - `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
 - `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs a single root `pnpm install --frozen-lockfile`, which installs all three workspace packages (`clients/ts/`, `tests/e2e/sdk/`, `docs/`).
-- **Node workspace**: the SDK (`clients/ts/`, `@wavehouse/sdk`), E2E harness (`tests/e2e/sdk/`, `wavehouse-e2e`), and docs site (`docs/`, `wavehouse-docs`) are pnpm workspace packages, driven directly from the root `Makefile` via `pnpm --filter` — no sub-Makefiles. The user-facing targets are verb-first and live in their natural `make help` sections: `build-ts` / `dev-ts` / `test-ts` / `clean-ts` for the SDK, and `build-docs` / `dev-docs` / `preview-docs` / `branding-docs` / `clean-docs` (plus the hidden `install-playwright-docs` helper) for docs. TS formatting/linting is workspace-wide via Biome (one `biome.json`), invoked by `make fmt` / `make lint` / `make fix`.
+- **Node workspace**: the SDK (`clients/ts/`, `@wavehouse/sdk`), E2E harness (`tests/e2e/sdk/`, `wavehouse-e2e`), and docs site (`docs/`, `wavehouse-docs`) are pnpm workspace packages, driven directly from the root `Makefile` via `pnpm --filter` — no sub-Makefiles. The user-facing targets are verb-first and live in their natural `make help` sections: `build-ts` / `dev-ts` / `test-ts` / `clean-ts` for the SDK, and `build-docs` / `dev-docs` / `preview-docs` / `branding-docs` / `clean-docs` (plus the hidden `install-playwright-docs` helper) for docs. TS/JS/JSON formatting & linting is workspace-wide via Biome (one `biome.json`, covering the SDK, E2E harness, and docs — `.astro` templates and Markdown are out of Biome's scope). Markdown across the whole repo is linted by markdownlint-cli2 (rules in `.markdownlint.json`, file globs in `.markdownlint-cli2.jsonc`; `.mdx` excluded) — that's Markdown *style*. Docs **prose** is linted separately by the `lint-prose` / `fix-prose` targets via misspell (curated common-typo + US-spelling/UK→US enforcement over `docs/src/content/**`, `.md` *and* `.mdx`; a pinned `.bin/` binary, distinct from the misspell analyzer golangci-lint runs on Go source — same fork, different entry point; autofixable via `make fix`). The split is style vs. words: markdownlint owns style, misspell owns spelling, Biome owns JS/TS/JSON — no overlap. (A full-dictionary spell-checker, cspell, was trialled and dropped: on these jargon-dense docs it flagged ~64 legitimate terms and zero real typos — an unbounded dictionary tax for no signal. Catching novel typos — and judging accuracy-vs-code, clarity, and completeness — is left to LLM review: the `docs-reviewer` subagent — a mandatory pre-push gate, run via `/docs-review` (see §Agent PR Discipline → Docs review) — which weighs a word in context against the code.) All run under `make lint` / `make fix` (Biome also under `make fmt`).
 - `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
 - **Worktrunk** (`wt`) reads `.config/wt.toml`. On `wt switch --create <branch>`, post-start runs `wt step copy-ignored` (seeds `.bin/` + `node_modules/` from main) then `make tools` to finish bootstrap. Personal overrides in `~/.config/worktrunk/config.toml`.
 
@@ -251,24 +251,21 @@ Agents CAN re-request bot reviewers by mentioning them in PR comments (`gh pr co
 
 ### Pre-push self-review is mandatory on PR branches
 
-Before pushing to any branch with an open PR, agents must invoke the `pre-push-reviewer` subagent in fresh context. The subagent reviews:
+Before pushing to any branch with an open PR, agents must invoke **two review subagents in fresh context, in parallel** — both are mandatory gates, each with its own marker:
 
-- The full PR diff against `main` (merge-base)
-- The latest commit specifically
-- All open PR comments and reviews (top-level + inline)
-- CI status / failing checks
-- Linked issues' acceptance criteria
+- **`pre-push-reviewer`** (code) reviews: the full PR diff against `main` (merge-base); the latest commit specifically; all open PR comments and reviews (top-level + inline); CI status / failing checks; linked issues' acceptance criteria.
+- **`docs-reviewer`** (docs) reviews: docs prose for accuracy-vs-code, runnable examples, clarity, and completeness, **plus code↔docs sync** — code that changed but whose docs didn't (per §Documentation Sync). It runs on **every** push, even code-only ones: docs may not change but *should*, and catching that is the point. (See §Docs review for scope.)
 
-The subagent's verdict is one of `ship_it`, `iterate`, or `block`. **`ship_it` requires zero findings at any severity** (`[MUST]`, `[SHOULD]`, `[MAY]` sections all empty). Anything in the findings list — including `[MAY]` — forces `iterate`. The rule is: if there's anything left to do, the PR isn't shippable. "Ship it, just do this one thing first" is iteration, not shipping.
+Each subagent's verdict is one of `ship_it`, `iterate`, or `block`. **`ship_it` requires zero findings at any severity** (`[MUST]`, `[SHOULD]`, `[MAY]` sections all empty). Anything in the findings list — including `[MAY]` — forces `iterate`. The rule is: if there's anything left to do, the PR isn't shippable. "Ship it, just do this one thing first" is iteration, not shipping. **Both** reviewers must reach `ship_it`.
 
-When the subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes `tmp/review-passed-<HEAD-sha>` and the next `git push` succeeds. On `VERDICT: iterate` or `VERDICT: block`, no marker — the orchestrator agent **loops**: address every finding, commit, re-invoke `pre-push-reviewer` in fresh context, repeat until `ship_it`. Never push with open findings.
+When a subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes its marker — `tmp/review-passed-<HEAD-sha>` for `pre-push-reviewer`, `tmp/docs-review-passed-<HEAD-sha>` for `docs-reviewer`. `git push` succeeds only when **both** markers exist for HEAD. On `VERDICT: iterate` or `VERDICT: block`, that reviewer writes no marker — the orchestrator agent **loops**: address every finding, commit, re-invoke the reviewer(s) in fresh context, repeat until both say `ship_it`. Never push with open findings.
 
-The orchestrator agent cannot override the subagent's system prompt (it's the fixed file content of `.claude/agents/pre-push-reviewer.md`), and the subagent runs in a clean conversation context, so it doesn't share the orchestrator's bias toward its own work.
+The orchestrator agent cannot override either subagent's system prompt (the fixed file content of `.claude/agents/pre-push-reviewer.md` / `.claude/agents/docs-reviewer.md`), and each runs in a clean conversation context, so they don't share the orchestrator's bias toward its own work.
 
 ### Don't bypass the gates
 
 - `--no-verify` on `git commit` / `git push` exists for human WIP / draft pushes. Agents should not use it.
-- Markers (`tmp/ci-passed-tree-*`, `tmp/review-passed-*`) are written by `make ci` and the `pre-push-reviewer` SubagentStop hook. Don't `touch` / `Write` / `Edit` them by hand — if you feel tempted, the marker is wrong-shaped for the situation you're in. Run `make ci`, invoke the subagent, get the verdict.
+- Markers (`tmp/ci-passed-tree-*`, `tmp/review-passed-*`, `tmp/docs-review-passed-*`) are written by `make ci` and the `review-marker.sh` SubagentStop hook (for both `pre-push-reviewer` and `docs-reviewer`). Don't `touch` / `Write` / `Edit` them by hand — if you feel tempted, the marker is wrong-shaped for the situation you're in. Run `make ci`, invoke the subagent(s), get the verdict.
 
 These are policy, not mechanically enforced. Bash can write a file a dozen ways; an agent can edit `.claude/hooks/agent-bash-gate.sh` itself. Trust beats whack-a-mole regex.
 
@@ -281,6 +278,14 @@ wt switch pr:<N>                # worktrunk + gh CLI; or `gh pr checkout <N>` fa
 ```
 
 Then invoke `pre-push-reviewer`. Findings stay local — agents must not post comments on the PR manually; surface them to the user, who decides what to act on.
+
+### Docs review
+
+Documentation *prose* — accuracy against the code, runnable examples, clarity, completeness — **and code↔docs sync** (code that changed but whose docs didn't) are reviewed by the **`docs-reviewer`** subagent, not the code-focused `pre-push-reviewer`. The canonical rubric is `.github/prompts/docs-review.md`. It complements the deterministic prose tools — misspell, markdownlint, starlight-links-validator — reviewing only what they can't, and it never edits docs or posts PR comments.
+
+**Scope** is the canonical docs-prose set from `scripts/docs-prose.sh` — a *denylist*: every tracked `.md`/`.mdx` EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`/`*.old.md`, `PERF-CLAIMS-REVIEW.md`. So it covers the Starlight site under `docs/src/content/` **and** the governance docs (`README.md`, the SDK readme `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — new docs are picked up automatically. `CODE_OF_CONDUCT.md`/`SUPPORT.md` are deep-reviewed only on change or material suspicion.
+
+**It is a hard pre-push gate**, run in parallel with `pre-push-reviewer` (see §Pre-push self-review). Invoked with the **default (branch) scope** it emits a `VERDICT:` line; on `ship_it` the `review-marker.sh` SubagentStop hook writes `tmp/docs-review-passed-<HEAD-sha>`, which the push gate requires — unconditionally, on every PR-branch push (even code-only ones). Run it via **`/docs-review`**; with **no arg** that's the gating review (branch scope), while an explicit **path/glob** or **`all`** is **advisory** (no `VERDICT:`, no marker) for ad-hoc audits. The whole dev team runs Claude Code and this command is tracked in-repo, so everyone runs it themselves; there is intentionally **no PR/cloud path** for docs review.
 
 ## Documentation Sync
 
@@ -377,12 +382,11 @@ internal/query/         → Structured query AST + SQL builder
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)
-tests/e2e/              → E2E test stack
+tests/e2e/              → E2E test stack (scripts/orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary)
 tests/e2e/fixtures/     → Idempotent ClickHouse DDL scripts for test tables
-tests/e2e/compose.yaml  → Docker Compose with profiles (ClickHouse always; WaveHouse via --profile app)
 tests/e2e/sdk/          → E2E integration tests via TypeScript SDK (Vitest)
-deployments/compose/    → Docker Compose files
-deployments/docker/     → Dockerfiles
+deployments/compose/    → Docker Compose files (standalone.yaml, dependencies.yaml)
+deployments/Dockerfile  → Runtime image (+ Dockerfile.goreleaser for release builds)
 docs/                   → Project documentation
 .vscode/                → Workspace settings (gopls build flags, recommended extensions)
 ```
@@ -401,7 +405,7 @@ docs/                   → Project documentation
 - **Issue triage** (`triage.yml`): GitHub Models classifies new/edited issues and applies `area/*` + `security` + `breaking-change` labels.
 - **Code review** (advisory; the `Admin approval` required status check + the ruleset are the actual merge gate): handled by external marketplace apps (CodeRabbit, Copilot) configured at the org/repo level, not by in-repo workflows. Inline findings post as review threads that `required_review_thread_resolution: true` blocks merge on until resolved.
 - **Dependabot auto-merge** (`dependabot-automerge.yml`): patch/minor bumps auto-approve + auto-merge; major bumps hold for human review. CI still gates the actual merge. Patch/minor bypass `Admin approval` (the workflow + CI passing is the trust model); major bumps fall through to admin review like any human PR — this closed a hole where a bot's APPROVED review (e.g. CodeRabbit) could merge a major bump without admin involvement (see #130).
-- **Docs site deploy** (`wavehouse.dev`): driven by Cloudflare's Workers Builds (the native Git integration on the CF side), not a GitHub Actions workflow — so no `CLOUDFLARE_API_TOKEN` lives in the repo. Push to `main` runs `npx wrangler deploy` from `docs/` and updates `wavehouse.dev` within ~2 minutes; pushes to PR branches run `npx wrangler versions upload`, which publishes a per-version preview at `<version-prefix>-wavehouse-docs.wave-rf.workers.dev`. Wrangler config (custom domain, observability, source maps, preview URLs) lives in `docs/wrangler.jsonc`; the build command (`pnpm install --frozen-lockfile && pnpm build`) and `docs/` root directory are configured on the CF dashboard side. The worker (`docs/worker/index.ts`, delegating to `cloudflare-md-router`) deploys alongside the static assets so `Accept: text/markdown` content negotiation works in production.
+- **Docs site deploy** (`wavehouse.dev`): a tail step of the CI job (`.github/workflows/ci.yml`), **not** Cloudflare's Workers Builds. Workers Builds can't build this site — `rehype-mermaid` renders diagrams to themed SVG at build time via headless Chromium, and the Workers Builds image has no browser (and no root to apt-install one). `make ci` already builds `docs/dist/` on a runner with a cached Chromium, so the deploy reuses that artifact and runs only once the whole pipeline is green: push to `main` runs `wrangler deploy` (production → `wavehouse.dev`); PR branches run `wrangler versions upload`, publishing a per-version preview at `<version-prefix>-wavehouse-docs.wave-rf.workers.dev` posted as a sticky PR comment. Deploys are skipped when no docs-affecting files changed and on fork PRs. **Requires `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` repo secrets**, and Cloudflare Workers Builds must stay **disconnected** from the `wavehouse-docs` Worker (else it double-deploys and fails the browser-dependent build on every push). Wrangler config (custom domain, observability, source maps, preview URLs) lives in `docs/wrangler.jsonc`. The worker (`docs/worker/index.ts`, delegating to `cloudflare-md-router`) deploys alongside the static assets so `Accept: text/markdown` content negotiation works in production.
 
 ## Governance Files
 

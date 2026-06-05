@@ -44,7 +44,7 @@ Review against each of these, in this order:
 
 4. **Testing** — new code without tests (especially on critical paths: auth middleware, ingest pipeline, policy evaluation, structured query builder, cache coherence, dedup). Missing edge-case coverage. Mocks where a real integration test would catch more (per the "no mocking DB" rule in the test conventions). Unit tests that don't actually exercise the code path they claim to.
 
-5. **Documentation & doc-sync** — AGENTS.md has a hard rule that code changes affecting API / config / architecture / event format / deployment must update the corresponding docs, `CHANGELOG.md` (under `[Unreleased]`), and the compose files / `config.yaml` defaults. The table in AGENTS.md §"Documentation Sync" is authoritative — diff changed files against that map and flag every missed sync.
+5. **Documentation & doc-sync** — AGENTS.md has a hard rule that code changes affecting API / config / architecture / event format / deployment must update the corresponding docs, `CHANGELOG.md` (under `[Unreleased]`), and the compose files / `config.yaml` defaults. The table in AGENTS.md §"Documentation Sync" is authoritative — diff changed files against that map and flag every missed sync. This check is about whether code changes *updated* the docs — not whether the docs *prose* is correct and clear. Prose quality (accuracy-vs-code, runnable examples, clarity, completeness) **and code↔docs sync** are the **`docs-reviewer`** subagent's job — canonical rubric in `.github/prompts/docs-review.md`. **Locally that's a hard pre-push gate** (`docs-reviewer` runs in parallel with its own marker), so don't hand-review prose here. In a context that can't spawn subagents or see local markers (e.g. the cloud PR review), raise a `[SHOULD]` recommending `/docs-review` be run instead. Either way, don't line-by-line prose-review in this pass.
 
 ## Output discipline
 
@@ -67,6 +67,8 @@ Verdict rules (matched to the styleguide):
 - `Block` — a `[MUST]` finding that's a CRITICAL/HIGH security issue, data-loss risk, or broken core invariant. Cannot proceed without addressing.
 - `Iterate` — one or more `[MUST]` findings that aren't `Block`-level, or multiple `[SHOULD]` findings that collectively need a pass.
 - `Ship it` — no `[MUST]`s and few or no `[SHOULD]`s. `[MAY]` findings alone don't preclude `Ship it`.
+
+**Docs review:** prose quality + code↔docs sync are gated by the `docs-reviewer` subagent. **Locally** that's a hard pre-push gate (its own marker, run in parallel with this review), so there's nothing to add here. **In the cloud PR review** (no subagents, no local markers): if the PR changed docs prose and no docs review was run/folded in, don't return `Ship it` — prefer `Iterate` with the single action "run `/docs-review`". That nudge is the best a markerless context can do; a docs-prose change shouldn't ship un-reviewed.
 
 What not to comment on:
 

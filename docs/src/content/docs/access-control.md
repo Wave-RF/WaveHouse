@@ -106,7 +106,7 @@ The rules, in order:
 2. **An empty (or `["*"]`) `allow_columns` means "all columns"** — every column not in `deny_columns` is permitted. Use this with `deny_columns` for a blocklist posture: see everything *except* a few sensitive columns.
 3. **A non-empty `allow_columns` is an allowlist** — only the named columns (and never the denied ones) are permitted.
 
-On a structured query (`POST /v1/query?table={table}`) and on insert (`POST /v1/ingest?table={table}`), a request that names a disallowed column is rejected with `403 column "x" not allowed`. On live streams, denied columns are silently **stripped** from each event rather than rejecting the connection.
+On a structured query (`POST /v1/query?table={table}`) a request that names a disallowed column is rejected with `403 column "x" not allowed`; on insert (`POST /v1/ingest?table={table}`) the body is `403 column "x" not allowed for insert`. On live streams, denied columns are silently **stripped** from each event rather than rejecting the connection.
 
 ## Row-level security
 
@@ -130,6 +130,8 @@ Supported comparison operators:
 | `_neq` | `col != ?` | not equals |
 | `_gt` | `col > ?` | greater than |
 | `_lt` | `col < ?` | less than |
+
+> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in #224) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 

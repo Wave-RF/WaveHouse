@@ -1,172 +1,155 @@
-<h1>
+<h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/branding/wavehouse-mark-dark.svg">
-    <img src="docs/src/assets/branding/wavehouse-mark-light.svg" alt="" height="36" width="36">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/branding/lockup-dark.svg">
+    <img src="docs/public/branding/lockup-light.svg" alt="" height="60">
   </picture>
-  WaveHouse
 </h1>
 
-[![CI](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse)](https://go.dev/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<p align="center">
+  <strong>
+    ClickHouse is a great database and a poor API. WaveHouse is the API.
+  </strong>
+</p>
 
-**The Open-Source Real-Time API Gateway for ClickHouse.**
+<p align="center">
+  The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time SSE streaming, and tiered query caching in a single binary.
+</p>
 
-WaveHouse is a high-performance, Go-based gateway designed to sit entirely in front of ClickHouse. It acts as the exclusive entry and exit point for your analytics data, solving the hardest parts of high-scale data ingestion and real-time querying so ClickHouse can focus on what it does best: fast analytics.
+<p align="center">
+  <a href="https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml">
+    <img src="https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+  <a href="https://go.dev/">
+    <img src="https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse" alt="Go Version">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0">
+  </a>
+  <a href="https://github.com/Wave-RF/WaveHouse/stargazers">
+    <img src="https://img.shields.io/github/stars/Wave-RF/WaveHouse?style=social" alt="Stars">
+  </a>
+  <a href="https://github.com/Wave-RF/WaveHouse/releases">
+    <img src="https://img.shields.io/github/v/release/Wave-RF/WaveHouse" alt="Release">
+  </a>
+  <a href="https://goreportcard.com/report/github.com/Wave-RF/WaveHouse">
+    <img src="https://goreportcard.com/badge/github.com/Wave-RF/WaveHouse" alt="Go Report Card">
+  </a>
+</p>
 
-If you are building user-facing analytics, **WaveHouse acts like Supabase for ClickHouse**—or an **open-source Tinybird** that pushes data to your frontend in real time over server-sent events (SSE), not just via pull-based REST queries.
+<p align="center">
+  <a href="https://wavehouse.dev"><strong>Docs</strong></a> ·
+  <a href="#-quick-start"><strong>Quick start</strong></a> ·
+  <a href="https://wavehouse.dev/why-wavehouse"><strong>Why WaveHouse</strong></a> ·
+  <a href="https://github.com/Wave-RF/WaveHouse/discussions"><strong>Discussions</strong></a>
+</p>
 
-📖 **Full documentation:** [wavehouse.dev](https://wavehouse.dev)
+---
 
-## ✨ Why WaveHouse?
+## ⚡ Try it in 30 seconds
 
-ClickHouse is a phenomenal OLAP database, but directly exposing it to frontend applications comes with sharp edges. You typically have to build custom APIs, manage Kafka queues to prevent "too many parts" errors during insertion, and write complex replacing logic for deduplication. WaveHouse abstracts all of this away into a single, deployable binary so you stop interacting with ClickHouse directly.
+```bash
+git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
+docker compose -f deployments/compose/standalone.yaml up -d   # ClickHouse + WaveHouse (ships a dev policy)
 
-* **📋 Schema-Aware Validation:** WaveHouse discovers your ClickHouse table schemas automatically via `system.columns` and validates every ingest payload against the real schema — unknown fields are rejected, types are checked, and nullable constraints are enforced. Bring Your Own Schema: you define tables in ClickHouse, WaveHouse enforces them.
-* **📥 Asynchronous Buffered Ingestion:** Never drop a packet. WaveHouse writes incoming data to a highly durable Write-Ahead Log (WAL) and returns `200 OK` instantly, batching inserts to ClickHouse in the background.
-* **👯 Optional Exact-Once Deduplication:** Built-in exact-match deduplication ensures duplicate payloads are dropped *before* they ever reach ClickHouse, saving expensive merge operations. Enable it when you need it, skip it when you don't.
-* **⚡ In-process Query Caching:** An in-process Ristretto cache plus Go `singleflight` coalesce identical queries, protecting ClickHouse from dashboard "thundering herds."
-* **🌊 Zero-Latency Real-Time Push:** When data is pushed via the WaveHouse API, it is immediately broadcast to SSE listeners—even before it gets flushed to ClickHouse. This ensures instant perceived ingestion, with seamless gap-fill from NATS JetStream history for clients that connect late.
-* **🛡️ Dead Letter Queue:** Failed batch inserts are routed to a DLQ (backed by a separate NATS stream) so no data is silently lost. Inspect failures via the DLQ stats API.
-* **🔐 Hasura-Style Access Control:** Define per-table, per-role column and row-level permissions with JWT claim templating. Policies are stored in NATS KV with file-based bootstrap and cluster-wide sync.
-* **🔍 Structured Queries:** A type-safe query AST endpoint (`POST /v1/query?table={table}`) with schema validation, permission enforcement, timestamp bucketing for cache optimization, and aggregation support.
-* **🔗 Named Pipes:** Pre-defined SQL templates (like Tinybird pipes) with parameter binding, role restrictions, and caching. Managed via admin API or bootstrapped from `.sql` files.
-* **📦 TypeScript SDK:** `@wavehouse/sdk` — a zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates, and codegen from ClickHouse schemas.
+# create a table (Bring Your Own Schema)
+docker compose -f deployments/compose/standalone.yaml exec clickhouse \
+  clickhouse-client --query "CREATE TABLE IF NOT EXISTS events (kind String, user String, received_timestamp DateTime64(3,'UTC') DEFAULT now64(3,'UTC')) ENGINE=MergeTree ORDER BY kind"
+
+# stream live events in one terminal, then ingest one in another and watch it arrive
+curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
+# in another terminal, ingest an event (no auth needed with the dev policy)
+curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
+  -H 'content-type: application/json' -d '{"kind":"click","user":"u_42"}'
+```
+
+Full walkthrough → **[wavehouse.dev/getting-started](https://wavehouse.dev/getting-started)**.
+
+## ✨ Why WaveHouse
+
+ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it has sharp edges: one-row inserts trigger `Too many parts`, there's no backpressure or edge validation, no real-time push, and no row/column security. You end up building custom APIs, a Kafka queue, a batch consumer, a cache tier, and an auth service. **WaveHouse is that whole stack as one binary** — the only external dependency is ClickHouse.
+
+If you're building user-facing analytics, WaveHouse is like **Supabase for ClickHouse** — or an **open-source Tinybird** that pushes data to the frontend in real time over SSE, not just pull-based REST.
+
+- **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional ID-based dedup (idempotent ingest); dead-letter queue for failed inserts.
+- **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
+- **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
+- **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
+- **Client** — `@wavehouse/sdk`: zero-dependency TypeScript client with query builder, live queries, streaming, and schema codegen.
+
+## 📊 How it compares
+
+|                               | Direct ClickHouse | Kafka + CH (DIY) |   Tinybird    | **WaveHouse**  |
+| ----------------------------- | :---------------: | :--------------: | :-----------: | :------------: |
+| Self-hosted, single binary    |         —         |        —         |   ✗ (SaaS)    |       ✓        |
+| Safe high-rate inserts        |         ✗         |  ✓ (via Kafka)   |       ✓       |       ✓        |
+| Schema validation at the edge |         ✗         |      custom      |       ✓       |       ✓        |
+| Real-time push (SSE)          |         ✗         |  custom service  |       ✗       |    ✓ native    |
+| Thundering-herd coalescing    |         ✗         |      custom      |       ✓       |       ✓        |
+| Row/column policies (JWT)     |         ✗         |      custom      |  tokens only  | ✓ Hasura-style |
+| Cost model                    |       infra       | infra + eng time | per-vCPU SaaS |   infra only   |
+
+Full breakdown, failure modes, and the engineering rationale → **[wavehouse.dev/why-wavehouse](https://wavehouse.dev/why-wavehouse)**.
 
 ## 🛠️ Quick Start
 
-Pick whichever flavour fits — Docker, prebuilt binary, or `go install`. Each one ends with WaveHouse listening on `http://localhost:8080`.
+Pick whichever fits — each ends with WaveHouse listening on `http://localhost:8080`.
 
-### A. Docker Compose (recommended for first-time)
-
-The easiest way to see WaveHouse in action. Requires Docker.
+### A. Docker Compose (recommended first run)
 
 ```bash
-# Clone the repository
-git clone https://github.com/Wave-RF/WaveHouse.git
-cd WaveHouse
-
-# Start ClickHouse and WaveHouse
+git clone https://github.com/Wave-RF/WaveHouse.git && cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
-
-# Create a table in ClickHouse (Bring Your Own Schema)
-docker compose -f deployments/compose/standalone.yaml exec clickhouse \
-  clickhouse-client --query "
-    CREATE TABLE IF NOT EXISTS clicks (
-      page String,
-      button String,
-      score Float64,
-      received_timestamp DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
-    ) ENGINE = MergeTree()
-    ORDER BY (page)
-  "
-
-# Ingest data (no auth required by default)
-curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
-  -H "Content-Type: application/json" \
-  -d '{"page": "/home", "button": "signup", "score": 42.5}'
-# → {"ok":true}
-
-# Check discovered schemas
-curl -s http://localhost:8080/v1/schema | jq
-
-# Query data (wait ~5s for the batch flush to ClickHouse).
-# /v1/admin/query is admin-only: send a valid JWT whose role is the policy
-# admin_role ("admin" by default) via `Authorization: Bearer <jwt>`.
-curl -s -X POST http://localhost:8080/v1/admin/query \
-  -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
-
-# Open a real-time SSE stream for a specific table (Ctrl+C to stop)
-curl -N "http://localhost:8080/v1/stream?table=clicks"
 ```
 
-WaveHouse is now accepting API requests on `http://localhost:8080`.
+The stack ships a permissive dev policy, so you can ingest without a token. Create a table in ClickHouse (Bring Your Own Schema), then ingest — see the [getting-started walkthrough](https://wavehouse.dev/getting-started) for the full ingest → query → stream tour.
 
 ### B. Prebuilt container image
 
-Skip the source clone — pull from GHCR:
-
 ```bash
-# Tagged release (recommended for production)
-docker pull ghcr.io/wave-rf/wavehouse:latest
-
-# Or rolling main-branch dev build
-docker pull ghcr.io/wave-rf/wavehouse:dev
+docker pull ghcr.io/wave-rf/wavehouse:latest    # tagged release
+docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 ```
 
-Tagged images are built by `release.yml` on every `v*` git tag (`:latest`, `:vX.Y.Z`). Dev images are built by `publish-dev.yml` on every push to `main` (`:dev`, `:dev-<sha>`); old `:dev-<sha>` tags are pruned weekly by `cleanup-ghcr.yml`.
-
-### C. `go install` / `go run` (binary, no Docker)
-
-If you have Go 1.26+ installed:
+### C. `go install` (binary, no Docker)
 
 ```bash
-# Install the latest tagged release into $GOBIN
 go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
-
-# Or run directly without installing
-go run github.com/Wave-RF/WaveHouse/cmd/wavehouse@latest
-
-# Or pin to a specific version
-go install github.com/Wave-RF/WaveHouse/cmd/wavehouse@v0.1.0
 ```
 
-You'll still need ClickHouse running somewhere — point WaveHouse at it via `WH_CH_ADDR`. See [Configuration](docs/src/content/docs/configuration.md).
+You'll still need ClickHouse reachable — point WaveHouse at it via `WH_CH_ADDR` (defaults to `localhost:9000`).
+See [Configuration](https://wavehouse.dev/configuration).
 
-WaveHouse is built as an application, not a library — `internal/` packages are not importable from outside the module. Use the binary or container; if you need programmatic access, the [TypeScript SDK](docs/src/content/docs/sdk.md) is the supported integration surface.
+## 🚦 Project status
+
+WaveHouse is in **alpha** — built in the open, Apache-2.0-licensed, no vendor lock-in. See [SUPPORT.md](SUPPORT.md) for where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now.
+
+Track what's shipped, in progress, and planned on the [**project board**](https://github.com/orgs/Wave-RF/projects/7).
+
+> **Alpha — expect change.** WaveHouse is pre-1.0: APIs, configuration, wire formats, and on-disk state can change between releases without a migration path, and some capabilities are still hardening. Pin a version and don't rely on stability guarantees until a tagged GA release.
 
 ## 💻 Local Development
 
-You'll need **Go 1.26+, GNU Make 4+, Docker (or Podman) with Compose v2, Node.js 22 LTS (pinned via `.nvmrc`, matches CI), and pnpm 11.1+** on your PATH — see [docs/development.md § Prerequisites](docs/src/content/docs/development.md#prerequisites) for the full list, version requirements, and macOS gotchas (BSD Make 3.81 won't work).
-
-For building and testing WaveHouse locally with hot-reload:
+You'll need **Go 1.26+, GNU Make 4+, Docker (Compose v2), Node.js 22 LTS, and pnpm 11+**. See [development docs](https://wavehouse.dev/development) for the authoritative source of truth with the full list, version requirements, and gotchas.
 
 ```bash
-# One-time bootstrap: installs golangci-lint into .bin/, downloads Go modules,
-# runs pnpm install for the SDK + E2E harness, and configures git hooks
-# (.githooks/pre-commit runs `make verify`; .githooks/pre-push enforces that
-# `make ci` has passed for HEAD before publishing).
-make tools
-
-# Start ClickHouse
+make tools    # one-time bootstrap
 docker compose -f deployments/compose/dependencies.yaml up -d clickhouse
-
-# Create your tables in ClickHouse, then:
-make dev
+make dev      # hot-reload on .go save
 ```
-
-WaveHouse will automatically recompile and restart whenever you save a `.go` file.
-
-**With observability:** Run `make obs-aspire` (or `obs-grafana` or `obs-front`) in a separate terminal to boot a lightweight OpenTelemetry dashboard. They run side-by-side with `make dev` or your test suites. See [docs/development.md § Running with observability](docs/src/content/docs/development.md#running-with-observability).
 
 ## 🤖 Working with Claude Code
 
-The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / a subagent, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
+> **AI-assisted, human-reviewed.** Much of WaveHouse — code and docs alike — is written with AI assistance ([Claude Code](https://claude.com/claude-code)). Every change, whether AI- or human-authored, goes through the same review gates, tests, and CI before it lands. We note it for transparency: treat the docs as the source of truth, and please [open an issue](https://github.com/Wave-RF/WaveHouse/issues) if anything reads as off or out of date.
+
+The repo ships minimal team-wide [Claude Code](https://claude.com/claude-code) configuration — safety guardrails, a couple of slash commands / subagents, an auto-format hook, and [worktrunk](https://worktrunk.dev) project hooks for parallel agent workflows. Personal preferences (status line, model, allow lists) stay user-level. See [Claude Code & AI agents](docs/src/content/docs/claude-code.md) for setup + reference. `AGENTS.md` at the repo root is the canonical source of truth for project conventions.
 
 ## 🤝 Contributing
 
-We welcome issues, pull requests, and feedback! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to structure your code and run the integration test suites.
-
-## 📖 Documentation
-
-The full documentation site lives at **[wavehouse.dev](https://wavehouse.dev)**. Source markdown is in [`docs/src/content/docs/`](docs/src/content/docs/):
-
-* [Getting Started](docs/src/content/docs/getting-started.md) — Five-minute quickstart
-* [Architecture](docs/src/content/docs/architecture.md) — System design, data flows, and package overview
-* [API Reference](docs/src/content/docs/api.md) — All endpoints, authentication, request/response formats
-* [Configuration](docs/src/content/docs/configuration.md) — Full config reference (YAML + environment variables)
-* [Deployment](docs/src/content/docs/deployment.md) — Single-binary deployment, Docker images, releases, and health checks
-* [Development](docs/src/content/docs/development.md) — Building, testing, linting, and project structure
-* [SDK Reference](docs/src/content/docs/sdk.md) — TypeScript client SDK usage and codegen
+Issues, pull requests, and feedback welcome! See our [CONTRIBUTING.md](CONTRIBUTING.md) guidelines on how to structure your code and run the integration test suites.
 
 ## 🛡️ Security
 
-Found a vulnerability? **Please don't open a public issue.** Email `security@wave-rf.com` per [SECURITY.md](SECURITY.md) — we acknowledge within 48 hours and aim for an initial assessment in 5 business days.
-
-## 🙋 Support
-
-WaveHouse is in **alpha**. See [SUPPORT.md](SUPPORT.md) for where to ask what, the alpha-stage response cadence (best-effort, 1–2 business days), and what's in vs. out of scope right now.
+Found a vulnerability? **Don't open a public issue.** Email `security@wave-rf.com` per [SECURITY.md](SECURITY.md) — we acknowledge within 48 hours and aim for an initial assessment in 5 business days.
 
 ## 📜 License
 
