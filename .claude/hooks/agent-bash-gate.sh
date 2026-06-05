@@ -6,8 +6,8 @@
 #   - gh pr edit --add-reviewer / --add-assignee
 #   - gh api .../requested_reviewers (write verbs)
 #   - gh pr review --approve / --request-changes
-#   - git push to a PR branch missing either pre-push review marker
-#     (pre-push-reviewer code review + docs-reviewer docs review)
+#   - git push to a PR branch missing any pre-push review marker
+#     (one per reviewer in scripts/pre-push-reviewers.sh — code, docs, …)
 #
 # Universal git checks (ci-passed marker, no-verify, etc.) live in .githooks/
 # and apply to humans and agents equally. Bypass surface acknowledged: an
@@ -100,11 +100,13 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
     && block "Agents post inline review comments instead of --request-changes."
 fi
 
-# git push from a non-main branch requires BOTH pre-push review markers for HEAD
-# — the pre-push-reviewer (code) marker AND the docs-reviewer (docs) marker. Both
-# are unconditional: even a code-only change goes through docs review, because
+# git push from a non-main branch requires a pre-push review marker for HEAD
+# from EVERY reviewer in scripts/pre-push-reviewers.sh (the single source of
+# truth — code, docs, and any future reviewer such as security). All are
+# unconditional: even a code-only change goes through docs review, because
 # catching "code changed but the docs should have and didn't" is the docs
-# reviewer's job.
+# reviewer's job. The set is read at push time, so adding a reviewer there
+# immediately makes it gate — no change needed here.
 #
 # We gate on "non-main branch with commits ahead of the base", NOT on "an OPEN PR
 # exists". The agent flow is push-the-branch THEN open the draft PR, so keying on
@@ -128,25 +130,45 @@ if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
       has_delta=0
     fi
     if [ "$has_delta" = "1" ]; then
+      # Resolve the gating reviewers from the single source of truth. If we
+      # can't get a valid reviewer list — file missing, unreadable, empty, or
+      # corrupt (a syntax error / conflict markers make `bash` error out to
+      # empty stdout) — we can't know what to require, so fail CLOSED (block)
+      # rather than silently let an un-reviewed push by. Capture once and
+      # validate each name for filename-safety before building a marker path.
+      reviewers_script="scripts/pre-push-reviewers.sh"
+      reviewers_list=$(bash "$reviewers_script" 2>/dev/null | grep -E '^[A-Za-z0-9._-]+$')
+      if [ -z "$reviewers_list" ]; then
+        block "reviewer list '$reviewers_script' produced no valid reviewer names (missing, unreadable, empty, or corrupt) — can't tell which reviews gate this push. Fix it before pushing."
+      fi
       missing=""
-      [ -f "tmp/review-passed-${head_sha}" ] \
-        || missing="${missing}  - pre-push-reviewer (code)              -> tmp/review-passed-${head_sha:0:8}
+      for r in $reviewers_list; do
+        [ -f "tmp/${r}-passed-${head_sha}" ] \
+          || missing="${missing}  - ${r} -> tmp/${r}-passed-${head_sha:0:8}
 "
-      [ -f "tmp/docs-review-passed-${head_sha}" ] \
-        || missing="${missing}  - docs-reviewer (docs prose + doc-sync) -> tmp/docs-review-passed-${head_sha:0:8}
-"
+      done
       if [ -n "$missing" ]; then
         cat >&2 <<EOF
 
 🛑 Claude PR discipline gate: missing pre-push review marker(s) for HEAD (${head_sha:0:8}) on branch '${branch}':
 
 ${missing}
-Run /prepush — it launches both reviewers in parallel in fresh context and loops
-to ship_it. Each writes its marker on VERDICT: ship_it, and the push then
-succeeds. Both must reach ship_it (zero findings) — see AGENTS.md
-§"Agent PR Discipline".
+Run /prepush — it reads ${reviewers_script}, runs the reviewers this change needs
+in parallel (fresh context), and skips the rest on the record. Each reviewer it
+runs must reach VERDICT: ship_it (zero findings) to write its marker; a skipped
+reviewer gets a logged marker via scripts/skip-pre-push-review.sh. The push
+succeeds once every listed reviewer has a marker — see AGENTS.md §"Agent PR
+Discipline".
 EOF
         exit 2
+      fi
+      # All required markers present. Surface any reviewers that were skipped by
+      # judgment (recorded by scripts/skip-pre-push-review.sh) so the skip is
+      # visible at push time, not just in the /prepush conversation. Advisory.
+      skiplog="tmp/review-skips-${head_sha}.log"
+      if [ -f "$skiplog" ]; then
+        echo "ℹ️  pre-push: reviewer(s) skipped by judgment for ${head_sha:0:8} (see ${skiplog}):" >&2
+        sed 's/^/    ⏭️  /' "$skiplog" >&2
       fi
     fi
   fi

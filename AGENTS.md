@@ -7,9 +7,9 @@ This file provides context for AI coding agents (Copilot, Cursor, Cody, Aider, e
 The non-negotiables, ordered by how often agents miss them. Each links to its detail section — read that before acting. These override convenience: if a rule blocks you, satisfy it; don't work around it.
 
 1. **Validate locally before every push** — run `make ci` the documented way ([§Running `make ci`](#running-make-ci-for-agents)). Don't use CI as your first feedback loop.
-2. **A PR-branch push needs BOTH reviewers** — run **`/prepush`**, which launches `pre-push-reviewer` **and** `docs-reviewer` in parallel (fresh context) and loops until **both** return `ship_it`. Both markers are required; one reviewer is never enough, and `docs-reviewer` runs even on code-only changes ([§Pre-push self-review](#pre-push-self-review-is-mandatory-on-pr-branches)).
+2. **A PR-branch push needs every pre-push reviewer satisfied** — run **`/prepush`**, which discovers the reviewers from `scripts/pre-push-reviewers.sh`, runs the ones the change needs in parallel (fresh context), skips any with nothing to do *on the record*, and loops until each it ran returns `ship_it`. Every reviewer needs a marker for HEAD — earned by a `ship_it` or a logged skip; the set is the single source of truth and grows over time (code, docs, security, …), so never hardcode it ([§Pre-push self-review](#pre-push-self-review-is-mandatory-on-pr-branches)).
 3. **Every code change updates its docs + `CHANGELOG.md` in the same PR** — a code change without its doc update is incomplete ([§Documentation Sync](#documentation-sync)).
-4. **Reply to and resolve every review thread** — substantive reply, @-mention the bot, then resolve ([§Review Response](#review-response)).
+4. **Address and resolve every review finding** — substantive reply, fix it or track it in an issue, @-mention the bot, then resolve; never silently drop one ([§Review Response](#review-response)).
 5. **Drafts only; valid title** — `gh pr create --draft` (never `gh pr ready`/approve); the PR **title** must pass the Conventional-Commits gate (≤ 72 chars) — check it with `scripts/lint-pr-title.sh "<title>"` before creating ([§Agent PR Discipline](#agent-pr-discipline)).
 6. **Never force-push or rebase a PR branch** — to absorb upstream main, `git merge origin/main` ([§Branch Maintenance](#branch-maintenance)).
 7. **Never hand-write markers or `--no-verify`** — if you're tempted, the gate is wrong-shaped for your situation; fix that instead ([§Don't bypass the gates](#dont-bypass-the-gates)).
@@ -71,6 +71,14 @@ The invariant index — what must stay true. Full narrative and rationale live i
 - **Error handling**: Return errors, don't panic. Wrap with `fmt.Errorf("context: %w", err)`.
 - **No global state**: Dependencies are passed explicitly (constructor injection).
 - **Package naming**: Lowercase, single word (or abbreviated). `internal/` enforces module privacy.
+
+## Craftsmanship
+
+Cross-cutting habits that keep the codebase reviewable — they apply to every change, in every language.
+
+- **Comment the *why*, not the *what*.** Add a comment only when the reason isn't obvious from the code; a line that matches the surrounding pattern needs none. Keep comments to 1–2 lines and match the file's existing density. Re-read each comment you add and cut any that merely restates the code — don't write three lines of comment for one line of code. The "what" lives in the code; the "why" usually belongs in the commit message / PR / `CHANGELOG.md`.
+- **DRY — one source of truth.** Before adding logic, look for an existing helper, type, or constant to reuse; before duplicating a rule, factor it into one place every caller reads. This is the repo's standing pattern: `scripts/lint-pr-title.sh` (the PR-title rule for the local gate *and* the required CI check), `scripts/docs-prose.sh` (the docs-review scope), and `scripts/pre-push-reviewers.sh` (the pre-push reviewer set) are each *the* canonical source. Duplicated logic drifts out of sync.
+- **Leave it neater than you found it — within reason.** Fix the small, safe things you touch in passing: a stale comment, an obvious typo, a misnamed local, dead code on your path. Keep such cleanups in the same spirit and size as your change so the diff stays reviewable. If a cleanup is large, risky, or you can't confidently judge it, don't fold it in — open a tracking issue instead (the same rule §Review Response applies to reviewer findings).
 
 ## Build & Test Commands
 
@@ -142,7 +150,7 @@ NO_COLOR=1 make ci > tmp/ci.log 2>&1
 - **`NO_COLOR=1`** keeps ANSI escapes out of the log so a failure greps cleanly (the Makefile emits raw color codes otherwise).
 - Read `tmp/ci.log` only when the exit code is non-zero.
 
-On success `make ci` writes the tree-keyed `tmp/ci-passed-tree-<TREE>` marker (see §Enforced via git hooks for the tree-keying and the commit-after-green rule; `tmp/` is gitignored, so the marker never enters the tree). That marker is one of the **three** a PR-branch push requires — the other two are written by the mandatory review subagents (see §Agent PR Discipline → Pre-push self-review). End to end: `make ci` green → commit → invoke `pre-push-reviewer` + `docs-reviewer` in parallel (fresh context) → loop until both reach `ship_it` → push. Re-run `make ci` only if a finding makes you edit a tracked file.
+On success `make ci` writes the tree-keyed `tmp/ci-passed-tree-<TREE>` marker (see §Enforced via git hooks for the tree-keying and the commit-after-green rule; `tmp/` is gitignored, so the marker never enters the tree). That's one of the markers a PR-branch push requires — the rest are written by the mandatory review subagents, one per reviewer in `scripts/pre-push-reviewers.sh` (see §Agent PR Discipline → Pre-push self-review). End to end: `make ci` green → commit → run every pre-push reviewer in parallel (fresh context) via `/prepush` → loop until each reaches `ship_it` → push. Re-run `make ci` only if a finding makes you edit a tracked file.
 
 ### Enforced via git hooks
 
@@ -161,7 +169,7 @@ When delegating to a subagent: tell them explicitly *"run locally first."* Agent
 
 ## Review Response
 
-Every review comment gets a substantive reply, and every thread gets resolved before merge. The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads block merge. Applies to human reviewers and AI reviewers alike (CodeRabbit, Copilot).
+Every review comment gets a substantive reply and is addressed — fixed, or tracked in an issue — and every thread gets resolved before merge. The `main branch protection` ruleset enforces `required_review_thread_resolution: true`, so unresolved threads block merge. Applies to human reviewers and AI reviewers alike (CodeRabbit, Copilot).
 
 ### What to do
 
@@ -172,7 +180,7 @@ Every review comment gets a substantive reply, and every thread gets resolved be
    - Copilot: no mention works — note the re-request-review button
 
    Without the mention, the bot never sees the reply and the dialog silently terminates.
-4. **Fix in this PR** if the suggestion is right and in scope. Out-of-scope but valid: link a tracking issue before resolving.
+4. **Address it — never silently drop it.** If the suggestion is right and in scope, fix it in this PR. If it's a small, safe improvement that's valid but tangential to your PR, fix it anyway — cooperatively leaving the tree neater helps the whole team (§Craftsmanship). If it's valid but too large or risky to do here, or you can't confidently judge its validity, open a tracking issue and link it in your reply before resolving — *unless* an existing issue already tracks it, in which case link that one. This applies to findings from every reviewer, human or bot, including ones outside the lane of whichever reviewer raised them.
 5. **Resolve the thread** once the reply addresses the concern and no counter-reply is pending. Bot threads are safe to resolve after a substantive reply (bots only re-engage on mention); human threads — wait for them.
 6. **Re-request review** from humans after substantive changes. Bot reviewers re-run via their own triggers — CodeRabbit on `@coderabbitai review`, Copilot via the re-request button.
 
@@ -234,21 +242,34 @@ Agents CAN re-request bot reviewers by mentioning them in PR comments (`gh pr co
 
 ### Pre-push self-review is mandatory on PR branches
 
-Before pushing a non-main branch, agents must run **both** review subagents in fresh context, in parallel — both are mandatory gates, each with its own marker. **The one-command form is `/prepush`**, which launches both and loops them to `ship_it`; prefer it over invoking the two by hand. (The push gate fires on any non-main branch with commits ahead of `main`, **not** only when a PR is already open — the first push, before `gh pr create`, is exactly when the diff most needs review.)
+Before pushing a non-main branch, **every** review subagent listed in `scripts/pre-push-reviewers.sh` must end with a marker for HEAD — earned either by **running** it in fresh context (the default) or by **deliberately skipping** it when it's genuinely out of lane for this diff (a *logged* skip; see below). That list is the single source of truth (don't assume how many there are — read it). **The one-command form is `/prepush`**, which reads the list, judges which reviewers the change actually needs, runs those in parallel, skips the rest on the record, and loops the ones it ran to `ship_it`; prefer it over invoking reviewers by hand. (The push gate fires on any non-main branch with commits ahead of `main`, **not** only when a PR is already open — the first push, before `gh pr create`, is exactly when the diff most needs review.)
+
+Today the list holds two reviewers; it's designed to grow (security is the obvious next one):
 
 - **`pre-push-reviewer`** (code) reviews: the full PR diff against `main` (merge-base); the latest commit specifically; all open PR comments and reviews (top-level + inline); CI status / failing checks; linked issues' acceptance criteria.
 - **`docs-reviewer`** (docs) reviews: docs prose for accuracy-vs-code, runnable examples, clarity, and completeness, **plus code↔docs sync** — code that changed but whose docs didn't (per §Documentation Sync). It runs on **every** push, even code-only ones: docs may not change but *should*, and catching that is the point. (See §Docs review for scope.)
 
-Each subagent's verdict is one of `ship_it`, `iterate`, or `block`. **`ship_it` requires zero findings at any severity** (`[MUST]`, `[SHOULD]`, `[MAY]` sections all empty). Anything in the findings list — including `[MAY]` — forces `iterate`. The rule is: if there's anything left to do, the PR isn't shippable. "Ship it, just do this one thing first" is iteration, not shipping. **Both** reviewers must reach `ship_it`.
+Each subagent's verdict is one of `ship_it`, `iterate`, or `block`. **`ship_it` requires zero findings at any severity** (`[MUST]`, `[SHOULD]`, `[MAY]` sections all empty). Anything in the findings list — including `[MAY]` — forces `iterate`. The rule is: if there's anything left to do, the PR isn't shippable. "Ship it, just do this one thing first" is iteration, not shipping. **Every** listed reviewer must reach `ship_it`, and you address findings from all of them (§Review Response) — not just the ones in whichever reviewer's lane you expected.
 
-When a subagent's response ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes its marker — `tmp/review-passed-<HEAD-sha>` for `pre-push-reviewer`, `tmp/docs-review-passed-<HEAD-sha>` for `docs-reviewer`. `git push` succeeds only when **both** markers exist for HEAD. On `VERDICT: iterate` or `VERDICT: block`, that reviewer writes no marker — the orchestrator agent **loops**: address every finding, commit, re-invoke the reviewer(s) in fresh context, repeat until both say `ship_it`. Never push with open findings.
+When a reviewer you ran ends with the parseable line `VERDICT: ship_it`, `.claude/hooks/review-marker.sh` writes its marker — `tmp/<name>-passed-<HEAD-sha>`, derived from the reviewer's name (so `pre-push-reviewer` → `tmp/pre-push-reviewer-passed-…`, `docs-reviewer` → `tmp/docs-reviewer-passed-…`). A reviewer you **skip** instead earns the same marker via `scripts/skip-pre-push-review.sh <name> "<reason>"`, which also appends the reason to `tmp/review-skips-<HEAD>.log` (the push gate echoes these skips for the record). `git push` succeeds only when a marker exists for HEAD from **every** listed reviewer — run *or* skipped. On `VERDICT: iterate` or `VERDICT: block`, that reviewer writes no marker — the orchestrator agent **loops**: address every finding, commit, re-invoke the reviewer(s) in fresh context, repeat until all say `ship_it`. Never push with open findings.
 
-The orchestrator agent cannot override either subagent's system prompt (the fixed file content of `.claude/agents/pre-push-reviewer.md` / `.claude/agents/docs-reviewer.md`), and each runs in a clean conversation context, so they don't share the orchestrator's bias toward its own work.
+The orchestrator agent cannot override any subagent's system prompt (the fixed file content of `.claude/agents/<name>.md`), and each runs in a clean conversation context, so they don't share the orchestrator's bias toward its own work.
+
+**Skipping is your judgment, on the record.** Skip a reviewer only when you're confident it has nothing to do with *this* diff — the code reviewer on a docs-only typo, the docs reviewer on a test-only change. Bias to running; when unsure, run it (or `/prepush all` to force the full set). `skip-pre-push-review.sh` prints a ⚠️ when a skip looks wrong (e.g. skipping docs review while docs files changed) — heed it. This is a deliberate trust trade-off: a careless skip is exactly the failure the fresh-context reviewers exist to catch, so don't skip a change that deserves a look just to save minutes. The detailed run/skip rules of thumb live in `/prepush`.
+
+### Adding a pre-push reviewer
+
+The reviewer set is meant to grow. To add one — with **no** edits to the hooks, which read the list at push time:
+
+1. **Write the subagent** at `.claude/agents/<name>.md` (frontmatter `name`/`description`/`tools`/`model`; body is its system prompt). End its output with the parseable `VERDICT: ship_it|iterate|block` line under the same strict rubric as the others (zero findings ⇒ `ship_it`). Model it on `pre-push-reviewer.md` / `docs-reviewer.md`.
+2. **Add `<name>`** to `scripts/pre-push-reviewers.sh` — *after* step 1, because a name with no agent file blocks every push until the agent exists.
+
+That's all: the marker is `tmp/<name>-passed-<HEAD>` automatically, the push gate requires it, `review-marker.sh` writes it on `ship_it`, `/prepush` launches it alongside the rest, and the missing-reviewer nudge covers it. Also add a row to the subagent table in `docs/src/content/docs/claude-code.md`.
 
 ### Don't bypass the gates
 
 - `--no-verify` on `git commit` / `git push` exists for human WIP / draft pushes. Agents should not use it.
-- Markers (`tmp/ci-passed-tree-*`, `tmp/review-passed-*`, `tmp/docs-review-passed-*`) are written by `make ci` and the `review-marker.sh` SubagentStop hook (for both `pre-push-reviewer` and `docs-reviewer`). Don't `touch` / `Write` / `Edit` them by hand — if you feel tempted, the marker is wrong-shaped for the situation you're in. Run `make ci`, invoke the subagent(s), get the verdict.
+- Markers are written by tooling, never by hand: `tmp/ci-passed-tree-*` by `make ci`; `tmp/<reviewer>-passed-*` (one per reviewer in `scripts/pre-push-reviewers.sh`) by the `review-marker.sh` SubagentStop hook on `ship_it`, **or** by `scripts/skip-pre-push-review.sh` for a deliberately-skipped reviewer (which logs the reason to `tmp/review-skips-<HEAD>.log`). Don't `touch` / `Write` / `Edit` a marker by hand — to skip a reviewer, use the skip command so the skip is recorded; if you're tempted to hand-write a review marker any other way, the marker is wrong-shaped for your situation. Run `make ci`, run or skip each reviewer, get the verdicts.
 
 These are policy, not mechanically enforced. Bash can write a file a dozen ways; an agent can edit `.claude/hooks/agent-bash-gate.sh` itself. Trust beats whack-a-mole regex.
 
@@ -260,7 +281,7 @@ For "review PR <N>" workflows, use `.claude/skills/pr-review-locally/SKILL.md`. 
 wt switch pr:<N>                # worktrunk + gh CLI; or `gh pr checkout <N>` fallback
 ```
 
-Then invoke `pre-push-reviewer`. Findings stay local — agents must not post comments on the PR manually; surface them to the user, who decides what to act on.
+Then run the reviewers relevant to the PR's diff (the same set from `scripts/pre-push-reviewers.sh`, judged per the diff — `pr-review-locally` launches them in parallel in fresh context). Findings stay local — agents must not post comments on the PR manually; surface them to the user, who decides what to act on. (No markers or skips here — that's an audit of someone else's branch, not your push.)
 
 ### Docs review
 
@@ -268,7 +289,7 @@ Documentation *prose* — accuracy against the code, runnable examples, clarity,
 
 **Scope** is the canonical docs-prose set from `scripts/docs-prose.sh` — a *denylist*: every tracked `.md`/`.mdx` EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`/`*.old.md`, `PERF-CLAIMS-REVIEW.md`. So it covers the Starlight site under `docs/src/content/` **and** the governance docs (`README.md`, the SDK readme `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — new docs are picked up automatically. `CODE_OF_CONDUCT.md`/`SUPPORT.md` are deep-reviewed only on change or material suspicion.
 
-**It is a hard pre-push gate**, run in parallel with `pre-push-reviewer` (see §Pre-push self-review). Invoked with the **default (branch) scope** it emits a `VERDICT:` line; on `ship_it` the `review-marker.sh` SubagentStop hook writes `tmp/docs-review-passed-<HEAD-sha>`, which the push gate requires — unconditionally, on every PR-branch push (even code-only ones). Run it via **`/docs-review`**; with **no arg** that's the gating review (branch scope), while an explicit **path/glob** or **`all`** is **advisory** (no `VERDICT:`, no marker) for ad-hoc audits. The whole dev team runs Claude Code and this command is tracked in-repo, so everyone runs it themselves; there is intentionally **no PR/cloud path** for docs review.
+**It is a hard pre-push gate**, run in parallel with the other pre-push reviewers (see §Pre-push self-review). Invoked with the **default (branch) scope** it emits a `VERDICT:` line; on `ship_it` the `review-marker.sh` SubagentStop hook writes `tmp/docs-reviewer-passed-<HEAD-sha>`, which the push gate requires — unconditionally, on every PR-branch push (even code-only ones). Run it via **`/docs-review`**; with **no arg** that's the gating review (branch scope), while an explicit **path/glob** or **`all`** is **advisory** (no `VERDICT:`, no marker) for ad-hoc audits. The whole dev team runs Claude Code and this command is tracked in-repo, so everyone runs it themselves; there is intentionally **no PR/cloud path** for docs review.
 
 ## Documentation Sync
 
