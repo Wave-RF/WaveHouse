@@ -1,5 +1,13 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { adminClient, chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
+import {
+  adminClient,
+  chQuery,
+  dataClient,
+  makeJWT,
+  testId,
+  WH_URL,
+  waitForCondition,
+} from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 describe("Query", () => {
@@ -56,6 +64,27 @@ describe("Query", () => {
       expect(row).toHaveProperty("page");
       expect(row).toHaveProperty("duration_ms");
     }
+  });
+
+  it("time_range over a DateTime64 column does not 500 (#238)", async () => {
+    const jwt = makeJWT({ sub: "test-viewer", role: "viewer", tenant_id: "acme" });
+    const res = await fetch(`${WH_URL}/v1/query?table=${encodeURIComponent(T.clicks)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        columns: ["event_id", "page"],
+        time_range: { column: "received_timestamp", since: "24h" },
+      }),
+    });
+
+    // The bug surfaced as HTTP 500 (ClickHouse code 53); the fix returns 200.
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as unknown[];
+    expect(Array.isArray(rows)).toBe(true);
+    // The rows seeded in beforeAll all carry received_timestamp = now64(3), so a
+    // "last 24h" window must return at least those — proving the bound actually
+    // matched DateTime64 values rather than just returning an empty 200.
+    expect(rows.length).toBeGreaterThanOrEqual(seededIds.length);
   });
 
   it("aggregation: count with groupBy", async () => {
