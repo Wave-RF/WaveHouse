@@ -1,5 +1,13 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { adminClient, chQuery, dataClient, testId, waitForCondition } from "./helpers.js";
+import {
+  adminClient,
+  chQuery,
+  dataClient,
+  makeJWT,
+  testId,
+  WH_URL,
+  waitForCondition,
+} from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 describe("Query", () => {
@@ -58,6 +66,27 @@ describe("Query", () => {
     }
   });
 
+  it("time_range over a DateTime64 column does not 500 (#238)", async () => {
+    const jwt = makeJWT({ sub: "test-viewer", role: "viewer", tenant_id: "acme" });
+    const res = await fetch(`${WH_URL}/v1/query?table=${encodeURIComponent(T.clicks)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        columns: ["event_id", "page"],
+        time_range: { column: "received_timestamp", since: "24h" },
+      }),
+    });
+
+    // The bug surfaced as HTTP 500 (ClickHouse code 53); the fix returns 200.
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as unknown[];
+    expect(Array.isArray(rows)).toBe(true);
+    // The rows seeded in beforeAll all carry received_timestamp = now64(3), so a
+    // "last 24h" window must return at least those — proving the bound actually
+    // matched DateTime64 values rather than just returning an empty 200.
+    expect(rows.length).toBeGreaterThanOrEqual(seededIds.length);
+  });
+
   it("aggregation: count with groupBy", async () => {
     const result = await wh
       .from(T.clicks)
@@ -79,9 +108,8 @@ describe("Query", () => {
   });
 
   it("pagination: limit + next page", async () => {
-    // Paginate by the unique event_id so the keyset cursor can't skip rows. The
-    // default received_timestamp cursor is exercised by the skipped test below,
-    // which documents why it can't be relied on over batched data (#175).
+    // Paginate by the unique event_id so the keyset cursor can't skip rows
+    // (received_timestamp ties on batch-inserted rows would — see #175).
     const page1 = await wh.from(T.clicks).select().orderBy("event_id", "asc").limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
@@ -94,13 +122,23 @@ describe("Query", () => {
     expect(page2.data!.length).toBeGreaterThan(0);
   });
 
-  // Original default-order pagination. Skipped because it currently fails:
-  // ClickHouse stamps received_timestamp (DEFAULT now64(3)) at BATCH-insert
-  // time, so every row the worker flushes together shares one millisecond, and
-  // the SDK's strict keyset cursor then skips the rows tied on a page boundary —
-  // leaving page 2 empty. Tracked in #175; re-enable once the default cursor
-  // breaks ties (e.g. a composite cursor with a unique tiebreak column).
-  it.skip("pagination by default received_timestamp cursor (known bug — #175)", async () => {
+  // #175: the old received_timestamp default cursor skipped rows tied on a page
+  // boundary (batch inserts share one now64(3) ms). #270 removed that default, so
+  // a bare .fetch() with no .orderBy() now reports hasMore but offers no next() —
+  // deterministic pagination needs an explicit .orderBy() (see the test above).
+  it("reports hasMore without next() when no order is set (#270, sidesteps #175)", async () => {
+    const page1 = await wh.from(T.clicks).select().limit(3).fetch();
+    expect(page1.error).toBeNull();
+    expect(page1.data).toHaveLength(3);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.next).toBeUndefined();
+  });
+
+  // TODO(#274): re-enable once the backend supplies a per-table default sort order
+  // (plus a resumable cursor). Then a bare .fetch() — no explicit .orderBy() —
+  // should paginate end-to-end again, the intent of the old received_timestamp
+  // default but without the #175 tie bug.
+  it.skip("paginates a bare .fetch() once the backend supplies a default order (#274)", async () => {
     const page1 = await wh.from(T.clicks).select().limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
@@ -109,7 +147,6 @@ describe("Query", () => {
 
     const page2 = await page1.next!();
     expect(page2.error).toBeNull();
-    expect(page2.data).toBeInstanceOf(Array);
     expect(page2.data!.length).toBeGreaterThan(0);
   });
 
@@ -161,6 +198,40 @@ describe("Query", () => {
     expect(result.error).toBeNull();
 
     await chQuery(`DROP TABLE IF EXISTS \`${weirdName}\``);
+  });
+
+  it("fetches from a bring-your-own-schema table lacking received_timestamp (#270)", async () => {
+    const admin = adminClient();
+    // A table with NO received_timestamp column. The SDK used to hardcode
+    // ORDER BY received_timestamp DESC, so a bare .fetch() here 500'd; #270
+    // dropped that default, so the query is now valid (regression guard).
+    const noTsTable = `no_ts_${testId().replace(/-/g, "_")}`;
+
+    // 1. Create the table and refresh schema so WaveHouse discovers it.
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${noTsTable}\` (id String, label String) ENGINE = Memory`,
+    );
+    await admin.schema.refresh();
+
+    // 2. Grant the viewer role read access via policy.
+    const currentPolicyRes = await admin.policy.get();
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        [noTsTable]: {
+          select: { viewer: { allow_columns: ["*"] } },
+        },
+      },
+    });
+
+    // 3. A bare .fetch() must succeed (no 500) — the regression guard for #270.
+    try {
+      const result = await wh.from(noTsTable).fetch();
+      expect(result.error).toBeNull();
+      expect(result.data).toBeInstanceOf(Array);
+    } finally {
+      await chQuery(`DROP TABLE IF EXISTS default.\`${noTsTable}\``);
+    }
   });
 
   it("rejects queries to unauthorized tables (403)", async () => {
