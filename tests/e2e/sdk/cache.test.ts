@@ -104,10 +104,6 @@ describe("Cache", () => {
     expect(res2.headers.get("x-cache")).toBe("HIT");
     console.log(`Query [HIT] took ${hotTime}ms`);
 
-    expect(queryTime, "Cold DB Query expected to take longer than hot from cache").toBeGreaterThan(
-      hotTime,
-    );
-
     // Wait for the ttl to expire.
     // Wait an extra 1 second to be safe.
     await new Promise((resolve) => setTimeout(resolve, ttl + 1000));

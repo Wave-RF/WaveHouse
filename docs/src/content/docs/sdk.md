@@ -130,18 +130,38 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or multiple rows. Each row is sent as a separate `POST /v1/ingest?table={table}`.
+Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
 
 ```ts
-// Single row
+// Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)
 const { data, error } = await clicks.insert({ page: '/home', button: 'cta' });
-// data: { ok: true } or { ok: true, duplicate: true }
 
-// Multiple rows
-const { error } = await clicks.insert([
+// Many rows → one NDJSON request, per-record summary
+const { data } = await clicks.insert([
   { page: '/home', button: 'cta' },
   { page: '/about', button: 'nav' },
 ]);
+// data: { ok, total, succeeded, failed, duplicates, results? }
+```
+
+For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size; bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+
+> The server itself is format-agnostic: `POST /v1/ingest` also accepts a raw JSON array or a single object directly (the `Content-Type` is only a hint), so non-SDK clients can send whichever shape is convenient. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
+
+### `.insertNDJSON(source, opts?)`
+
+Insert pre-formatted NDJSON you already have — a `.ndjson` file, a byte stream, or a string — without first parsing it into objects. Accepts a `string`, `Uint8Array`, `Blob`/`File`, or `ReadableStream<Uint8Array>`; non-string sources are read fully into memory before sending. Returns the same per-record summary as an array `insert`.
+
+```ts
+// From a string
+await clicks.insertNDJSON('{"page":"/a"}\n{"page":"/b"}\n');
+
+// From a browser <input type="file"> (a File is a Blob)
+await clicks.insertNDJSON(fileInput.files[0]);
+
+// From a Node file (Node 20+: fs.openAsBlob; or read it to a string)
+import { openAsBlob } from 'node:fs';
+await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
 ```
 
 ### `.schema(opts?)`
@@ -646,6 +666,7 @@ createClient<DB>(config) → WaveHouseClient
 │   │   ├── .stream(opts?) → StreamController
 │   │   └── .liveQuery(subscriber, opts?) → LiveQuery
 │   ├── .insert(data) → Promise<Result<InsertResult>>
+│   ├── .insertNDJSON(source) → Promise<Result<InsertResult>>
 │   ├── .schema() → Promise<Result<TableSchema>>
 │   └── .stream(opts?) → StreamController
 ├── .pipe(name, params?) → PipeRef (PromiseLike)
