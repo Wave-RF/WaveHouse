@@ -539,7 +539,7 @@ build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 # iterating on the mark does). The script self-locates via git, so it runs the
 # same from the repo root.
 .PHONY: branding-docs
-branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/scripts/branding/mark.svg
+branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 	@docs/scripts/branding/generate.sh
 
 # --- Node workspace: SDK + docs ----------------------------------------------

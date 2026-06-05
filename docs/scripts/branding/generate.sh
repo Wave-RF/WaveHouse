@@ -214,9 +214,9 @@ render_text_png "$TMP/og.svg" "$OUT_KIT/og.png" 1200 630
 # --- 7. Raster marks + lockups (PNG, transparent) -----------------------------
 # For non-SVG consumers: slide decks, GitHub social-preview upload, email sig,
 # anywhere SVG isn't accepted. Marks are pure geometry → rsvg-convert is fine.
-# Lockups carry the wordmark, so they go through resvg + pinned Inter; the
-# committed lockup-*.svg still hold <text> (the SVG-outlining step is separate),
-# but their PNG renders are now true Inter.
+# Lockups carry the wordmark; the committed lockup-*.svg are already outlined
+# to paths in place (outline_lockup_svg, section 3), so rendering their PNGs
+# through resvg + the pinned Inter is belt-and-braces.
 rsvg-convert -w 1024 -h 1024 "$OUT_KIT/mark-light.svg" -o "$OUT_KIT/mark-light.png"
 rsvg-convert -w 1024 -h 1024 "$OUT_KIT/mark-dark.svg"  -o "$OUT_KIT/mark-dark.png"
 render_text_png "$OUT_KIT/lockup-light.svg" "$OUT_KIT/lockup-light.png" 1200 250
