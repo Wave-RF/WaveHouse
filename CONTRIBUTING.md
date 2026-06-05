@@ -34,10 +34,10 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 1. Ensure your changes pass all checks:
 
    ```bash
-   make lint       # Linter must pass
-   make test       # Unit tests must pass
-   make build      # All binaries must compile
+   make ci         # full local pipeline: verify + builds + all test suites (Docker required)
    ```
+
+   The pre-push hook (installed by `make tools`) blocks any push until `make ci` has passed for the current tree. `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
 2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag.
 

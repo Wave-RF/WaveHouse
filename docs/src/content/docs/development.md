@@ -365,7 +365,7 @@ Install options:
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 - **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 
-The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control). Enabled linters:
+The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
 - **errcheck** — Unchecked error returns
 - **govet** — Suspicious constructs
@@ -376,12 +376,12 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **revive** — Extensible linter (replaces golint)
 - **ineffassign** — Ineffective assignments
 - **misspell** — Spelling errors in comments/strings
-- **gofumpt** — Strict formatting (superset of gofmt)
-- **goimports** — Import ordering and grouping
 - **bodyclose** — Unclosed HTTP response bodies
 - **noctx** — HTTP requests without context
 - **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
 - **tparallel** — Missing `t.Parallel()` in test subtests
+
+Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
 
 ## Project Structure
 
