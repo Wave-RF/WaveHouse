@@ -56,6 +56,24 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
     || block "Agent-opened PRs must use --draft. Only humans publish ready-for-review PRs."
 fi
 
+# gh pr create / gh pr edit --title: validate the title against the SAME
+# Conventional-Commits rule the required `PR housekeeping` check enforces
+# (scripts/lint-pr-title.sh is the shared rule) — so a too-long or wrong-format
+# title is caught locally BEFORE the PR exists, not after the required check
+# fails. Extract the quoted --title/-t value from the ORIGINAL command (the
+# `stripped` copy has quotes removed). Fail-open: if no title is parseable
+# (--fill, interactive, unquoted) or the validator is missing, fall through to
+# the CI check rather than block a create we can't confidently judge.
+if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+(create|edit)\b'; then
+  pr_title=$(printf '%s' "$cmd" | sed -nE 's/.*(--title|-t)[[:space:]]+"([^"]*)".*/\2/p')
+  [ -z "$pr_title" ] && pr_title=$(printf '%s' "$cmd" | sed -nE "s/.*(--title|-t)[[:space:]]+'([^']*)'.*/\2/p")
+  if [ -n "$pr_title" ] && [ -x scripts/lint-pr-title.sh ]; then
+    if ! reason=$(scripts/lint-pr-title.sh "$pr_title" 2>&1); then
+      block "$reason"
+    fi
+  fi
+fi
+
 # gh pr ready is humans-only.
 if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:space:]]+ready\b'; then
   block "Only humans flip drafts to ready-for-review. Ask the user."

@@ -10,7 +10,7 @@ The non-negotiables, ordered by how often agents miss them. Each links to its de
 2. **A PR-branch push needs BOTH reviewers** — run **`/prepush`**, which launches `pre-push-reviewer` **and** `docs-reviewer` in parallel (fresh context) and loops until **both** return `ship_it`. Both markers are required; one reviewer is never enough, and `docs-reviewer` runs even on code-only changes ([§Pre-push self-review](#pre-push-self-review-is-mandatory-on-pr-branches)).
 3. **Every code change updates its docs + `CHANGELOG.md` in the same PR** — a code change without its doc update is incomplete ([§Documentation Sync](#documentation-sync)).
 4. **Reply to and resolve every review thread** — substantive reply, @-mention the bot, then resolve ([§Review Response](#review-response)).
-5. **Drafts only; humans publish** — `gh pr create --draft`; never `gh pr ready`, never approve/request-changes ([§Agent PR Discipline](#agent-pr-discipline)).
+5. **Drafts only; valid title** — `gh pr create --draft` (never `gh pr ready`/approve); the PR **title** must pass the Conventional-Commits gate (≤ 72 chars) — check it with `scripts/lint-pr-title.sh "<title>"` before creating ([§Agent PR Discipline](#agent-pr-discipline)).
 6. **Never force-push or rebase a PR branch** — to absorb upstream main, `git merge origin/main` ([§Branch Maintenance](#branch-maintenance)).
 7. **Never hand-write markers or `--no-verify`** — if you're tempted, the gate is wrong-shaped for your situation; fix that instead ([§Don't bypass the gates](#dont-bypass-the-gates)).
 
@@ -216,6 +216,8 @@ Agents follow the same universal git hooks as humans (pre-commit + pre-push in `
 ### Drafts only
 
 Agents must create PRs with `gh pr create --draft`. Only humans transition draft → ready-for-review (`gh pr ready` is blocked for agents). Only humans approve or request changes (`gh pr review --approve` / `--request-changes` are blocked).
+
+**PR title format.** The title becomes the squash-merge subject on `main` and is gated by the required `PR housekeeping` check — a bad title blocks merge, so don't discover it from CI. It must be Conventional Commits — `<type>(optional-scope)(optional-!): <subject>` — **≤ 72 chars**, subject **lowercase-first** with **no trailing period**. Types: `feat fix docs refactor test chore ci deps build perf revert style`. Validate before creating: `scripts/lint-pr-title.sh "<title>"` (exit 0 = valid; it prints the reason on failure). `.claude/hooks/agent-bash-gate.sh` runs the same check on `gh pr create` / `gh pr edit --title`, so a malformed title is caught locally before the PR exists. The rule has a single source — `scripts/lint-pr-title.sh`, which mirrors the regex in `.github/workflows/housekeeping.yml`; change them together.
 
 ### Human reviewer assignment is humans-only
 
