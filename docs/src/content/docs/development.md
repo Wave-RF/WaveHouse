@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and — under `build-docs` / CI only — `starlight-links-validator`; the `dev-docs` watch loop skips the validator so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time; nothing else in the docs toolchain uses a browser). `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
 
 ### Verify your setup
 
@@ -473,7 +473,7 @@ Run `make help` to see all targets. Key ones:
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
 | `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`) |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
@@ -518,7 +518,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
+PR titles must match Conventional Commits format (enforced by `.github/workflows/housekeeping.yml` as the required `PR housekeeping` status check):
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -526,7 +526,7 @@ PR titles must match Conventional Commits format (enforced by `.github/workflows
 
 Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`.
 
-The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`).
+The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
 If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
 
@@ -534,15 +534,13 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 The `main branch protection` ruleset requires the following checks to pass before any PR can merge:
 
-- `Check` — module tidiness, format verification, vulnerability scan
-- `Build` — compile all binaries
-- `Validate` — PR title is Conventional Commits
+- `CI` — the full pipeline (`.github/workflows/ci.yml`, one job running `make ci`): static checks (tidy, format, lint, vulncheck), all builds, unit + SDK + integration + E2E suites, and the merged coverage gates
+- `PR housekeeping` — Conventional Commits title (+ 72-char cap), file-path labels, reviewer assignment (`.github/workflows/housekeeping.yml`)
+- `Admin approval` — at least one `APPROVED` review specifically from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
 
-Plus 1 approving review, and the `Admin approval` check (enforced by `.github/workflows/admin-approval.yml`) requires at least one `APPROVED` review specifically from an admin (Eric or Taite). Linear history, no deletion, no force-push, squash-merge only.
+Plus 1 approving review. Linear history, no deletion, no force-push, squash-merge only.
 
 Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
-
-> **Note — temporarily relaxed**: `Lint`, `Test`, and `Integration Tests` are *not* currently required while pre-existing failures on `main` are being fixed (tracked in #57). They'll rejoin required once main is green.
 
 ### Merge behavior
 
@@ -563,11 +561,11 @@ Both are **advisory** — the `Admin approval` status check (admin review mandat
 
 ### Task Board is the single signal
 
-`.github/workflows/project-orchestrator.yml` drives the Task Board (project #7) as the real "who needs to look at this next" channel. GitHub's review-request notifications are treated as noise; what matters is the position of your assigned card on the board.
+The Task Board (project #7) is the real "who needs to look at this next" channel. Reviewer assignment is workflow-driven (`housekeeping.yml`); card placement and movement are handled by native Projects v2 workflows configured in the project UI — there is no on-repo workflow moving cards.
 
-- **Coder flow**: open PR (draft or not) → address bot feedback → once all required checks pass and all review threads are resolved, the orchestrator adds the PR to the board, sets its Status to `Ready`, and assigns the non-author admin. You're done for now.
-- **Reviewer flow**: PR card shows up on your board in `Ready`. You move it to `In progress` when you start reviewing (this is the one manual step). You review. Either (a) approve → `admin-approval.yml` passes, auto-merge takes over, card auto-flips to `Done`; or (b) click "Request changes" → orchestrator moves PR card to `In review`, linked issue card to `Ready` (now the coder's ball).
-- **Coder addressing feedback**: push fixes, resolve threads, then click "re-request review" on your reviewer in GitHub's sidebar (this is the trigger the orchestrator listens for). Orchestrator moves PR card back to `Ready`, issue card back to `In review`. Reviewer sees the card returned to their column.
+- **Coder flow**: open a PR ready-for-review (or flip a draft to ready) → `housekeeping.yml` requests review from the non-author admin and sets assignees (an admin author gets the *other* admin; otherwise reviewers round-robin by PR number; drafts and Dependabot PRs are skipped). Address bot feedback and resolve threads as you go. You're done for now.
+- **Reviewer flow**: the PR card shows up on your board via the Projects v2 built-in workflows. You move it to `In progress` when you start reviewing. Either (a) approve → `admin-approval.yml` passes, auto-merge (if enabled) takes over; or (b) "Request changes" → the ball is back with the coder.
+- **Coder addressing feedback**: push fixes, resolve threads, then click "re-request review" on your reviewer in GitHub's sidebar. This step is deliberately manual — `dismiss_stale_reviews_on_push` clears stale approvals, and the workflow doesn't re-request on every push so reviewers aren't re-pinged before you're actually ready.
 
 Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review). Dependabot PRs do not appear on the Task Board.
 
@@ -593,7 +591,7 @@ When pushing back on a bot's suggestion, end the reply with the bot's mention (e
 
 ### Auto-labeling PRs
 
-`.github/workflows/label.yml` uses `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
+A step in `.github/workflows/housekeeping.yml` uses `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
 
 ### When adding a new `internal/<pkg>/` package
 

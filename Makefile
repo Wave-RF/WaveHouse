@@ -531,9 +531,10 @@ check-docs: pnpm-install ## Type-check the docs (astro check — types + content
 	$(call run,check-docs (astro check),NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
 
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)
-# because rehype-mermaid renders diagrams via headless Chrome at build time and
-# starlight-links-validator needs it too. Depends on check-docs so a type/content
-# error fails fast before the (heavier) build, and the two never race on .astro.
+# because rehype-mermaid renders diagrams via headless Chrome at build time
+# (starlight-links-validator runs here too, but needs no browser). Depends on
+# check-docs so a type/content error fails fast before the (heavier) build,
+# and the two never race on .astro.
 .PHONY: build-docs
 build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
@@ -587,7 +588,7 @@ pnpm-install:
 	@$(PNPM) install --frozen-lockfile --reporter=silent
 
 # install-playwright-docs: hidden helper — fetch the Chromium build the docs
-# site needs (rehype-mermaid build-time SSR + starlight-links-validator). It's
+# site needs (rehype-mermaid build-time SSR; nothing else uses a browser). It's
 # ~130 MB, so it's lazy: only the docs build/dev/preview targets pull it in,
 # never plain pnpm-install, so Go-only contributors don't pay for it. The
 # --with-deps apt step needs sudo and only helps on CI's minimal images, so
@@ -786,7 +787,7 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 #   clean-all    everything above + data/ + docker volumes (full reset)
 
 .PHONY: clean
-clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/)
+clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
 	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/ docs/.dev-dist/
 

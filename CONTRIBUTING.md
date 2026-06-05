@@ -76,7 +76,7 @@ Types:
 - `revert` — Reverting a previous commit
 - `style` — Formatting changes with no functional effect
 
-The PR title is enforced via the `Lint PR title` workflow; it becomes the squash-merge commit message on `main`, so keep it parseable.
+The PR title is enforced by the required `PR housekeeping` status check (`.github/workflows/housekeeping.yml`); it becomes the squash-merge commit message on `main`, so keep it parseable — and at most 72 characters.
 
 Examples:
 
