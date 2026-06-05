@@ -38,22 +38,6 @@ export default defineConfig({
       description:
         "The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.",
       head: [
-        // PostHog
-        {
-          tag: "script",
-          content: `!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
-posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https://us.i.posthog.com',defaults:'2026-01-30'});`,
-        },
-        // Icon set (generated into /branding/ by docs/scripts/branding/
-        // generate.sh). The dark/light swap lives inside favicon.svg as a
-        // prefers-color-scheme style — but Chromium only *picks* the SVG over
-        // the .ico when the SVG link says sizes="any" and the .ico has numeric
-        // sizes; drop the `any` entry and Chrome shows the static .ico.
-        // Starlight's `favicon` option (below) emits the same SVG again as
-        // rel="shortcut icon", sorted last so Firefox's last-icon-wins picks
-        // it, but it can't carry `sizes` — hence this explicit pair. The .ico
-        // stays for Safari ≤18 (SVG favicons land in 26) + the root auto-probe.
-        // Head.astro live-swaps in favicon-{light,dark}.svg on theme flips.
         {
           tag: "link",
           attrs: {
