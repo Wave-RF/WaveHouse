@@ -260,8 +260,12 @@ clicks.select('page').timeRange('received_timestamp', '1h')
 clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
 ```
 
+#### `.cacheTTL(seconds)`
+
+Records a desired result-cache TTL on the builder. **Currently client-side state only** — the value is never sent to the server, which derives each result's cache TTL adaptively from query execution time. Wiring it through the wire format is tracked in [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
+
 ```ts
-clicks.select('page').count().cacheTTL(300) // cache for 5 minutes
+clicks.select('page').count().cacheTTL(300) // not yet honored server-side — see #280
 ```
 
 ### `.fetch(opts?)`
@@ -538,13 +542,13 @@ When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.str
 ```ts
 const stream = wh.from('clicks')
   .select('page', 'button')
-  .where('page', 'eq', '/home')
+  .where('page', '=', '/home')
   .stream();
 
 // Only events where page === '/home' are emitted, with only page + button columns
 ```
 
-Supported operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `like`, `not_like`.
+Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
 
 ---
 
@@ -554,7 +558,7 @@ Live queries combine a historical backfill (`.fetch()`) with a real-time stream,
 
 ```ts
 const lq = wh.from('clicks')
-  .where('page', 'eq', '/home')
+  .where('page', '=', '/home')
   .orderBy('received_timestamp', 'desc')
   .limit(100)
   .liveQuery({

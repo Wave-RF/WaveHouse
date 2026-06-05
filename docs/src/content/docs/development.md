@@ -18,7 +18,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json` and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -365,7 +365,7 @@ Install options:
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 - **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 
-The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control). Enabled linters:
+The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
 - **errcheck** — Unchecked error returns
 - **govet** — Suspicious constructs
@@ -376,12 +376,12 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **revive** — Extensible linter (replaces golint)
 - **ineffassign** — Ineffective assignments
 - **misspell** — Spelling errors in comments/strings
-- **gofumpt** — Strict formatting (superset of gofmt)
-- **goimports** — Import ordering and grouping
 - **bodyclose** — Unclosed HTTP response bodies
 - **noctx** — HTTP requests without context
 - **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
 - **tparallel** — Missing `t.Parallel()` in test subtests
+
+Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
 
 ## Project Structure
 
@@ -501,10 +501,11 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for four ecosystems:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for five ecosystems:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
 - **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
+- **npm — docs site** (`docs/`), commit prefix `docs:`
 - **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
 - **npm — E2E tests** (`tests/e2e/sdk/`), commit prefix `deps(tests):`
 
@@ -518,7 +519,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format (enforced by `.github/workflows/housekeeping.yml` as the required `PR housekeeping` status check):
+PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the required `PR housekeeping` check (`.github/workflows/housekeeping.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -532,13 +533,13 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 ### Required status checks
 
-The `main branch protection` ruleset requires the following checks to pass before any PR can merge:
+The `main branch protection` ruleset requires three status checks to pass before any PR can merge:
 
-- `CI` — the full pipeline (`.github/workflows/ci.yml`, one job running `make ci`): static checks (tidy, format, lint, vulncheck), all builds, unit + SDK + integration + E2E suites, and the merged coverage gates
-- `PR housekeeping` — Conventional Commits title (+ 72-char cap), file-path labels, reviewer assignment (`.github/workflows/housekeeping.yml`)
-- `Admin approval` — at least one `APPROVED` review specifically from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
+- `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
+- `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
+- `Admin approval` — at least one `APPROVED` review from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
 
-Plus 1 approving review. Linear history, no deletion, no force-push, squash-merge only.
+The ruleset also enforces 1 approving review, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only.
 
 Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
 
@@ -559,15 +560,15 @@ Advisory PR review comes from marketplace apps configured at the org/repo level:
 
 Both are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
 
-### Task Board is the single signal
+### Reviewer assignment and the Task Board
 
-The Task Board (project #7) is the real "who needs to look at this next" channel. Reviewer assignment is workflow-driven (`housekeeping.yml`); card placement and movement are handled by native Projects v2 workflows configured in the project UI — there is no on-repo workflow moving cards.
+Reviewer assignment is automated; the board itself is GitHub-native, not a workflow state machine:
 
-- **Coder flow**: open a PR ready-for-review (or flip a draft to ready) → `housekeeping.yml` requests review from the non-author admin and sets assignees (an admin author gets the *other* admin; otherwise reviewers round-robin by PR number; drafts and Dependabot PRs are skipped). Address bot feedback and resolve threads as you go. You're done for now.
-- **Reviewer flow**: the PR card shows up on your board via the Projects v2 built-in workflows. You move it to `In progress` when you start reviewing. Either (a) approve → `admin-approval.yml` passes, auto-merge (if enabled) takes over; or (b) "Request changes" → the ball is back with the coder.
-- **Coder addressing feedback**: push fixes, resolve threads, then click "re-request review" on your reviewer in GitHub's sidebar. This step is deliberately manual — `dismiss_stale_reviews_on_push` clears stale approvals, and the workflow doesn't re-request on every push so reviewers aren't re-pinged before you're actually ready.
+- **Reviewer assignment**: on PR open / ready-for-review, the `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) requests review from the non-author admin and sets them as assignee. It does **not** re-request on every push — after addressing feedback, use GitHub's "Re-request review" button (the trigger, if `dismiss_stale_reviews_on_push` cleared the request).
+- **Merge gate**: the `Admin approval` status check (`.github/workflows/admin-approval.yml`) fails until an admin has an `APPROVED` review; the ruleset adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
+- **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review). Dependabot PRs do not appear on the Task Board.
+Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
 
 ### Invoking bots manually
 
@@ -591,7 +592,7 @@ When pushing back on a bot's suggestion, end the reply with the bot's mention (e
 
 ### Auto-labeling PRs
 
-A step in `.github/workflows/housekeeping.yml` uses `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
+The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
 
 ### When adding a new `internal/<pkg>/` package
 
