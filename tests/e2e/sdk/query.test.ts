@@ -94,23 +94,22 @@ describe("Query", () => {
     expect(page2.data!.length).toBeGreaterThan(0);
   });
 
-  // Original default-order pagination. Skipped because it currently fails:
-  // ClickHouse stamps received_timestamp (DEFAULT now64(3)) at BATCH-insert
-  // time, so every row the worker flushes together shares one millisecond, and
-  // the SDK's strict keyset cursor then skips the rows tied on a page boundary —
-  // leaving page 2 empty. Tracked in #175; re-enable once the default cursor
-  // breaks ties (e.g. a composite cursor with a unique tiebreak column).
-  it.skip("pagination by default received_timestamp cursor (known bug — #175)", async () => {
+  // Issue #175 — the default received_timestamp cursor skipped rows tied on a
+  // page boundary (ClickHouse stamps received_timestamp (DEFAULT now64(3)) at
+  // BATCH-insert time, so every row a worker flushes together shares one
+  // millisecond, and the SDK's strict keyset cursor then dropped the ties,
+  // leaving page 2 empty) — is now moot for unconfigured clients: #270 removed
+  // the hardcoded default order. A bare .limit().fetch() with no .orderBy() and
+  // no options.defaultOrderBy reports hasMore honestly but offers no next(),
+  // because there is no order column to build a keyset cursor from. Deterministic
+  // pagination requires an explicit .orderBy() (see the test above) or an opt-in
+  // options.defaultOrderBy.
+  it("reports hasMore without next() when no order is configured (#270, sidesteps #175)", async () => {
     const page1 = await wh.from(T.clicks).select().limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
     expect(page1.hasMore).toBe(true);
-    expect(page1.next).toBeDefined();
-
-    const page2 = await page1.next!();
-    expect(page2.error).toBeNull();
-    expect(page2.data).toBeInstanceOf(Array);
-    expect(page2.data!.length).toBeGreaterThan(0);
+    expect(page1.next).toBeUndefined();
   });
 
   it("raw SQL query", async () => {
@@ -161,6 +160,42 @@ describe("Query", () => {
     expect(result.error).toBeNull();
 
     await chQuery(`DROP TABLE IF EXISTS \`${weirdName}\``);
+  });
+
+  it("fetches from a bring-your-own-schema table lacking received_timestamp (#270)", async () => {
+    const admin = adminClient();
+    // A table with NO received_timestamp column. The SDK used to hardcode
+    // `ORDER BY received_timestamp DESC` as the default query order, so a bare
+    // .fetch() here produced invalid SQL → ClickHouse "Unknown expression
+    // identifier received_timestamp" → HTTP 500. With #270 the default order is
+    // gone, so the query is valid and returns cleanly.
+    const noTsTable = `no_ts_${testId().replace(/-/g, "_")}`;
+
+    // 1. Create the table and refresh schema so WaveHouse discovers it.
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${noTsTable}\` (id String, label String) ENGINE = Memory`,
+    );
+    await admin.schema.refresh();
+
+    // 2. Grant the viewer role read access via policy.
+    const currentPolicyRes = await admin.policy.get();
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        [noTsTable]: {
+          select: { viewer: { allow_columns: ["*"] } },
+        },
+      },
+    });
+
+    // 3. A bare .fetch() must succeed (no 500) — the regression guard for #270.
+    try {
+      const result = await wh.from(noTsTable).fetch();
+      expect(result.error).toBeNull();
+      expect(result.data).toBeInstanceOf(Array);
+    } finally {
+      await chQuery(`DROP TABLE IF EXISTS default.\`${noTsTable}\``);
+    }
   });
 
   it("rejects queries to unauthorized tables (403)", async () => {
