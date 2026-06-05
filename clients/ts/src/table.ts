@@ -5,6 +5,7 @@ import type { StreamController } from "./stream/controller.js";
 import type {
   FetchOptions,
   HttpContext,
+  InsertRecordResult,
   InsertResult,
   Result,
   StreamOptions,
@@ -12,6 +13,34 @@ import type {
 } from "./types.js";
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
+
+/** Content-Type for the NDJSON batch ingest path. */
+const NDJSON_CONTENT_TYPE = "application/x-ndjson";
+
+/**
+ * Accepted sources for {@link TableRef.insertNDJSON}: a string, raw bytes, a
+ * Blob/File (browser file inputs), or a byte stream. Non-string sources are
+ * read fully before sending.
+ */
+export type NDJSONSource = string | Uint8Array | Blob | ReadableStream<Uint8Array>;
+
+/** Wire shape of the server's batch ingest response (JSON array or NDJSON). */
+interface BatchIngestResponse {
+  total: number;
+  succeeded: number;
+  failed: number;
+  duplicates: number;
+  results?: InsertRecordResult[];
+}
+
+/** Read an {@link NDJSONSource} fully into a UTF-8 string. */
+async function ndjsonSourceToString(source: NDJSONSource): Promise<string> {
+  if (typeof source === "string") return source;
+  if (source instanceof Uint8Array) return new TextDecoder().decode(source);
+  // Blob/File and ReadableStream<Uint8Array> are both valid fetch body inits,
+  // so let Response drain them to text.
+  return new Response(source).text();
+}
 
 /**
  * Reference to a table. NOT thenable — safe to pass around without triggering requests.
@@ -51,31 +80,30 @@ export class TableRef<Row = Record<string, unknown>> {
     );
   }
 
-  /** Insert one or more rows into this table. */
+  /**
+   * Insert one or more rows into this table.
+   *
+   * A single object is sent as a JSON `POST /v1/ingest`. An **array** is
+   * serialized to NDJSON (one record per line) and sent as a single
+   * `application/x-ndjson` request: a bad record no longer fails or hides the
+   * rest of the batch — per-record outcomes come back in the result
+   * (`failed` / `results`), and `ok` is true only when every record succeeded.
+   *
+   * The array path sends one request regardless of size; bounded-concurrency
+   * chunking of very large arrays is tracked separately (#196). For NDJSON you
+   * already have (a file or stream), use {@link insertNDJSON}.
+   */
   async insert(
     data: Partial<Row> | Partial<Row>[],
     opts?: { signal?: AbortSignal },
   ): Promise<Result<InsertResult>> {
     if (Array.isArray(data)) {
-      // TODO: Switch to NDJSON
-      // FAST: Fire all HTTP requests concurrently instead of waiting for each one
-      const promises = data.map((row) =>
-        request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
-          method: "POST",
-          path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
-          body: row,
-          signal: opts?.signal,
-        }),
-      );
-
-      // TODO: with NDJSON/array version, need to rework how to show errors if only some/one fail
-      const results = await Promise.all(promises);
-
-      // Check if any of the concurrent requests failed
-      for (const res of results) {
-        if (res.error) return err(res.error);
+      if (data.length === 0) {
+        // Nothing to send — succeed without a round trip.
+        return ok({ ok: true, total: 0, succeeded: 0, failed: 0, duplicates: 0, results: [] });
       }
-      return ok({ ok: true });
+      const ndjson = data.map((row) => JSON.stringify(row)).join("\n");
+      return this._sendNDJSON(ndjson, opts);
     }
 
     const { data: res, error } = await request<{ ok?: boolean; duplicate?: boolean }>(this._ctx, {
@@ -88,6 +116,58 @@ export class TableRef<Row = Record<string, unknown>> {
     if (error) return err(error);
     const result: InsertResult = { ok: res?.ok ?? true };
     if (res?.duplicate != null) result.duplicate = res.duplicate;
+    return ok(result);
+  }
+
+  /**
+   * Insert pre-formatted NDJSON (newline-delimited JSON, one record per line)
+   * from a string, raw bytes, a Blob/File, or a byte stream — e.g. a `.ndjson`
+   * file or a stream produced by another system. For in-memory rows, prefer
+   * {@link insert}.
+   *
+   * Non-string sources are read fully into memory before sending (the server
+   * streams the parse). Returns the same per-record batch summary as an array
+   * `insert`.
+   */
+  async insertNDJSON(
+    source: NDJSONSource,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Result<InsertResult>> {
+    const ndjson = await ndjsonSourceToString(source);
+    return this._sendNDJSON(ndjson, opts);
+  }
+
+  /**
+   * @internal Send an NDJSON body and map the server's batch response onto an
+   * {@link InsertResult}. A transport / whole-request failure surfaces as the
+   * Result error arm; a processed batch (even with rejected records) surfaces
+   * as the success arm with `ok = failed === 0`.
+   */
+  private async _sendNDJSON(
+    ndjson: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Result<InsertResult>> {
+    const { data, error } = await request<BatchIngestResponse>(this._ctx, {
+      method: "POST",
+      path: `/v1/ingest?table=${encodeURIComponent(this._table)}`,
+      rawBody: ndjson,
+      contentType: NDJSON_CONTENT_TYPE,
+      signal: opts?.signal,
+    });
+
+    if (error) return err(error);
+    // A 200 with no/empty body (e.g. a record-stripping intermediary) must not
+    // throw — mirror the single-object path's optimistic `?? true` and fall back
+    // to a zeroed summary so the "never throws" Result contract holds.
+    const r = data ?? { total: 0, succeeded: 0, failed: 0, duplicates: 0 };
+    const result: InsertResult = {
+      ok: r.failed === 0,
+      total: r.total,
+      succeeded: r.succeeded,
+      failed: r.failed,
+      duplicates: r.duplicates,
+    };
+    if (r.results && r.results.length > 0) result.results = r.results;
     return ok(result);
   }
 
