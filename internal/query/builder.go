@@ -233,6 +233,10 @@ func filterToSQL(f Filter) (string, []any, error) {
 // The clickhouse-go driver's time.Time formatting uses toDateTime() (second
 // precision), which loses milliseconds needed for DateTime64 cursor comparisons.
 // Returning a formatted string lets ClickHouse parse it with full precision.
+//
+// A value that isn't a timestamp (a plain string, a number, etc.) is a valid
+// non-temporal filter value, so the parse "failure" is just the expected
+// non-timestamp case — pass it through unchanged rather than treat it as an error.
 func coerceFilterValue(v any) any {
 	s, ok := v.(string)
 	if !ok {
@@ -257,7 +261,7 @@ func formatClickHouseTime(t time.Time) string {
 // resolveTimeValue parses an RFC3339 timestamp or a relative duration like "1h",
 // "30m" and renders it as a ClickHouse DateTime literal (see formatClickHouseTime).
 // When bucketSeconds > 0, timestamps are bucketed (truncated) to the nearest
-// boundary. Failure to parse returns the original string, which will likely
+// boundary. An unrecognised value is returned unchanged, which will likely
 // cause a ClickHouse error.
 //
 // The output deliberately matches coerceFilterValue's format rather than RFC3339:
@@ -267,7 +271,8 @@ func resolveTimeValue(val string, bucketSeconds int) string {
 	if d, err := time.ParseDuration(val); err == nil {
 		return formatClickHouseTime(bucketTime(time.Now().UTC().Add(-d), bucketSeconds))
 	}
-
+	// Try an absolute timestamp (RFC3339Nano accepts fractional and whole-second
+	// input); normalise to UTC before bucketing.
 	if t, err := time.Parse(time.RFC3339Nano, val); err == nil {
 		return formatClickHouseTime(bucketTime(t.UTC(), bucketSeconds))
 	}
