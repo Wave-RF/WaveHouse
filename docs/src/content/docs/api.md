@@ -291,6 +291,8 @@ curl -X POST http://localhost:8080/v1/admin/query \
 
 Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
 
+> **The column allowlist is a hard cap on every clause.** Every column the query references — in `columns`, an aggregation argument, `filters`, `group_by`, `order_by`, or `time_range` — must be permitted by the role's `allow_columns`/`deny_columns`, or the request is rejected with `403 column "x" not allowed`. Omitting `columns` (or sending `["*"]`) returns only the columns the role may read — it is **not** `SELECT *` — so a hidden column never leaks by being left out, grouped on, or filtered on. See [Access control → Column permissions](/access-control#column-permissions).
+
 **Request:**
 
 ```json
@@ -315,7 +317,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `columns` | string[] | No | Columns to SELECT. |
+| `columns` | string[] | No | Columns to SELECT. Omit (or send `["*"]`) to select every column the role is allowed to read — never more. |
 | `aggregations` | object[] | No | Aggregation functions (`fn`, `column`, `alias`). |
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |

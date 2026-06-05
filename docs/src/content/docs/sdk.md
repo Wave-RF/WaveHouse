@@ -121,7 +121,9 @@ const clicks = wh.from('clicks');
 
 ### `.fetch(opts?)`
 
-Shortcut for `SELECT *` with a default limit of 1000.
+Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
+
+A bare `.fetch()` paginates by `received_timestamp` (the default keyset cursor → `ORDER BY received_timestamp`). Ordering by a column is rejected if your role can't read it, so a column-restricted role must either include `received_timestamp` in its `allow_columns` or pass an explicit `.orderBy()` over a column it can read.
 
 ```ts
 const { data, error, hasMore, next } = await clicks.fetch();

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -197,12 +198,127 @@ func TestIsColumnAllowed(t *testing.T) {
 		{"in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "secret", false},
 		{"not in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "page", true},
 		{"deny overrides allow", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}, "a", false},
+		// A literal "*" passed as the column is never a concrete grantable column:
+		// it is a wildcard probe the projection layer must expand, not a column to
+		// wave through. It must be rejected even when the allow list is empty (the
+		// deny-list footgun behind the #223 SELECT * bypass) or a wildcard.
+		{"star arg, empty allow list, rejected", &ResolvedPermissions{Allowed: true}, "*", false},
+		{"star arg, deny list set, rejected", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "*", false},
+		{"star arg, wildcard allow, rejected", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, "*", false},
+		{"star arg, denied table, rejected", &ResolvedPermissions{Allowed: false}, "*", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := tt.perms.IsColumnAllowed(tt.col)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestAllowedProjection(t *testing.T) {
+	t.Parallel()
+	all := []string{"page", "user_id", "payload", "ts"}
+	tests := []struct {
+		name  string
+		perms *ResolvedPermissions
+		cols  []string
+		want  []string
+	}{
+		{"nil perms returns input unchanged", nil, all, all},
+		{"no lists - all pass", &ResolvedPermissions{Allowed: true}, all, all},
+		{
+			"allow list keeps order and subset",
+			&ResolvedPermissions{Allowed: true, AllowColumns: []string{"ts", "page"}},
+			all,
+			[]string{"page", "ts"}, // preserves input order, not allow-list order
+		},
+		{
+			"deny list drops denied",
+			&ResolvedPermissions{Allowed: true, DenyColumns: []string{"payload"}},
+			all,
+			[]string{"page", "user_id", "ts"},
+		},
+		{
+			"wildcard allow with deny drops only denied",
+			&ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}},
+			all,
+			[]string{"page", "user_id", "ts"},
+		},
+		{
+			"allow list disjoint from schema yields empty",
+			&ResolvedPermissions{Allowed: true, AllowColumns: []string{"nonexistent"}},
+			all,
+			[]string{},
+		},
+		{
+			"denied table yields empty",
+			&ResolvedPermissions{Allowed: false},
+			all,
+			[]string{},
+		},
+		{"empty input yields empty", &ResolvedPermissions{Allowed: true}, []string{}, []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.perms.AllowedProjection(tt.cols)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRestrictsColumns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		perms *ResolvedPermissions
+		want  bool
+	}{
+		{"nil perms - unrestricted", nil, false},
+		{"no lists - unrestricted", &ResolvedPermissions{Allowed: true}, false},
+		{"bare wildcard allow - unrestricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, false},
+		{"wildcard among allows - unrestricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "*"}}, false},
+		{"concrete allow list - restricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page"}}, true},
+		{"deny list - restricted", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"payload"}}, true},
+		{"wildcard allow but deny set - restricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.perms.RestrictsColumns())
+		})
+	}
+}
+
+// TestColumnPrimitives_AgreeOnVisibility pins the invariant that RestrictsColumns
+// and IsColumnAllowed/AllowedProjection never disagree: an "unrestricted" role
+// must see every schema column, and a "restricted" role must hide at least one.
+// If a future refactor drifts the allow/deny precedence in one but not the
+// other, the SELECT * expansion decision (which trusts RestrictsColumns) would
+// part ways with the per-column check — the exact failure mode behind #223.
+func TestColumnPrimitives_AgreeOnVisibility(t *testing.T) {
+	t.Parallel()
+	schema := []string{"page", "user_id", "payload", "ts"}
+	cases := []*ResolvedPermissions{
+		{Allowed: true},
+		{Allowed: true, AllowColumns: []string{"*"}},
+		{Allowed: true, AllowColumns: []string{"page", "*"}},
+		{Allowed: true, AllowColumns: []string{"page"}},
+		{Allowed: true, DenyColumns: []string{"payload"}},
+		{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"payload"}},
+	}
+	for i, perms := range cases {
+		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
+			t.Parallel()
+			visible := perms.AllowedProjection(schema)
+			if perms.RestrictsColumns() {
+				assert.Less(t, len(visible), len(schema),
+					"a restricted role must hide at least one schema column")
+			} else {
+				assert.Equal(t, schema, visible,
+					"an unrestricted role must see every schema column, so SELECT * is safe")
+			}
 		})
 	}
 }

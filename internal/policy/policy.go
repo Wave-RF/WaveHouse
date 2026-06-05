@@ -244,11 +244,28 @@ func navigateClaims(claims map[string]any, parts []string) any {
 
 // IsColumnAllowed checks if a column is permitted by the resolved permissions.
 // A nil receiver means no policy applies — all columns are allowed.
+//
+// This is the single source of truth for the per-column read decision. Every
+// read path defers to it: the query builder checks every column a structured
+// query references against it (internal/query.Build), and the stream path's
+// filterEventColumns drops any event field it rejects. Keep it the one decision
+// function so the surfaces can never drift apart.
 func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 	if rp == nil {
 		return true
 	}
 	if !rp.Allowed {
+		return false
+	}
+	// A literal "*" is never a concrete, grantable column. It is the caller
+	// asking for "everything", which the projection layer (AllowedProjection)
+	// must resolve to the role's allowed columns — not something to wave through
+	// here. Returning true would re-open the allowlist whenever AllowColumns is
+	// empty or itself a wildcard (the deny-list footgun behind the structured
+	// query SELECT * bypass, #223). A real column literally named "*" cannot
+	// reach a query: it is not a valid SQL identifier, so the builder's
+	// schema/identifier validation rejects it regardless.
+	if col == "*" {
 		return false
 	}
 	// Check deny list first.
@@ -267,6 +284,52 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 		}
 	}
 	return false
+}
+
+// AllowedProjection returns the subset of cols this role may read, preserving
+// input order. It is the batch form of IsColumnAllowed and the single source of
+// truth for expanding an unqualified "all columns" read (the SQL the builder
+// would otherwise emit as SELECT *) into the concrete set a role is permitted to
+// see — the projection counterpart to the stream path's filterEventColumns. A
+// nil receiver (no policy) returns cols unchanged.
+func (rp *ResolvedPermissions) AllowedProjection(cols []string) []string {
+	if rp == nil {
+		return cols
+	}
+	out := make([]string, 0, len(cols))
+	for _, c := range cols {
+		if rp.IsColumnAllowed(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// RestrictsColumns reports whether this role constrains which columns may be
+// read — whether any column-level allow/deny rule applies. It is false only when
+// the role can read every column (no deny list, and an allow list that is empty
+// or a bare "*" wildcard); there a SELECT * exposes nothing the role isn't
+// already entitled to, so the builder leaves it untouched. When true, the
+// builder must expand SELECT * into AllowedProjection so denied columns never
+// reach the result (#223). A nil receiver (no policy) is unrestricted. The
+// allow/deny precedence here mirrors IsColumnAllowed exactly so the "is this
+// role restricted?" and "is this column allowed?" questions can never disagree.
+func (rp *ResolvedPermissions) RestrictsColumns() bool {
+	if rp == nil {
+		return false
+	}
+	if len(rp.DenyColumns) > 0 {
+		return true
+	}
+	if len(rp.AllowColumns) == 0 {
+		return false
+	}
+	for _, a := range rp.AllowColumns {
+		if a == "*" {
+			return false
+		}
+	}
+	return true
 }
 
 // IsAggregationAllowed checks if an aggregation function is permitted.
