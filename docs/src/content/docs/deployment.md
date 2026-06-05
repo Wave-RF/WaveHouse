@@ -406,6 +406,6 @@ docker compose -f deployments/compose/standalone.yaml up -d
 
 ```bash
 rm -rf data/         # Removes embedded NATS + Pebble data (run `make clean-all` to also drop docker volumes)
-make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/
+make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
 make build && ./bin/wavehouse
 ```

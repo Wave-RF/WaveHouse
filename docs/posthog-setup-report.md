@@ -1,13 +1,13 @@
 <wizard-report>
 # PostHog post-wizard report
 
-The wizard has completed a deep integration of PostHog analytics into the WaveHouse documentation site. PostHog is initialized via a browser snippet in a new `src/components/posthog.astro` component, imported into the existing `src/components/Head.astro` override. The initialization is wrapped in a `window.__posthog_initialized` guard to prevent stack overflow during Astro View Transitions (ClientRouter) soft navigation. Pageviews are tracked automatically via `capture_pageview: 'history_change'`. Event capture scripts in Hero.astro, Footer.astro, and index.mdx attach click listeners using the `astro:page-load` event pattern to work correctly across both hard and soft navigations.
+The wizard has completed a deep integration of PostHog analytics into the WaveHouse documentation site. PostHog is initialized via a browser snippet in a new `src/components/PostHog.astro` component, imported into the existing `src/components/Head.astro` override. The initialization is wrapped in a `window.__posthog_initialized` guard to prevent stack overflow during Astro View Transitions (ClientRouter) soft navigation. Pageviews are tracked automatically via `capture_pageview: 'history_change'`. Event capture scripts in Hero.astro, Footer.astro, and HomepageCtaTracking.astro (imported by index.mdx) attach click listeners using the `astro:page-load` event pattern to work correctly across both hard and soft navigations.
 
 | Event | Description | File |
 |-------|-------------|------|
 | `hero_cta_clicked` | User clicked a CTA button in the homepage hero section (Get Started or View on GitHub). Properties: `cta_text`, `cta_href`, `cta_variant`. | `src/components/Hero.astro` |
 | `footer_link_clicked` | User clicked an external link in the site footer (GitHub, Discussions, Changelog, Contributing, Support, Security, License). Properties: `link_name`, `link_href`. | `src/components/Footer.astro` |
-| `homepage_cta_clicked` | User clicked a primary CTA in the homepage closing section (Get started in five minutes, Star on GitHub). Properties: `cta_text`, `cta_href`. | `src/content/docs/index.mdx` |
+| `homepage_cta_clicked` | User clicked a primary CTA in the homepage closing section (Get started in five minutes, Star on GitHub). Properties: `cta_text`, `cta_href`. | `src/components/HomepageCtaTracking.astro` |
 
 ## Next steps
 

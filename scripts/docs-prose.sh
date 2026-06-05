@@ -15,6 +15,7 @@
 #                               these AS truth to check the other docs)
 #   *.draft.md , *.old.md       drafts / archives
 #   PERF-CLAIMS-REVIEW.md       internal review artifact
+#   docs/posthog-setup-report.md  frozen wizard-generated setup artifact
 #
 # CODE_OF_CONDUCT.md and SUPPORT.md ARE docs prose (they appear in `all`), but
 # the docs-reviewer only deep-reviews them when they changed or when a material
@@ -35,6 +36,7 @@ is_docs_prose() {
   case "$1" in
     .claude/*|.github/*)                                    return 1 ;;
     CHANGELOG.md|AGENTS.md|CLAUDE.md|PERF-CLAIMS-REVIEW.md) return 1 ;;
+    docs/posthog-setup-report.md)                           return 1 ;;
     *.draft.md|*.old.md)                                   return 1 ;;
     *.md|*.mdx)                                             return 0 ;;
     *)                                                      return 1 ;;
