@@ -542,13 +542,13 @@ When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.str
 ```ts
 const stream = wh.from('clicks')
   .select('page', 'button')
-  .where('page', 'eq', '/home')
+  .where('page', '=', '/home')
   .stream();
 
 // Only events where page === '/home' are emitted, with only page + button columns
 ```
 
-Supported operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `like`, `not_like`.
+Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
 
 ---
 
@@ -558,7 +558,7 @@ Live queries combine a historical backfill (`.fetch()`) with a real-time stream,
 
 ```ts
 const lq = wh.from('clicks')
-  .where('page', 'eq', '/home')
+  .where('page', '=', '/home')
   .orderBy('received_timestamp', 'desc')
   .limit(100)
   .liveQuery({
