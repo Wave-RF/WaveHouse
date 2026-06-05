@@ -25,7 +25,7 @@ GET /v1/stream?token=<jwt>
 
 The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`), so a token in the more log-leakable URL never overrides an explicit header credential. The `token` query parameter is stripped from the URL after extraction so it can't leak into logs.
 
-**Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`).
+**Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`). A `403` body has two forms: a request that resolves to **no role at all** (no token and no `default_role` configured) returns `{"error":"forbidden: request has no role and no public default_role is configured"}`, while a request carrying a concrete-but-unauthorized role returns the bare `{"error":"forbidden"}` shown in the tables below.
 
 **Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/admin/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/admin/*` **and** the schema/DLQ endpoints are admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
 
@@ -74,7 +74,7 @@ The per-endpoint error tables below list the bodies you can expect for each stat
 
 ### `GET /livez` — Liveness Probe
 
-> Canonical name (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). Also served at **`/healthz`** (a permanent alias — the most widely-recognized name) and **`/health`** (deprecated, removed in v0.2.0).
+> Canonical name (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). Also served at **`/healthz`** (a permanent alias — the most widely-recognized name) and **`/health`** (a deprecated alias, scheduled for removal in v0.2.0).
 
 Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
 
@@ -219,8 +219,10 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
+| 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
+| 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
@@ -470,7 +472,7 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `table` | string | (required) | Table name to subscribe to. Must match `^[a-zA-Z_][a-zA-Z0-9_]*$` (rejects NATS wildcards `*` / `>`). Returns 400 if missing or invalid. |
+| `table` | string | (required) | Table name to subscribe to. Returns `400` only if missing/empty; other values aren't rejected — the name is encoded into a NATS-safe subject token (wildcards `*` / `>` are percent-encoded), so a nonexistent or odd name simply matches no events. |
 | `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp. If provided, replays historical events from NATS before switching to live streaming. |
 | `token` | string | — | JWT token (alternative to `Authorization` header, useful for `EventSource`). Stripped from URL after extraction. |
 
@@ -515,15 +517,16 @@ Returns all discovered ClickHouse table schemas.
 **Response:**
 
 ```json
-{
-  "clicks": {
+[
+  {
+    "name": "clicks",
     "columns": [
       {"name": "page", "type": "String", "is_nullable": false, "has_default": false},
       {"name": "button", "type": "String", "is_nullable": false, "has_default": false},
       {"name": "score", "type": "Float64", "is_nullable": true, "has_default": false}
     ]
   }
-}
+]
 ```
 
 ---
@@ -536,6 +539,7 @@ Returns the schema for a specific table.
 
 ```json
 {
+  "name": "clicks",
   "columns": [
     {"name": "page", "type": "String", "is_nullable": false, "has_default": false},
     {"name": "button", "type": "String", "is_nullable": false, "has_default": false}
@@ -553,12 +557,19 @@ Returns the schema for a specific table.
 
 ### `POST /v1/schema/refresh` — Refresh Schemas
 
-Triggers an immediate re-discovery of ClickHouse table schemas.
+Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`).
 
 **Response:**
 
 ```json
-{"ok": true}
+[
+  {
+    "name": "clicks",
+    "columns": [
+      {"name": "page", "type": "String", "is_nullable": false, "has_default": false}
+    ]
+  }
+]
 ```
 
 ---
@@ -571,15 +582,15 @@ Returns per-table message counts in the Dead Letter Queue.
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `table` | string | — | Filter stats to a specific table name (e.g., `?table=clicks` returns only `dlq.clicks`). |
+| `table` | string | — | Filter stats to a specific table name (e.g., `?table=clicks` returns only the `clicks` count). |
 
 **Response:**
 
 ```json
 {
   "tables": {
-    "dlq.clicks": 3,
-    "dlq.page_views": 1
+    "clicks": 3,
+    "page_views": 1
   },
   "total": 4
 }
@@ -713,14 +724,14 @@ Use `GET /v1/dlq/stats` to monitor DLQ depth.
 
 ## Generating a JWT for Testing
 
-Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves).
+Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
-jwt encode --secret "change-me-in-production" '{"exp": 9999999999}'
+jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}'
 
 # Export for use with curl:
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}')
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \

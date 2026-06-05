@@ -26,6 +26,12 @@ services:
       # No auth on/off switch: set WH_AUTH_JWT_SECRET to validate tokens;
       # without it, every request resolves to the policy default_role.
       # WH_AUTH_JWT_SECRET: "change-me"
+      #
+      # Seed a policy on first boot. WaveHouse is fail-closed: with no policy,
+      # every request (even admin) is denied. dev-policy.yaml ships a permissive
+      # "public" trial policy (read/write the demo tables, NOT admin) so the
+      # quickstart works tokenless. Tune it before production — see that file.
+      WH_POLICY_FILE_PATH: /app/policy.yaml
       WH_DEDUPE_ENABLED: "false"
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"
@@ -36,6 +42,7 @@ services:
       # WH_PIPES_DIR: /app/pipes
     volumes:
       - wavehouse-data:/app/data
+      - ./dev-policy.yaml:/app/policy.yaml:ro    # permissive trial policy (public role, demo tables) — tune for prod
       # - ./my-pipes:/app/pipes:ro    # uncomment alongside WH_PIPES_DIR
     depends_on:
       - clickhouse

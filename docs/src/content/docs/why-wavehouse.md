@@ -19,12 +19,6 @@ What goes wrong in concrete terms:
 
 ```mermaid
 flowchart TB
-    classDef pain fill:#b91c1c,stroke:#ef4444,color:#fff,stroke-width:2px
-    classDef fail fill:#7f1d1d,stroke:#dc2626,color:#fff,stroke-width:3px
-    classDef win fill:#15803d,stroke:#22c55e,color:#fff,stroke-width:2px
-    classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:3px
-    classDef neutral fill:#475569,stroke:#94a3b8,color:#fff,stroke-width:2px
-
     subgraph bad["DIRECT TO CLICKHOUSE"]
         direction TB
         CA["10,000 clients<br/>1 event each"]:::neutral
@@ -69,11 +63,6 @@ WaveHouse's SSE layer broadcasts events **before** they flush to ClickHouse, wit
 
 ```mermaid
 flowchart TB
-    classDef pain fill:#b91c1c,stroke:#ef4444,color:#fff,stroke-width:2px
-    classDef win fill:#15803d,stroke:#22c55e,color:#fff,stroke-width:2px
-    classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:3px
-    classDef neutral fill:#475569,stroke:#94a3b8,color:#fff,stroke-width:2px
-
     subgraph poll["POLLING"]
         direction TB
         D1["100 dashboards"]:::neutral
@@ -99,11 +88,6 @@ WaveHouse coalesces identical queries with an in-process Ristretto cache and Go'
 
 ```mermaid
 flowchart TB
-    classDef pain fill:#b91c1c,stroke:#ef4444,color:#fff,stroke-width:2px
-    classDef win fill:#15803d,stroke:#22c55e,color:#fff,stroke-width:2px
-    classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:3px
-    classDef neutral fill:#475569,stroke:#94a3b8,color:#fff,stroke-width:2px
-
     subgraph herd["THUNDERING HERD"]
         direction TB
         C1["50 clients<br/>(same query)"]:::neutral
@@ -129,13 +113,10 @@ ClickHouse has users and role grants, but nothing like row-level security driven
 
 The canonical DIY stack for user-facing analytics on ClickHouse looks like this:
 
+<div class="diagram-pair">
+
 ```mermaid
 flowchart TB
-    classDef pain fill:#b91c1c,stroke:#ef4444,color:#fff,stroke-width:2px
-    classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:3px
-    classDef neutral fill:#475569,stroke:#94a3b8,color:#fff,stroke-width:2px
-    classDef infra fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
-
     subgraph diy["DIY: 7 COMPONENTS TO OPERATE"]
         direction TB
         Cs["Clients"]:::neutral
@@ -148,7 +129,10 @@ flowchart TB
         Worker --> CHd[("ClickHouse")]:::infra
         WS --> Cs
     end
+```
 
+```mermaid
+flowchart TB
     subgraph single["WAVEHOUSE: 1 BINARY + CLICKHOUSE"]
         direction TB
         Cs2["Clients"]:::neutral
@@ -156,6 +140,8 @@ flowchart TB
         WHone --> CHw[("ClickHouse")]:::infra
     end
 ```
+
+</div>
 
 **Ingredient count, cleanly:**
 
@@ -189,7 +175,7 @@ Where it differs from WaveHouse:
 | Deployment workflow | Tinybird CLI against Tinybird Cloud | `docker compose up` or any K8s |
 | Real-time push | Pipe endpoints (request/response) | Native SSE |
 | Access control | Tinybird tokens (API-level) | JWT + Hasura-style row/column policies |
-| Vendor lock-in | Queries run on Tinybird; moving off = rewriting | None — WaveHouse is MIT, ClickHouse is yours |
+| Vendor lock-in | Queries run on Tinybird; moving off = rewriting | None — WaveHouse is Apache 2.0, ClickHouse is yours |
 
 Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and pay AWS, not a second vendor" — which gets more compelling at scale, on sensitive data, or for anyone who needs on-prem.
 
@@ -203,7 +189,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Schema validation at the edge | ✗ | Custom | ✓ | ✓ (discovers schema) |
 | Dead letter queue | ✗ | Custom | Partial | ✓ `WAVEHOUSE_DLQ` |
 | Backpressure (503 + Retry-After) | ✗ | Custom | ✓ | ✓ |
-| Exact-once dedup | ✗ | Custom | ✓ | ✓ optional |
+| Idempotent ingest (dedup by ID) | ✗ | Custom | ✓ | ✓ optional |
 | Real-time push (SSE) | ✗ | Custom service | ✗ | ✓ native, gap-fill |
 | Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |
@@ -219,13 +205,8 @@ How an event actually moves through WaveHouse, end to end. The ingest path is sp
 
 ```mermaid
 flowchart TB
-    classDef client fill:#475569,stroke:#94a3b8,color:#fff,stroke-width:2px
-    classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:2px
-    classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
-    classDef fail fill:#b91c1c,stroke:#ef4444,color:#fff,stroke-width:2px
-
-    C["Client<br/>POST /v1/ingest?table=\{clicks\}"]:::client
-    C --> AUTH["JWT auth (optional)"]:::wh
+    C["Client<br/>POST /v1/ingest?table={clicks}"]:::client
+    C --> AUTH["JWT auth (token optional)"]:::wh
     AUTH --> POL["Policy check<br/>row + column"]:::wh
     POL --> VAL["Schema validation<br/>(system.columns)"]:::wh
     VAL --> DD["Dedupe (optional)"]:::wh
@@ -244,10 +225,6 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    classDef client fill:#475569,stroke:#94a3b8,color:#fff,stroke-width:2px
-    classDef wh fill:#0e7f8f,stroke:#5bbfcf,color:#fff,stroke-width:2px
-    classDef store fill:#334155,stroke:#64748b,color:#fff,stroke-width:2px
-
     Q["Client<br/>POST /v1/query?table={table}"]:::client
     Q --> L1["Ristretto cache<br/>(in-process)"]:::wh
     L1 -. "miss + singleflight" .-> CH[("ClickHouse")]:::store

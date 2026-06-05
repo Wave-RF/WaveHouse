@@ -21,11 +21,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 ## Full Reference
 
-### Top-Level
-
-| YAML Key | Env Var | Default | Description |
-| -------- | ------- | ------- | ----------- |
-
 ### State
 
 | YAML Key | Env Var | Default | Description |
@@ -160,6 +155,7 @@ server:
 clickhouse:
   addr: localhost:9000
   http_port: 8123
+  http_scheme: http
   database: default
   username: default
   password: ""

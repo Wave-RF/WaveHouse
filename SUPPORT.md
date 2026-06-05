@@ -11,7 +11,7 @@ WaveHouse is in **alpha**. We're a small team building publicly while shipping t
 | **Feature requests**                            | Open a [feature request](https://github.com/Wave-RF/WaveHouse/issues/new?template=feature_request.md).                                                                                                                             |
 | **Usage questions** ("how do I…")               | Open a thread in [GitHub Discussions → Q&A](https://github.com/Wave-RF/WaveHouse/discussions/categories/q-a). Ideas / show-and-tell / general chat live in the [other Discussion categories](https://github.com/Wave-RF/WaveHouse/discussions). Please don't open a bug-report issue for a usage question — we'll redirect.    |
 | **Real-time chat**                              | No Discord or Slack today.                                                                                                                                                                                                         |
-| **Commercial / enterprise interest**            | Email `hello@wave-rf.com`. WaveHouse is and will remain MIT-licensed open source; Wave RF (the parent company) is the operator behind it.                                                                                          |
+| **Commercial / enterprise interest**            | Email `hello@wave-rf.com`. WaveHouse is and will remain Apache-2.0-licensed open source; Wave RF (the parent company) is the operator behind it.                                                                                          |
 
 ## Response cadence (alpha)
 

@@ -1,19 +1,16 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
   "vcs": {
-    "enabled": false,
+    "enabled": true,
     "clientKind": "git",
-    "useIgnoreFile": false
+    "useIgnoreFile": true
   },
   "files": {
     "includes": [
       "clients/ts/src/**",
       "clients/ts/*.{ts,js,mjs,cjs,json}",
       "tests/e2e/sdk/**/*.{ts,js,mjs,cjs,json}",
-      "!**/node_modules",
-      "!**/dist",
-      "!**/.pnpm",
-      "!**/pnpm-lock.yaml"
+      "docs/**/*.{ts,js,mjs,cjs,json}"
     ]
   },
   "formatter": {

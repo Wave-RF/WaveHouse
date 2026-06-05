@@ -49,7 +49,7 @@ LABEL org.opencontainers.image.description="Schema-aware real-time API gateway f
 LABEL org.opencontainers.image.url="https://github.com/Wave-RF/WaveHouse"
 LABEL org.opencontainers.image.source="https://github.com/Wave-RF/WaveHouse"
 LABEL org.opencontainers.image.logo="https://raw.githubusercontent.com/Wave-RF/WaveHouse/refs/heads/main/docs/public/apple-touch-icon.png"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.vendor="Wave RF"
 
 # more custom labels for the WaveHouse project, not part of the OCI spec

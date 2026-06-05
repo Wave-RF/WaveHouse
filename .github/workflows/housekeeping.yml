@@ -39,7 +39,7 @@ jobs:
       - name: Checkout main (board-config + composite-action source)
         # Explicit ref so the local composite action and board-config.env
         # resolve from the default branch, not the PR head.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -62,37 +62,25 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          # Matches the conventional 72-char git subject cap; PR titles
-          # become the squash-merge subject on main. Dependabot's
-          # grouped-update titles routinely exceed 72 chars and the
-          # format isn't configurable, so Dependabot PRs are exempt
-          # from the length check (the format regex still applies).
-          MAX_LEN: "72"
         run: |
-          # Type list — keep in sync with CONTRIBUTING.md.
-          # The `[^A-Z]` after `: ` enforces a lowercase first character
-          # as house style; the Conventional Commits spec is silent on
-          # subject capitalization.
-          pattern='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
-
-          is_dependabot=false
+          # Single source of truth for the rule: scripts/lint-pr-title.sh — the
+          # SAME validator the local agent gate runs (.claude/hooks/agent-bash-gate.sh),
+          # so CI and local can't drift. The checkout above is ref: main, so this is
+          # always the default-branch script. Dependabot's grouped-update titles
+          # routinely exceed the 72-char subject cap and the format isn't
+          # configurable, so Dependabot PRs are exempt from the length check
+          # (the format check still applies).
           if [[ "$PR_AUTHOR" == "dependabot[bot]" || "$PR_AUTHOR" == "app/dependabot" ]]; then
-            is_dependabot=true
+            export PR_TITLE_SKIP_LENGTH=1
           fi
 
-          if [[ "$is_dependabot" != "true" && ${#PR_TITLE} -gt $MAX_LEN ]]; then
-            echo "passed=false" >> "$GITHUB_OUTPUT"
-            echo "::error::PR title is ${#PR_TITLE} chars (max $MAX_LEN): $PR_TITLE"
-          elif [[ "$PR_TITLE" =~ $pattern ]]; then
+          if reason=$(bash scripts/lint-pr-title.sh "$PR_TITLE" 2>&1); then
             echo "passed=true" >> "$GITHUB_OUTPUT"
-            if [[ "$is_dependabot" == "true" && ${#PR_TITLE} -gt $MAX_LEN ]]; then
-              echo "::notice::Dependabot PR title is ${#PR_TITLE} chars (exempt from $MAX_LEN cap): $PR_TITLE"
-            else
-              echo "PR title OK: $PR_TITLE"
-            fi
+            echo "PR title OK: $PR_TITLE"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
-            echo "::error::PR title does not match Conventional Commits format: $PR_TITLE"
+            printf '%s\n' "$reason"
+            echo "::error::$(printf '%s' "$reason" | head -1)"
           fi
 
       - name: Post / update sticky comment on title fail
