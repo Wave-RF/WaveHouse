@@ -262,10 +262,10 @@ clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2
 
 #### `.cacheTTL(seconds)`
 
-Per-query override of the server's result-cache TTL, in seconds.
+Records a desired result-cache TTL on the builder. **Currently client-side state only** — the value is never sent to the server, which derives each result's cache TTL adaptively from query execution time. Wiring it through the wire format is tracked in [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
 
 ```ts
-clicks.select('page').count().cacheTTL(300) // cache for 5 minutes
+clicks.select('page').count().cacheTTL(300) // not yet honored server-side — see #280
 ```
 
 ### `.fetch(opts?)`

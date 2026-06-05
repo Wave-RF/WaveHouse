@@ -141,7 +141,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ```text
 Client POST /v1/ingest?table={table}
-  → Optional JWT auth middleware
+  → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
   → Validate JSON body against schema (type checks, required columns)
   → Optional deduplication check (configurable ID field)
@@ -226,7 +226,7 @@ consistent.
 
 ```text
 Client GET /v1/stream
-  → Optional JWT auth middleware
+  → JWT auth middleware (always runs; token optional)
   → If ?since= parameter provided:
     → Create ephemeral NATS consumer with DeliverByStartTime
     → Send historical events from JetStream first
