@@ -4,6 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    '@types/node':
+      specifier: ^25.9.1
+      version: 25.9.1
+    typescript:
+      specifier: ^6.0.3
+      version: 6.0.3
+    vitest:
+      specifier: ^4.1.6
+      version: 4.1.7
+
 importers:
 
   .:
@@ -63,8 +75,8 @@ importers:
         specifier: ^6.1.5
         version: 6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0)
       astro-themed-mermaid:
-        specifier: github:Wave-RF/astro-themed-mermaid#v0.1.1
-        version: https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38(astro@6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.60.0))
+        specifier: github:Wave-RF/astro-themed-mermaid#v0.2.0
+        version: https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/938f765559c7afa706b460c009bdfa0566d0a621(astro@6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.60.0))
       cloudflare-md-router:
         specifier: github:Wave-RF/cloudflare-md-router
         version: https://codeload.github.com/Wave-RF/cloudflare-md-router/tar.gz/792cfd3f34cef958cbe54d20ceb71011e2549e42(@cloudflare/workers-types@4.20260521.1)
@@ -1768,9 +1780,9 @@ packages:
     peerDependencies:
       astro: ^4.0.0-beta || ^5.0.0-beta || ^3.3.0 || ^6.0.0-beta
 
-  astro-themed-mermaid@https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38:
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38}
-    version: 0.1.1
+  astro-themed-mermaid@https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/938f765559c7afa706b460c009bdfa0566d0a621:
+    resolution: {gitHosted: true, integrity: sha512-Qy+9g1unw6V5V6+Je6wNfiaLgUcZ/9YkCjcfXxLogBP1aOzMZNGmSVRt4KCxpSRUHOWU7zXNbb/5D4p1FTjyHw==, tarball: https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/938f765559c7afa706b460c009bdfa0566d0a621}
+    version: 0.2.0
     engines: {node: '>=20'}
     peerDependencies:
       astro: '>=5.0.0'
@@ -5496,7 +5508,7 @@ snapshots:
 
   '@types/sax@1.2.7':
     dependencies:
-      '@types/node': 24.12.4
+      '@types/node': 25.9.1
 
   '@types/trusted-types@2.0.7':
     optional: true
@@ -5691,7 +5703,7 @@ snapshots:
       astro: 6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0)
       rehype-expressive-code: 0.42.0
 
-  astro-themed-mermaid@https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/819f1ce334253d80be7235a77a123e68472efa38(astro@6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.60.0)):
+  astro-themed-mermaid@https://codeload.github.com/Wave-RF/astro-themed-mermaid/tar.gz/938f765559c7afa706b460c009bdfa0566d0a621(astro@6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0))(rehype-mermaid@3.0.0(playwright@1.60.0)):
     dependencies:
       astro: 6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0)
       rehype-mermaid: 3.0.0(playwright@1.60.0)

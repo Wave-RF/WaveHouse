@@ -119,7 +119,7 @@ make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
 make clean-all         # Full reset: above + data/ + docker volumes
 
 # Docs site (Astro + Starlight in docs/, driven via pnpm workspace filters)
-make dev-docs          # Hot-reload Astro dev server on :4321
+make dev-docs          # Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
 make build-docs        # Production build → docs/dist/
 make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
 make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg

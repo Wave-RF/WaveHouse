@@ -5,7 +5,6 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
 import { themedMermaid } from "astro-themed-mermaid";
 import rehypeKatex from "rehype-katex";
-import rehypeMermaid from "rehype-mermaid";
 import remarkMath from "remark-math";
 import starlightImageZoom from "starlight-image-zoom";
 import starlightLinksValidator from "starlight-links-validator";
@@ -28,7 +27,10 @@ export default defineConfig({
   markdown: {
     syntaxHighlight: { excludeLangs: ["mermaid"] },
     remarkPlugins: [remarkMath, mermaid.remarkInjectClassdefs],
-    rehypePlugins: [[rehypeMermaid, mermaid.rehypeMermaidOptions], rehypeKatex],
+    // mermaid.rehypeMermaid = rehype-mermaid behind the package's per-diagram
+    // render cache (node_modules/.cache/astro-themed-mermaid/) — rebuilds that
+    // don't change a diagram skip Chromium entirely (~6.5s → ~3.7s per build).
+    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex],
   },
   integrations: [
     starlight({
@@ -156,10 +158,18 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         starlightImageZoom(),
         // @ts-expect-error — plugin types target an older Starlight; runtime is fine.
         starlightLlmTools(),
-        starlightLinksValidator({
-          errorOnInvalidHashes: true,
-          errorOnRelativeLinks: true,
-        }),
+        // The validator fails the whole build on a broken link. Right for CI
+        // and `make build-docs`; wrong for the rebuild-on-save dev loop
+        // (scripts/dev.mjs sets WAVEHOUSE_DOCS_WATCH=1), where a mid-edit
+        // dangling link would block every rebuild. Output is identical.
+        ...(process.env.WAVEHOUSE_DOCS_WATCH
+          ? []
+          : [
+              starlightLinksValidator({
+                errorOnInvalidHashes: true,
+                errorOnRelativeLinks: true,
+              }),
+            ]),
       ],
     }),
     mermaid.integration,

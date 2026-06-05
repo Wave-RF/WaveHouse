@@ -244,8 +244,14 @@ dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveH
 dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 	@$(PNPM) --filter $(SDK_NAME) run dev
 
+# dev-docs runs docs/scripts/dev.mjs: a full `astro build` on every save,
+# synced into docs/dist/ and served through `wrangler dev --live-reload` —
+# so the Worker (md twins, pagefind search, llm outputs) behaves exactly like
+# production while you edit, and the browser refreshes itself per build.
+# Slower per change than Astro HMR; the raw dev server remains available as
+# `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
 .PHONY: dev-docs
-dev-docs: install-playwright-docs ## Hot-reload Astro dev server on :4321
+dev-docs: install-playwright-docs ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
 	@$(PNPM) --filter $(DOCS_FILTER) run dev
 
 # preview-docs serves the production build through wrangler (Cloudflare Workers
@@ -782,7 +788,7 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 .PHONY: clean
 clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/
+	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/ docs/.dev-dist/
 
 .PHONY: clean-ts
 clean-ts: ## Remove SDK build artifacts only (clients/ts/dist/)
@@ -790,9 +796,9 @@ clean-ts: ## Remove SDK build artifacts only (clients/ts/dist/)
 	@rm -rf clients/ts/dist/
 
 .PHONY: clean-docs
-clean-docs: ## Remove docs build artifacts only (docs/dist/)
+clean-docs: ## Remove docs build artifacts only (docs/dist/, docs/.dev-dist/)
 	@echo "$(YELLOW)==> Cleaning docs dist/...$(RESET)"
-	@rm -rf $(DOCS_DIR)/dist/
+	@rm -rf $(DOCS_DIR)/dist/ $(DOCS_DIR)/.dev-dist/
 
 .PHONY: clean-test
 clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)

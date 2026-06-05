@@ -74,6 +74,7 @@ __debug_bin*
 
 # Docs site build outputs
 docs/.astro/
+docs/.dev-dist/
 docs/.env.production
 docs/.wrangler/
 docs/dist/
