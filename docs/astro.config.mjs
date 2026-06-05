@@ -42,11 +42,16 @@ export default defineConfig({
           content: `!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
 posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https://us.i.posthog.com',defaults:'2026-01-30'});`,
         },
-        // The primary SVG favicon is set via Starlight's `favicon` option below
-        // (→ /branding/favicon.svg). Here we add the .ico fallback (legacy /
-        // non-SVG browsers; also auto-probed at the site root) and the
-        // apple-touch icon. The whole brand kit is generated into /branding/ by
-        // docs/scripts/branding/generate.sh.
+        // Icon set (generated into /branding/ by docs/scripts/branding/
+        // generate.sh). The dark/light swap lives inside favicon.svg as a
+        // prefers-color-scheme style — but Chromium only *picks* the SVG over
+        // the .ico when the SVG link says sizes="any" and the .ico has numeric
+        // sizes; drop the `any` entry and Chrome shows the static .ico.
+        // Starlight's `favicon` option (below) emits the same SVG again as
+        // rel="shortcut icon", sorted last so Firefox's last-icon-wins picks
+        // it, but it can't carry `sizes` — hence this explicit pair. The .ico
+        // stays for Safari ≤18 (SVG favicons land in 26) + the root auto-probe.
+        // Head.astro live-swaps in favicon-{light,dark}.svg on theme flips.
         {
           tag: "link",
           attrs: {
@@ -54,6 +59,15 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
             type: "image/x-icon",
             sizes: "16x16 32x32 48x48",
             href: "/favicon.ico",
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            type: "image/svg+xml",
+            sizes: "any",
+            href: "/branding/favicon.svg",
           },
         },
         {
@@ -100,7 +114,7 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
       // mark via the shared <WaveMark/> component (currentColor, theme-aware),
       // so Starlight's logo config would never render. The brand mark lives in
       // exactly one place — src/components/WaveMark.astro.
-      // Primary favicon (the .ico fallback + apple-touch are added via head above).
+      // Same SVG as the head[] icon entry — see the icon-set comment there.
       favicon: "/branding/favicon.svg",
       customCss: ["./src/styles/global.css", "katex/dist/katex.min.css"],
       social: [

@@ -58,3 +58,51 @@ import { ClientRouter } from "astro:transitions";
     document.addEventListener("astro:after-swap", resolve);
   })();
 </script>
+
+{/*
+  Live theme-flip for the tab icon, the GitHub way (favicon.svg/favicon-dark
+  .svg + matchMedia): Chromium rasterizes an SVG favicon once, under the
+  scheme active at fetch time, and never re-renders it on a theme flip
+  (crbug.com/1208277) — so swap the SVG icon links between statically-colored
+  per-scheme files. A distinct URL per scheme defeats the per-URL favicon
+  cache, and the fetched file carries no media query for the favicon
+  rasterizer to mis-evaluate. The self-styling favicon.svg stays as the SSR
+  default for no-JS contexts (bookmarks, unloaded tabs, crawlers — where a
+  JS-only swap is known to fail). Tracks the OS/browser theme (what the tab
+  strip uses), deliberately not Starlight's page toggle.
+*/}
+<script is:inline>
+  (() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const repaint = () => {
+      const variant = mq.matches ? "dark" : "light";
+      // Chromium re-evaluates icon candidates reliably only on link node
+      // insertion/removal — an in-place href mutation is honored briefly,
+      // then the stale candidate set wins again. And whenever the .ico is
+      // among the live candidates, Chromium's scorer commits it over a
+      // sizes="any" SVG (verified via the profile Favicons DB: exact 16/32
+      // bitmap matches outscore "scalable"). So: remove ALL icon links
+      // (rel~=icon spares apple-touch-icon) and append one fresh SVG node —
+      // the sole candidate must win, and last-in-head also satisfies
+      // Firefox. No-JS UAs keep the full SSR markup; Safari ≤18 (no SVG
+      // favicons) loses the .ico link here but falls back to auto-probing
+      // /favicon.ico at the site root, which generate.sh keeps in place.
+      for (const link of document.querySelectorAll('link[rel~="icon"]')) {
+        link.remove();
+      }
+      const link = document.createElement("link");
+      link.rel = "icon";
+      link.type = "image/svg+xml";
+      link.setAttribute("sizes", "any");
+      link.href = `/branding/favicon-${variant}.svg`;
+      document.head.append(link);
+    };
+    repaint();
+    // View transitions restore the plain SSR links (and this script re-runs);
+    // sentinel-guard the listeners only, like the theme-color script above.
+    if (window.__whFaviconBound) return;
+    window.__whFaviconBound = true;
+    mq.addEventListener("change", repaint);
+    document.addEventListener("astro:after-swap", repaint);
+  })();
+</script>
