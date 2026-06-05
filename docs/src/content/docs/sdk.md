@@ -123,7 +123,7 @@ const clicks = wh.from('clicks');
 
 Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
 
-A bare `.fetch()` paginates by `received_timestamp` (the default keyset cursor → `ORDER BY received_timestamp`). Ordering by a column is rejected if your role can't read it, so a column-restricted role must either include `received_timestamp` in its `allow_columns` or pass an explicit `.orderBy()` over a column it can read.
+To paginate, chain an explicit `.orderBy()` — a bare `.fetch()` sends no default order (see [Pagination](#pagination)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
 
 ```ts
 const { data, error, hasMore, next } = await clicks.fetch();
@@ -291,7 +291,7 @@ Open a live stream from the builder's table. See [Streaming](#streaming).
 
 ### Pagination
 
-When `limit` is set and the result contains exactly `limit` rows, the result includes `hasMore: true` and a `next()` function. Calling `next()` fetches the next page using cursor-based pagination (adds a filter on the sort column using the last row's value).
+When `limit` is set and the result contains at least `limit` rows, `hasMore` is `true`. Cursor-based pagination's `next()` walks an **order column** — it adds a filter on that column using the last row's value — so `next()` is only attached when the query has an explicit `.orderBy()`. With no order column the result still reports `hasMore` honestly, but `next` is `undefined` (there is no deterministic cursor to build) — add an `.orderBy()` to paginate.
 
 ```ts
 let result = await clicks.select().orderBy('received_timestamp', 'desc').limit(100).fetch();

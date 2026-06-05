@@ -79,9 +79,8 @@ describe("Query", () => {
   });
 
   it("pagination: limit + next page", async () => {
-    // Paginate by the unique event_id so the keyset cursor can't skip rows. The
-    // default received_timestamp cursor is exercised by the skipped test below,
-    // which documents why it can't be relied on over batched data (#175).
+    // Paginate by the unique event_id so the keyset cursor can't skip rows
+    // (received_timestamp ties on batch-inserted rows would — see #175).
     const page1 = await wh.from(T.clicks).select().orderBy("event_id", "asc").limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
@@ -94,13 +93,23 @@ describe("Query", () => {
     expect(page2.data!.length).toBeGreaterThan(0);
   });
 
-  // Original default-order pagination. Skipped because it currently fails:
-  // ClickHouse stamps received_timestamp (DEFAULT now64(3)) at BATCH-insert
-  // time, so every row the worker flushes together shares one millisecond, and
-  // the SDK's strict keyset cursor then skips the rows tied on a page boundary —
-  // leaving page 2 empty. Tracked in #175; re-enable once the default cursor
-  // breaks ties (e.g. a composite cursor with a unique tiebreak column).
-  it.skip("pagination by default received_timestamp cursor (known bug — #175)", async () => {
+  // #175: the old received_timestamp default cursor skipped rows tied on a page
+  // boundary (batch inserts share one now64(3) ms). #270 removed that default, so
+  // a bare .fetch() with no .orderBy() now reports hasMore but offers no next() —
+  // deterministic pagination needs an explicit .orderBy() (see the test above).
+  it("reports hasMore without next() when no order is set (#270, sidesteps #175)", async () => {
+    const page1 = await wh.from(T.clicks).select().limit(3).fetch();
+    expect(page1.error).toBeNull();
+    expect(page1.data).toHaveLength(3);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.next).toBeUndefined();
+  });
+
+  // TODO(#274): re-enable once the backend supplies a per-table default sort order
+  // (plus a resumable cursor). Then a bare .fetch() — no explicit .orderBy() —
+  // should paginate end-to-end again, the intent of the old received_timestamp
+  // default but without the #175 tie bug.
+  it.skip("paginates a bare .fetch() once the backend supplies a default order (#274)", async () => {
     const page1 = await wh.from(T.clicks).select().limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
@@ -109,7 +118,6 @@ describe("Query", () => {
 
     const page2 = await page1.next!();
     expect(page2.error).toBeNull();
-    expect(page2.data).toBeInstanceOf(Array);
     expect(page2.data!.length).toBeGreaterThan(0);
   });
 
@@ -161,6 +169,40 @@ describe("Query", () => {
     expect(result.error).toBeNull();
 
     await chQuery(`DROP TABLE IF EXISTS \`${weirdName}\``);
+  });
+
+  it("fetches from a bring-your-own-schema table lacking received_timestamp (#270)", async () => {
+    const admin = adminClient();
+    // A table with NO received_timestamp column. The SDK used to hardcode
+    // ORDER BY received_timestamp DESC, so a bare .fetch() here 500'd; #270
+    // dropped that default, so the query is now valid (regression guard).
+    const noTsTable = `no_ts_${testId().replace(/-/g, "_")}`;
+
+    // 1. Create the table and refresh schema so WaveHouse discovers it.
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${noTsTable}\` (id String, label String) ENGINE = Memory`,
+    );
+    await admin.schema.refresh();
+
+    // 2. Grant the viewer role read access via policy.
+    const currentPolicyRes = await admin.policy.get();
+    await admin.policy.set({
+      tables: {
+        ...(currentPolicyRes.data as any).tables,
+        [noTsTable]: {
+          select: { viewer: { allow_columns: ["*"] } },
+        },
+      },
+    });
+
+    // 3. A bare .fetch() must succeed (no 500) — the regression guard for #270.
+    try {
+      const result = await wh.from(noTsTable).fetch();
+      expect(result.error).toBeNull();
+      expect(result.data).toBeInstanceOf(Array);
+    } finally {
+      await chQuery(`DROP TABLE IF EXISTS default.\`${noTsTable}\``);
+    }
   });
 
   it("rejects queries to unauthorized tables (403)", async () => {
@@ -241,11 +283,10 @@ describe("Query", () => {
   }
 
   it("omitting columns returns only the allowed columns, never SELECT * (#223)", async () => {
-    // received_timestamp is allowed here because a bare .fetch() paginates by it
-    // (the SDK's default keyset cursor → ORDER BY received_timestamp), and ordering
-    // by a column you can't read is now rejected just like selecting it (see the
-    // pagination-cursor test below). The point under test is the *projection*: no
-    // .select() must not silently become SELECT *.
+    // The point under test is the *projection*: a bare .fetch() with no .select()
+    // must not silently widen to SELECT *. received_timestamp is just a third
+    // allowed column here — since #270 a bare .fetch() emits no implicit order, so
+    // it carries no special weight; the returned keys must equal the allow-list.
     await withViewerSelect(
       { allow_columns: ["page", "duration_ms", "received_timestamp"] },
       async () => {
@@ -323,17 +364,24 @@ describe("Query", () => {
     });
   });
 
-  it("bare .fetch() paginates by received_timestamp, so a role that can't read it is rejected", async () => {
-    // Documents a deliberate consequence of the #223 fix: the SDK's default cursor
-    // orders by received_timestamp, and ordering by a denied column is rejected.
-    // A column-restricted role that paginates must include its cursor column (or
-    // pass an explicit .orderBy() over a readable one).
+  it("a column-restricted bare .fetch() succeeds, returning only allowed columns (#270 × #223)", async () => {
+    // Cross-PR regression guard. Before #270 a bare .fetch() emitted an implicit
+    // ORDER BY received_timestamp DESC; once #223 authorizes order_by, that implicit
+    // order would make a bare .fetch() by a role that can't read received_timestamp
+    // a 403. #270 removed the implicit order, so a bare .fetch() carries no denied-
+    // column reference and succeeds — returning exactly the role's allowed columns.
+    // received_timestamp is intentionally NOT in the allow-list here: pre-#270 this
+    // very call 403'd; it must now pass. Ordering by a denied column is still
+    // rejected when the caller asks for it explicitly (see the order_by test above).
     await withViewerSelect({ allow_columns: ["page", "duration_ms"] }, async () => {
-      const rejected = await wh.from(T.clicks).fetch(); // implicit ORDER BY received_timestamp
-      expect(rejected.error).not.toBeNull();
-      expect(rejected.error!.status).toBe(403);
+      const result = await wh.from(T.clicks).fetch(); // no implicit order since #270
+      expect(result.error).toBeNull();
+      expect(result.data!.length).toBeGreaterThan(0);
+      for (const row of result.data!) {
+        expect(Object.keys(row as object).sort()).toEqual(["duration_ms", "page"]);
+      }
 
-      // …and it works once ordered by a column the role can read.
+      // An explicit .orderBy() over a readable column still paginates fine.
       const ok = await wh.from(T.clicks).select().orderBy("page", "asc").fetch();
       expect(ok.error).toBeNull();
       for (const row of ok.data!) {
