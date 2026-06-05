@@ -588,7 +588,8 @@ pnpm-install:
 	@$(PNPM) install --frozen-lockfile --reporter=silent
 
 # install-playwright-docs: hidden helper — fetch the Chromium build the docs
-# site needs (rehype-mermaid build-time SSR; nothing else uses a browser). It's
+# site needs (rehype-mermaid build-time SSR is the build's only browser use;
+# the manual scripts/screenshot.mjs helper drives the same install). It's
 # ~130 MB, so it's lazy: only the docs build/dev/preview targets pull it in,
 # never plain pnpm-install, so Go-only contributors don't pay for it. The
 # --with-deps apt step needs sudo and only helps on CI's minimal images, so
