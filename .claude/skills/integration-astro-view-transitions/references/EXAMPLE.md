@@ -1,13 +1,13 @@
 # PostHog Astro (View Transitions) Example Project
 
-Repository: https://github.com/PostHog/context-mill
+Repository: <https://github.com/PostHog/context-mill>
 Path: basics/astro-view-transitions
 
 ---
 
 ## README.md
 
-# PostHog Astro View Transitions Example
+### PostHog Astro View Transitions Example
 
 This is an [Astro](https://astro.build/) example demonstrating PostHog integration with [View Transitions](https://docs.astro.build/en/guides/view-transitions/) (ClientRouter) for SPA-like navigation.
 
@@ -807,4 +807,3 @@ import PostHogLayout from '../layouts/PostHogLayout.astro';
 ```
 
 ---
-

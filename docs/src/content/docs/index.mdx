@@ -26,6 +26,7 @@ hero:
 ---
 
 import { Card, CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/components';
+import HomepageCtaTracking from '../../components/HomepageCtaTracking.astro';
 
 <div class="wh-stats not-content">
   <div class="wh-stat">
@@ -162,21 +163,4 @@ WaveHouse is fail-closed, so the standalone stack ships a permissive trial polic
   </div>
 </div>
 
-<script is:inline>
-  function setupHomepageCTATracking() {
-    var container = document.querySelector('.wh-closer__actions');
-    if (!container) return;
-    container.querySelectorAll('a').forEach(function(el) {
-      el.removeEventListener('click', el.__whPhHomepageHandler);
-      el.__whPhHomepageHandler = function() {
-        window.posthog?.capture('homepage_cta_clicked', {
-          cta_text: el.textContent?.trim(),
-          cta_href: el.getAttribute('href')
-        });
-      };
-      el.addEventListener('click', el.__whPhHomepageHandler);
-    });
-  }
-  document.addEventListener('DOMContentLoaded', setupHomepageCTATracking);
-  document.addEventListener('astro:page-load', setupHomepageCTATracking);
-</script>
+<HomepageCtaTracking />

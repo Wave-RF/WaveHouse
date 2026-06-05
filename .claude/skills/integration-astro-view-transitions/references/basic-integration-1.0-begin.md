@@ -23,9 +23,9 @@ Look for opportunities to track client-side events.
 
 **IMPORTANT: Server-side events are REQUIRED** if the project includes any instrumentable server-side code. If the project has API routes (e.g., `app/api/**/route.ts`) or Server Actions, you MUST include server-side events for critical business operations like:
 
-  - Payment/checkout completion
-  - Webhook handlers
-  - Authentication endpoints
+- Payment/checkout completion
+- Webhook handlers
+- Authentication endpoints
 
 Do not skip server-side events - they capture actions that cannot be tracked client-side.
 

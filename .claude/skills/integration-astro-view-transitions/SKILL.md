@@ -40,13 +40,13 @@ The example project shows the target implementation pattern. Consult the documen
 ## Framework guidelines
 
 - Always use the is:inline directive on PostHog script tags to prevent Astro from processing them and causing TypeScript errors
-- Use PUBLIC_ prefix for client-side environment variables in Astro (e.g., PUBLIC_POSTHOG_PROJECT_TOKEN)
+- Use PUBLIC_prefix for client-side environment variables in Astro (e.g., PUBLIC_POSTHOG_PROJECT_TOKEN)
 - Create a posthog.astro component in src/components/ for reusable initialization across pages
 - Import the PostHog component in a Layout and wrap all pages with that layout
 - Wrap PostHog initialization with a window.__posthog_initialized guard to prevent stack overflow during soft navigation
 - Set capture_pageview option to 'history_change' for automatic pageview tracking during soft navigation
 - Use the astro page-load event instead of just DOMContentLoaded to re-run scripts after soft navigation
-- When a reverse proxy is configured, both /static/* AND /array/* must route to the assets origin (us-assets.i.posthog.com or eu-assets.i.posthog.com).
+- When a reverse proxy is configured, both /static/*AND /array/* must route to the assets origin (us-assets.i.posthog.com or eu-assets.i.posthog.com).
 
 ## Identifying users
 
