@@ -519,7 +519,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format (enforced by the required `PR housekeeping` check, `.github/workflows/housekeeping.yml` — validate locally with `scripts/lint-pr-title.sh "<title>"`):
+PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the required `PR housekeeping` check (`.github/workflows/housekeeping.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -577,7 +577,7 @@ Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch
 
 ### Review-response expectations
 
-Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response (MANDATORY)": accept / push back / defer, reply with detail, resolve when settled.
+Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response": accept / push back / defer, reply with detail, resolve when settled.
 
 When pushing back on a bot's suggestion, end the reply with the bot's mention (e.g. `@coderabbitai`) to invite a counter-reply so the dialog actually loops.
 

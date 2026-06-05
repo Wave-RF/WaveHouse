@@ -24,7 +24,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 | Layer | Lives in | Applies to | Purpose |
 | ----- | -------- | ---------- | ------- |
 | **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
-| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on PR pushes |
+| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main` |
 | **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: on a reviewer's `VERDICT: ship_it`, writes that reviewer's `tmp/<name>-passed-<HEAD-sha>` marker |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
 
@@ -49,7 +49,7 @@ Tree-keyed so commit-then-push works without a re-run when the tree is unchanged
 | ---- | ------- |
 | `.claude/settings.json` | Team-wide: `deny` permissions (force-push / git reset --hard / filter-branch / update-ref -d, gh pr merge / ready / approve / request-changes, gh repo/release delete, gh secret delete, gh workflow disable, rm -rf / sudo rm), all three hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
-| `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on PR pushes) |
+| `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main`) |
 | `.claude/hooks/review-marker.sh` | SubagentStop: on a reviewer's `VERDICT: ship_it`, writes its `tmp/<name>-passed-<HEAD-sha>` marker (the reviewer set comes from `scripts/pre-push-reviewers.sh`). Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |
 | `.claude/commands/docs-review.md` | `/docs-review [path\|all]` — launches the `docs-reviewer` subagent. No-arg = the gating pre-push docs review; a path/`all` = advisory |
@@ -105,7 +105,7 @@ Agents (Claude Code etc.) have additional gating beyond what humans face — enf
 - **No human reviewer assignment.** `gh pr edit --add-reviewer / --add-assignee` and `POST /requested_reviewers` are blocked. The `housekeeping.yml` workflow auto-assigns; humans handle the rest.
 - **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
 - **Pre-push review required on PR branches.** Before `git push` to a branch with commits ahead of `main`, the agent runs the reviewers in `scripts/pre-push-reviewers.sh` (today: `pre-push-reviewer` for code, `docs-reviewer` for docs prose + code↔docs sync) that the change needs — in fresh context, in parallel — and **skips** any with nothing to do via `scripts/skip-pre-push-review.sh <name> "<reason>"` (a logged skip that satisfies the marker, so a docs typo doesn't pay for a full code review). `/prepush` does all of this. `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate; fix and re-invoke (always fresh context) until clean. The push gate requires a marker — from a `ship_it` or a logged skip — from every listed reviewer, and echoes the skips at push time.
-- **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci` and the `review-marker.sh` hook; nothing else.
+- **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci`, the `review-marker.sh` hook, and `scripts/skip-pre-push-review.sh` (logged skips); nothing else.
 - **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — the reviewers' findings go to you, not the PR.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
@@ -188,6 +188,7 @@ The deny list blocks:
 | `git reset --hard origin:*` | Throws away local work |
 | `git filter-branch`, `git update-ref -d` | History-rewriting / ref destruction |
 | `gh pr merge`, `gh repo delete`, `gh release delete` | Irreversible / shared-state |
+| `gh pr ready`, `gh pr review --approve` / `-a` / `--request-changes` / `-r` | [Agent PR Discipline](#agent-pr-discipline) — draft→ready and review verdicts are human actions |
 | `gh workflow disable`, `gh secret delete` | Operational footguns |
 | `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `sudo rm` | Filesystem destruction |
 
@@ -207,10 +208,9 @@ Not committed at project level. Personal preference — put in `.claude/settings
 
 1. Write code (gofumpt-on-save formats Go files as you go).
 2. `git commit` → pre-commit hook runs `make verify` (or skips if `make ci` already validated this tree). Fix anything that fails.
-3. `git push` (first time on a feature branch) → pre-push hook blocks until `make ci` passed for HEAD. Run `make ci`, fix, retry push.
+3. `git push` → the pre-push hook blocks until `make ci` passed for HEAD (run `make ci`, fix, retry). For agents, the agent-bash-gate hook also requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh` on any push of a branch with commits ahead of `main` — including the first push, before the PR exists. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
 4. Open the PR with `gh pr create --draft` (agents required to use `--draft`; humans flip to ready when ready).
-5. **Subsequent pushes** → the agent-bash-gate hook ALSO requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh`. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
-6. CI workflows fire on the new HEAD. Address review comments per AGENTS.md §Review Response.
+5. CI workflows fire on the new HEAD. Address review comments per AGENTS.md §Review Response.
 
 Helpers along the way:
 

@@ -628,14 +628,14 @@ Use `GET /v1/dlq/stats` to monitor DLQ depth.
 
 ## Generating a JWT for Testing
 
-Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves).
+Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
-jwt encode --secret "change-me-in-production" '{"exp": 9999999999}'
+jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}'
 
 # Export for use with curl:
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}')
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \

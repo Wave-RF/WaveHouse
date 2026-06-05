@@ -260,6 +260,10 @@ clicks.select('page').timeRange('received_timestamp', '1h')
 clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
 ```
 
+#### `.cacheTTL(seconds)`
+
+Per-query override of the server's result-cache TTL, in seconds.
+
 ```ts
 clicks.select('page').count().cacheTTL(300) // cache for 5 minutes
 ```
