@@ -113,7 +113,7 @@ make deps-shell        # clickhouse-client REPL on the running container
 make deps-wipe         # Stop AND destroy ClickHouse data volume (DESTRUCTIVE)
 
 # Cleanup (tiered — compose explicitly for partial resets)
-make clean             # Build outputs only (bin/, dist/, clients/ts/dist/)
+make clean             # Build outputs only (bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/)
 make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
 make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
 make clean-all         # Full reset: above + data/ + docker volumes
