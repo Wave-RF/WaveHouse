@@ -82,29 +82,37 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
     && block "Agents post inline review comments instead of --request-changes."
 fi
 
-# git push to a PR branch requires BOTH pre-push review markers — the
-# pre-push-reviewer (code) marker AND the docs-reviewer (docs) marker. Both are
-# unconditional: even a code-only change goes through docs review, because
+# git push from a non-main branch requires BOTH pre-push review markers for HEAD
+# — the pre-push-reviewer (code) marker AND the docs-reviewer (docs) marker. Both
+# are unconditional: even a code-only change goes through docs review, because
 # catching "code changed but the docs should have and didn't" is the docs
-# reviewer's job. (The universal .githooks/pre-push handles ci-passed for
-# everyone.)
+# reviewer's job.
+#
+# We gate on "non-main branch with commits ahead of the base", NOT on "an OPEN PR
+# exists". The agent flow is push-the-branch THEN open the draft PR, so keying on
+# PR state let the FIRST push — the one that actually publishes the diff — skip
+# review entirely. Trade-off: this also gates WIP/throwaway feature-branch pushes;
+# that's intentional (agents review before sharing code; a human can push WIP from
+# their own shell). The universal .githooks/pre-push handles ci-passed for everyone.
 if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
   head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
   branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
   if [ -n "$head_sha" ] && [ -n "$branch" ] && [ "$branch" != "main" ]; then
-    if ! command -v gh >/dev/null 2>&1; then
-      block "gh CLI required to detect PR state for '${branch}'. Install gh or push from main."
+    # Only gate when there's actually a diff to review: commits on HEAD not yet on
+    # the base (local main, else origin/main). No base resolvable → fail safe and
+    # gate. A branch with no delta vs the base has nothing for the reviewers.
+    base=""
+    for ref in main origin/main; do
+      if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then base="$ref"; break; fi
+    done
+    has_delta=1
+    if [ -n "$base" ] && [ -z "$(git rev-list "${base}..HEAD" 2>/dev/null)" ]; then
+      has_delta=0
     fi
-    pr_state=""
-    if pr_view_out=$(gh pr view "$branch" --json state --jq .state 2>&1); then
-      pr_state="$pr_view_out"
-    elif ! printf '%s' "$pr_view_out" | grep -qiE 'no (open )?pull request'; then
-      block "Could not determine PR state for '${branch}': ${pr_view_out}"
-    fi
-    if [ "$pr_state" = "OPEN" ]; then
+    if [ "$has_delta" = "1" ]; then
       missing=""
       [ -f "tmp/review-passed-${head_sha}" ] \
-        || missing="${missing}  - pre-push-reviewer (code)            -> tmp/review-passed-${head_sha:0:8}
+        || missing="${missing}  - pre-push-reviewer (code)              -> tmp/review-passed-${head_sha:0:8}
 "
       [ -f "tmp/docs-review-passed-${head_sha}" ] \
         || missing="${missing}  - docs-reviewer (docs prose + doc-sync) -> tmp/docs-review-passed-${head_sha:0:8}
@@ -112,12 +120,12 @@ if git_subcmd 'push' && ! git_subcmd_is_help 'push'; then
       if [ -n "$missing" ]; then
         cat >&2 <<EOF
 
-🛑 Claude PR discipline gate: missing pre-push review marker(s) for HEAD (${head_sha:0:8}) on PR branch '${branch}':
+🛑 Claude PR discipline gate: missing pre-push review marker(s) for HEAD (${head_sha:0:8}) on branch '${branch}':
 
 ${missing}
-Invoke the missing subagent(s) above in fresh context — run both in parallel.
-Each writes its marker automatically on VERDICT: ship_it, and the push then
-succeeds. Both reviewers must reach ship_it (zero findings) — see AGENTS.md
+Run /prepush — it launches both reviewers in parallel in fresh context and loops
+to ship_it. Each writes its marker on VERDICT: ship_it, and the push then
+succeeds. Both must reach ship_it (zero findings) — see AGENTS.md
 §"Agent PR Discipline".
 EOF
         exit 2

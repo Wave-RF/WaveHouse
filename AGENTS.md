@@ -2,6 +2,20 @@
 
 This file provides context for AI coding agents (Copilot, Cursor, Cody, Aider, etc.) working on this codebase.
 
+## Operating Rules
+
+The non-negotiables, ordered by how often agents miss them. Each links to its detail section — read that before acting. These override convenience: if a rule blocks you, satisfy it; don't work around it.
+
+1. **Validate locally before every push** — run `make ci` the documented way ([§Running `make ci`](#running-make-ci-for-agents)). Don't use CI as your first feedback loop.
+2. **A PR-branch push needs BOTH reviewers** — run **`/prepush`**, which launches `pre-push-reviewer` **and** `docs-reviewer` in parallel (fresh context) and loops until **both** return `ship_it`. Both markers are required; one reviewer is never enough, and `docs-reviewer` runs even on code-only changes ([§Pre-push self-review](#pre-push-self-review-is-mandatory-on-pr-branches)).
+3. **Every code change updates its docs + `CHANGELOG.md` in the same PR** — a code change without its doc update is incomplete ([§Documentation Sync](#documentation-sync)).
+4. **Reply to and resolve every review thread** — substantive reply, @-mention the bot, then resolve ([§Review Response](#review-response)).
+5. **Drafts only; humans publish** — `gh pr create --draft`; never `gh pr ready`, never approve/request-changes ([§Agent PR Discipline](#agent-pr-discipline)).
+6. **Never force-push or rebase a PR branch** — to absorb upstream main, `git merge origin/main` ([§Branch Maintenance](#branch-maintenance)).
+7. **Never hand-write markers or `--no-verify`** — if you're tempted, the gate is wrong-shaped for your situation; fix that instead ([§Don't bypass the gates](#dont-bypass-the-gates)).
+
+Everything below is **reference** — architecture and design invariants, command/convention detail, and the full PR-workflow rules — consulted when relevant, not memorized. Skim [§Key Design Decisions](#key-design-decisions) before changing a core package.
+
 ## Project Overview
 
 WaveHouse is a **schema-aware real-time API gateway for ClickHouse**, written in Go. It handles ingestion with schema validation, optional deduplication, caching, real-time streaming, query proxying, and a Dead Letter Queue. It sits entirely in front of ClickHouse as the exclusive data entry/exit point.
@@ -28,24 +42,26 @@ Eleven internal packages under `internal/` (plus `internal/testutil/` for shared
 
 ## Key Design Decisions
 
-1. **Interface-first**: Core behaviors are defined as Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`). Standalone and (future) clustered modes use different implementations.
-2. **Bring Your Own Schema (BYOS)**: Users create tables in ClickHouse directly. WaveHouse discovers schemas by querying `system.columns` and validates ingest payloads against real column definitions. No auto-migration, no fixed table schema.
-3. **Schema-driven ingest**: `POST /v1/ingest?table={table}` accepts a flat JSON body. The table name comes from the `table` query parameter. The body is validated against the discovered schema (unknown fields rejected, types checked, nullable constraints enforced). No envelope — just data.
-4. **Async ingestion**: Ingest returns 200 immediately after optional dedup + MQ publish. ClickHouse writes happen asynchronously via the ingest worker pipeline (`StartIngestWorker`). If NATS stream is full, returns 503 + Retry-After.
-5. **Per-table batching**: The ingest worker pipeline groups events by table name and performs dynamic INSERTs using the schema's column order. Each table's batch is independent.
-6. **Dead Letter Queue**: Failed batch inserts are published to a separate NATS stream (`WAVEHOUSE_DLQ`) with subjects `dlq.<table>`. This prevents silent data loss. Controlled by `dlq.enabled`.
-7. **Auth (JWT, no on/off switch)**: The JWT middleware (`internal/auth`) **always** runs — there is no `auth.enabled` or `auth.dev_mode` flag. It verifies tokens with **either** a JWKS endpoint (`auth.jwks_url`) **or** an HMAC shared secret, not both — when `jwks_url` is set it is the sole verifier and `jwt_secret` is ignored (an unreachable JWKS endpoint fails startup loudly); roles come from a configurable claim path (`auth.role_claim`). Accepted signing algorithms are pinned to the active verifier (HMAC → `HS*`; JWKS → asymmetric `RS*/ES*/PS*/EdDSA`) via `jwt.WithValidMethods`, and the `alg` header is checked before any key is used, so `alg: none` and cross-family alg-confusion tokens are rejected. **Authentication is decoupled from authorization:** a request with **no** token, or an **invalid/expired/malformed** one, falls back to an empty role (which `policy.ResolveRole` maps to the policy `default_role`) — the bad-token reason is stashed in the request context so a gate that ultimately denies can **fail loud** (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the policy `admin_role`). **Public (no-token) access is policy-driven:** set a usable `default_role` to open it, remove it to close it — a policy PUT/delete flips it live, no restart. `/v1/admin/*` **and** the schema/DLQ routes are admin-only via `RequireAdmin`, which reads `policy.AdminRole` from the store live (so `admin_role` changes apply without a restart); a pipe with no `allowed_roles` denies everyone but the admin role. There is **no** fail-closed cache hack: a deleted policy becomes `nil`, and `Evaluate(nil)`/`IsAdmin(nil)` deny everyone — including the admin role — on their own (fail fully closed), so "delete the policy" structurally locks everyone out (bootstrap a fresh deployment from the policy file, not an implicit admin grant).
-8. **Optional dedup**: Deduplication is opt-in via `dedupe.enabled`. When enabled, the `dedupe.id_field` config specifies which JSON field to use as the dedup key.
-9. **Singleflight**: TieredCache uses `golang.org/x/sync/singleflight` to prevent cache stampede.
-10. **Active Sweeper**: NATS messages are retained for SSE gap-fill. The Sweeper purges messages that are both ACKed (written to ClickHouse) and older than the gap window. Gap-fill uses NATS `DeliverByStartTime` — no in-process ring buffer.
-11. **Hasura-style access control**: Per-table, per-role column-level and row-level permissions with JWT claim templating (`{{ jwt.path }}`). Policies stored in NATS KV with file-based bootstrap and cluster-wide sync via KV Watch. The **single** admin check is `policy.IsAdmin` (role == `admin_role`, configurable per policy, `"admin"` by default, **exact case-sensitive** match — no `ToLower`/`TrimSpace` normalization); it is the one source of truth shared by `Evaluate`, `ResolveRole`, `Validate`, the `/v1/admin` gate, and pipe authorization (`policy.RoleAllowed`). An empty/absent role is fail-closed: it never matches a role key — matching is exact (no `"*"` any-role wildcard) and only the admin role bypasses the allowlist — `Validate` rejects empty role keys at write time, and a `nil` policy denies everyone, including the admin role (a total lockout — bootstrap from the policy file, not an implicit admin grant). Preserve this when touching `internal/policy` (the policy twin of the pipe invariant in #13, see #159). The optional `default_role` is the one sanctioned exception: `ResolveRole` maps an empty role to it *before* evaluation (so a roleless request gets that role's perms). Setting `default_role` equal to the `admin_role` is permitted and makes every roleless request admin — a local/dev-only convenience that is **not** refused by `ResolveRole` or `Validate`, but the store logs a loud warning on every node that adopts such a policy (`policy.DefaultRoleGrantsAdmin`, the single source of truth for the condition); never use it in production. Roles do **not** inherit the default's permissions.
-12. **Structured queries**: Type-safe query AST endpoint (`POST /v1/query?table={table}`) validated against schema, with permission enforcement, timestamp bucketing for cache optimization, and `DefaultMaxRows` (10,000) limit cap.
-13. **Named query pipes**: Pre-defined SQL templates (inspired by Tinybird) with parameter binding, role restrictions, and caching. Stored in NATS KV with `.sql` file directory bootstrap. Per-pipe `allowed_roles` is the *only* authorization gate on the execute path — `GET/POST /v1/pipes/{name}` sit outside the `/v1/admin/*` `RequireAdmin` block — and it **fails closed** via `policy.RoleAllowed`: authorization is exact allowlist membership (there is no `"*"` any-role wildcard), the admin role (`policy.AdminRole`) always passes, and any request whose resolved role is empty or absent (no token, or a JWT missing `auth.role_claim`, with no usable `default_role`) matches nothing; empty-string allowlist entries are ignored so a stray `""` cannot authorize an empty role, and a pipe with no `allowed_roles` authorizes nobody but the admin role. When changing pipe execution, preserve this — and exercise it via the shared `testutil.RunRoleMatrix` / `StandardRoleMatrix` matrix (see #159).
-14. **TypeScript SDK**: `@wavehouse/sdk` — zero-dependency client with typed query builder, real-time SSE, live queries with smart aggregation classification (incrementable/decomposable/poll), and codegen CLI.
-15. **Observability invariants**: Stdout is *always* 100% — the slog logger fans out to stdout AND OTLP, and stdout sampling would silently hide records that scraping pipelines (Promtail/Alloy/Vector → Loki) are paying to store. Sampling knobs apply only to OTLP push. WARN+ERROR records always export at 100% regardless of `logs.sample_rate` — silently dropping errors during incidents would be a worse failure mode than the cost of forwarding them all (this is a *non-configurable* floor; do not expose it). gRPC OTel exporters dial lazily, so an unreachable collector never blocks startup; transient failures surface via the OTel SDK's error handler. The OTel Prometheus exporter (when enabled) uses a *private* `prometheus.Registry` to avoid leaking process/Go collectors that `prometheus.DefaultRegisterer` auto-registers into our `/metrics` output. When changing the logger, the sampler, or the provider wiring, preserve these invariants.
-16. **Bearer-token-only CORS posture**: WaveHouse is a Bearer-token API — `Authorization: Bearer <jwt>` on every authenticated request, no cookies, no session middleware. The CORS middleware (`internal/api/router.go` `corsMiddleware`) deliberately **never** emits `Access-Control-Allow-Credentials`, because (a) we don't need it (Bearer tokens are explicit request headers, not browser-managed credentials) and (b) the historical pairing of `Allow-Credentials: true` with `Allow-Origin: *` is a CORS spec violation that browsers reject. The `cors_allowed_origins` allowlist controls *which origins can read responses*, not cookie scope. CSRF protection is structural: cross-site requests can't smuggle a Bearer token because the browser won't auto-attach `Authorization` headers cross-origin. Do not reintroduce cookie-based auth or `Access-Control-Allow-Credentials` without a separate design discussion — the current posture is the answer to GitHub issues #29 and #30.
-17. **Non-fatal boot**: Schema-discovery failure on boot (ClickHouse unreachable, missing database, transient network blip) is non-fatal — `cmd/wavehouse` records an `api.BootState` diagnostic, binds `:8080`, and retries via `SchemaRegistry.RetryRefresh` (exp backoff 2s → 60s) in the background. `/livez` and `/readyz` return 503 with the latest diagnostic until a Refresh succeeds, after which `/livez` stays 200 for the rest of the process. Keeps supervisor restart loops bounded and gives operators a queryable failure surface (`curl /livez`) instead of a restart-log grep.
-18. **Health endpoint convention**: Liveness is `/livez` and readiness `/readyz` (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). `/healthz` is a **permanent alias** of `/livez` (the most widely-recognized name); `/health` and `/ready` are **deprecated aliases** slated for removal in v0.2.0 (see CHANGELOG #144). Response bodies are unchanged — `/livez` returns `{"status":"ok"}` (or `{"status":"degraded",…}` + 503 while boot is still failing) and `/readyz` returns `{"status":"ready"}` (or `{"status":"not ready","error":…}` + 503); kubelet only reads the status code, the bodies are for humans. Separately, **`/v1/health`** is a content-free public liveness ping (200/503, no body, no ClickHouse check, `HealthHandler.Online`) — it's what the SDK's `wh.sys.health()` uses, and it's intentionally a `/v1` API route so it stays reachable even where the bare probe paths are filtered at the reverse proxy. Point new k8s tooling at `/livez`/`/readyz`, SDK/online-checks at `/v1/health`, never the deprecated aliases. (Per-dependency drill-down probes and a richer aggregate `/readyz` body — issue #144 part 2 — remain deferred.)
+The invariant index — what must stay true. Full narrative and rationale live in [`docs/src/content/docs/architecture.md`](docs/src/content/docs/architecture.md) and the cited code; the numbers are **stable** (cross-referenced from code comments and architecture.md), so preserve the named invariant when you touch its package. Items tagged **(security)** are fail-closed gates — change them only with a security review.
+
+1. **Interface-first** — core behaviors are Go interfaces (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`); standalone vs. future-clustered swap implementations.
+2. **Bring Your Own Schema** — users create ClickHouse tables; WaveHouse discovers them via `system.columns` and never auto-migrates.
+3. **Schema-driven ingest** — `POST /v1/ingest?table={table}` takes flat JSON, validated against the discovered schema (unknown fields rejected, types/nullability enforced). No envelope.
+4. **Async ingestion** — ingest returns 200 after optional dedup + MQ publish; ClickHouse writes happen later via `StartIngestWorker`. NATS full → 503 + Retry-After.
+5. **Per-table batching** — the worker groups events by table and bulk-INSERTs in schema column order; each table's batch is independent.
+6. **Dead Letter Queue** — failed batch inserts publish to `WAVEHOUSE_DLQ` (`dlq.<table>`), gated by `dlq.enabled`. No silent data loss.
+7. **Auth: always on, fail-loud, decoupled from authz (security)** — the JWT middleware always runs (no `auth.enabled`/`dev_mode` flag); it verifies with HMAC **or** JWKS (not both), with accepted `alg` pinned to the active verifier and checked before any key is used (rejects `alg:none` and cross-family confusion). No/invalid/expired token → empty role → policy `default_role`, with the bad-token reason stashed so a denying gate returns a loud `401`, not a bare `403`. Elevated access needs a valid granted role. Detail: architecture.md § `api/` + `internal/auth`; see also #11, §Security Considerations.
+8. **Optional dedup** — opt-in via `dedupe.enabled`; `dedupe.id_field` selects the JSON key.
+9. **Singleflight** — `TieredCache` coalesces concurrent misses (`x/sync/singleflight`) to prevent cache stampede.
+10. **Active Sweeper** — purges NATS messages that are both ACKed (written to CH) and older than the gap window; SSE gap-fill uses `DeliverByStartTime`, no in-process ring buffer.
+11. **Hasura-style access control: fail-closed (security)** — `policy.IsAdmin` (role == `admin_role`, **exact case-sensitive**, default `"admin"`) is the single admin check, shared by `Evaluate`/`ResolveRole`/`Validate`/the `/v1/admin` gate/`RoleAllowed`. Empty/absent role matches nothing (no `"*"` wildcard); `Validate` rejects empty role keys; a `nil` policy (deleted) denies **everyone incl. admin** — a total lockout, so bootstrap from the policy file, never an implicit admin grant. `default_role` is the one sanctioned roleless exception (`ResolveRole` maps empty → it pre-eval); `default_role == admin_role` is permitted but dev-only and loudly warned (`policy.DefaultRoleGrantsAdmin`). Preserve when touching `internal/policy` (policy twin of #13; see #159). Detail: architecture.md § `policy/`.
+12. **Structured queries** — `POST /v1/query?table={table}`: typed AST validated against schema, permission-enforced, timestamp-bucketed for cache, `DefaultMaxRows` (10,000) cap.
+13. **Named query pipes: fail-closed (security)** — pre-defined SQL templates (Tinybird-style) with param binding + caching; `GET/POST /v1/pipes/{name}` sit outside `RequireAdmin`, so per-pipe `allowed_roles` is the *only* execute-path gate, via `policy.RoleAllowed`: exact allowlist membership (no `"*"`), admin always passes, empty/absent role and empty-string entries authorize nobody, and no `allowed_roles` → admin-only. Preserve and exercise via `testutil.RunRoleMatrix` / `StandardRoleMatrix` (see #159). Detail: architecture.md § `pipes/`.
+14. **TypeScript SDK** — `@wavehouse/sdk`: zero-dep client, typed query builder, real-time SSE, live queries (incrementable/decomposable/poll aggregation), codegen CLI. The canonical client (see §SDK Sync).
+15. **Observability invariants** — stdout always 100% (sampling is OTLP-push-only); WARN+ERROR always export at 100% (a non-configurable floor — don't expose it); gRPC OTel exporters dial lazily so an unreachable collector never blocks startup; the OTel Prometheus exporter uses a **private** `prometheus.Registry`. Preserve when touching the logger/sampler/provider. Detail: architecture.md § `observability/`.
+16. **Bearer-token-only CORS posture (security)** — Bearer JWT on every request, no cookies/sessions; `corsMiddleware` deliberately **never** emits `Access-Control-Allow-Credentials` (not needed, and `*` + credentials is a spec violation browsers reject). `cors_allowed_origins` controls who can *read* responses, not cookie scope; CSRF protection is structural. Don't reintroduce cookie auth or `Allow-Credentials` without a design discussion — answers GitHub #29/#30. Code: `internal/api/router.go`.
+17. **Non-fatal boot** — schema-discovery failure on boot is non-fatal: `cmd/wavehouse` records an `api.BootState`, binds `:8080`, serves 503 on `/livez`/`/readyz` with the diagnostic, and retries via `SchemaRegistry.RetryRefresh` (backoff 2s → 60s). Bounds supervisor restart loops.
+18. **Health endpoints** — liveness `/livez`, readiness `/readyz` (k8s convention); `/healthz` is a permanent alias of `/livez`; `/health` + `/ready` are deprecated (removal v0.2.0, CHANGELOG #144). `/v1/health` is the SDK's content-free public ping (no ClickHouse check), a `/v1` route so it survives reverse-proxy probe-path filtering. Point k8s at `/livez`/`/readyz`, SDK/online-checks at `/v1/health`, never the deprecated aliases.
 
 ## Code Conventions
 
@@ -58,84 +74,32 @@ Eleven internal packages under `internal/` (plus `internal/testutil/` for shared
 
 ## Build & Test Commands
 
-`make help` is the source of truth — run it to see every target with its one-line description. Common targets, grouped:
+**`make help` is the source of truth — run it for the full annotated list.** The targets agents reach for:
 
 ```bash
-# Setup
-make tools             # Install pinned tools, Go modules, pnpm deps, and git hooks
-make help              # Show all targets with descriptions
-
-# Static checks (parallel-safe: `make -j verify`)
-make fmt               # Check formatting across Go (gofumpt) + TS (Biome)
-make tidy              # Verify go.mod/go.sum are tidy (run `make fix` to apply)
-make lint              # Lint across Go (golangci-lint) + TS (Biome)
-make vulncheck         # Run govulncheck (V=1 for full call stacks)
-make verify            # Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + tsc typecheck)
-make fix               # Auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS (Biome --write)
-
-# Build
-make build             # Compile wavehouse → bin/wavehouse (debug symbols kept)
-make build-release     # Stripped release-style build → bin/wavehouse-release
-make build-cover       # Coverage-instrumented build → bin/wavehouse-cov (used by E2E)
-make build-ts         # Build TypeScript SDK → clients/ts/dist/
-
-# Test (each suite renders coverage and gates against .testcoverage.yml)
-make test              # Alias for test-unit
-make test-unit         # Go unit tests + coverage gate
-make test-integration  # Go integration tests (requires Docker) + coverage gate
-make test-ts          # SDK vitest unit tests + coverage + gate against suites.ts-unit
-                       # (`make cov` merges ts-unit + ts-e2e automatically — no separate command)
-make test-e2e          # E2E SDK suite against bin/wavehouse-cov + coverage gate
-make test-all          # All four suites sequentially + merged coverage gate
-make cov               # Merge whichever Go + TS coverage exists + gate against thresholds
-
-# CI
-make ci                # Phase 1 (parallel): verify + builds (Go + SDK + docs) + test-unit + test-ts
-                       # Phase 2 (sequential): test-integration + test-e2e + cov
-
-# Analysis (informational, not in CI)
-make size              # Binary size analysis → text + SVG + interactive HTML
-make audit-cgo         # Audit deps for C code (builds use CGO_ENABLED=0)
-make deadcode          # Find unreachable functions
-make dep-cut           # Top cuttable deps by transitive weight (LIMIT=N)
-make binary-analysis   # size + audit-cgo + deadcode
-
-# Dev loop (Docker required for everything in this group)
-make dev               # ClickHouse + WaveHouse with air hot-reload on :8080.
-                       # CORS=*. No auth flag: with no WH_AUTH_JWT_SECRET set,
-                       # every request resolves to the policy default_role. Set
-                       # WH_AUTH_JWT_SECRET=<secret> and mint a JWT (role ==
-                       # admin_role) to exercise admin/elevated endpoints.
-make deps-up           # Start ClickHouse alone (idempotent; blocks until healthy)
-make deps-down         # Stop ClickHouse (preserves data volume)
-make deps-logs         # Tail ClickHouse logs
-make deps-shell        # clickhouse-client REPL on the running container
-make deps-wipe         # Stop AND destroy ClickHouse data volume (DESTRUCTIVE)
-
-# Cleanup (tiered — compose explicitly for partial resets)
-make clean             # Build outputs only (bin/, dist/, clients/ts/dist/)
-make clean-test        # Test outputs only (tmp/ — coverage, logs, NATS state)
-make clean-tools       # Installed tools and pnpm deps (.bin/, node_modules/)
-make clean-all         # Full reset: above + data/ + docker volumes
-
-# Docs site (Astro + Starlight in docs/, driven via pnpm workspace filters)
-make dev-docs          # Hot-reload Astro dev server on :4321
-make build-docs        # Production build → docs/dist/
-make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
-make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
+make verify            # Static checks: Go (tidy+fmt+vulncheck+lint) + TS (Biome+tsc)
+make fix               # Auto-fix everything fixable (gofumpt, goimports, lint --fix, Biome)
+make test              # Go unit tests + coverage gate (alias for test-unit)
+make test-integration  # Go integration tests + gate (Docker; testcontainers)
+make test-e2e          # E2E SDK suite vs the cover binary + gate (Docker; testcontainers)
+make test-ts           # SDK vitest unit tests + coverage + gate
+make ci                # Full pre-push pipeline — run it the documented way (§Local-First Validation)
+make build             # Compile → bin/wavehouse
+make dev               # ClickHouse + hot-reload server on :8080 (Docker)
+make deps-up           # Start ClickHouse alone — for `make dev`; NOT needed by `make ci`
+make build-docs        # Production docs build → docs/dist/
 ```
 
-Verbose test output: `V=1 make test`. Extra flags: `make test ARGS="-run TestFoo"`.
-Build tags: `make build TAGS="foo bar"`.
+Verbose: `V=1 make test`. Extra args: `make test ARGS="-run TestFoo"`. Build tags: `make build TAGS="foo"`.
 
-Tooling notes:
+Tooling notes (the non-obvious bits `make help` won't tell you):
 
-- Most dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via native `tool` directives and invoked with `go tool <name>` — no manual install needed.
-- `golangci-lint` is pinned in the Makefile (currently v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or via `make tools`). Not in `go.mod` — its dependency tree conflicts with the main module.
-- `pnpm` (>= 11.1) and `Node.js` (22 LTS — pinned via `.nvmrc` at the repo root, matches CI) must be on your PATH; the SDK, E2E test harness, and docs site all shell out to `pnpm`. `make tools` runs a single root `pnpm install --frozen-lockfile`, which installs all three workspace packages (`clients/ts/`, `tests/e2e/sdk/`, `docs/`).
-- **Node workspace**: the SDK (`clients/ts/`, `@wavehouse/sdk`), E2E harness (`tests/e2e/sdk/`, `wavehouse-e2e`), and docs site (`docs/`, `wavehouse-docs`) are pnpm workspace packages, driven directly from the root `Makefile` via `pnpm --filter` — no sub-Makefiles. The user-facing targets are verb-first and live in their natural `make help` sections: `build-ts` / `dev-ts` / `test-ts` / `clean-ts` for the SDK, and `build-docs` / `dev-docs` / `preview-docs` / `branding-docs` / `clean-docs` (plus the hidden `install-playwright-docs` helper) for docs. TS/JS/JSON formatting & linting is workspace-wide via Biome (one `biome.json`, covering the SDK, E2E harness, and docs — `.astro` templates and Markdown are out of Biome's scope). Markdown across the whole repo is linted by markdownlint-cli2 (rules in `.markdownlint.json`, file globs in `.markdownlint-cli2.jsonc`; `.mdx` excluded) — that's Markdown *style*. Docs **prose** is linted separately by the `lint-prose` / `fix-prose` targets via misspell (curated common-typo + US-spelling/UK→US enforcement over `docs/src/content/**`, `.md` *and* `.mdx`; a pinned `.bin/` binary, distinct from the misspell analyzer golangci-lint runs on Go source — same fork, different entry point; autofixable via `make fix`). The split is style vs. words: markdownlint owns style, misspell owns spelling, Biome owns JS/TS/JSON — no overlap. (A full-dictionary spell-checker, cspell, was trialled and dropped: on these jargon-dense docs it flagged ~64 legitimate terms and zero real typos — an unbounded dictionary tax for no signal. Catching novel typos — and judging accuracy-vs-code, clarity, and completeness — is left to LLM review: the `docs-reviewer` subagent — a mandatory pre-push gate, run via `/docs-review` (see §Agent PR Discipline → Docs review) — which weighs a word in context against the code.) All run under `make lint` / `make fix` (Biome also under `make fmt`).
-- `GNU Make 4+` is required (uses `--output-sync=target`); macOS ships BSD Make 3.81 which will not parse the Makefile. See `docs/src/content/docs/development.md` § Prerequisites for the full setup checklist.
-- **Worktrunk** (`wt`) reads `.config/wt.toml`. On `wt switch --create <branch>`, post-start runs `wt step copy-ignored` (seeds `.bin/` + `node_modules/` from main) then `make tools` to finish bootstrap. Personal overrides in `~/.config/worktrunk/config.toml`.
+- Dev tools (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) are pinned in `go.mod` via `tool` directives — `go tool <name>`, no manual install.
+- `golangci-lint` is pinned in the Makefile (v2.11.4), auto-installed to `.bin/` on first `make lint` — kept out of `go.mod` (its deps conflict with the main module).
+- `pnpm` (≥ 11.1) + `Node 22 LTS` (`.nvmrc`, matches CI) must be on PATH; `make tools` runs one root `pnpm install --frozen-lockfile` across the three workspaces (SDK `clients/ts/`, E2E `tests/e2e/sdk/`, docs `docs/`).
+- **GNU Make 4+** required (uses `--output-sync=target`); macOS BSD Make 3.81 won't parse it. Full setup: `docs/src/content/docs/development.md` § Prerequisites.
+- **Lint split**: Biome owns JS/TS/JSON, markdownlint owns Markdown *style*, misspell owns spelling (all under `make lint`/`make fix`); accuracy/clarity/doc-sync is the `docs-reviewer` gate (§Docs review).
+- **Worktrunk** (`wt`, `.config/wt.toml`): `wt switch --create` seeds `.bin/` + `node_modules/` from main, then runs `make tools`.
 
 ## Testing Conventions
 
@@ -162,6 +126,23 @@ make ci   # Full parity with CI: parallel verify + builds + unit/SDK tests, then
 ```
 
 If `make ci` passes locally, your commit has crossed the same gates CI will run. For workflow-only changes, read the YAML diff carefully and run `actionlint` if you have it installed.
+
+### Running `make ci` (for agents)
+
+`make ci` is **self-contained**: the integration suite (`tests/integration/`) and the E2E orchestrator (`scripts/orchestrator/`) each boot ClickHouse via **testcontainers on random host ports**. The only prerequisite is a running **Docker daemon** — do **not** `make deps-up` or start ClickHouse first (`deps-up` is for `make dev` only).
+
+Run it via the **background Bash tool** (`run_in_background: true`) and wait for the completion notification; the harness re-invokes you on exit, so polling the log with `tail` only burns context:
+
+```bash
+NO_COLOR=1 make ci > tmp/ci.log 2>&1
+```
+
+- **Background, never foreground** — a full run can exceed the 10-minute foreground Bash cap and be killed mid-pipeline (which then looks like a failure).
+- **No `| tee` / `| tail`** — a pipe masks `make ci`'s real exit code in the completion notification, and `tail -f` never returns. Redirect to the file and nothing else.
+- **`NO_COLOR=1`** keeps ANSI escapes out of the log so a failure greps cleanly (the Makefile emits raw color codes otherwise).
+- Read `tmp/ci.log` only when the exit code is non-zero.
+
+On success `make ci` writes the tree-keyed `tmp/ci-passed-tree-<TREE>` marker (see §Enforced via git hooks for the tree-keying and the commit-after-green rule; `tmp/` is gitignored, so the marker never enters the tree). That marker is one of the **three** a PR-branch push requires — the other two are written by the mandatory review subagents (see §Agent PR Discipline → Pre-push self-review). End to end: `make ci` green → commit → invoke `pre-push-reviewer` + `docs-reviewer` in parallel (fresh context) → loop until both reach `ship_it` → push. Re-run `make ci` only if a finding makes you edit a tracked file.
 
 ### Enforced via git hooks
 
@@ -251,7 +232,7 @@ Agents CAN re-request bot reviewers by mentioning them in PR comments (`gh pr co
 
 ### Pre-push self-review is mandatory on PR branches
 
-Before pushing to any branch with an open PR, agents must invoke **two review subagents in fresh context, in parallel** — both are mandatory gates, each with its own marker:
+Before pushing a non-main branch, agents must run **both** review subagents in fresh context, in parallel — both are mandatory gates, each with its own marker. **The one-command form is `/prepush`**, which launches both and loops them to `ship_it`; prefer it over invoking the two by hand. (The push gate fires on any non-main branch with commits ahead of `main`, **not** only when a PR is already open — the first push, before `gh pr create`, is exactly when the diff most needs review.)
 
 - **`pre-push-reviewer`** (code) reviews: the full PR diff against `main` (merge-base); the latest commit specifically; all open PR comments and reviews (top-level + inline); CI status / failing checks; linked issues' acceptance criteria.
 - **`docs-reviewer`** (docs) reviews: docs prose for accuracy-vs-code, runnable examples, clarity, and completeness, **plus code↔docs sync** — code that changed but whose docs didn't (per §Documentation Sync). It runs on **every** push, even code-only ones: docs may not change but *should*, and catching that is the point. (See §Docs review for scope.)
