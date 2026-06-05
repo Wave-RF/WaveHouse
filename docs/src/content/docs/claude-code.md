@@ -47,7 +47,7 @@ Tree-keyed so commit-then-push works without a re-run when the tree is unchanged
 
 | Path | Purpose |
 | ---- | ------- |
-| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all three hooks wired |
+| `.claude/settings.json` | Team-wide: `deny` permissions (force-push / git reset --hard / filter-branch / update-ref -d, gh pr merge / ready / approve / request-changes, gh repo/release delete, gh secret delete, gh workflow disable, rm -rf / sudo rm), all three hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
 | `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on PR pushes) |
 | `.claude/hooks/review-marker.sh` | SubagentStop: on a reviewer's `VERDICT: ship_it`, writes its `tmp/<name>-passed-<HEAD-sha>` marker (the reviewer set comes from `scripts/pre-push-reviewers.sh`). Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
@@ -57,7 +57,8 @@ Tree-keyed so commit-then-push works without a re-run when the tree is unchanged
 | `.claude/agents/pre-push-reviewer.md` | `pre-push-reviewer` subagent — canonical pre-push **code** review (one of the parallel pre-push reviewers in `scripts/pre-push-reviewers.sh`); also used for auditing others' PRs locally |
 | `.claude/agents/docs-reviewer.md` | `docs-reviewer` subagent — docs-prose + code↔docs-sync review; **mandatory pre-push gate** (writes `tmp/docs-reviewer-passed-<HEAD-sha>` on ship_it, in parallel with the other pre-push reviewers); advisory only for ad-hoc path/`all`. Scope via `scripts/docs-prose.sh` |
 | `.claude/skills/pr-sync-with-main/SKILL.md` | "Fix this stale PR" workflow — merge origin/main, never rebase or force-push |
-| `.claude/skills/pr-review-locally/SKILL.md` | "Review PR <N> locally" workflow — `wt switch pr:<N>` + `pre-push-reviewer`, no PR comments |
+| `.claude/skills/pr-review-locally/SKILL.md` | "Review PR <N> locally" workflow — `wt switch pr:<N>` + the relevant reviewers (code, docs, …) in parallel, no PR comments |
+| `.claude/skills/pm-triage/SKILL.md` | PM-review workflow — triage feedback / backlog / code TODOs and reconcile issue & PR status into well-scoped, tracked Task Board (project #7) issues; invoked as `/pm-triage` |
 | `.claude/settings.local.json` | **Your personal overrides** — gitignored; put model choice, status line, allow lists, etc. here |
 | `.config/wt.toml` | Worktrunk project hooks (post-start, pre-merge, pre-remove) |
 
@@ -92,6 +93,7 @@ Skills load automatically into Claude's context when conversation patterns match
 | ----- | ----------- |
 | `pr-sync-with-main` | When a PR shows "out-of-date with base branch", or a user asks to "fix the PR" / "sync with main". Documents the merge-not-rebase procedure and the WaveHouse-specific reason long-lived branches need it. |
 | `pr-review-locally` | When a user asks to "review PR <N>", "audit PR <N>", "look at PR <N>" — pulls the PR down via `wt switch pr:<N>` (or `gh pr checkout`), runs the relevant reviewers (code, docs, …) in parallel in fresh context, surfaces their combined findings without commenting on the PR. |
+| `pm-triage` | When a user asks to triage dogfooding feedback, re-prioritize the backlog (P0–P3), sweep code TODOs, or check that work is tracked — runs a PM-style review against the Task Board (project #7) and proposes well-scoped issues. Invoked as `/pm-triage`. |
 
 To add a skill: create `.claude/skills/<name>/SKILL.md` with frontmatter `name` + `description` and the workflow body. Description quality matters — that's what Claude matches against to load the skill.
 
@@ -104,7 +106,7 @@ Agents (Claude Code etc.) have additional gating beyond what humans face — enf
 - **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
 - **Pre-push review required on PR branches.** Before `git push` to a branch with commits ahead of `main`, the agent runs the reviewers in `scripts/pre-push-reviewers.sh` (today: `pre-push-reviewer` for code, `docs-reviewer` for docs prose + code↔docs sync) that the change needs — in fresh context, in parallel — and **skips** any with nothing to do via `scripts/skip-pre-push-review.sh <name> "<reason>"` (a logged skip that satisfies the marker, so a docs typo doesn't pay for a full code review). `/prepush` does all of this. `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate; fix and re-invoke (always fresh context) until clean. The push gate requires a marker — from a `ship_it` or a logged skip — from every listed reviewer, and echoes the skips at push time.
 - **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci` and the `review-marker.sh` hook; nothing else.
-- **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — `pre-push-reviewer` findings go to you, not the PR.
+- **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — the reviewers' findings go to you, not the PR.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
 
@@ -184,11 +186,10 @@ The deny list blocks:
 | ------- | --- |
 | `git push --force`, `-f`, `--force-with-lease` | Force-pushing is destructive; also loses inline review-comment anchors |
 | `git reset --hard origin:*` | Throws away local work |
+| `git filter-branch`, `git update-ref -d` | History-rewriting / ref destruction |
 | `gh pr merge`, `gh repo delete`, `gh release delete` | Irreversible / shared-state |
 | `gh workflow disable`, `gh secret delete` | Operational footguns |
-| `make deps-wipe`, `make clean-all` | Wipes data / docker volumes / installed tools |
-| `rm -rf /`, `rm -rf $HOME`, `sudo rm` | Filesystem destruction |
-| `Read(./.env)`, `Read(./.env.*)`, `Read(./secrets/**)` | Secrets shouldn't enter Claude's context |
+| `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `sudo rm` | Filesystem destruction |
 
 ## Status line, output style, model
 

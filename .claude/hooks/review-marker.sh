@@ -95,24 +95,13 @@ if [ "$verdict" = "ship_it" ]; then
   fi
 fi
 
-# Multi-review nudge. EVERY listed reviewer is a mandatory, independent push
-# gate (agent-bash-gate.sh requires a marker for each). The recurring miss is
-# running one and forgetting the rest. So if any OTHER gating reviewer has no
-# ship_it marker for THIS HEAD, surface the list into the ORCHESTRATOR's
-# context: a SubagentStop hook's hookSpecificOutput.additionalContext injects
-# into the main session (not the finished subagent), per the Claude Code hooks
-# docs. Exit 0 — advisory, never a block. Phrased defensively so it's a
-# harmless no-op when the orchestrator already launched them all in parallel
-# (e.g. via /prepush) and the others simply haven't finished writing yet.
-missing_siblings=""
-for r in $reviewers; do
-  [ "$r" = "$agent_type" ] && continue
-  [ -f "tmp/${r}-passed-${head_sha}" ] || missing_siblings="${missing_siblings}${r}, "
-done
-missing_siblings="${missing_siblings%, }"
-if [ -n "$missing_siblings" ]; then
-  nudge="Reminder: these mandatory pre-push reviewer(s) still have no marker for HEAD ${head_sha:0:8}: ${missing_siblings}. Every reviewer in scripts/pre-push-reviewers.sh gates the push — each needs a marker from a ship_it OR a deliberate skip. If you have not already handled them this turn, run /prepush: it runs the reviewers this change needs (fresh context, in parallel) and skips the rest on the record (scripts/skip-pre-push-review.sh). Markers are HEAD-keyed, so re-satisfy every reviewer after any new commit."
-  jq -n --arg ctx "$nudge" '{hookSpecificOutput:{hookEventName:"SubagentStop",additionalContext:$ctx}}'
-fi
+# Writing the marker above is this hook's only job — it intentionally does NOT
+# nudge the orchestrator about other still-missing reviewers. A SubagentStop
+# hook's hookSpecificOutput.additionalContext is delivered to the *finishing
+# subagent* (which just gets a confused extra turn — "not actionable by me"),
+# not to the main session, so it can't reliably reach the orchestrator and only
+# muddies reviewer output. The push gate (agent-bash-gate.sh) already lists
+# every missing marker at push time, which is the right reminder at the right
+# moment — don't re-add a nudge here.
 
 exit 0

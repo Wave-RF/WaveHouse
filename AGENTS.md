@@ -264,7 +264,7 @@ The reviewer set is meant to grow. To add one — with **no** edits to the hooks
 1. **Write the subagent** at `.claude/agents/<name>.md` (frontmatter `name`/`description`/`tools`/`model`; body is its system prompt). End its output with the parseable `VERDICT: ship_it|iterate|block` line under the same strict rubric as the others (zero findings ⇒ `ship_it`). Model it on `pre-push-reviewer.md` / `docs-reviewer.md`.
 2. **Add `<name>`** to `scripts/pre-push-reviewers.sh` — *after* step 1, because a name with no agent file blocks every push until the agent exists.
 
-That's all: the marker is `tmp/<name>-passed-<HEAD>` automatically, the push gate requires it, `review-marker.sh` writes it on `ship_it`, `/prepush` launches it alongside the rest, and the missing-reviewer nudge covers it. Also add a row to the subagent table in `docs/src/content/docs/claude-code.md`.
+That's all: the marker is `tmp/<name>-passed-<HEAD>` automatically, the push gate requires it, `review-marker.sh` writes it on `ship_it`, and `/prepush` launches it alongside the rest. Also add a row to the subagent table in `docs/src/content/docs/claude-code.md`.
 
 ### Don't bypass the gates
 
