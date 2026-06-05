@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time; nothing else in the docs *build* uses a browser — the manual `docs/scripts/screenshot.mjs` QA helper drives the same Chromium). `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
 
 ### Verify your setup
 
@@ -473,7 +473,7 @@ Run `make help` to see all targets. Key ones:
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
 | `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`) |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
@@ -527,7 +527,7 @@ PR titles must match Conventional Commits format and stay ≤ 72 characters — 
 
 Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`.
 
-The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`).
+The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
 If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
 

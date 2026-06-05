@@ -1,0 +1,34 @@
+---
+// PostHog analytics snippet with View Transitions support.
+// Uses is:inline to prevent Astro from processing the script.
+// Includes initialization guard to prevent stack overflow with ClientRouter.
+//
+// The committed fallbacks keep prod working: CI (make ci → astro build) has no
+// PUBLIC_POSTHOG_* env and docs/.env is gitignored. phc_ project tokens are
+// public by design — they ship in every served page — so committing one leaks
+// nothing. A local docs/.env still overrides. Local-dev noise (localhost
+// pageviews) is filtered PostHog-side via the project's internal-user filters,
+// not here.
+//
+// api_host is the PostHog *managed* reverse proxy on our zone (CNAME →
+// proxyhog.com) — first-party requests dodge ad-blocker lists, and PostHog
+// routes /static + /array to its assets CDN for us. ui_host keeps toolbar /
+// PostHog-app links pointed at the real UI since api_host is custom.
+const apiKey =
+  import.meta.env.PUBLIC_POSTHOG_PROJECT_TOKEN ??
+  "phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj";
+const apiHost =
+  import.meta.env.PUBLIC_POSTHOG_HOST ?? "https://t.wave-rf.com";
+---
+<script is:inline define:vars={{ apiKey, apiHost }}>
+  if (!window.__posthog_initialized && apiKey && apiHost) {
+    window.__posthog_initialized = true;
+    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="capture identify alias people.set people.set_once set_config register register_once unregister opt_out_capturing has_opted_out_capturing opt_in_capturing reset isFeatureEnabled onFeatureFlags getFeatureFlag getFeatureFlagPayload reloadFeatureFlags group updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures getActiveMatchingSurveys getSurveys getNextSurveyStep onSessionId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+    posthog.init(apiKey, {
+      api_host: apiHost,
+      ui_host: 'https://us.posthog.com',
+      defaults: '2026-01-30',
+      capture_pageview: 'history_change'
+    })
+  }
+</script>
