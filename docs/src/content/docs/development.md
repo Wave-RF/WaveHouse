@@ -533,17 +533,15 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 ### Required status checks
 
-The `main branch protection` ruleset requires the following checks to pass before any PR can merge:
+The `main branch protection` ruleset requires three status checks to pass before any PR can merge:
 
-- `Check` — module tidiness, format verification, vulnerability scan
-- `Build` — compile all binaries
-- `PR housekeeping` — PR title is Conventional Commits
+- `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
+- `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
+- `Admin approval` — at least one `APPROVED` review from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
 
-Plus 1 approving review, and the `Admin approval` check (enforced by `.github/workflows/admin-approval.yml`) requires at least one `APPROVED` review specifically from an admin (Eric or Taite). Linear history, no deletion, no force-push, squash-merge only.
+The ruleset also enforces 1 approving review, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only.
 
 Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
-
-> **Note — temporarily relaxed**: `Lint`, `Test`, and `Integration Tests` are *not* currently required while pre-existing failures on `main` are being fixed (tracked in #57). They'll rejoin required once main is green.
 
 ### Merge behavior
 
