@@ -142,10 +142,8 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     const rows = data!;
     const hasMore = effectiveLimit != null && rows.length >= effectiveLimit;
 
-    // Cursor pagination needs an order column to walk. Offer `next()` only when
-    // the caller set an explicit `.orderBy()`; otherwise still report `hasMore`
-    // honestly from the row count, but with `next` undefined — there's no
-    // deterministic cursor to build.
+    // next() needs an order column for its cursor; with no .orderBy() we still
+    // report hasMore honestly from the row count but can't offer a next().
     if (hasMore && this._state.orderBy.length > 0) {
       const nextFn = () => this._fetchNext(rows, effectiveLimit!, opts);
       return okPage(rows, true, nextFn);
@@ -209,9 +207,6 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     if (this._state.aggregations.length > 0) ast.aggregations = this._state.aggregations;
     if (this._state.filters.length > 0) ast.filters = this._state.filters;
     if (this._state.groupBy.length > 0) ast.group_by = this._state.groupBy;
-    // No implicit default order: emit ORDER BY only when the caller set one via
-    // `.orderBy()`. Sending a hardcoded column here would 500 on tables that
-    // lack it (#270); pagination's `next()` is likewise gated on an explicit order.
     if (this._state.orderBy.length > 0) ast.order_by = this._state.orderBy;
     if (effectiveLimit != null) ast.limit = effectiveLimit;
     if (this._state.timeRange) ast.time_range = this._state.timeRange;
@@ -223,10 +218,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     _limit: number,
     opts?: FetchOptions,
   ): Promise<Result<Row[]>> {
-    // The keyset cursor walks the explicit order's first column. `fetch()` only
-    // attaches `next()` when `.orderBy()` was set, so a missing cursor means
-    // there's nothing to paginate by — return an empty terminal page rather than
-    // guess a column the table may not have (#270).
+    // No explicit order → no keyset cursor to build; nothing to page by.
     const cursor = this._state.orderBy[0];
     if (cursor == null) return okPage([] as unknown as Row[], false);
     const { column: orderCol, dir: orderDir } = cursor;

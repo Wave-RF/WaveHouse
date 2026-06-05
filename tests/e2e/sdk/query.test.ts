@@ -79,9 +79,8 @@ describe("Query", () => {
   });
 
   it("pagination: limit + next page", async () => {
-    // Paginate by the unique event_id so the keyset cursor can't skip rows. The
-    // default received_timestamp cursor is exercised by the skipped test below,
-    // which documents why it can't be relied on over batched data (#175).
+    // Paginate by the unique event_id so the keyset cursor can't skip rows
+    // (received_timestamp ties on batch-inserted rows would — see #175).
     const page1 = await wh.from(T.clicks).select().orderBy("event_id", "asc").limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
@@ -94,21 +93,32 @@ describe("Query", () => {
     expect(page2.data!.length).toBeGreaterThan(0);
   });
 
-  // Issue #175 — the default received_timestamp cursor skipped rows tied on a
-  // page boundary (ClickHouse stamps received_timestamp (DEFAULT now64(3)) at
-  // BATCH-insert time, so every row a worker flushes together shares one
-  // millisecond, and the SDK's strict keyset cursor then dropped the ties,
-  // leaving page 2 empty) — is now moot: #270 removed the hardcoded default
-  // order. A bare .limit().fetch() with no .orderBy() reports hasMore honestly
-  // but offers no next(), because there is no order column to build a keyset
-  // cursor from. Deterministic pagination requires an explicit .orderBy() (see
-  // the test above).
+  // #175: the old received_timestamp default cursor skipped rows tied on a page
+  // boundary (batch inserts share one now64(3) ms). #270 removed that default, so
+  // a bare .fetch() with no .orderBy() now reports hasMore but offers no next() —
+  // deterministic pagination needs an explicit .orderBy() (see the test above).
   it("reports hasMore without next() when no order is set (#270, sidesteps #175)", async () => {
     const page1 = await wh.from(T.clicks).select().limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);
     expect(page1.hasMore).toBe(true);
     expect(page1.next).toBeUndefined();
+  });
+
+  // TODO(#274): re-enable once the backend supplies a per-table default sort order
+  // (plus a resumable cursor). Then a bare .fetch() — no explicit .orderBy() —
+  // should paginate end-to-end again, the intent of the old received_timestamp
+  // default but without the #175 tie bug.
+  it.skip("paginates a bare .fetch() once the backend supplies a default order (#274)", async () => {
+    const page1 = await wh.from(T.clicks).select().limit(3).fetch();
+    expect(page1.error).toBeNull();
+    expect(page1.data).toHaveLength(3);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.next).toBeDefined();
+
+    const page2 = await page1.next!();
+    expect(page2.error).toBeNull();
+    expect(page2.data!.length).toBeGreaterThan(0);
   });
 
   it("raw SQL query", async () => {
@@ -164,10 +174,8 @@ describe("Query", () => {
   it("fetches from a bring-your-own-schema table lacking received_timestamp (#270)", async () => {
     const admin = adminClient();
     // A table with NO received_timestamp column. The SDK used to hardcode
-    // `ORDER BY received_timestamp DESC` as the default query order, so a bare
-    // .fetch() here produced invalid SQL → ClickHouse "Unknown expression
-    // identifier received_timestamp" → HTTP 500. With #270 the default order is
-    // gone, so the query is valid and returns cleanly.
+    // ORDER BY received_timestamp DESC, so a bare .fetch() here 500'd; #270
+    // dropped that default, so the query is now valid (regression guard).
     const noTsTable = `no_ts_${testId().replace(/-/g, "_")}`;
 
     // 1. Create the table and refresh schema so WaveHouse discovers it.
