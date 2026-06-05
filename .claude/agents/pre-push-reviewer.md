@@ -42,6 +42,7 @@ The diff source here is the local working state, computed as `git diff main...HE
    - **Testing** — new code on critical paths without tests, missing edge cases, mocks where integration would catch more.
    - **Documentation sync** — per AGENTS.md §Documentation Sync table.
    - **SDK sync** — per AGENTS.md §SDK Sync table. Did `internal/api/` change without `clients/ts/src/` consideration?
+   - **Docs prose** — prose *quality* (accuracy-vs-code, runnable examples, clarity, completeness) and the docs↔code sync check are the **`docs-reviewer`** subagent's job. It runs **in parallel with you as a mandatory pre-push gate**, with its own `tmp/docs-review-passed-<sha>` marker, so the push is already blocked until it reaches `ship_it`. Do **not** review prose or raise a "run `/docs-review`" `[SHOULD]` here — that gate fires on its own. (This supersedes the docs soft-gate in `.github/prompts/pr-review.md`: locally, docs review is a hard gate, not a nudge.) Don't line-edit prose yourself. You still keep the **Documentation sync** and **SDK sync** checks above as a code-completeness backstop.
 
 6. Apply the noise filter from `pr-review.md` before finalizing: drop findings you wouldn't personally ask the author to change in-person.
 
@@ -88,7 +89,7 @@ VERDICT: ship_it
 
 WaveHouse uses a stricter rule than `.github/prompts/pr-review.md`: **`ship_it` requires zero findings at any severity**. If there is anything left to do, the PR isn't shippable — "ship it, just do this one thing first" is iteration, not shipping.
 
-- **`Ship it`** + `VERDICT: ship_it` — `[MUST]`, `[SHOULD]`, and `[MAY]` sections are all empty. Pre-push marker auto-writes, push proceeds.
+- **`Ship it`** + `VERDICT: ship_it` — `[MUST]`, `[SHOULD]`, and `[MAY]` sections are all empty. Pre-push marker auto-writes, push proceeds. (Docs prose + docs↔code sync are gated independently by the parallel `docs-reviewer` and its own marker — see the Docs prose focus area — so they aren't your concern here.)
 - **`Iterate`** + `VERDICT: iterate` — any `[MUST]` / `[SHOULD]` / `[MAY]` finding exists, but none are block-level. The orchestrator fixes the findings and re-invokes this subagent (always in fresh context) until ship_it.
 - **`Block`** + `VERDICT: block` — a `[MUST]` that's CRITICAL/HIGH security, data-loss risk, broken core invariant, or otherwise needs human/maintainer attention (architectural disagreement, missing CI signal, etc.). Cannot proceed without addressing.
 

@@ -63,6 +63,25 @@ else
   RESET  :=
 endif
 
+# --- Quiet check runner -------------------------------------------------------
+# $(call run,Label,command(s),hint) — run a check quietly: capture its combined
+# output and print a single green "✓ Label" on success (output discarded), or a
+# red "✗ Label" + the indented output (+ optional fix hint) on failure, then
+# stop. Keeps `make verify` scannable: a column of ✓ when green, full detail
+# only for whatever broke. Honors NO_COLOR (the color vars go empty above).
+#
+# Always pass all THREE args (omit the hint with a trailing comma) so
+# --warn-undefined-variables stays quiet on $(3). Args cross make → shell, so:
+# no commas inside an argument (commas delimit $(call) args); Label and hint are
+# printf %s args — keep them plain text (no backticks / $(...) / quotes, which
+# the shell would evaluate). For a `-j` fan-out, --output-sync=target keeps each
+# leaf's ✓/✗ line intact.
+define run
+@out=$$({ $(2) ; } 2>&1) \
+  && printf "  $(GREEN)✓$(RESET) %s\n" "$(1)" \
+  || { printf "  $(RED)✗ %s$(RESET)\n" "$(1)"; printf '%s\n' "$$out" | sed 's/^/      /'; $(if $(3),printf "      $(YELLOW)→ %s$(RESET)\n" "$(3)";) exit 1; }
+endef
+
 # --- System & Architecture ----------------------------------------------------
 OS   := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
@@ -76,12 +95,26 @@ ARCH := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 #   VERSION=v1.2.3               override version string embedded in binary
 #   LDFLAGS="-s -w"              extra ldflags (e.g. force-strip a local build)
 #   LIMIT=50                     top-N for `make dep-cut`
+#   JOBS=4                       parallel slots for the -j fan-outs (default: CPU count)
 #
 # Add binaries here as the project grows (e.g., wavehouse-api, wavehouse-worker).
 BINARIES := wavehouse
 
 TAGS ?=
 ARGS ?=
+
+# JOBS: parallel slots for the recursive `$(MAKE) -j` fan-outs (verify, ci,
+# build-all, tools, fix). Default = CPU count (getconf _NPROCESSORS_ONLN) — "use
+# whatever the machine has": a 4-core box runs -j4, a 16-core box -j16. It's
+# self-limiting both ways: never more than the cores present (small runners
+# aren't oversubscribed), and make never starts more jobs than there are ready
+# targets anyway (8 for verify, ~14 for ci), so the effective width is the
+# smaller of cores and leaves. NOTE: a bare `make -j` with NO number means
+# *unlimited*, not "all cores" — it ignores the CPU count and would oversubscribe
+# a small runner, which is why we pass an explicit count here. Override:
+# `make ci JOBS=4`. Falls back to 4 if getconf is unavailable.
+DEFAULT_JOBS := $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+JOBS ?= $(DEFAULT_JOBS)
 
 # Version metadata is always embedded in the binary. Names match the package
 # vars in cmd/wavehouse/main.go (Version / GitCommit / BuildTime), which the
@@ -131,6 +164,14 @@ GOLANGCI_LINT         := $(LOCAL_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 # `go mod download` — same exclusion principle as golangci-lint.
 AIR_VERSION := v1.65.1
 AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
+
+# misspell: curated common-typo corrector + US/UK locale enforcer. Installed
+# standalone to .bin/ (pure Go, `go install` — same pattern as air) so it can
+# lint Markdown/MDX prose. DISTINCT from the misspell analyzer bundled inside
+# golangci-lint, which only inspects Go source; same maintained fork
+# (github.com/golangci/misspell), two entry points. Drives `make lint-prose`.
+MISSPELL_VERSION := v0.8.0
+MISSPELL         := $(LOCAL_BIN)/misspell-$(MISSPELL_VERSION)
 
 # --- Coverage Directories -----------------------------------------------------
 # One path per suite. Internal layout (managed by scripts/coverage.sh):
@@ -262,52 +303,75 @@ obs-front: ## Start local OTel Front UI
 # Dynamically find all directories containing Go files, safely ignoring hidden folders like .worktrees
 GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
 
-# fmt/lint/fix: Biome is workspace-wide — one config (biome.json), one binary,
-# scanning whatever its files.includes glob covers (SDK + e2e today). It's
-# invoked directly here, not via a per-subproject target. All three depend on
-# pnpm-install so Biome never runs before node_modules exists (fresh clone, or
-# as a sibling under `make -j verify`).
+# fmt / lint / fix: one Biome binary (biome.json) scans the whole workspace
+# (SDK + e2e + docs); Markdown is owned separately by markdownlint-cli2 (rules in
+# .markdownlint.json, globs in .markdownlint-cli2.jsonc) — Biome only does
+# JS/TS/JSON. gofumpt + golangci-lint own the Go side.
 #
-# fmt = format only (quick). lint = `biome check --error-on-warnings` (format +
-# lint + organize-imports) — the read-only inverse of fix's `biome check
-# --write`, so `make verify` gates precisely what `make fix` would change. The
-# --error-on-warnings flag makes warn-level rules hard-fail (not just print),
-# matching gofumpt/golangci-lint. NOTE: Biome demotes style nits to a
-# non-blocking "info" severity by default — bump a rule to "warn"/"error" in
-# biome.json (as we do for useTemplate) to make it actually gate.
+# Each tool is its OWN target (fmt-go/fmt-ts, lint-go/lint-ts/lint-md) so
+# `make verify` can fan them all out in parallel as verify-parallel leaves —
+# gofumpt no longer waits behind Biome, golangci no longer behind markdownlint.
+# The public `fmt` / `lint` targets are thin aggregates over those leaves, for
+# muscle-memory and standalone use (`make -j lint` parallelizes them too). Each
+# leaf depends on pnpm-install (TS) so Biome/markdownlint never run before
+# node_modules exists.
+#
+# fmt = format only (quick): `biome format` + gofumpt. lint = `biome check
+# --error-on-warnings` (format + lint + organize-imports) + markdownlint +
+# golangci. `biome check` is the read-only inverse of fix's `biome check --write`,
+# so `make verify` gates precisely what `make fix` would change; --error-on-
+# warnings makes warn-level rules hard-fail (matching gofumpt/golangci). NOTE:
+# Biome demotes style nits to non-blocking "info" by default — bump a rule to
+# "warn"/"error" in biome.json (as for useTemplate) to gate it. verify runs
+# `biome check` (lint-ts) but NOT `biome format` (fmt-ts): check already verifies
+# formatting, so running both would double the Biome work.
 .PHONY: fmt
-fmt: pnpm-install ## Check formatting across Go (gofumpt) + TS (Biome). Run `make fix` to apply.
-	@echo "$(CYAN)==> Checking TypeScript formatting (Biome)...$(RESET)"
-	@$(PNPM) -w run format || { echo "$(RED)==> Biome found formatting issues.$(RESET) Run $(CYAN)make fix$(RESET) to apply."; exit 1; }
-	@echo "$(CYAN)==> Checking Go formatting (gofumpt)...$(RESET)"
-	@if ! OUT=$$($(GOFUMPT) -l $(GO_DIRS)); then \
-		echo "$(RED)==> gofumpt failed$(RESET)"; \
-		exit 1; \
-	fi; \
-	if [ -n "$$OUT" ]; then \
-		echo "$(RED)==> Files not formatted:$(RESET)"; \
-		echo "$$OUT"; \
-		echo "Run $(CYAN)make fix$(RESET) to apply."; \
-		exit 1; \
-	fi
-	@echo "$(GREEN)==> Formatting OK$(RESET)"
+fmt: fmt-go fmt-ts ## Check formatting across Go (gofumpt) + TS (Biome). Run `make fix` to apply.
 
-# lint: Go (golangci-lint) + TS. The TS side runs `biome check` (lint +
-# format + import order) — see the fmt block for why it mirrors fix.
+.PHONY: fmt-go
+fmt-go:
+	$(call run,gofumpt (Go fmt),$(GOFUMPT) -l $(GO_DIRS) | (! grep .),run make fix to apply formatting)
+
+.PHONY: fmt-ts
+fmt-ts: pnpm-install
+	$(call run,Biome (format),$(PNPM) -s -w run format,run make fix to apply formatting)
+
 .PHONY: lint
-lint: $(GOLANGCI_LINT) go-mod-download pnpm-install ## Lint across Go (golangci-lint) + TS (biome check). Run `make fix` to apply --fix.
-	@echo "$(CYAN)==> Running Biome check (lint + format + imports)...$(RESET)"
-	@$(PNPM) -w run check || { echo "$(RED)==> Biome found issues.$(RESET) Run $(CYAN)make fix$(RESET) to auto-fix (warnings without a safe fix need a manual edit)."; exit 1; }
-	@echo "$(CYAN)==> Running golangci-lint...$(RESET)"
-	@$(GOLANGCI_LINT) run ./... --allow-parallel-runners
+lint: lint-go lint-ts lint-md lint-prose ## Lint across Go (golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell). Run `make fix` to apply --fix.
+
+.PHONY: lint-go
+lint-go: $(GOLANGCI_LINT) go-mod-download
+	$(call run,golangci-lint,$(GOLANGCI_LINT) run ./... --allow-parallel-runners,run make fix to auto-fix what is fixable)
+
+.PHONY: lint-ts
+lint-ts: pnpm-install
+	$(call run,Biome (lint + format + imports),$(PNPM) -s -w run check,run make fix to auto-fix what is fixable)
+
+.PHONY: lint-md
+lint-md: pnpm-install
+	$(call run,markdownlint,$(PNPM) -s -w run lint:md,run make fix to auto-fix what is fixable)
+
+# lint-prose: docs prose quality, owned by misspell — a curated common-typo +
+# US-locale (UK → US) checker over the Starlight content (.md + .mdx). Its word
+# list is finite and maintained upstream, so it gates with ~zero false positives
+# and no project dictionary to babysit. `-error` makes it exit non-zero on
+# findings; `make fix` (fix-prose) auto-applies the corrections. Distinct domain
+# from markdownlint (*style*) and Biome (JS/TS/JSON) — no overlap. (A full
+# dictionary spell-checker, cspell, was trialled and dropped: on these jargon-
+# dense docs it flagged ~64 legitimate terms and zero real typos — an unbounded
+# dictionary tax for no signal. Catching novel typos is left to human/LLM
+# review, which can judge a word in context; a finite checker can't.)
+.PHONY: lint-prose
+lint-prose: $(MISSPELL)
+	$(call run,misspell (US spelling),$(MISSPELL) -locale US -source text -error $(DOCS_PROSE),run make fix to auto-correct)
 
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
-	@echo "$(CYAN)==> Running govulncheck...$(RESET)"
 ifdef V
+	@echo "$(CYAN)==> Running govulncheck (verbose)...$(RESET)"
 	@$(GOVULNCHECK) ./...
 else
-	@$(GOVULNCHECK) -scan package ./...
+	$(call run,vulncheck,$(GOVULNCHECK) -scan package ./...,)
 endif
 
 # tidy: read-only check via `go mod tidy -diff` (Go 1.23+). Prints the
@@ -315,37 +379,74 @@ endif
 # without touching go.mod / go.sum. Safe to run in parallel with fmt/lint.
 .PHONY: tidy
 tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
-	@echo "$(CYAN)==> Checking module tidiness...$(RESET)"
-	@if ! go mod tidy -diff; then \
-		echo "$(RED)==> go.mod/go.sum is not tidy.$(RESET)"; \
-		echo "Run $(CYAN)make fix$(RESET) to apply."; \
-		exit 1; \
-	fi
-	@echo "$(GREEN)==> Modules OK$(RESET)"
+	$(call run,go.mod tidy,go mod tidy -diff,run make fix to tidy go.mod and go.sum)
 
-# fix: apply auto-fixes everywhere — Go (tidy + gofumpt + goimports +
-# golangci-lint --fix) + Biome (`check --write`: format + lint + imports).
+# fix: apply auto-fixes everywhere, fanned out into three tracks that touch
+# disjoint files — Go (.go + go.mod/sum), TS/JS/JSON (Biome), Markdown — so they
+# run in parallel safely. The Go track is itself a serial chain (tidy → gofumpt →
+# goimports → golangci --fix): order matters there, since each rewrites the same
+# files and the formatters must settle before lint --fix runs.
 .PHONY: fix
-fix: $(GOLANGCI_LINT) pnpm-install ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS (Biome --write)
-	@echo "$(CYAN)==> Applying Biome fixes...$(RESET)"
-	@$(PNPM) -w run fix
-	@echo "$(CYAN)==> Applying Go auto-fixes...$(RESET)"
+fix: ## Apply auto-fixes across Go (tidy + gofumpt + goimports + lint --fix) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell)
+	@$(MAKE) -j $(JOBS) fix-go fix-ts fix-md fix-prose
+	@echo "$(GREEN)==> Done$(RESET)"
+
+.PHONY: fix-go
+fix-go: $(GOLANGCI_LINT)
+	@echo "$(CYAN)==> Applying Go auto-fixes (tidy + gofumpt + goimports + lint --fix)...$(RESET)"
 	@go mod tidy
 	@$(GOFUMPT) -w $(GO_DIRS)
 	@$(GOIMPORTS) -w $(GO_DIRS)
 	@$(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
-	@echo "$(GREEN)==> Done$(RESET)"
 
-# verify: all static checks across the repo. fmt and lint above already
-# span Go + Biome; the recipe adds tidy + vulncheck (Go-side) and a TS
-# type-check (`tsc --noEmit`) — Biome doesn't type-check, so this fills
-# the gap that golangci-lint implicitly covers on the Go side.
+.PHONY: fix-ts
+fix-ts: pnpm-install
+	@echo "$(CYAN)==> Applying Biome fixes (format + lint + imports)...$(RESET)"
+	@$(PNPM) -w run fix
+
+.PHONY: fix-md
+fix-md: pnpm-install
+	@echo "$(CYAN)==> Applying markdownlint fixes...$(RESET)"
+	@$(PNPM) -w run fix:md
+
+# fix-prose: misspell autofix (common typos + UK → US) over the docs prose. Its
+# corrections come from a curated list and are unambiguous, so applying them
+# wholesale is safe.
+.PHONY: fix-prose
+fix-prose: $(MISSPELL)
+	@echo "$(CYAN)==> Applying misspell fixes (common typos + US spelling)...$(RESET)"
+	@$(MISSPELL) -locale US -source text -w $(DOCS_PROSE)
+
+# verify: all static checks across the repo, split into a parallel-safe leaf
+# list (verify-parallel) and a thin wrapper that fans it out under `-j`, exactly
+# like ci/ci-parallel. A bare `make verify` self-parallelizes instead of running
+# serially — and because every tool is its OWN leaf, the long pole is the single
+# slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
+# markdownlint along behind it).
+#
+# Leaves (9): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
+# docs spelling) for JS/TS + Markdown + prose;
+# check-docs (astro check — the only leaf that writes, to docs/.astro/, and
+# nothing else touches it) and typecheck-ts (tsc --noEmit). It runs lint-ts
+# (`biome check`) but NOT fmt-ts (`biome format`) — check already covers
+# formatting. ci-parallel depends on verify-parallel (not verify), so phase 1
+# shares one jobserver instead of nesting `make -j` inside `make -j`.
 .PHONY: verify
-verify: tidy fmt vulncheck lint pnpm-install ## Run all static checks across the repo (Go + TS, parallel-safe)
-	@echo "$(CYAN)==> Type-checking SDK (tsc --noEmit)...$(RESET)"
-	@$(PNPM) --filter $(SDK_NAME) run typecheck
+verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
+	@printf "$(CYAN)==> Static checks$(RESET) (Go + TS + docs, -j $(JOBS)):\n"
+	@$(MAKE) -j $(JOBS) verify-parallel || { printf "$(RED)$(BOLD)✗ Static checks failed$(RESET) — fix the ✗ above (often $(CYAN)make fix$(RESET)).\n"; exit 1; }
 	@scripts/ci-marker.sh write-verify
-	@echo "$(GREEN)==> All static checks passed$(RESET)"
+	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
+
+.PHONY: verify-parallel
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose vulncheck check-docs typecheck-ts
+
+# typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
+# recipe) so it can run as a parallel leaf of verify-parallel.
+.PHONY: typecheck-ts
+typecheck-ts: pnpm-install
+	$(call run,typecheck-ts (tsc --noEmit),$(PNPM) -s --filter $(SDK_NAME) run typecheck,)
 
 
 ##@ Build
@@ -397,13 +498,13 @@ $(COVER_BINARIES): %-cov: go-mod-download
 build-cover: $(COVER_BINARIES) ## Compile all binaries with coverage instrumentation → bin/<name>-cov
 
 # build-all: umbrella for "compile every artifact this repo produces" without
-# running tests. Recursive `$(MAKE) -j 4` mirrors how `ci` forces parallelism
-# on `ci-parallel` — typing `make build-all` gets parallel builds without
-# requiring the user to remember `-j`.
+# running tests. Recursive `$(MAKE) -j $(JOBS)` mirrors how `ci` forces
+# parallelism on `ci-parallel` — typing `make build-all` gets parallel builds
+# without requiring the user to remember `-j`.
 .PHONY: build-all
 build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 	@echo "$(CYAN)==> Building all artifacts...$(RESET)"
-	@$(MAKE) -j 4 build build-ts build-docs
+	@$(MAKE) -j $(JOBS) build build-ts build-docs
 	@echo "$(GREEN)$(BOLD)✔ All artifacts built$(RESET)"
 
 # build-ts: pnpm-driven SDK build → clients/ts/dist/ (ESM + CJS + .d.ts).
@@ -413,18 +514,30 @@ build-all: ## Build all artifacts in parallel — Go binaries + SDK + docs site
 build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
 	@$(PNPM) --filter $(SDK_NAME) run build
 
+# check-docs: astro check — type-checks .astro/.mdx, content-collection frontmatter
+# schemas, and config TS. Catches what `astro build` does NOT (the build strips
+# types without checking). No browser needed. A prereq of both `verify` and
+# `build-docs`, so make runs it once and serializes it before the build — Astro's
+# content-sync writes docs/.astro/, so check and build must not run concurrently.
+# (Link validation is separate: owned by starlight-links-validator at build.)
+.PHONY: check-docs
+check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
+	$(call run,check-docs (astro check),NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
+
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)
 # because rehype-mermaid renders diagrams via headless Chrome at build time and
-# starlight-links-validator needs it too.
+# starlight-links-validator needs it too. Depends on check-docs so a type/content
+# error fails fast before the (heavier) build, and the two never race on .astro.
 .PHONY: build-docs
-build-docs: install-playwright-docs ## Build docs site → docs/dist/
+build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@$(PNPM) --filter $(DOCS_FILTER) run build
 
 # branding-docs: regenerate logo/favicon/OG assets from the brand SVG.
 # Not a `build-docs` prereq — derived assets are committed so contributors
-# don't need rsvg + ImageMagick to build docs. The script self-locates via
-# git, so it runs the same from the repo root.
+# don't need rsvg, ImageMagick, resvg, or usvg to build docs (only someone
+# iterating on the mark does). The script self-locates via git, so it runs the
+# same from the repo root.
 .PHONY: branding-docs
 branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/scripts/branding/mark.svg
 	@docs/scripts/branding/generate.sh
@@ -452,12 +565,20 @@ DOCS_DIR    := docs
 SDK_NAME    := @wavehouse/sdk
 DOCS_FILTER := wavehouse-docs
 
+# Markdown + MDX prose sources under the Starlight content dir. lint-prose /
+# fix-prose hand misspell this explicit list (lazily expanded via `=`, so the
+# find only runs when those targets run) rather than a directory — so misspell
+# never reads a .ts content-config as text.
+DOCS_PROSE   = $(shell find $(DOCS_DIR)/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null)
+
 # pnpm-install: hidden internal target. Node targets depend on it to ensure
 # workspace deps are present; on a warm tree `--frozen-lockfile` is a fast
-# no-op. No doc string → hidden from `make help`.
+# no-op. No doc string → hidden from `make help`. --reporter=silent drops the
+# "Scope / Already up to date / Done in Xms" chatter so it doesn't clutter the
+# verify checklist; fatal errors (e.g. a lockfile mismatch) still print.
 .PHONY: pnpm-install
 pnpm-install:
-	@$(PNPM) install --frozen-lockfile
+	@$(PNPM) install --frozen-lockfile --reporter=silent
 
 # install-playwright-docs: hidden helper — fetch the Chromium build the docs
 # site needs (rehype-mermaid build-time SSR + starlight-links-validator). It's
@@ -572,16 +693,20 @@ cov: ## Consolidated coverage report (Go + TS) + gate against thresholds (auto-r
 
 # ci-parallel: hidden — the parallel-safe leaves. No `## ` doc comment so it
 # stays out of `make help`; users invoke `make ci`, not this directly.
-# Everything is listed explicitly (no subproject fan-out): `verify` already
-# spans Go + TS (Biome + tsc), and the build/test leaves are few enough that
-# an explicit list reads clearer than an abstraction.
+# Everything is listed explicitly (no subproject fan-out): `verify-parallel`
+# already spans Go + TS (Biome + tsc), and the build/test leaves are few enough
+# that an explicit list reads clearer than an abstraction. Depends on
+# verify-parallel (the leaves), NOT verify (the `-j` wrapper), so phase 1 runs
+# under one jobserver rather than nesting `make -j` inside `make -j`. The verify
+# marker that standalone `make verify` writes is instead written by ci's own
+# `ci-marker.sh write` below — it touches both the ci and verify markers.
 .PHONY: ci-parallel
-ci-parallel: verify build build-cover build-ts build-docs test test-ts
+ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
 	@echo "$(CYAN)==> Phase 1: Parallel Build & Static Checks$(RESET)"
-	@$(MAKE) -j 4 ci-parallel COV_DEFER=1
+	@$(MAKE) -j $(JOBS) ci-parallel COV_DEFER=1
 	@echo "$(CYAN)==> Phase 2: Sequential Heavy Tests$(RESET)"
 	@$(MAKE) test-integration COV_DEFER=1
 	@$(MAKE) test-e2e COV_DEFER=1
@@ -691,7 +816,7 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 ##@ Tooling
 
 # tools: bootstrap a fresh clone.
-#   - Installs pinned external binaries to .bin/ (currently just golangci-lint).
+#   - Installs pinned external binaries to .bin/ (golangci-lint, air, misspell).
 #   - Downloads Go modules so go.mod tool deps are available offline.
 #   - Installs SDK + E2E pnpm deps so test-ts / test-e2e are runnable
 #     without a separate manual setup step.
@@ -701,7 +826,11 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # Go's build cache makes subsequent invocations near-instant. If you need
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(AIR) go-mod-download pnpm-install ## Install pinned tools, Go modules, pnpm deps, and git hooks
+tools: ## Install pinned tools, Go modules, pnpm deps, and git hooks
+	@# The five installs are independent — fan them out under -j (golangci-lint
+	@# download ∥ air ∥ misspell ∥ go-mod-download ∥ pnpm-install). Go's module
+	@# cache is concurrency-safe, so this is just faster on a cold clone.
+	@$(MAKE) -j $(JOBS) $(GOLANGCI_LINT) $(AIR) $(MISSPELL) go-mod-download pnpm-install
 	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
 	@# `make tools` repeatedly just re-asserts the config. The .githooks/
 	@# directory is committed; this line plumbs git to it. Users can opt out
@@ -732,4 +861,14 @@ $(AIR):
 	@mkdir -p $(LOCAL_BIN)
 	@GOBIN=$(LOCAL_BIN) go install github.com/air-verse/air@$(AIR_VERSION)
 	@mv $(LOCAL_BIN)/air $@
+	@echo "$(GREEN)==> Installed: $@$(RESET)"
+
+# misspell installs cleanly via `go install` (pure Go), GOBIN-pinned to .bin/
+# like air. cmd/misspell is the CLI entry point of the golangci fork — the same
+# codebase golangci-lint vendors as a library for its Go-only misspell linter.
+$(MISSPELL):
+	@echo "$(YELLOW)==> Installing misspell $(MISSPELL_VERSION) for $(OS)_$(ARCH)...$(RESET)"
+	@mkdir -p $(LOCAL_BIN)
+	@GOBIN=$(LOCAL_BIN) go install github.com/golangci/misspell/cmd/misspell@$(MISSPELL_VERSION)
+	@mv $(LOCAL_BIN)/misspell $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"

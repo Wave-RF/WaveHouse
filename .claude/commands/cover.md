@@ -8,6 +8,7 @@ Generate the coverage report and surface anything below threshold from `.testcov
 Suite to run: $ARGUMENTS
 
 Behavior:
+
 - **no argument or "merge"**: just `make cov` (merges whatever Go + TS coverage exists under `tmp/coverage/` and gates against the thresholds)
 - **unit**: `make test-unit` (gates per-suite + writes `tmp/coverage/unit/`)
 - **integration**: `make test-integration` (requires Docker)
@@ -18,6 +19,7 @@ Behavior:
 - **all**: `make test-all` (all four suites sequentially + `make cov`)
 
 After the run completes:
+
 1. Parse `tmp/coverage/<suite>/coverage.txt` (Go) or `tmp/coverage/sdk/index.html` (SDK) for per-package coverage.
 2. Identify packages below the suite's threshold from `.testcoverage.yml`. Report as a sorted list.
 3. Surface the suite total + delta vs. the threshold.

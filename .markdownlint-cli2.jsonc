@@ -1,0 +1,34 @@
+{
+  // markdownlint-cli2 CLI config for the WaveHouse monorepo: which files to lint.
+  //
+  // Rule configuration lives in .markdownlint.json (NOT here) so that editor
+  // markdownlint extensions — which read .markdownlint.json directly — stay in
+  // sync with the CLI. See that file for why MD013 / MD033 / MD024 / MD041 are
+  // tuned. Biome owns JS / TS / JSON; markdownlint owns Markdown — no overlap.
+  // Driven from the root Makefile (`make lint` / `make fix`).
+  //
+  // markdownlint checks Markdown *style* only — it does NOT resolve links or
+  // routes (it lints one file at a time, with no model of the site). Internal
+  // link + #fragment validation is owned by starlight-links-validator at
+  // `astro build` (CI, via `make ci` → build-docs), the single source of truth
+  // for broken links. See docs/astro.config.mjs.
+  //
+  // NOTE: .mdx is intentionally NOT linted — markdownlint parses CommonMark, not
+  // MDX's JSX/import syntax (docs/src/content/docs/index.mdx).
+  //
+  // markdownlint-cli2 globs with dot:true, so `**/*.md` descends into hidden
+  // dirs — including .worktrees/, where this repo nests git worktrees. Honor
+  // .gitignore so a `make lint` / `make fix` from the *main* checkout never
+  // reaches into sibling worktrees, tmp/, or vendored Markdown — and `fix:md`
+  // (`--fix`) never rewrites another branch's files. The explicit ignores below
+  // stay as a fallback for the case where .gitignore is absent.
+  "gitignore": true,
+  "globs": ["**/*.md"],
+  "ignores": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/.astro/**",
+    "**/.pnpm/**",
+    "**/.worktrees/**"
+  ]
+}

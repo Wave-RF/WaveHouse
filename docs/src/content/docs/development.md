@@ -16,7 +16,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
 | **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
-| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/` and `tests/e2e/compose.yaml`; integration tests boot a ClickHouse testcontainer | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
+| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
 | **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json` and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
@@ -82,28 +82,31 @@ WaveHouse is now running at `http://localhost:8080` in standalone mode with:
 
 - **Embedded NATS** (JetStream) — no external MQ needed
 - **L1 cache only** (Ristretto) — no external cache needed
-- **No JWT secret** by default — requests resolve to the policy `default_role`
+- **Fail-closed** by default — `config.yaml` seeds no policy, so every request is denied until you seed one (see [Test the API](#test-the-api))
 - **Dedup disabled** by default — no Pebble needed
 - **Schema discovery** — automatically finds your ClickHouse tables
 
 ### Test the API
 
+`make dev` is **fail-closed** — `config.yaml` seeds no policy, so every request is denied. Point it at the shipped dev policy (the `public` trial role: read/write `clicks`/`events`, no token) and (re)start it:
+
 ```bash
-# Ingest data (no auth required by default)
+WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
+```
+
+Then the tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
+
+```bash
+# Ingest an event
 curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
 
-# Check discovered schemas
-curl -s http://localhost:8080/v1/schema | jq
-
-# Query events (wait a few seconds for the batch flush). `/v1/admin/query` is
-# admin-only: send a valid JWT whose role is the policy `admin_role`
-# ("admin" by default) via `Authorization: Bearer <jwt>`.
-curl -s -X POST http://localhost:8080/v1/admin/query \
+# Query it back (wait ~5s for the batch flush)
+curl -s -X POST "http://localhost:8080/v1/query?table=clicks" \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
+  -d '{"columns": ["page", "button", "score"], "limit": 10}'
 
 # Open an SSE stream for a specific table (Ctrl+C to stop)
 curl -N "http://localhost:8080/v1/stream?table=clicks"
@@ -111,16 +114,18 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 # With gap-fill (replays events since the given timestamp, then switches to live)
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 
-# Liveness check (no auth required)
-curl http://localhost:8080/livez
-# → {"status":"ok"}
+# Liveness / readiness (no auth required)
+curl http://localhost:8080/livez   # → {"status":"ok"}
+curl http://localhost:8080/readyz  # → {"status":"ready"}
+```
 
-# Readiness check (no auth required)
-curl http://localhost:8080/readyz
-# → {"status":"ready"}
+The admin surface — `/v1/schema`, `/v1/admin/query` (raw SQL), `/v1/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
 
-# DLQ stats
-curl http://localhost:8080/v1/dlq/stats
+```bash
+curl -s http://localhost:8080/v1/schema -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X POST http://localhost:8080/v1/admin/query -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
+curl -s http://localhost:8080/v1/dlq/stats -H "Authorization: Bearer $TOKEN"
 ```
 
 ### How `make dev` works
@@ -133,16 +138,16 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` plus `config.yaml`, rebuilds `tmp/wavehouse` on change, and restarts the binary.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file.
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
 **While `make dev` is running you get:**
 
-- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based SDK playground or example app on any localhost port can hit the API directly.
-- No JWT secret set by default, so every request resolves to the policy `default_role`. Override with env vars (see below).
+- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
+- A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` (or `config.yaml`) triggers a debounced rebuild + restart. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets
 
@@ -181,43 +186,36 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 2. Open Tab 2: run `make dev` (or `make test-e2e`)
 3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
 
-### Using the SDK playground against `make dev`
+### Using the SDK against `make dev`
 
-The `clients/ts/playground/` scripts (`public.ts`, `auth.ts`, `admin.ts`) target a WaveHouse signing JWTs with the secret `sdk-dev-secret`. To match under `make dev`:
-
-```bash
-WH_AUTH_JWT_SECRET=sdk-dev-secret make dev
-```
-
-Then in another terminal:
+There's no bundled playground — point the published `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`), with the dev policy seeded so requests are authorized:
 
 ```bash
-cd clients/ts
-pnpm install
-npx tsx playground/setup.ts          # seed sample tables + data
-npx tsx playground/public.ts         # SDK demo against the live server
+WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 ```
+
+See the [SDK guide](/sdk) for the client API and examples.
 
 Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs. Set `WH_AUTH_JWT_SECRET` so tokens can be validated; without it, every request resolves to the policy `default_role`. Mint a JWT signed with that secret (role == the policy `admin_role`) to reach admin/elevated endpoints:
+There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies everyone, admins included). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
 
 ```bash
-WH_AUTH_JWT_SECRET=my-secret make dev
+WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
-Then generate a test token:
+Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
-export TOKEN=$(jwt encode --secret "my-secret" '{"exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "my-secret" '{"role": "admin", "exp": 9999999999}')
 
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -s -X POST http://localhost:8080/v1/admin/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"page": "/home", "button": "signup"}'
+  -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
 
 ### Enable Dedup (Optional)
@@ -336,7 +334,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `tests/e2e/compose.yaml` — Single Docker Compose file with **profiles**: ClickHouse always starts; WaveHouse starts only with `--profile app`, so you can also point the suite at a hot-reload `make dev` instance instead.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
@@ -351,7 +349,7 @@ KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
 
 **If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
 
-**Test files**: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress`.
 
 ## Linting
 
@@ -404,12 +402,14 @@ WaveHouse/
 │   ├── query/              # Structured query AST + SQL builder
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
-│   ├── compose.yaml        # Shared Docker Compose (ClickHouse + optional WaveHouse)
-│   ├── fixtures/           # Idempotent ClickHouse DDL scripts
-│   └── sdk/                # E2E tests via TypeScript SDK (Vitest)
+│   ├── integration/        # Go integration tests (//go:build integration)
+│   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
+│       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
+│       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
 ├── deployments/
-│   ├── compose/            # Docker Compose files
-│   └── docker/             # Dockerfiles
+│   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
+│   ├── Dockerfile          # Runtime image
+│   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets
@@ -473,7 +473,7 @@ Run `make help` to see all targets. Key ones:
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
 | `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`) |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |

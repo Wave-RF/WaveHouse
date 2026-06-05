@@ -60,8 +60,37 @@
     "editor.tabSize": 2
   },
   "[markdown]": {
-    "editor.tabSize": 2
+    "editor.tabSize": 2,
+    // Apply markdownlint's auto-fixes on save — mirrors `make fix` / `pnpm run
+    // fix:md`. The DavidAnson.vscode-markdownlint extension and the CLI both read
+    // the same .markdownlint.json (rules) + .markdownlint-cli2.jsonc (globs), so
+    // the editor and CI stay in lockstep.
+    "editor.codeActionsOnSave": {
+      "source.fixAll.markdownlint": "explicit"
+    }
   },
+
+  // ── Markdown link validation (VS Code built-in — Microsoft) ────
+  // The only editor-side link checker we use is VS Code's own built-in
+  // Markdown validation — no third-party link extension. It accurately
+  // validates same-page #anchors and reference-style links (kept on as
+  // warnings). But it resolves root-absolute links against the workspace
+  // folder, so Astro/Starlight routes like /api or /configuration#authentication
+  // look "broken" to it even though they're valid pages, and there is no
+  // setting to remap that (microsoft/vscode#222020). So `fileLinks` validation
+  // is turned off — otherwise every /route link is a false positive.
+  //
+  // Cross-page links + fragments are validated authoritatively in CI by
+  // starlight-links-validator at `astro build` (docs/astro.config.mjs, wired
+  // through `make ci` → build-docs) — that is the single source of truth for
+  // "are the links good".
+  "markdown.validate.enabled": true,
+  "markdown.validate.fileLinks.enabled": "ignore",
+  "markdown.validate.fileLinks.markdownFragmentLinks": "ignore",
+  "markdown.validate.fragmentLinks.enabled": "warning",
+  "markdown.validate.referenceLinks.enabled": "warning",
+  "markdown.validate.unusedLinkDefinitions.enabled": "warning",
+  "markdown.validate.duplicateLinkDefinitions.enabled": "warning",
 
   // ── Search exclusions ──────────────────────────────────────────
   "search.exclude": {

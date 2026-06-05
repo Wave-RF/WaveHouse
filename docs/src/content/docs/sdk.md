@@ -211,7 +211,7 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
 | `'<='` | `lte` | Less than or equal |
 | `'in'` | `in` | Value in array |
 | `'like'` | `like` | SQL LIKE pattern |
-| `'not_like'` | `not_like` | SQL NOT LIKE |
+| `'not_like'` | — | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
 
 #### Aggregations
 
@@ -289,7 +289,7 @@ Open a live stream from the builder's table. See [Streaming](#streaming).
 
 ### Pagination
 
-When `limit` is set and the result contains exactly `limit` rows, the result includes `hasMore: true` and a `next()` function. Calling `next()` fetches the next page using cursor-based pagination (adds a filter on the sort column using the last row's value).
+When `limit` is set and the result contains at least `limit` rows, `hasMore` is `true`. Cursor-based pagination's `next()` walks an **order column** — it adds a filter on that column using the last row's value — so `next()` is only attached when the query has an explicit `.orderBy()`. With no order column the result still reports `hasMore` honestly, but `next` is `undefined` (there is no deterministic cursor to build) — add an `.orderBy()` to paginate.
 
 ```ts
 let result = await clicks.select().orderBy('received_timestamp', 'desc').limit(100).fetch();
@@ -375,6 +375,8 @@ await wh.schema.refresh();
 
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
+> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/schema*`, which are **admin-only** endpoints. Against any non-dev policy (anything but `default_role: admin`), construct the client with an admin-role token or these calls return `403`.
+
 ---
 
 ## Policy — `wh.policy`
@@ -415,7 +417,7 @@ Dead Letter Queue operations.
 ```ts
 // Get DLQ statistics
 const { data } = await wh.dlq.list();
-// data: { tables: { "dlq.clicks": 3, "dlq.users": 0 }, total: 3 }
+// data: { tables: { "clicks": 3, "users": 0 }, total: 3 }
 
 // Stats for a specific table
 const { data } = await wh.dlq.table('clicks');
@@ -622,13 +624,13 @@ The SDK **never throws**. All errors are returned in `Result.error`.
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
-| 0 | `ABORTED` | No | Request cancelled via `AbortSignal` |
+| 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 
 ---
 
 ## Full API Tree
 
-```
+```text
 createClient<DB>(config) → WaveHouseClient
 ├── .from(table) → TableRef (NOT thenable)
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>
@@ -677,10 +679,13 @@ StreamController (NOT thenable)
 Generate TypeScript types from a running WaveHouse instance:
 
 ```bash
+# From the SDK package (clients/ts/):
+pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
+# or directly:
 npx tsx src/cli/codegen.ts --url http://localhost:8080 --out ./src/db.d.ts
-# or via npm script:
-npm run codegen -- --url http://localhost:8080 --out ./src/db.d.ts
 ```
+
+Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
 
 **Options:**
 
@@ -722,13 +727,12 @@ export interface ClicksRow {
 
 ## E2E Testing
 
-The SDK doubles as the E2E integration test harness. Tests in `tests/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
+The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
 
 ```bash
-make test-e2e          # Run all E2E tests (starts Docker services if needed)
-make test-e2e-dev      # Watch mode for iterative development
+make test-e2e          # Run all E2E tests (the orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary, then runs the SDK suite)
 ```
 
-Test files: `ingest.test.ts`, `query.test.ts`, `auth.test.ts`, `admin.test.ts`, `streaming.test.ts`.
+Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress` (each `*.test.ts`).
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

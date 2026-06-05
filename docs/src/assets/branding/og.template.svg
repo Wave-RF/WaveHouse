@@ -1,17 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0A0B0E"/>
-      <stop offset="1" stop-color="#14171C"/>
+      <stop offset="0" stop-color="__BG__"/>
+      <stop offset="1" stop-color="__SURFACE__"/>
     </linearGradient>
     <radialGradient id="glow" cx="0.9" cy="0.1" r="0.5">
-      <stop offset="0" stop-color="#06B0BF" stop-opacity="0.30"/>
-      <stop offset="1" stop-color="#06B0BF" stop-opacity="0"/>
+      <stop offset="0" stop-color="__ACCENT__" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="__ACCENT__" stop-opacity="0"/>
     </radialGradient>
     <!-- Accent-tinted scaffolding grid. Visible enough to read as structure
          without competing with the wordmark / tagline. -->
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#06B0BF" stroke-width="0.75" stroke-opacity="0.16"/>
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="__ACCENT__" stroke-width="0.75" stroke-opacity="0.16"/>
     </pattern>
   </defs>
 
@@ -21,7 +21,7 @@
   <rect width="1200" height="630" fill="url(#glow)"/>
 
   <!-- Canonical lockup — mark + wordmark as a single 480×100 design unit from
-       scripts/branding/lockup.svg. Heights / weights / gap are designed-in,
+       lockup.svg (co-located). Heights / weights / gap are designed-in,
        so the OG just picks an x/y/scale and the rest comes out balanced.
        scale 1.85 → visual height ≈ 144 px, visual width ≈ 825 px.
        translate (115 135) places the lockup so its visible content starts
@@ -39,8 +39,8 @@
        edge of the 1200-px canvas — visibly breathable without pushing the
        wrap point so far in that the line breaks before "streaming." -->
   <text x="120" y="400" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="34" font-weight="400" fill="#9CA3AF">
-    <tspan x="120" dy="0">The open-source real-time API gateway for <tspan fill="#06B0BF" font-weight="500">ClickHouse</tspan>.</tspan>
+        font-size="34" font-weight="400" fill="__INK_MUTED__">
+    <tspan x="120" dy="0">The open-source real-time API gateway for <tspan fill="__ACCENT__" font-weight="500">ClickHouse</tspan>.</tspan>
     <tspan x="120" dy="52">Schema-aware ingest, async batching, real-time streaming.</tspan>
   </text>
 
@@ -52,7 +52,7 @@
        split (tagline gray left / accent cyan right) gives the URL CTA-weight
        without enlarging it. -->
   <text x="120" y="585" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="28" font-weight="400" fill="#9CA3AF">A Wave RF open-source project</text>
+        font-size="28" font-weight="400" fill="__INK_MUTED__">A Wave RF open-source project</text>
   <text x="1080" y="585" font-family="Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="28" font-weight="500" fill="#06B0BF" text-anchor="end">wavehouse.dev</text>
+        font-size="28" font-weight="500" fill="__ACCENT__" text-anchor="end">wavehouse.dev</text>
 </svg>

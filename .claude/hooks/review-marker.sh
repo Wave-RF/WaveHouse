@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# SubagentStop hook — writes the pre-push review marker.
+# SubagentStop hook — writes a pre-push review marker.
 #
-# When the pre-push-reviewer subagent finishes its review and its last assistant
-# message ends with `VERDICT: ship_it`, this hook writes
-# tmp/review-passed-<HEAD-sha>. The pre-push gate (in
-# .claude/hooks/agent-bash-gate.sh) reads that marker to allow the subsequent
-# `git push`.
+# Both review subagents gate a push, each with its own HEAD-keyed marker:
+#   pre-push-reviewer → tmp/review-passed-<HEAD-sha>       (code review)
+#   docs-reviewer     → tmp/docs-review-passed-<HEAD-sha>  (docs prose + code<->docs sync)
+# When the subagent's last assistant message ends with `VERDICT: ship_it`, this
+# hook writes the corresponding marker. The pre-push gate (in
+# .claude/hooks/agent-bash-gate.sh) requires both markers to allow the
+# subsequent `git push`.
 #
 # Why SubagentStop (not PostToolUse:Agent): the PostToolUse:Agent payload puts
 # the subagent's final text in `.tool_response.content[].text` (array of
@@ -14,13 +16,13 @@
 # both stable and what we actually need. Both events do fire on subagent
 # completion; we just use the one with the friendlier schema.
 #
-# Why this hook exists at all: the orchestrator agent is denied direct writes
-# to tmp/(ci|review)-passed-* (permission deny list + agent-bash-gate). Hooks
-# run at Claude Code privilege level, NOT subject to the permission system, so
-# this is the only path to creating the marker. The subagent's verdict is the
-# gate; the orchestrator can't fake it because the subagent runs in fresh
-# context with the canonical system prompt from
-# .claude/agents/pre-push-reviewer.md.
+# Why this hook exists at all: the orchestrator agent must not hand-write
+# tmp/(ci|review|docs-review)-passed-* (policy in AGENTS.md §"Don't bypass the
+# gates"). Hooks run at Claude Code privilege level, NOT subject to the
+# permission system, so this is the only honest path to creating a marker. The
+# subagent's verdict is the gate; the orchestrator can't fake it because each
+# subagent runs in fresh context with the canonical system prompt from
+# .claude/agents/<agent>.md.
 
 set -uo pipefail
 
@@ -38,12 +40,17 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # SubagentStop fires for every subagent completion (no matcher support per
-# Claude Code docs), so we filter by `agent_type` in-script.
+# Claude Code docs), so we filter by `agent_type` in-script and map it to the
+# marker it gates. Any other subagent (Explore, Plan, …) is a no-op.
 if ! agent_type=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null); then
   echo "review-marker: malformed SubagentStop payload; could not parse .agent_type — no marker written." >&2
   exit 0
 fi
-[ "$agent_type" = "pre-push-reviewer" ] || exit 0
+case "$agent_type" in
+  pre-push-reviewer) marker_prefix="review-passed" ;;
+  docs-reviewer)     marker_prefix="docs-review-passed" ;;
+  *) exit 0 ;;
+esac
 
 if ! response=$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null); then
   echo "review-marker: malformed SubagentStop payload; could not parse .last_assistant_message — no marker written." >&2
@@ -69,10 +76,10 @@ cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 head_sha=$(git rev-parse HEAD 2>/dev/null)
 [ -z "$head_sha" ] && exit 0
 
-if mkdir -p tmp && touch "tmp/review-passed-${head_sha}"; then
-  echo "📝 Pre-push review marker written: tmp/review-passed-${head_sha:0:8}" >&2
+if mkdir -p tmp && touch "tmp/${marker_prefix}-${head_sha}"; then
+  echo "📝 Pre-push marker written (${agent_type}): tmp/${marker_prefix}-${head_sha:0:8}" >&2
 else
-  echo "review-marker: failed to write tmp/review-passed-${head_sha:0:8} — no marker written." >&2
+  echo "review-marker: failed to write tmp/${marker_prefix}-${head_sha:0:8} — no marker written." >&2
 fi
 
 exit 0

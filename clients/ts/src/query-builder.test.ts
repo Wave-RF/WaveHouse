@@ -196,7 +196,9 @@ describe("QueryBuilder", () => {
     expect(body.aggregations).toBeUndefined();
     expect(body.filters).toBeUndefined();
     expect(body.group_by).toBeUndefined();
-    expect(body.order_by).toEqual([{ column: "received_timestamp", dir: "desc" }]);
+    // A bare query carries no order_by: the SDK no longer hardcodes a
+    // received_timestamp default, so .fetch() stays valid on any schema (#270).
+    expect(body.order_by).toBeUndefined();
     expect(body.time_range).toBeUndefined();
   });
 
@@ -229,15 +231,16 @@ describe("QueryBuilder", () => {
 
   // --- Pagination ---
 
-  it("sets hasMore=true when result length equals limit", async () => {
+  it("sets hasMore=true but no next() when limit is hit with no order", async () => {
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify([{ page: "a" }, { page: "b" }]), { status: 200 }),
     );
 
     const result = await builder().limit(2).fetch();
 
+    // hasMore from the row count; no order column → no cursor → no next().
     expect(result.hasMore).toBe(true);
-    expect(result.next).toBeDefined();
+    expect(result.next).toBeUndefined();
   });
 
   it("sets hasMore=false when result length is less than limit", async () => {
@@ -274,6 +277,38 @@ describe("QueryBuilder", () => {
       op: "lt",
       value: "2026-01-01T11:00:00Z",
     });
+  });
+
+  it("next() walks ascending order with a gt cursor and returns the next page", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: "c" }]), { status: 200 }));
+
+    const page1 = await builder().orderBy("id", "asc").limit(2).fetch();
+    expect(page1.next).toBeDefined();
+
+    const page2 = await page1.next!();
+
+    const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
+    // Keyset forward from the last row, with the same order pinned across pages.
+    expect(body.filters).toContainEqual({ column: "id", op: "gt", value: "b" });
+    expect(body.order_by).toEqual([{ column: "id", dir: "asc" }]);
+    expect(page2.data).toEqual([{ id: "c" }]);
+  });
+
+  // TODO(#274): re-enable once the backend supplies a per-table default sort order,
+  // letting a bare .fetch() (no explicit .orderBy()) expose next() again.
+  it.skip("exposes next() for a bare fetch once a default order is configured (#274)", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify([{ page: "a" }, { page: "b" }]), { status: 200 }),
+    );
+
+    const result = await builder().limit(2).fetch();
+
+    expect(result.hasMore).toBe(true);
+    expect(result.next).toBeDefined();
   });
 
   // --- PromiseLike ---
