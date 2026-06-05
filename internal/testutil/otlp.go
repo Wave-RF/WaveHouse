@@ -54,8 +54,7 @@ import (
 type FakeOTLP struct {
 	addr      string
 	server    *grpc.Server
-	tlsConfig *tls.Config       // non-nil only when constructed via NewFakeOTLPTLS
-	cert      *x509.Certificate // ditto — the receiver's self-signed leaf cert
+	tlsConfig *tls.Config // non-nil only when constructed via NewFakeOTLPTLS
 
 	mu      sync.Mutex
 	traces  []*tracepb.ResourceSpans
@@ -80,22 +79,18 @@ func NewFakeOTLP(t *testing.T) *FakeOTLP {
 func NewFakeOTLPTLS(t *testing.T) *FakeOTLP {
 	t.Helper()
 
-	cert, parsed, clientCfg := ephemeralTLSPair(t)
-	// Pinned to TLS 1.3 on both sides to match the production floor in
-	// observability.tlsConfigOrDefault — a regression below TLS 1.3 should
-	// fail the handshake here rather than negotiate to 1.2 silently.
+	cert, clientCfg := ephemeralTLSPair(t)
 	serverCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	return newFakeOTLP(t, &fakeOTLPTLS{server: serverCfg, client: clientCfg, cert: parsed})
+	return newFakeOTLP(t, &fakeOTLPTLS{server: serverCfg, client: clientCfg})
 }
 
 type fakeOTLPTLS struct {
 	server *tls.Config
 	client *tls.Config
-	cert   *x509.Certificate
 }
 
 func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
@@ -112,7 +107,6 @@ func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
 	if tlsCfg != nil {
 		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsCfg.server)))
 		r.tlsConfig = tlsCfg.client
-		r.cert = tlsCfg.cert
 	}
 	r.server = grpc.NewServer(serverOpts...)
 
@@ -132,9 +126,8 @@ func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
 }
 
 // ephemeralTLSPair mints a one-shot ECDSA self-signed cert valid for 127.0.0.1
-// and returns it along with its parsed form and a client tls.Config that
-// trusts only this cert.
-func ephemeralTLSPair(t *testing.T) (tls.Certificate, *x509.Certificate, *tls.Config) {
+// and returns it along with a client tls.Config that trusts only this cert.
+func ephemeralTLSPair(t *testing.T) (tls.Certificate, *tls.Config) {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -169,7 +162,7 @@ func ephemeralTLSPair(t *testing.T) (tls.Certificate, *x509.Certificate, *tls.Co
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(parsed)
-	return cert, parsed, &tls.Config{
+	return cert, &tls.Config{
 		RootCAs:    pool,
 		ServerName: "127.0.0.1",
 		MinVersion: tls.VersionTLS13,
@@ -184,11 +177,6 @@ func (r *FakeOTLP) Addr() string { return r.addr }
 // ephemeral cert. Returns nil when the server was constructed via the plaintext
 // NewFakeOTLP.
 func (r *FakeOTLP) TLSConfig() *tls.Config { return r.tlsConfig }
-
-// Cert returns the receiver's parsed self-signed leaf certificate. Returns
-// nil for the plaintext variant. Use to build a merged trust pool across
-// multiple TLS receivers in a single test (per-signal endpoint coverage).
-func (r *FakeOTLP) Cert() *x509.Certificate { return r.cert }
 
 // SpanCount returns the total number of spans received across all RPCs.
 // Spans are flattened across resource and scope groupings.

@@ -1,43 +1,23 @@
 package observability
 
 import (
-	"crypto/tls"
 	"fmt"
 	"strings"
 )
 
-// tlsConfigOrDefault returns c, or a TLS 1.3 floor config when c is nil.
-// credentials.NewTLS panics on a nil *tls.Config; the production default
-// uses system roots with MinVersion=TLS1.3.
-func tlsConfigOrDefault(c *tls.Config) *tls.Config {
-	if c != nil {
-		return c
+// schemeURL normalizes an otel.addr into a URL the OTLP exporters'
+// WithEndpointURL accepts, so the SDK — not us — owns scheme→TLS selection and
+// URL-path stripping. A bare `host:port` (the backward-compatible default) has
+// no scheme for url.Parse to key on, so it gets an `http://` prefix → plaintext
+// gRPC, matching the prior WithInsecure() default. A value that already carries
+// an `https://` or `http://` scheme passes through unchanged; the SDK then
+// selects TLS from `https://`, leaves anything else plaintext, and strips any
+// URL path (gRPC routes by service name). See provider.go for the call sites.
+func schemeURL(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS13}
-}
-
-// ParseEndpoint splits an OTLP endpoint string into the gRPC dial host and a
-// useTLS flag. The OpenTelemetry SDK env-var convention is honored: an
-// `https://` prefix selects TLS, while `http://` or a bare `host:port` stays
-// plaintext (backward-compat with the prior WithInsecure() default).
-//
-// A URL path component is tolerated and stripped — gRPC routes by service name
-// and ignores the path, so `https://otlp-gateway.example.com/otlp` and
-// `https://otlp-gateway.example.com` dial the same way.
-func ParseEndpoint(addr string) (host string, useTLS bool) {
-	switch {
-	case strings.HasPrefix(addr, "https://"):
-		useTLS = true
-		host = strings.TrimPrefix(addr, "https://")
-	case strings.HasPrefix(addr, "http://"):
-		host = strings.TrimPrefix(addr, "http://")
-	default:
-		host = addr
-	}
-	if i := strings.IndexByte(host, '/'); i >= 0 {
-		host = host[:i]
-	}
-	return host, useTLS
+	return "http://" + addr
 }
 
 // ParseOTelHeaders parses the OpenTelemetry-spec headers env-var format

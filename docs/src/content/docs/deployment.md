@@ -333,7 +333,7 @@ When `dlq.enabled` is `true` (default), failed batch inserts are published to th
 
 ## Observability
 
-Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. `otel.addr` is scheme-aware — `https://` selects TLS, a bare `host:port` or `http://` stays plaintext — and `otel.headers` carries cloud auth, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled (and pointed at its own endpoint) independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
+Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. `otel.addr` is scheme-aware — `https://` selects TLS, a bare `host:port` or `http://` stays plaintext — and `otel.headers` carries cloud auth, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
 
 WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
@@ -368,7 +368,7 @@ export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
 export WH_OTEL_HEADERS="authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')"
 ```
 
-If different signals need different gateway hosts, set `WH_OTEL_TRACES_ADDR` / `WH_OTEL_METRICS_ADDR` / `WH_OTEL_LOGS_ADDR` to override `otel.addr` per signal (empty inherits). Headers always apply to every exporter — there is intentionally no per-signal header override. mTLS / client-certificate auth is not yet supported.
+mTLS / client-certificate auth is not yet supported.
 
 ### Pattern: Datadog (via local DDOT Collector)
 

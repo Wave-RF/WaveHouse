@@ -35,8 +35,8 @@ type Config struct {
 // when false, no signals are initialized regardless of the per-signal toggles.
 // `addr` is scheme-aware (`https://` selects TLS, `http://` or a bare
 // host:port stays plaintext); `headers` carries per-RPC cloud auth (parsed and
-// validated at boot in cmd/wavehouse). Per-signal `traces/metrics/logs.addr`
-// override `addr` for one signal — empty inherits it. See docs/configuration.md.
+// validated at boot in cmd/wavehouse) and applies to every signal's exporter.
+// See docs/configuration.md.
 type OTel struct {
 	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
 	Addr    string      `yaml:"addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
@@ -49,12 +49,10 @@ type OTel struct {
 type OTelTraces struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_TRACES_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_TRACES_SAMPLE_RATE" env-default:"1.0"`
-	Addr       string  `yaml:"addr" env:"WH_OTEL_TRACES_ADDR"`
 }
 
 type OTelMetrics struct {
-	Enabled bool   `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
-	Addr    string `yaml:"addr" env:"WH_OTEL_METRICS_ADDR"`
+	Enabled bool `yaml:"enabled" env:"WH_OTEL_METRICS_ENABLED" env-default:"true"`
 }
 
 // Prometheus controls a Prometheus exposition endpoint served alongside (or
@@ -86,7 +84,6 @@ type Prometheus struct {
 type OTelLogs struct {
 	Enabled    bool    `yaml:"enabled" env:"WH_OTEL_LOGS_ENABLED" env-default:"true"`
 	SampleRate float64 `yaml:"sample_rate" env:"WH_OTEL_LOGS_SAMPLE_RATE" env-default:"1.0"`
-	Addr       string  `yaml:"addr" env:"WH_OTEL_LOGS_ADDR"`
 }
 
 type Server struct {

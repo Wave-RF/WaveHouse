@@ -110,8 +110,12 @@ func run() int {
 		// malformed value is FATAL: the InitProvider error below is non-fatal
 		// (we fall back to stdout), so a bad header reaching the exporter would
 		// silently ship telemetry with no auth — fail the boot loudly instead.
-		// Skipped in Prometheus-only mode: no OTLP push, so headers are
-		// irrelevant and a stale value shouldn't block boot.
+		//
+		// Gated on OTel.Enabled (the OTLP push path), NOT on !Prometheus.Enabled:
+		// when BOTH outputs are on we still push OTLP and still need these
+		// headers, so a !Prometheus check would wrongly skip validation. A
+		// Prometheus-only deployment pushes no OTLP, so a stale/blank value is
+		// irrelevant there and shouldn't block boot.
 		var headers map[string]string
 		if cfg.OTel.Enabled {
 			var err error
@@ -124,13 +128,10 @@ func run() int {
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
 			Endpoint:          cfg.OTel.Addr,
 			Headers:           headers,
-			TracesEndpoint:    cfg.OTel.Traces.Addr,
 			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
 			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
-			MetricsEndpoint:   cfg.OTel.Metrics.Addr,
 			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
 			PrometheusEnabled: cfg.Prometheus.Enabled,
-			LogsEndpoint:      cfg.OTel.Logs.Addr,
 			LogsEnabled:       cfg.OTel.Enabled && cfg.OTel.Logs.Enabled,
 		})
 		if err != nil {

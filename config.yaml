@@ -23,14 +23,11 @@ otel:
   # headers: ""          # comma-separated key=value cloud auth, e.g. "x-honeycomb-team=API_KEY"
   traces:
     enabled: true
-    # addr: ""           # per-signal endpoint override; empty inherits otel.addr
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
   metrics:
     enabled: true        # OTLP push for metrics
-    # addr: ""           # per-signal endpoint override; empty inherits otel.addr
   logs:
     enabled: true
-    # addr: ""           # per-signal endpoint override; empty inherits otel.addr
     sample_rate: 1.0     # DEBUG/INFO OTLP rate; WARN+ always 100%, stdout always 100%
 
 # Prometheus exposition is independent of OTel — works on its own (Alloy /

@@ -122,20 +122,15 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 
 **TLS + direct-to-cloud OTLP.** `otel.addr` is scheme-aware: `https://` selects TLS (system root CAs), while `http://` or a bare `host:port` stays plaintext gRPC (the default, backward-compatible with prior releases). Combined with `otel.headers` for per-RPC auth, WaveHouse ships telemetry straight to TLS-protected cloud gateways (Grafana Cloud's OTLP gateway, Honeycomb, etc.) — no sidecar required. A sidecar is still useful for egress queuing, batching, and tail-based sampling; it's just no longer mandatory. Datadog has no public direct-to-cloud OTLP endpoint — use the local DDOT Collector path in the [deployment guide](/deployment#observability). mTLS / client-certificate auth is not yet supported. See [Deployment → Observability](/deployment#observability) for worked Honeycomb / Grafana Cloud examples.
 
-If different signals need different gateway hosts (Grafana Cloud uses distinct trace / metric / log endpoints in some regions), set `otel.{traces,metrics,logs}.addr` to override the default for that signal — empty inherits `otel.addr`. Headers always apply to every exporter; there is intentionally no per-signal header override.
-
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. |
-| `otel.addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | Default OTLP gRPC endpoint for every enabled signal. Accepts `host:port` or `http://host:port` (plaintext) or `https://host:port` (TLS via system root CAs). A trailing URL path is tolerated and stripped — gRPC routes by service name. See `make help` for a local collector setup. |
+| `otel.addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | OTLP gRPC endpoint for every enabled signal. Accepts `host:port` or `http://host:port` (plaintext) or `https://host:port` (TLS via system root CAs). A trailing URL path is tolerated and stripped — gRPC routes by service name. See `make help` for a local collector setup. |
 | `otel.headers` | `WH_OTEL_HEADERS` | *(empty)* | Comma-separated `key=value` pairs applied as gRPC metadata to **every** OTLP export — the standard auth knob for cloud endpoints (`authorization=Basic <b64>`, `x-honeycomb-team=<key>`). Values may contain `=`; only the first `=` per pair splits key from value, so base64 padding round-trips. Parsed and validated at boot — a malformed value fails startup rather than silently shipping unauthenticated telemetry. |
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
-| `otel.traces.addr` | `WH_OTEL_TRACES_ADDR` | *(empty)* | Per-signal override for `otel.addr` (same scheme rules). Empty inherits `otel.addr`. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
-| `otel.metrics.addr` | `WH_OTEL_METRICS_ADDR` | *(empty)* | Per-signal override for `otel.addr`. Empty inherits `otel.addr`. |
 | `otel.logs.enabled` | `WH_OTEL_LOGS_ENABLED` | `true` | Export logs via OTLP gRPC. Disabling this leaves stdout logging untouched — the OTel logger provider is simply not registered. |
-| `otel.logs.addr` | `WH_OTEL_LOGS_ADDR` | *(empty)* | Per-signal override for `otel.addr`. Empty inherits `otel.addr`. |
 | `otel.logs.sample_rate` | `WH_OTEL_LOGS_SAMPLE_RATE` | `1.0` | OTLP export rate for `DEBUG`/`INFO` records, in `[0.0, 1.0]`. Validated at config load. `WARN` and `ERROR` records always export at 100% — dropping them silently during incidents is too dangerous to expose as a knob. **Stdout always receives 100% of records regardless of this rate** (see the scraper note above). |
 
 ### Prometheus

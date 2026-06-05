@@ -6,31 +6,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseEndpoint(t *testing.T) {
+func TestSchemeURL(t *testing.T) {
+	// schemeURL only normalizes a bare host:port into an http:// URL so the
+	// SDK's WithEndpointURL accepts it; scheme→TLS selection and path stripping
+	// are the SDK's job (covered end-to-end by the integration tests).
 	cases := []struct {
-		name     string
-		in       string
-		wantHost string
-		wantTLS  bool
+		name string
+		in   string
+		want string
 	}{
-		{name: "bare host port", in: "otlp.example.com:4317", wantHost: "otlp.example.com:4317"},
-		{name: "http scheme", in: "http://otlp.example.com:4317", wantHost: "otlp.example.com:4317"},
-		{name: "https scheme", in: "https://otlp.example.com:443", wantHost: "otlp.example.com:443", wantTLS: true},
-		{name: "https with path", in: "https://otlp-gateway.example.com/otlp", wantHost: "otlp-gateway.example.com", wantTLS: true},
-		{name: "https with port and path", in: "https://otlp.example.com:443/v1/traces", wantHost: "otlp.example.com:443", wantTLS: true},
-		{name: "empty", in: "", wantHost: ""},
-		{name: "ipv4 plaintext", in: "127.0.0.1:4317", wantHost: "127.0.0.1:4317"},
-		// Pin IPv6 bracketed-literal behavior — a future refactor to net/url
-		// would need to preserve the brackets.
-		{name: "ipv6 bare", in: "[::1]:4317", wantHost: "[::1]:4317"},
-		{name: "ipv6 https", in: "https://[::1]:4317", wantHost: "[::1]:4317", wantTLS: true},
-		{name: "ipv6 https with path", in: "https://[::1]:4317/otlp", wantHost: "[::1]:4317", wantTLS: true},
+		{name: "bare host port gets http prefix", in: "otlp.example.com:4317", want: "http://otlp.example.com:4317"},
+		{name: "ipv4 bare gets http prefix", in: "127.0.0.1:4317", want: "http://127.0.0.1:4317"},
+		{name: "ipv6 bare gets http prefix", in: "[::1]:4317", want: "http://[::1]:4317"},
+		{name: "http scheme passes through", in: "http://otlp.example.com:4317", want: "http://otlp.example.com:4317"},
+		{name: "https scheme passes through", in: "https://otlp.example.com:443", want: "https://otlp.example.com:443"},
+		{name: "https with path passes through", in: "https://otlp-gateway.example.com/otlp", want: "https://otlp-gateway.example.com/otlp"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotHost, gotTLS := ParseEndpoint(tc.in)
-			require.Equal(t, tc.wantHost, gotHost)
-			require.Equal(t, tc.wantTLS, gotTLS)
+			require.Equal(t, tc.want, schemeURL(tc.in))
 		})
 	}
 }
