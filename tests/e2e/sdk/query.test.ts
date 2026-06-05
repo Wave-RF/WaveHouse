@@ -299,16 +299,30 @@ describe("Query", () => {
     });
 
     try {
-      // The query will hit the Go context deadline exceeded error
-      // IMPORTANT: Make the query unique so it doesn't get served instantly from the cache!
-      const result = await wh
-        .from(T.clicks)
-        .select("*")
-        .where("event_id", "=", testId())
-        .limit(999)
-        .fetch();
-      expect(result.error).not.toBeNull();
-      expect(result.error!.status).toBe(500);
+      // The 1ms budget races the ClickHouse roundtrip: this zero-row query on
+      // a tiny table CAN finish sub-millisecond before the deadline is ever
+      // observed, so a single attempt is a coin flip (flaked on 2-core CI,
+      // #283). The enforced property is existential — a 1ms budget must
+      // produce deadline 500s — so retry until one fires; if enforcement is
+      // broken, every attempt succeeds and the wait times out the test.
+      // IMPORTANT: unique event_id per attempt so no attempt is cache-served!
+      let deadlineError: { status: number } | null = null;
+      await waitForCondition(
+        async () => {
+          const result = await wh
+            .from(T.clicks)
+            .select("*")
+            .where("event_id", "=", testId())
+            .limit(999)
+            .fetch();
+          deadlineError = result.error;
+          return result.error !== null;
+        },
+        10_000,
+        100,
+      );
+      expect(deadlineError).not.toBeNull();
+      expect(deadlineError!.status).toBe(500);
     } finally {
       // Restore policy even if test fails so that others don't too
       await admin.policy.set(currentPolicyRes.data!);
