@@ -142,6 +142,7 @@ const terminalLines: TerminalLine[] = [
                   "wh-hero__action",
                   `wh-hero__action--${action.variant ?? "primary"}`,
                 ]}
+                data-ph-cta={action.text}
                 {...attrs}
               >
                 <span>{action.text}</span>
@@ -317,6 +318,24 @@ const terminalLines: TerminalLine[] = [
       { once: true },
     );
   })();
+</script>
+
+<script is:inline>
+  function setupHeroCTATracking() {
+    document.querySelectorAll('.wh-hero__action[data-ph-cta]').forEach(function(el) {
+      el.removeEventListener('click', el.__whPhHandler);
+      el.__whPhHandler = function() {
+        window.posthog?.capture('hero_cta_clicked', {
+          cta_text: el.getAttribute('data-ph-cta'),
+          cta_href: el.getAttribute('href'),
+          cta_variant: el.classList.contains('wh-hero__action--primary') ? 'primary' : 'secondary'
+        });
+      };
+      el.addEventListener('click', el.__whPhHandler);
+    });
+  }
+  document.addEventListener('DOMContentLoaded', setupHeroCTATracking);
+  document.addEventListener('astro:page-load', setupHeroCTATracking);
 </script>
 
 <style>

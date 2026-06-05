@@ -1,9 +1,11 @@
 ---
 import Default from "@astrojs/starlight/components/Head.astro";
 import { ClientRouter } from "astro:transitions";
+import PostHog from "./posthog.astro";
 ---
 
 <Default><slot /></Default>
+<PostHog />
 {/*
   Two media-scoped theme-color tags so the browser chrome (mobile address bar,
   PWA splash) matches the OS preference at first paint — no JS needed. The

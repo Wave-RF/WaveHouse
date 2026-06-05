@@ -43,16 +43,16 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
           open-source project
         </span>
         <nav class="wh-footer__links" aria-label="Footer">
-          <a href={repo} target="_blank" rel="noopener noreferrer">
+          <a href={repo} target="_blank" rel="noopener noreferrer" data-ph-link="github">
             GitHub
           </a>
-          <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer">
+          <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer" data-ph-link="discussions">
             Discussions
           </a>
-          <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer">
+          <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer" data-ph-link="changelog">
             Changelog
           </a>
-          <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
+          <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer" data-ph-link="license">
             License
           </a>
         </nav>
@@ -103,13 +103,13 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
           </div>
           <div class="wh-footer__col">
             <span class="wh-footer__label">Project</span>
-            <a href={repo} target="_blank" rel="noopener noreferrer">Source</a>
-            <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer">Discussions</a>
-            <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer">Changelog</a>
-            <a href={`${repo}/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener noreferrer">Contributing</a>
-            <a href={`${repo}/blob/main/SUPPORT.md`} target="_blank" rel="noopener noreferrer">Support</a>
-            <a href={`${repo}/blob/main/SECURITY.md`} target="_blank" rel="noopener noreferrer">Security</a>
-            <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">License</a>
+            <a href={repo} target="_blank" rel="noopener noreferrer" data-ph-link="github">Source</a>
+            <a href={`${repo}/discussions`} target="_blank" rel="noopener noreferrer" data-ph-link="discussions">Discussions</a>
+            <a href={`${repo}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener noreferrer" data-ph-link="changelog">Changelog</a>
+            <a href={`${repo}/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener noreferrer" data-ph-link="contributing">Contributing</a>
+            <a href={`${repo}/blob/main/SUPPORT.md`} target="_blank" rel="noopener noreferrer" data-ph-link="support">Support</a>
+            <a href={`${repo}/blob/main/SECURITY.md`} target="_blank" rel="noopener noreferrer" data-ph-link="security">Security</a>
+            <a href={`${repo}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer" data-ph-link="license">License</a>
           </div>
         </div>
 
@@ -122,6 +122,23 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     </footer>
   )
 }
+
+<script is:inline>
+  function setupFooterLinkTracking() {
+    document.querySelectorAll('[data-ph-link]').forEach(function(el) {
+      el.removeEventListener('click', el.__whPhFooterHandler);
+      el.__whPhFooterHandler = function() {
+        window.posthog?.capture('footer_link_clicked', {
+          link_name: el.getAttribute('data-ph-link'),
+          link_href: el.getAttribute('href')
+        });
+      };
+      el.addEventListener('click', el.__whPhFooterHandler);
+    });
+  }
+  document.addEventListener('DOMContentLoaded', setupFooterLinkTracking);
+  document.addEventListener('astro:page-load', setupFooterLinkTracking);
+</script>
 
 <style>
   /* ---------- shared bits (both variants) ---------- */
