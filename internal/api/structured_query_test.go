@@ -280,39 +280,70 @@ func policyWithViewer(perms policy.RolePermissions) *policy.Policy {
 	}
 }
 
-// TestStructuredQuery_OmittedColumns_RestrictedRoleGetsAllowedProjection is the
-// direct #223 regression: a request body with no `columns` must NOT become
-// SELECT *. A column-restricted role gets exactly its allowed columns, so the
-// denied payload/user_id never reach ClickHouse — let alone the client.
-func TestStructuredQuery_OmittedColumns_RestrictedRoleGetsAllowedProjection(t *testing.T) {
+// TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection is the #223
+// regression: select_all for a column-restricted role must NOT become a raw
+// SELECT *. It expands to exactly the role's allowed columns, so the denied
+// payload/user_id never reach ClickHouse — let alone the client.
+func TestStructuredQuery_SelectAll_RestrictedRoleGetsAllowedProjection(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"page", "ts"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{})) // no columns → the SELECT * path
+	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT page, ts FROM `clicks` LIMIT 10000", conn.lastSQL)
+	assert.Equal(t, "SELECT `page`, `ts` FROM `clicks` LIMIT 10000", conn.lastSQL)
 	assert.NotContains(t, conn.lastSQL, "*")
 	assert.NotContains(t, conn.lastSQL, "payload")
 	assert.NotContains(t, conn.lastSQL, "user_id")
 }
 
-// TestStructuredQuery_ExplicitStar_RestrictedRoleExpands closes the sibling
-// bypass: an explicit columns:["*"] under a deny-list (empty allow list) must
-// expand to the non-denied columns, not pass "*" straight through.
-func TestStructuredQuery_ExplicitStar_RestrictedRoleExpands(t *testing.T) {
+// TestStructuredQuery_OmittedColumns_ReturnsNothing pins safe-by-default: a request
+// with no columns, no aggregations, and no select_all asks for no data, so it
+// returns 200 [] and never reaches ClickHouse. A hidden column can't leak by
+// simply leaving columns out.
+func TestStructuredQuery_OmittedColumns_ReturnsNothing(t *testing.T) {
+	t.Parallel()
+	conn := &sqlCapturingConn{}
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"page", "ts"}}))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerRequest(t, query.StructuredQuery{}))
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.JSONEq(t, "[]", w.Body.String())
+	assert.Empty(t, conn.lastSQL, "an empty projection must not reach ClickHouse")
+}
+
+// TestStructuredQuery_SelectAll_DenyListExpands: select_all under a deny-list
+// (empty allow) expands to the non-denied columns, never a raw SELECT *.
+func TestStructuredQuery_SelectAll_DenyListExpands(t *testing.T) {
 	t.Parallel()
 	conn := &sqlCapturingConn{}
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{DenyColumns: []string{"payload"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{Columns: []string{"*"}}))
+	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT page, user_id, ts FROM `clicks` LIMIT 10000", conn.lastSQL)
+	assert.Equal(t, "SELECT `page`, `user_id`, `ts` FROM `clicks` LIMIT 10000", conn.lastSQL)
 	assert.NotContains(t, conn.lastSQL, "payload")
+}
+
+// TestStructuredQuery_LiteralStarColumn_Unknown: columns:["*"] is a literal column
+// name now, not a wildcard. clicks has no column named "*", so it is a 400 unknown
+// column — the all-columns wildcard is select_all.
+func TestStructuredQuery_LiteralStarColumn_Unknown(t *testing.T) {
+	t.Parallel()
+	conn := &sqlCapturingConn{}
+	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"*"}}))
+
+	w := httptest.NewRecorder()
+	h.Handle(w, viewerRequest(t, query.StructuredQuery{Columns: []string{"*"}}))
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+	assert.Empty(t, conn.lastSQL)
 }
 
 // TestStructuredQuery_UnrestrictedRoleKeepsSelectStar proves the common case is
@@ -324,7 +355,7 @@ func TestStructuredQuery_UnrestrictedRoleKeepsSelectStar(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"*"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{}))
+	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", conn.lastSQL)
@@ -389,7 +420,7 @@ func TestStructuredQuery_NoReadableColumns_Returns403(t *testing.T) {
 	h := newCapturingHandler(t, conn, policyWithViewer(policy.RolePermissions{AllowColumns: []string{"nonexistent"}}))
 
 	w := httptest.NewRecorder()
-	h.Handle(w, viewerRequest(t, query.StructuredQuery{}))
+	h.Handle(w, viewerRequest(t, query.StructuredQuery{SelectAll: true}))
 
 	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
 	assert.Empty(t, conn.lastSQL)
@@ -407,12 +438,12 @@ func TestStructuredQuery_UnauthenticatedUsesDefaultRoleProjection(t *testing.T) 
 	h := newCapturingHandler(t, conn, p)
 
 	// No role on the context — a tokenless request.
-	r := structuredQueryRequest(t, "clicks", query.StructuredQuery{Limit: 2})
+	r := structuredQueryRequest(t, "clicks", query.StructuredQuery{SelectAll: true, Limit: 2})
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	assert.Equal(t, "SELECT page FROM `clicks` LIMIT 2", conn.lastSQL)
+	assert.Equal(t, "SELECT `page` FROM `clicks` LIMIT 2", conn.lastSQL)
 	assert.NotContains(t, conn.lastSQL, "payload")
 }
 
@@ -433,7 +464,7 @@ func TestStructuredQuery_CacheKeyIsolatesColumnVisibility(t *testing.T) {
 	sqlFor := func(role string) string {
 		conn := &sqlCapturingConn{}
 		h := newCapturingHandler(t, conn, p)
-		r := structuredQueryRequest(t, "clicks", query.StructuredQuery{})
+		r := structuredQueryRequest(t, "clicks", query.StructuredQuery{SelectAll: true})
 		r = r.WithContext(auth.WithClaims(auth.WithRole(r.Context(), role), jwt.MapClaims{}))
 		w := httptest.NewRecorder()
 		h.Handle(w, r)

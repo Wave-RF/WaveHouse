@@ -74,7 +74,19 @@ export interface ClientOptions {
 // --- Structured query AST (matches backend wire format) ---
 
 export interface StructuredQuery {
+  /**
+   * Explicit columns to project. A literal "*" is a column named "*", not a
+   * wildcard. Omitting columns (with no aggregations and no select_all) selects
+   * nothing — use select_all for a full-row read. Mutually exclusive with
+   * select_all.
+   */
   columns?: string[];
+  /**
+   * Request every column the caller's role may read (the all-columns wildcard,
+   * expanded server-side to the allowed/denied set). Mutually exclusive with a
+   * non-empty columns list.
+   */
+  select_all?: boolean;
   aggregations?: Aggregation[];
   filters?: QueryFilter[];
   group_by?: string[];

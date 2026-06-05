@@ -2,17 +2,14 @@ package query
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
-
-// validIdentifierRe matches safe SQL identifiers (letters, digits, underscores).
-var validIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // DefaultMaxRows is applied when no explicit LIMIT is specified and no policy MaxRows is set.
 // This prevents unbounded queries from consuming excessive memory.
@@ -28,15 +25,33 @@ type BuildResult struct {
 //
 // Every column the query references — in the projection, an aggregation
 // argument, a filter, group_by, order_by, or time_range — is validated against
-// the schema (to prevent SQL injection via unknown identifiers) AND authorized
-// against perms, the caller's resolved column permissions. perms may be nil,
-// which means "no policy" — every column is allowed (used by callers that gate
-// access elsewhere, and by tests). Centralizing the authorization here, at the
-// one place that already enumerates every column reference, is what keeps a
-// denied column from slipping through any single clause: scattering the checks
-// across the handler is exactly what let group_by, order_by, filters, and the
-// empty-or-"*" projection bypass the allowlist (#223).
+// the schema (it must be a real, discovered column) AND authorized against
+// perms, the caller's resolved column permissions. perms may be nil, which
+// means "no policy" — every column is allowed (used by callers that gate access
+// elsewhere, and by tests). Centralizing the authorization here, at the one
+// place that already enumerates every column reference, is what keeps a denied
+// column from slipping through any single clause (#223).
+//
+// Every identifier that reaches the SQL — columns, the table, aggregation
+// aliases — is backtick-quoted via chsql.QuoteIdent, so the builder accepts any
+// name ClickHouse accepts while remaining injection-safe. Values stay positional
+// `?` parameters bound by the driver.
+//
+// Projection rules: SelectAll requests every readable column (expanded to the
+// role's allow/deny set); an explicit Columns list projects exactly those (where
+// "*" is a literal column name, not a wildcard); the two are mutually exclusive.
+// A query with neither, and no aggregations, selects nothing → ErrEmptyProjection.
 func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perms *policy.ResolvedPermissions, bucketSeconds int) (*BuildResult, error) {
+	if chsql.BindUnsafe(table) {
+		return nil, fmt.Errorf("unsupported table name (contains '?'): %s", table)
+	}
+	if q.SelectAll && len(q.Columns) > 0 {
+		return nil, ErrColumnsAndSelectAll
+	}
+	if q.SelectAll && len(q.Aggregations) > 0 {
+		return nil, fmt.Errorf("select_all cannot be combined with aggregations")
+	}
+
 	colSet := schemaColumnSet(schema)
 
 	// Validate + authorize every referenced column in one pass.
@@ -44,35 +59,33 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 		return nil, err
 	}
 
-	// Resolve the row projection. A full-row read (no explicit columns, or a "*"
-	// wildcard) expands to the role's allowed columns when the role is column-
-	// restricted, so the builder never emits a bare SELECT * that would return
-	// denied columns; unrestricted roles keep SELECT * unchanged.
-	projection, err := resolveProjection(q, schema, perms)
+	// Resolve the row projection (aggregations are appended separately below).
+	projection, wildcard, err := resolveProjection(q, schema, perms)
 	if err != nil {
 		return nil, err
 	}
 
 	var params []any
 
-	// SELECT clause: resolved row columns followed by any aggregation expressions.
-	selectParts := make([]string, 0, len(projection)+len(q.Aggregations))
-	selectParts = append(selectParts, projection...)
+	// SELECT clause: the resolved row columns (a bare "*" only for an unrestricted
+	// SelectAll; every concrete name is quoted), then any aggregation expressions.
+	selectParts := make([]string, 0, len(projection)+len(q.Aggregations)+1)
+	if wildcard {
+		selectParts = append(selectParts, "*")
+	}
+	for _, c := range projection {
+		selectParts = append(selectParts, chsql.QuoteIdent(c))
+	}
 	for _, a := range q.Aggregations {
 		selectParts = append(selectParts, aggregationExpr(a))
 	}
-	// resolveProjection guarantees a non-empty projection (or an error) for a
-	// full-row read, and an aggregation-only query fills selectParts above, so an
-	// empty SELECT should be unreachable. Guard fail-CLOSED anyway: a bare
-	// SELECT * fallback here would be exactly the fail-open this fix exists to
-	// remove.
+	// resolveProjection returns ErrEmptyProjection for the nothing-to-select case,
+	// so this should be unreachable. Guard fail-CLOSED anyway.
 	if len(selectParts) == 0 {
-		return nil, ErrNoReadableColumns
+		return nil, ErrEmptyProjection
 	}
 
-	// Double-backtick escaping is the Go SQL driver standard for identifiers
-	escapedTable := strings.ReplaceAll(table, "`", "``")
-	sql := fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(selectParts, ", "), escapedTable)
+	sql := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectParts, ", "), chsql.QuoteIdent(table))
 
 	// WHERE clause.
 	whereParts, whereParams, err := buildWhere(q.Filters, q.TimeRange, bucketSeconds)
@@ -86,7 +99,11 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 
 	// GROUP BY.
 	if len(q.GroupBy) > 0 {
-		sql += " GROUP BY " + strings.Join(q.GroupBy, ", ")
+		groupCols := make([]string, len(q.GroupBy))
+		for i, g := range q.GroupBy {
+			groupCols[i] = chsql.QuoteIdent(g)
+		}
+		sql += " GROUP BY " + strings.Join(groupCols, ", ")
 	}
 
 	// ORDER BY.
@@ -97,7 +114,7 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 			if strings.ToLower(o.Dir) == "desc" {
 				dir = "DESC"
 			}
-			orderParts = append(orderParts, fmt.Sprintf("%s %s", o.Column, dir))
+			orderParts = append(orderParts, fmt.Sprintf("%s %s", chsql.QuoteIdent(o.Column), dir))
 		}
 		sql += " ORDER BY " + strings.Join(orderParts, ", ")
 	}
@@ -146,32 +163,35 @@ func ApplyMaxRows(result *BuildResult, maxRows int) {
 }
 
 // aggregationExpr renders a single aggregation as a SELECT expression, e.g.
-// {Fn:"count", Column:"*", Alias:"n"} → "count(*) AS n". The function name,
-// column, and alias have all been validated/authorized by
-// validateAndAuthorizeColumns, so they are safe to interpolate verbatim.
+// {Fn:"count", Column:"*", Alias:"n"} → "count(*) AS `n`". The function name was
+// allowlisted by validateAndAuthorizeColumns; the column (unless it is the "*"
+// of count(*)) and the alias are backtick-quoted, so any legal ClickHouse name
+// is safe to emit.
 func aggregationExpr(a Aggregation) string {
-	expr := fmt.Sprintf("%s(%s)", a.Fn, a.Column)
+	arg := a.Column
+	if arg != "*" {
+		arg = chsql.QuoteIdent(arg)
+	}
+	expr := fmt.Sprintf("%s(%s)", a.Fn, arg)
 	if a.Alias != "" {
-		expr += " AS " + a.Alias
+		expr += " AS " + chsql.QuoteIdent(a.Alias)
 	}
 	return expr
 }
 
 // validateAndAuthorizeColumns checks, in a single pass, that every column the
-// query references (1) exists in the schema — blocking SQL injection via unknown
-// identifiers — and (2) is permitted by the role's column allowlist — blocking a
-// denied column from leaking through ANY clause. This is the one chokepoint that
-// enumerates every column-bearing field, so none can silently skip the policy
-// check the way scattered handler checks did (#223 and its group_by / order_by /
-// filter siblings).
+// query references (1) exists in the schema — so only real, discovered columns
+// reach the SQL — and (2) is permitted by the role's column allow/deny lists —
+// blocking a denied column from leaking through ANY clause. This is the one
+// chokepoint that enumerates every column-bearing field, so none can silently
+// skip the policy check the way scattered handler checks did (#223).
 //
-// Two wildcards are intentionally not treated as concrete columns here:
-//   - "*" in the projection columns, and an aggregation's count(*) argument, mean
-//     "all columns" and are resolved by resolveProjection, not authorized as a
-//     literal column.
-//   - ORDER BY may name an aggregation alias (not a schema column); aliases carry
-//     no column policy because the aggregation that defines them was authorized
-//     above.
+// Identifier *escaping* is not done here — every identifier is backtick-quoted by
+// chsql.QuoteIdent when it is emitted — so this pass only rejects names that are
+// unknown, denied, or bind-unsafe (chsql.BindUnsafe). Note "*" in the projection
+// columns is now a literal column name (validated/authorized like any other); the
+// only special "*" is an aggregation's count(*) argument, which is the SQL
+// all-rows token, not a column.
 func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, perms *policy.ResolvedPermissions) error {
 	authorize := func(col string) error {
 		if !perms.IsColumnAllowed(col) {
@@ -187,9 +207,6 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 	}
 
 	for _, c := range q.Columns {
-		if c == "*" {
-			continue // all-columns wildcard, resolved by resolveProjection
-		}
 		if err := check(c); err != nil {
 			return err
 		}
@@ -206,13 +223,10 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 		if !perms.IsAggregationAllowed(a.Fn) {
 			return &ForbiddenAggregationError{Fn: a.Fn}
 		}
-		// The alias is interpolated into the SELECT list verbatim by
-		// aggregationExpr ("fn(col) AS <alias>"), so it must be a safe bare
-		// identifier — an unvalidated alias is a SQL-injection vector (e.g.
-		// "n FROM secrets --" reparents the whole query). Validate it exactly as
-		// ORDER BY aliases are validated below.
-		if a.Alias != "" && !validIdentifierRe.MatchString(a.Alias) {
-			return fmt.Errorf("invalid aggregation alias: %s", a.Alias)
+		// The alias is backtick-quoted by aggregationExpr, so any legal ClickHouse
+		// name is safe. Only a '?' is refused — it would break value binding.
+		if chsql.BindUnsafe(a.Alias) {
+			return fmt.Errorf("unsupported aggregation alias (contains '?'): %s", a.Alias)
 		}
 	}
 	for _, f := range q.Filters {
@@ -227,11 +241,12 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 	}
 	for _, o := range q.OrderBy {
 		if err := validateColumn(o.Column, colSet); err != nil {
-			// Not a schema column — only a valid-identifier alias is allowed
-			// (e.g. ORDER BY an aggregation's AS name). Aliases are not policy-
-			// checked; the aggregation that defines them already was.
-			if !validIdentifierRe.MatchString(o.Column) {
-				return fmt.Errorf("invalid order column: %s", o.Column)
+			// Not a schema column — allow it as an aggregation-alias reference
+			// (ORDER BY an aggregation's AS name). Aliases carry no column policy;
+			// the aggregation that defines them was authorized above. The name is
+			// backtick-quoted when emitted, so any content is safe except a '?'.
+			if chsql.BindUnsafe(o.Column) {
+				return fmt.Errorf("unsupported order column (contains '?'): %s", o.Column)
 			}
 			continue
 		}
@@ -247,44 +262,38 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 	return nil
 }
 
-// resolveProjection returns the concrete columns the SELECT clause should project
-// (aggregations are appended separately by Build). Explicit, non-wildcard columns
-// pass through unchanged — they were already validated and authorized. A "*"
-// wildcard, or a query with no columns and no aggregations, is a full-row read:
-// for a column-restricted role it expands to the role's AllowedProjection so
-// denied columns never reach the result; for an unrestricted role it stays "*".
-// An aggregation-only query projects no row columns (returns nil). A restricted
-// role that may read the table but no columns gets ErrNoReadableColumns rather
-// than a fail-open SELECT *.
-func resolveProjection(q *StructuredQuery, schema *discovery.TableSchema, perms *policy.ResolvedPermissions) ([]string, error) {
-	wildcard := false
-	explicit := make([]string, 0, len(q.Columns))
-	for _, c := range q.Columns {
-		if c == "*" {
-			wildcard = true
-			continue
-		}
-		explicit = append(explicit, c)
-	}
-
+// resolveProjection decides the row columns the SELECT clause projects
+// (aggregations are appended separately by Build). It returns the concrete
+// columns plus a wildcard flag (true ⇒ emit a bare SELECT *):
+//
+//   - SelectAll, unrestricted role → (nil, true): a bare SELECT * is safe because
+//     the role may read every column.
+//   - SelectAll, column-restricted role → (allowed columns, false): expanded to
+//     exactly the role's allow/deny set so denied columns never reach the result;
+//     a role entitled to no columns gets ErrNoReadableColumns (→ 403).
+//   - explicit Columns → (those columns, false): already validated + authorized;
+//     a literal "*" among them is quoted like any other name.
+//   - no columns but aggregations present → (nil, false): an aggregation-only
+//     query projects no row columns.
+//   - nothing at all → ErrEmptyProjection (→ 200 [], a request for no data).
+func resolveProjection(q *StructuredQuery, schema *discovery.TableSchema, perms *policy.ResolvedPermissions) (cols []string, wildcard bool, err error) {
 	switch {
-	case !wildcard && len(explicit) > 0:
-		// Caller named concrete columns — use them verbatim.
-		return explicit, nil
-	case !wildcard && len(q.Aggregations) > 0:
-		// Aggregation-only query: no row columns to project.
-		return nil, nil
+	case q.SelectAll:
+		if !perms.RestrictsColumns() {
+			return nil, true, nil
+		}
+		allowed := perms.AllowedProjection(schema.ColumnNames())
+		if len(allowed) == 0 {
+			return nil, false, ErrNoReadableColumns
+		}
+		return allowed, false, nil
+	case len(q.Columns) > 0:
+		return q.Columns, false, nil
+	case len(q.Aggregations) > 0:
+		return nil, false, nil
+	default:
+		return nil, false, ErrEmptyProjection
 	}
-
-	// Full-row read ("*" wildcard, or an empty query).
-	if !perms.RestrictsColumns() {
-		return []string{"*"}, nil
-	}
-	allowed := perms.AllowedProjection(schema.ColumnNames())
-	if len(allowed) == 0 {
-		return nil, ErrNoReadableColumns
-	}
-	return allowed, nil
 }
 
 func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]string, []any, error) {
@@ -305,13 +314,14 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 	}
 
 	if timeRange != nil && timeRange.Column != "" && timeRange.Since != "" {
+		col := chsql.QuoteIdent(timeRange.Column)
 		sinceTime := resolveTimeValue(timeRange.Since, bucketSeconds)
-		parts = append(parts, fmt.Sprintf("%s >= ?", timeRange.Column))
+		parts = append(parts, fmt.Sprintf("%s >= ?", col))
 		params = append(params, sinceTime)
 
 		if timeRange.Until != "" {
 			untilTime := resolveTimeValue(timeRange.Until, bucketSeconds)
-			parts = append(parts, fmt.Sprintf("%s <= ?", timeRange.Column))
+			parts = append(parts, fmt.Sprintf("%s <= ?", col))
 			params = append(params, untilTime)
 		}
 	}
@@ -320,27 +330,28 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 }
 
 func filterToSQL(f Filter) (string, []any, error) {
+	col := chsql.QuoteIdent(f.Column)
 	val := coerceFilterValue(f.Value)
 	switch strings.ToLower(f.Op) {
 	case "eq":
-		return f.Column + " = ?", []any{val}, nil
+		return col + " = ?", []any{val}, nil
 	case "neq":
-		return f.Column + " != ?", []any{val}, nil
+		return col + " != ?", []any{val}, nil
 	case "gt":
-		return f.Column + " > ?", []any{val}, nil
+		return col + " > ?", []any{val}, nil
 	case "gte":
-		return f.Column + " >= ?", []any{val}, nil
+		return col + " >= ?", []any{val}, nil
 	case "lt":
-		return f.Column + " < ?", []any{val}, nil
+		return col + " < ?", []any{val}, nil
 	case "lte":
-		return f.Column + " <= ?", []any{val}, nil
+		return col + " <= ?", []any{val}, nil
 	case "like":
-		return f.Column + " LIKE ?", []any{val}, nil
+		return col + " LIKE ?", []any{val}, nil
 	case "in":
 		if vals, ok := f.Value.([]any); ok && len(vals) > 0 {
 			placeholders := strings.Repeat("?,", len(vals))
 			placeholders = placeholders[:len(placeholders)-1]
-			return fmt.Sprintf("%s IN (%s)", f.Column, placeholders), vals, nil
+			return fmt.Sprintf("%s IN (%s)", col, placeholders), vals, nil
 		}
 		return "", nil, fmt.Errorf("invalid value for 'in' operator")
 	default:
@@ -404,12 +415,17 @@ func schemaColumnSet(schema *discovery.TableSchema) map[string]bool {
 	return m
 }
 
+// validateColumn confirms a column is real (present in the discovered schema)
+// and bind-safe. It does NOT restrict the character set: any name ClickHouse
+// allows is accepted, because the name is backtick-quoted by chsql.QuoteIdent
+// when it reaches the SQL. Schema membership is the injection boundary for column
+// references — only a name ClickHouse already reported can be used.
 func validateColumn(col string, validCols map[string]bool) error {
 	if !validCols[col] {
 		return fmt.Errorf("unknown column: %s", col)
 	}
-	if !validIdentifierRe.MatchString(col) {
-		return fmt.Errorf("invalid column name: %s", col)
+	if chsql.BindUnsafe(col) {
+		return fmt.Errorf("unsupported column name (contains '?'): %s", col)
 	}
 	return nil
 }

@@ -20,7 +20,7 @@ describe("Cache", () => {
         Authorization: `Bearer ${token}`,
       },
       // A deterministic query body to ensure consistent cache key generation
-      body: JSON.stringify({ columns: ["*"], limit: 69 }), // must make sure we never use this anywhere else in our tests!
+      body: JSON.stringify({ select_all: true, limit: 69 }), // must make sure we never use this anywhere else in our tests!
     };
 
     const url = `${WH_URL}/v1/query?table=${T.clicks}`;
@@ -75,7 +75,7 @@ describe("Cache", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ columns: ["*"], limit: 420 }), // Unique body for this test
+      body: JSON.stringify({ select_all: true, limit: 420 }), // Unique body for this test
     };
 
     const url = `${WH_URL}/v1/query?table=${T.clicks}`;

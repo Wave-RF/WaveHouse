@@ -306,9 +306,9 @@ describe("Query", () => {
     );
   });
 
-  it("select('*') expands to allowed columns under a deny-list, not raw SELECT *", async () => {
+  it("selectAll() expands to allowed columns under a deny-list, not raw SELECT *", async () => {
     await withViewerSelect({ deny_columns: ["user_id", "session_id"] }, async () => {
-      const result = await wh.from(T.clicks).select("*").fetch();
+      const result = await wh.from(T.clicks).selectAll().fetch();
       expect(result.error).toBeNull();
       expect(result.data!.length).toBeGreaterThan(0);
       for (const row of result.data!) {
@@ -415,7 +415,7 @@ describe("Query", () => {
       // IMPORTANT: Make the query unique so it doesn't get served instantly from the cache!
       const result = await wh
         .from(T.clicks)
-        .select("*")
+        .selectAll()
         .where("event_id", "=", testId())
         .limit(999)
         .fetch();

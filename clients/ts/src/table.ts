@@ -51,6 +51,15 @@ export class TableRef<Row = Record<string, unknown>> {
     );
   }
 
+  /**
+   * Start a query that selects every column the caller's role is allowed to read
+   * (the all-columns wildcard). Use instead of `.select(...)` for an explicit
+   * full-row read; `.fetch()` does this implicitly.
+   */
+  selectAll(): QueryBuilder<Row> {
+    return this.select().selectAll();
+  }
+
   /** Insert one or more rows into this table. */
   async insert(
     data: Partial<Row> | Partial<Row>[],

@@ -130,7 +130,7 @@ func TestEvaluate_FilterWithClaimTemplate(t *testing.T) {
 	claims := map[string]any{"org_id": "org-123"}
 	perms := Evaluate(p, "user", "clicks", "select", claims)
 	assert.True(t, perms.Allowed)
-	assert.Contains(t, perms.WhereClause, "org_id = ?")
+	assert.Contains(t, perms.WhereClause, "`org_id` = ?")
 	require.Len(t, perms.WhereParams, 1)
 	assert.Equal(t, "org-123", perms.WhereParams[0])
 }
@@ -198,14 +198,18 @@ func TestIsColumnAllowed(t *testing.T) {
 		{"in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "secret", false},
 		{"not in deny list", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "page", true},
 		{"deny overrides allow", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"a"}, DenyColumns: []string{"a"}}, "a", false},
-		// A literal "*" passed as the column is never a concrete grantable column:
-		// it is a wildcard probe the projection layer must expand, not a column to
-		// wave through. It must be rejected even when the allow list is empty (the
-		// deny-list footgun behind the #223 SELECT * bypass) or a wildcard.
-		{"star arg, empty allow list, rejected", &ResolvedPermissions{Allowed: true}, "*", false},
-		{"star arg, deny list set, rejected", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "*", false},
-		{"star arg, wildcard allow, rejected", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, "*", false},
-		{"star arg, denied table, rejected", &ResolvedPermissions{Allowed: false}, "*", false},
+		// "*" is now a LITERAL column name, not a wildcard sentinel: it follows the
+		// same allow/deny rules as any column. (The all-columns wildcard is the
+		// caller's SelectAll, expanded by AllowedProjection — never run through
+		// here, which is what closed the #223 footgun structurally.) The builder
+		// additionally gates it on schema membership, so it only resolves when a
+		// real column is named "*".
+		{"literal star, empty allow → allowed", &ResolvedPermissions{Allowed: true}, "*", true},
+		{"literal star, wildcard allow → allowed", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, "*", true},
+		{"literal star, deny of another column → allowed", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret"}}, "*", true},
+		{"literal star, specific allow without it → denied", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page"}}, "*", false},
+		{"literal star, explicitly denied → denied", &ResolvedPermissions{Allowed: true, DenyColumns: []string{"*"}}, "*", false},
+		{"star arg, denied table → denied", &ResolvedPermissions{Allowed: false}, "*", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -276,6 +280,7 @@ func TestRestrictsColumns(t *testing.T) {
 		want  bool
 	}{
 		{"nil perms - unrestricted", nil, false},
+		{"denied role - restricts everything", &ResolvedPermissions{Allowed: false}, true},
 		{"no lists - unrestricted", &ResolvedPermissions{Allowed: true}, false},
 		{"bare wildcard allow - unrestricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}}, false},
 		{"wildcard among allows - unrestricted", &ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "*"}}, false},
@@ -301,6 +306,7 @@ func TestColumnPrimitives_AgreeOnVisibility(t *testing.T) {
 	t.Parallel()
 	schema := []string{"page", "user_id", "payload", "ts"}
 	cases := []*ResolvedPermissions{
+		{Allowed: false}, // denied role: restricted, sees nothing
 		{Allowed: true},
 		{Allowed: true, AllowColumns: []string{"*"}},
 		{Allowed: true, AllowColumns: []string{"page", "*"}},
@@ -577,8 +583,39 @@ func TestResolveFilters_LtOperator(t *testing.T) {
 	}
 	clauses, params := resolveFilters(filters, nil)
 	require.Len(t, clauses, 1)
-	assert.Contains(t, clauses[0], "price < ?")
+	assert.Contains(t, clauses[0], "`price` < ?")
 	assert.Equal(t, "100", params[0])
+}
+
+// TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
+// contains '?' is refused at write time — it would shift clickhouse-go's
+// positional value binding when interpolated into the WHERE clause.
+func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.org }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Select: map[string]RolePermissions{
+			"viewer": {Filter: map[string]Filter{"weird?col": {Eq: &eq}}},
+		}},
+	}}
+	err := Validate(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contains '?'")
+}
+
+// TestEvaluate_DeniesBindUnsafeFilterColumn: defense-in-depth — a bind-unsafe
+// filter column that somehow reaches Evaluate (which does not re-validate) denies
+// the role fail-closed rather than emitting a binding-shifted query.
+func TestEvaluate_DeniesBindUnsafeFilterColumn(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.org }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Select: map[string]RolePermissions{
+			"viewer": {AllowColumns: []string{"page"}, Filter: map[string]Filter{"weird?col": {Eq: &eq}}},
+		}},
+	}}
+	perms := Evaluate(p, "viewer", "clicks", "select", map[string]any{"org": "o1"})
+	assert.False(t, perms.Allowed, "a bind-unsafe filter column must deny the role")
 }
 
 func TestResolveRole(t *testing.T) {

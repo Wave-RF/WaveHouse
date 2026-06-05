@@ -91,12 +91,22 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// malformed query maps to 400.
 	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs)
 	if err != nil {
+		// A query that selects nothing — no columns, no aggregations, no
+		// select_all — is a request for no data, not an error: return an empty
+		// result. Authorization already passed above, so this leaks nothing.
+		if errors.Is(err, query.ErrEmptyProjection) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
 		var forbiddenCol *query.ForbiddenColumnError
 		var forbiddenAgg *query.ForbiddenAggregationError
 		switch {
 		case errors.As(err, &forbiddenCol), errors.As(err, &forbiddenAgg), errors.Is(err, query.ErrNoReadableColumns):
 			writeJSONError(w, http.StatusForbidden, err.Error())
 		default:
+			// Malformed query — unknown column, bad operator, columns+select_all,
+			// '?' in an identifier, etc.
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 		}
 		return

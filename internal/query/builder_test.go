@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/stretchr/testify/assert"
@@ -29,15 +30,61 @@ func TestBuild_SimpleSelect(t *testing.T) {
 	sq := &StructuredQuery{Columns: []string{"page", "count"}, Limit: 10}
 	result, err := Build("clicks", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT page, count FROM `clicks` LIMIT 10", result.SQL)
+	assert.Equal(t, "SELECT `page`, `count` FROM `clicks` LIMIT 10", result.SQL)
 	assert.Empty(t, result.Params)
 }
 
 func TestBuild_SelectStar(t *testing.T) {
 	t.Parallel()
-	result, err := Build("clicks", &StructuredQuery{}, testSchema(), nil, 0)
+	// SelectAll (not omitted columns) is what produces a full-row read.
+	result, err := Build("clicks", &StructuredQuery{SelectAll: true}, testSchema(), nil, 0)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", result.SQL)
+}
+
+// TestBuild_EmptyProjection: a query naming no columns, no aggregations, and no
+// SelectAll selects nothing → ErrEmptyProjection (handler maps it to 200 []).
+// Omitting columns is fail-closed — you get nothing unless you ask, so a hidden
+// column can never leak by simply leaving columns out.
+func TestBuild_EmptyProjection(t *testing.T) {
+	t.Parallel()
+	cases := map[string]*StructuredQuery{
+		"empty struct":          {},
+		"empty columns slice":   {Columns: Columns{}},
+		"filter but no project": {Filters: []Filter{{Column: "page", Op: "eq", Value: "x"}}},
+		"limit only":            {Limit: 5},
+	}
+	for name, sq := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Build("clicks", sq, testSchema(), nil, 0)
+			require.ErrorIs(t, err, ErrEmptyProjection)
+		})
+	}
+}
+
+// TestBuild_ColumnsAndSelectAll: setting both an explicit list and SelectAll is
+// ambiguous → ErrColumnsAndSelectAll (handler maps it to 400).
+func TestBuild_ColumnsAndSelectAll(t *testing.T) {
+	t.Parallel()
+	_, err := Build("clicks", &StructuredQuery{Columns: Columns{"page"}, SelectAll: true}, testSchema(), nil, 0)
+	require.ErrorIs(t, err, ErrColumnsAndSelectAll)
+}
+
+// TestBuild_LiteralStarColumn: "*" in columns is a literal column name now, not a
+// wildcard. It is quoted and must exist in the schema like any other column.
+func TestBuild_LiteralStarColumn(t *testing.T) {
+	t.Parallel()
+	// Not in the schema → unknown column.
+	_, err := Build("clicks", &StructuredQuery{Columns: Columns{"*"}}, testSchema(), nil, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown column")
+
+	// Present in the schema → selected as the quoted literal `*`, never a wildcard.
+	starSchema := &discovery.TableSchema{Name: "t", Columns: []discovery.Column{{Name: "*", Type: "String"}}}
+	result, err := Build("t", &StructuredQuery{Columns: Columns{"*"}}, starSchema, nil, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT `*` FROM `t` LIMIT 10000", result.SQL)
 }
 
 func TestBuild_WithAggregation(t *testing.T) {
@@ -48,8 +95,8 @@ func TestBuild_WithAggregation(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "count(*) AS total")
-	assert.Contains(t, result.SQL, "GROUP BY page")
+	assert.Contains(t, result.SQL, "count(*) AS `total`")
+	assert.Contains(t, result.SQL, "GROUP BY `page`")
 }
 
 func TestBuild_AllFilterOperators(t *testing.T) {
@@ -58,13 +105,13 @@ func TestBuild_AllFilterOperators(t *testing.T) {
 		op   string
 		want string
 	}{
-		{"eq", "page = ?"},
-		{"neq", "page != ?"},
-		{"gt", "page > ?"},
-		{"gte", "page >= ?"},
-		{"lt", "page < ?"},
-		{"lte", "page <= ?"},
-		{"like", "page LIKE ?"},
+		{"eq", "`page` = ?"},
+		{"neq", "`page` != ?"},
+		{"gt", "`page` > ?"},
+		{"gte", "`page` >= ?"},
+		{"lt", "`page` < ?"},
+		{"lte", "`page` <= ?"},
+		{"like", "`page` LIKE ?"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.op, func(t *testing.T) {
@@ -88,7 +135,7 @@ func TestBuild_InFilter(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "page IN (?,?)")
+	assert.Contains(t, result.SQL, "`page` IN (?,?)")
 	assert.Len(t, result.Params, 2)
 }
 
@@ -100,7 +147,7 @@ func TestBuild_OrderBy(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "ORDER BY count DESC, page ASC")
+	assert.Contains(t, result.SQL, "ORDER BY `count` DESC, `page` ASC")
 }
 
 func TestBuild_UnknownColumn(t *testing.T) {
@@ -126,7 +173,7 @@ func TestBuild_TimeRange(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "ts >= ?")
+	assert.Contains(t, result.SQL, "`ts` >= ?")
 	assert.Len(t, result.Params, 1)
 }
 
@@ -321,6 +368,7 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 		},
 	}
 	sq := &StructuredQuery{
+		SelectAll: true,
 		Filters: []Filter{
 			{Column: "received_timestamp", Op: "lt", Value: "2026-04-02T16:02:07.666Z"},
 		},
@@ -329,7 +377,7 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 	}
 	result, err := Build("events", sq, schema, nil, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "received_timestamp < ?")
+	assert.Contains(t, result.SQL, "`received_timestamp` < ?")
 	require.Len(t, result.Params, 1)
 	strVal, isString := result.Params[0].(string)
 	assert.True(t, isString, "timestamp filter value should be coerced to formatted string, got %T", result.Params[0])
@@ -341,7 +389,9 @@ func TestBuild_TableNameWithBacktick(t *testing.T) {
 	sq := &StructuredQuery{Columns: []string{"page"}, Limit: 10}
 	result, err := Build("my`table", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT page FROM `my``table` LIMIT 10", result.SQL)
+	// ClickHouse's canonical escaping (per SHOW CREATE) is backslash, not
+	// backtick-doubling: an embedded ` becomes \`. The column is quoted too.
+	assert.Equal(t, "SELECT `page` FROM `my\\`table` LIMIT 10", result.SQL)
 }
 
 func TestBuild_InvalidColumns(t *testing.T) {
@@ -359,13 +409,15 @@ func TestBuild_InvalidColumns(t *testing.T) {
 			wantErr: "unknown column",
 		},
 		{
-			name: "invalid order by column",
+			name: "bind-unsafe order by column",
 			sq: &StructuredQuery{
 				Columns: []string{"page"},
-				// Aliases are allowed, but they must still be valid identifiers
-				OrderBy: []OrderClause{{Column: "invalid;--", Dir: "asc"}},
+				// A non-schema order column is allowed as an alias reference and
+				// backtick-quoted; only a '?' (which clickhouse-go's binder would
+				// miscount) is rejected.
+				OrderBy: []OrderClause{{Column: "we?ird", Dir: "asc"}},
 			},
-			wantErr: "invalid order column",
+			wantErr: "unsupported order column",
 		},
 		{
 			name: "invalid time range column",
@@ -395,8 +447,8 @@ func TestBuild_TimeRange_SinceOnly(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), nil, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "ts >= ?")
-	assert.NotContains(t, result.SQL, "ts <= ?")
+	assert.Contains(t, result.SQL, "`ts` >= ?")
+	assert.NotContains(t, result.SQL, "`ts` <= ?")
 }
 
 func TestBuild_FilterUnsupportedOp(t *testing.T) {
@@ -475,59 +527,47 @@ func TestBuild_AllowsAuthorizedColumnsInEveryClause(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestBuild_WildcardProjection covers SELECT * resolution: unrestricted roles
-// keep "*", restricted roles expand to exactly their allowed columns (in schema
-// order), and the omitted-columns and explicit-"*" inputs behave identically —
-// closing both the #223 omitted-columns bypass and its explicit-"*" sibling.
-func TestBuild_WildcardProjection(t *testing.T) {
+// TestBuild_SelectAllProjection covers SelectAll resolution: an unrestricted role
+// (or no policy) keeps a bare "*", a column-restricted role expands to exactly its
+// allowed columns in schema order (deny always subtracted), and a role entitled to
+// no columns fails closed — so SelectAll can never reach ClickHouse as a bare *
+// that returns denied columns (#223).
+func TestBuild_SelectAllProjection(t *testing.T) {
 	t.Parallel()
 	// testSchema order: page, button, count, ts, org_id.
 	tests := []struct {
 		name     string
-		columns  []string
 		perms    *policy.ResolvedPermissions
 		wantErr  error
 		selectIs string
 	}{
 		{
 			name:     "nil perms keeps SELECT *",
-			columns:  nil,
 			perms:    nil,
 			selectIs: "*",
 		},
 		{
-			name:     "unrestricted (wildcard allow) omitted columns keeps SELECT *",
-			columns:  nil,
+			name:     "unrestricted (wildcard allow) keeps SELECT *",
 			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}},
 			selectIs: "*",
 		},
 		{
-			name:     "restricted omitted columns expands to allowed projection (schema order)",
-			columns:  nil,
+			name:     "restricted expands to allowed projection (schema order)",
 			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"count", "page"}},
-			selectIs: "page, count",
+			selectIs: "`page`, `count`",
 		},
 		{
-			name:     "restricted explicit-star expands identically (sibling bypass)",
-			columns:  []string{"*"},
-			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"count", "page"}},
-			selectIs: "page, count",
-		},
-		{
-			name:     "deny-list with empty allow expands and drops denied (sibling bypass)",
-			columns:  []string{"*"},
+			name:     "deny-list with empty allow expands and drops denied",
 			perms:    &policy.ResolvedPermissions{Allowed: true, DenyColumns: []string{"org_id"}},
-			selectIs: "page, button, count, ts",
+			selectIs: "`page`, `button`, `count`, `ts`",
 		},
 		{
 			name:     "deny-list with wildcard allow drops denied",
-			columns:  nil,
 			perms:    &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"*"}, DenyColumns: []string{"org_id", "button"}},
-			selectIs: "page, count, ts",
+			selectIs: "`page`, `count`, `ts`",
 		},
 		{
 			name:    "restricted with zero readable columns fails closed",
-			columns: nil,
 			perms:   &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"nonexistent"}},
 			wantErr: ErrNoReadableColumns,
 		},
@@ -535,7 +575,7 @@ func TestBuild_WildcardProjection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result, err := Build("clicks", &StructuredQuery{Columns: tt.columns}, testSchema(), tt.perms, 0)
+			result, err := Build("clicks", &StructuredQuery{SelectAll: true}, testSchema(), tt.perms, 0)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				assert.Nil(t, result)
@@ -543,7 +583,7 @@ func TestBuild_WildcardProjection(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, "SELECT "+tt.selectIs+" FROM `clicks` LIMIT 10000", result.SQL,
-				"restricted SELECT * must never reach ClickHouse as a bare *")
+				"restricted SelectAll must never reach ClickHouse as a bare *")
 			assert.NotContains(t, result.SQL, "org_id", "denied column must not appear when denied")
 		})
 	}
@@ -576,7 +616,7 @@ func TestBuild_OrderByAliasSkipsColumnPolicy(t *testing.T) {
 	}
 	result, err := Build("clicks", sq, testSchema(), perms, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "ORDER BY n DESC")
+	assert.Contains(t, result.SQL, "ORDER BY `n` DESC")
 }
 
 // TestBuild_CountStarWithoutReadableColumns documents that count(*) is permitted
@@ -588,45 +628,137 @@ func TestBuild_CountStarWithoutReadableColumns(t *testing.T) {
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}}
 	result, err := Build("clicks", sq, testSchema(), perms, 0)
 	require.NoError(t, err)
-	assert.Contains(t, result.SQL, "count(*) AS n")
+	assert.Contains(t, result.SQL, "count(*) AS `n`")
 }
 
-// TestBuild_RejectsInjectionViaAggregationAlias is a red-team regression for a
-// SQL-injection vector adjacent to #223: the aggregation alias is interpolated
-// into the SELECT list verbatim ("fn(col) AS <alias>"), so an alias that isn't a
-// bare identifier — one that reparents the query with a comment, breaks the
-// statement, or opens a subquery — must be rejected before it reaches ClickHouse.
-func TestBuild_RejectsInjectionViaAggregationAlias(t *testing.T) {
+// TestBuild_AggregationAliasQuotedAndContained is the successor to the old
+// strict-alias rejection test. Aliases are now permissive identifiers (ClickHouse
+// allows arbitrary quoted alias names), so an injection-shaped alias is no longer
+// rejected — it is backtick-quoted, which neutralizes it: the crafted SQL becomes
+// an inert (weird) column label rather than syntax. Real containment against a
+// live server is proven by TestIntegration_AliasInjectionContained; here we pin
+// that Build succeeds and emits the alias as a single quoted identifier whose
+// inner backticks are backslash-escaped, so it cannot break out.
+func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name  string
-		alias string
-		valid bool
-	}{
-		{"plain identifier", "total", true},
-		{"identifier with underscore and digits", "total_2", true},
-		{"empty alias is allowed (no AS emitted)", "", true},
-		{"reparent via comment", "n FROM secrets --", false},
-		{"statement break", "n; DROP TABLE clicks", false},
-		{"subquery", "n, (SELECT 1)", false},
-		{"backtick break", "n` FROM secrets `", false},
-		{"leading digit", "1n", false},
+	aliases := []string{
+		"total",
+		"n FROM secrets --", // reparent attempt
+		"n; DROP TABLE clicks",
+		"n, (SELECT 1)",     // subquery
+		"n` FROM secrets `", // backtick break
+		"1n",                // leading digit
+		"naïve total",       // space + unicode
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, alias := range aliases {
+		t.Run(alias, func(t *testing.T) {
 			t.Parallel()
-			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: tt.alias}}}
+			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: alias}}}
 			result, err := Build("clicks", sq, testSchema(), nil, 0)
-			if tt.valid {
-				require.NoError(t, err)
-				if tt.alias != "" {
-					assert.Contains(t, result.SQL, "AS "+tt.alias)
-				}
-			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "invalid aggregation alias")
-				assert.Nil(t, result)
+			require.NoError(t, err)
+			assert.Contains(t, result.SQL, "AS "+chsql.QuoteIdent(alias),
+				"alias must be emitted as one backtick-quoted, escaped token")
+		})
+	}
+}
+
+// TestBuild_RejectsBindUnsafeAlias keeps the one alias rejection that remains: a
+// '?' would be miscounted by clickhouse-go's positional value binder.
+func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "we?ird"}}}
+	_, err := Build("clicks", sq, testSchema(), nil, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported aggregation alias")
+}
+
+// ─── Permissive identifier handling (ClickHouse allows arbitrary quoted names) ─
+//
+// ClickHouse identifiers — table names, column names, AND aliases — may contain
+// arbitrary characters when quoted (dots, spaces, unicode, keywords, embedded
+// backticks/backslashes). Customers point WaveHouse at existing schemas that use
+// such names, so the builder must accept any name the schema actually contains —
+// not just names matching the safe-identifier regex.
+//
+// These unit tests assert ACCEPTANCE only (the builder no longer rejects a legal
+// column/alias). That the resulting SQL is correctly ESCAPED and round-trips —
+// including the backslash/backtick cases and injection containment — is proven
+// against a real ClickHouse in tests/integration/identifier_roundtrip_test.go.
+// The escaping mechanism (server-side {name:Identifier} params vs a centralized
+// client-side quoter) is deliberately not asserted here so these stay valid
+// whichever is chosen.
+
+// weirdColumnSchema returns a schema whose weird column names are all legal
+// ClickHouse identifiers but illegal under validIdentifierRe. "id" is a normal
+// anchor so each clause can isolate one weird column.
+func weirdColumnSchema() *discovery.TableSchema {
+	return &discovery.TableSchema{
+		Name: "weird",
+		Columns: []discovery.Column{
+			{Name: "id", Type: "String"},
+			{Name: "user.id", Type: "String"},
+			{Name: "2024", Type: "String"},
+			{Name: "gross $", Type: "String"},
+			{Name: "naïve", Type: "String"},
+			{Name: "tick`col", Type: "String"},
+			{Name: `back\slash`, Type: "String"},
+		},
+	}
+}
+
+// TestBuild_PermissiveColumnNames_AcceptedInEveryClause asserts a legal-in-
+// ClickHouse column that the safe-identifier regex rejects is still accepted no
+// matter which clause references it — projection, filter, group_by, order_by,
+// aggregation argument, or time_range. order_by is included deliberately: it has
+// its own identifier check distinct from validateColumn and must be relaxed too.
+func TestBuild_PermissiveColumnNames_AcceptedInEveryClause(t *testing.T) {
+	t.Parallel()
+	schema := weirdColumnSchema()
+	weird := []string{"user.id", "2024", "gross $", "naïve", "tick`col", `back\slash`}
+	for _, col := range weird {
+		t.Run(col, func(t *testing.T) {
+			t.Parallel()
+			clauses := map[string]*StructuredQuery{
+				"projection":  {Columns: []string{col}},
+				"filter":      {Columns: []string{"id"}, Filters: []Filter{{Column: col, Op: "eq", Value: "x"}}},
+				"group_by":    {Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}, GroupBy: []string{col}},
+				"order_by":    {Columns: []string{"id"}, OrderBy: []OrderClause{{Column: col, Dir: "asc"}}},
+				"aggregation": {Aggregations: []Aggregation{{Fn: "max", Column: col, Alias: "m"}}},
+				"time_range":  {Columns: []string{"id"}, TimeRange: &TimeRange{Column: col, Since: "1h"}},
 			}
+			for clause, sq := range clauses {
+				_, err := Build("weird", sq, schema, nil, 0)
+				require.NoErrorf(t, err, "%s clause must accept legal ClickHouse column %q", clause, col)
+			}
+		})
+	}
+}
+
+// TestBuild_PermissiveAliases_Accepted asserts aliases — which ClickHouse defines
+// as identifiers ("Aliases should comply with the identifiers syntax") — are
+// accepted permissively, including injection-shaped ones. Containment (that a
+// crafted alias cannot break out of the AS position) is an escaping property
+// proven by TestIntegration_AliasInjectionContained, not a rejection.
+//
+// NOTE: this is the new contract that SUPERSEDES
+// TestBuild_RejectsInjectionViaAggregationAlias (which encodes the old strict-
+// regex behavior). The two are intentionally contradictory right now: implementing
+// permissive aliases means reconciling them — keep this one, retire the strict one
+// (or, if aliases end up locked to the regex after all, do the reverse).
+func TestBuild_PermissiveAliases_Accepted(t *testing.T) {
+	t.Parallel()
+	aliases := []string{
+		"total events",       // space
+		"naïve",              // unicode
+		"n) FROM secrets --", // injection-shaped — must be contained, not rejected
+		"x` , (SELECT 1) `y", // backtick break — contained
+	}
+	for _, alias := range aliases {
+		t.Run(alias, func(t *testing.T) {
+			t.Parallel()
+			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: alias}}}
+			_, err := Build("clicks", sq, testSchema(), nil, 0)
+			require.NoErrorf(t, err, "alias %q must be accepted — containment is an escaping concern, not a rejection", alias)
 		})
 	}
 }

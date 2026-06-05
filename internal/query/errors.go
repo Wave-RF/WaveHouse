@@ -11,13 +11,25 @@ import (
 // returns them so a handler can pick the right status without re-deriving the
 // policy decision. See StructuredQueryHandler.Handle for the mapping.
 
-// ErrNoReadableColumns is returned by Build for a full-row read (no explicit
-// columns and no aggregations) when the role may select the table but its column
-// allowlist permits no columns at all. Rather than fall back to a bare SELECT *
-// — the fail-open behind #223 — Build refuses the query. This mirrors the stream
-// path, where a fully column-restricted role receives an empty event rather than
-// the raw row.
+// ErrNoReadableColumns is returned by Build for a SelectAll read when the role
+// may select the table but its column allowlist permits no columns at all.
+// Rather than fall back to a bare SELECT * — the fail-open behind #223 — Build
+// refuses the query (→ 403). This is distinct from ErrEmptyProjection: the caller
+// explicitly asked for all columns and is entitled to none. Mirrors the stream
+// path, where a fully column-restricted role receives an empty event.
 var ErrNoReadableColumns = errors.New("no columns readable for role")
+
+// ErrEmptyProjection is returned by Build when a query selects nothing — no
+// columns, no aggregations, and SelectAll is false. That is a request for no
+// data, so the handler returns an empty result (HTTP 200 []) rather than building
+// an invalid SELECT with no projection. Omitting columns is therefore safe-by-
+// default: you get nothing unless you name columns or set SelectAll.
+var ErrEmptyProjection = errors.New("query selects no columns")
+
+// ErrColumnsAndSelectAll is returned when a query sets both an explicit Columns
+// list and SelectAll — an ambiguous request the handler maps to 400. Pick one:
+// name the columns, or ask for all of them.
+var ErrColumnsAndSelectAll = errors.New("columns and select_all are mutually exclusive")
 
 // ForbiddenColumnError reports that a query referenced a column the role's
 // allowlist denies. It can surface from any clause — projection, aggregation

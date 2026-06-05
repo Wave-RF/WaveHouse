@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 )
 
 // Policy is the top-level access control configuration.
@@ -154,8 +156,19 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		MaxExecutionTimeMs:  perms.MaxExecutionTimeMs,
 	}
 
-	// Resolve filters into WHERE clause.
+	// Resolve filters into WHERE clause. A bind-unsafe filter column can't be
+	// emitted safely — a '?' in it would shift clickhouse-go's positional value
+	// binding, including this RLS filter's own bound value — so deny the role
+	// fail-closed rather than drop the predicate (which would widen row access)
+	// or emit a mis-bound query. validateRolePerms rejects such a policy at write
+	// time; this guards the query path as defense-in-depth (Evaluate does not
+	// re-validate the policy it is handed).
 	if len(perms.Filter) > 0 {
+		for col := range perms.Filter {
+			if chsql.BindUnsafe(col) {
+				return &ResolvedPermissions{Allowed: false}
+			}
+		}
 		clauses, params := resolveFilters(perms.Filter, claims)
 		if len(clauses) > 0 {
 			resolved.WhereClause = strings.Join(clauses, " AND ")
@@ -181,24 +194,28 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 	var clauses []string
 	var params []any
 	for col, f := range filters {
+		// Quote the policy-authored column the same way the query builder quotes
+		// caller columns, so a row-filter on a weird-but-legal column name (dots,
+		// spaces, keywords) is emitted safely.
+		qcol := chsql.QuoteIdent(col)
 		if f.Eq != nil {
 			val := resolveTemplate(*f.Eq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s = ?", col))
+			clauses = append(clauses, fmt.Sprintf("%s = ?", qcol))
 			params = append(params, val)
 		}
 		if f.Neq != nil {
 			val := resolveTemplate(*f.Neq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s != ?", col))
+			clauses = append(clauses, fmt.Sprintf("%s != ?", qcol))
 			params = append(params, val)
 		}
 		if f.Gt != nil {
 			val := resolveTemplate(*f.Gt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s > ?", col))
+			clauses = append(clauses, fmt.Sprintf("%s > ?", qcol))
 			params = append(params, val)
 		}
 		if f.Lt != nil {
 			val := resolveTemplate(*f.Lt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s < ?", col))
+			clauses = append(clauses, fmt.Sprintf("%s < ?", qcol))
 			params = append(params, val)
 		}
 	}
@@ -257,24 +274,26 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 	if !rp.Allowed {
 		return false
 	}
-	// A literal "*" is never a concrete, grantable column. It is the caller
-	// asking for "everything", which the projection layer (AllowedProjection)
-	// must resolve to the role's allowed columns — not something to wave through
-	// here. Returning true would re-open the allowlist whenever AllowColumns is
-	// empty or itself a wildcard (the deny-list footgun behind the structured
-	// query SELECT * bypass, #223). A real column literally named "*" cannot
-	// reach a query: it is not a valid SQL identifier, so the builder's
-	// schema/identifier validation rejects it regardless.
-	if col == "*" {
-		return false
-	}
-	// Check deny list first.
+	// Precedence is most-restrictive-wins: the deny list is consulted before the
+	// allow list, so a column in BOTH is denied. The order of the two loops is
+	// cosmetic — the result is the conjunction "in allow AND not in deny" either
+	// way; what would be unsafe is allow-WINS (returning true before consulting
+	// deny), which we never do. See access-control.md "deny_columns always wins".
+	//
+	// "*" carries no special meaning here: in a query it is a literal column name,
+	// decided by these same rules (and gated by schema membership in the builder,
+	// so it only resolves when a real column is named "*"). The all-columns
+	// wildcard is the caller's SelectAll, expanded by AllowedProjection — never a
+	// bare "*" run through this function, which was the #223 footgun and is now
+	// closed structurally.
 	for _, d := range rp.DenyColumns {
 		if d == col {
 			return false
 		}
 	}
-	// If allow list is empty or contains "*", all non-denied columns are allowed.
+	// An empty allow list (or one containing the "*" wildcard token) means "all
+	// columns": every non-denied column is permitted. A non-empty allow list
+	// without "*" is an allowlist — only its members (never the denied) pass.
 	if len(rp.AllowColumns) == 0 {
 		return true
 	}
@@ -311,12 +330,21 @@ func (rp *ResolvedPermissions) AllowedProjection(cols []string) []string {
 // or a bare "*" wildcard); there a SELECT * exposes nothing the role isn't
 // already entitled to, so the builder leaves it untouched. When true, the
 // builder must expand SELECT * into AllowedProjection so denied columns never
-// reach the result (#223). A nil receiver (no policy) is unrestricted. The
-// allow/deny precedence here mirrors IsColumnAllowed exactly so the "is this
+// reach the result (#223). A nil receiver (no policy) is unrestricted; a denied
+// role (`Allowed` false) restricts everything. The precedence here mirrors
+// IsColumnAllowed exactly — including the `!Allowed` deny-all — so the "is this
 // role restricted?" and "is this column allowed?" questions can never disagree.
 func (rp *ResolvedPermissions) RestrictsColumns() bool {
 	if rp == nil {
 		return false
+	}
+	// A denied role can read no column, so it restricts everything. Without this
+	// guard RestrictsColumns would return false ("unrestricted") for an
+	// `Allowed:false` receiver while IsColumnAllowed denies all — and
+	// resolveProjection's SelectAll branch trusts RestrictsColumns, so the
+	// disagreement would emit a bare `SELECT *` over every column. Fail closed.
+	if !rp.Allowed {
+		return true
 	}
 	if len(rp.DenyColumns) > 0 {
 		return true
@@ -393,6 +421,20 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	}
 	if perms.MaxExecutionTimeMs < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_execution_time_ms must be non-negative", table, op, role)
+	}
+	// Filter and check column names are interpolated into SQL (backtick-quoted) at
+	// query time, so a '?' in one would shift clickhouse-go's positional value
+	// binding. Refuse such a policy at write time, mirroring the query builder's
+	// chsql.BindUnsafe guard on caller-supplied columns.
+	for col := range perms.Filter {
+		if chsql.BindUnsafe(col) {
+			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
+		}
+	}
+	for col := range perms.Check {
+		if chsql.BindUnsafe(col) {
+			return fmt.Errorf("table %q, op %q, role %q: check column %q contains '?' (unsupported)", table, op, role, col)
+		}
 	}
 	return nil
 }
