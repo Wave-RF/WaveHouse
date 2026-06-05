@@ -69,17 +69,6 @@ export interface ClientConfig<_DB extends Database = Database> {
 export interface ClientOptions {
   /** Maximum retry attempts for failed requests. Default: 2. */
   maxRetries?: number;
-  /**
-   * Fallback `ORDER BY` applied when a query has no explicit `.orderBy()`.
-   *
-   * Set this to your table's sort key to get deterministic cursor pagination —
-   * the `next()` paginator needs an order column to build its keyset cursor.
-   * Omitted by default, so `wh.from(table).fetch()` works on any schema —
-   * including bring-your-own tables that lack a `received_timestamp` column —
-   * without emitting an `ORDER BY` the table can't satisfy. Never applied to
-   * aggregation queries (those order by their own grouped output).
-   */
-  defaultOrderBy?: OrderClause | OrderClause[];
 }
 
 // --- Structured query AST (matches backend wire format) ---

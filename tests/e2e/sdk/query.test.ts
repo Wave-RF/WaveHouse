@@ -98,13 +98,12 @@ describe("Query", () => {
   // page boundary (ClickHouse stamps received_timestamp (DEFAULT now64(3)) at
   // BATCH-insert time, so every row a worker flushes together shares one
   // millisecond, and the SDK's strict keyset cursor then dropped the ties,
-  // leaving page 2 empty) — is now moot for unconfigured clients: #270 removed
-  // the hardcoded default order. A bare .limit().fetch() with no .orderBy() and
-  // no options.defaultOrderBy reports hasMore honestly but offers no next(),
-  // because there is no order column to build a keyset cursor from. Deterministic
-  // pagination requires an explicit .orderBy() (see the test above) or an opt-in
-  // options.defaultOrderBy.
-  it("reports hasMore without next() when no order is configured (#270, sidesteps #175)", async () => {
+  // leaving page 2 empty) — is now moot: #270 removed the hardcoded default
+  // order. A bare .limit().fetch() with no .orderBy() reports hasMore honestly
+  // but offers no next(), because there is no order column to build a keyset
+  // cursor from. Deterministic pagination requires an explicit .orderBy() (see
+  // the test above).
+  it("reports hasMore without next() when no order is set (#270, sidesteps #175)", async () => {
     const page1 = await wh.from(T.clicks).select().limit(3).fetch();
     expect(page1.error).toBeNull();
     expect(page1.data).toHaveLength(3);

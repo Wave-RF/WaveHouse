@@ -6,7 +6,6 @@ import type {
   FetchOptions,
   HttpContext,
   InsertResult,
-  OrderClause,
   Result,
   StreamOptions,
   TableSchema,
@@ -22,18 +21,11 @@ export class TableRef<Row = Record<string, unknown>> {
   private readonly _ctx: HttpContext;
   private readonly _table: string;
   private readonly _createStream: CreateStreamFn<Row>;
-  private readonly _defaultOrderBy: OrderClause[];
 
-  constructor(
-    ctx: HttpContext,
-    table: string,
-    createStream: CreateStreamFn<Row>,
-    defaultOrderBy: OrderClause[] = [],
-  ) {
+  constructor(ctx: HttpContext, table: string, createStream: CreateStreamFn<Row>) {
     this._ctx = ctx;
     this._table = table;
     this._createStream = createStream;
-    this._defaultOrderBy = defaultOrderBy;
   }
 
   /** SELECT * shortcut — fetches rows with optional pagination. */
@@ -56,7 +48,6 @@ export class TableRef<Row = Record<string, unknown>> {
         orderBy: [],
       },
       this._createStream,
-      this._defaultOrderBy,
     );
   }
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryBuilder } from "./query-builder.js";
-import type { HttpContext, OrderClause, QueryFilter } from "./types.js";
+import type { HttpContext, QueryFilter } from "./types.js";
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 const mockCreateStream = vi.fn();
@@ -21,23 +21,6 @@ function builder(table = "clicks"): QueryBuilder {
       orderBy: [],
     },
     mockCreateStream,
-  );
-}
-
-/** A builder carrying a client-configured `defaultOrderBy` (4th ctor arg). */
-function builderWithDefault(defaultOrderBy: OrderClause[], table = "clicks"): QueryBuilder {
-  return new QueryBuilder(
-    makeCtx(),
-    {
-      table,
-      columns: [],
-      aggregations: [],
-      filters: [],
-      groupBy: [],
-      orderBy: [],
-    },
-    mockCreateStream,
-    defaultOrderBy,
   );
 }
 
@@ -295,65 +278,6 @@ describe("QueryBuilder", () => {
       op: "lt",
       value: "2026-01-01T11:00:00Z",
     });
-  });
-
-  // --- Configured defaultOrderBy (issue #270) ---
-
-  it("applies a configured defaultOrderBy when no explicit orderBy is set", async () => {
-    await builderWithDefault([{ column: "id", dir: "asc" }]).fetch();
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.order_by).toEqual([{ column: "id", dir: "asc" }]);
-  });
-
-  it("lets an explicit orderBy override the configured defaultOrderBy", async () => {
-    await builderWithDefault([{ column: "id", dir: "asc" }])
-      .orderBy("score", "desc")
-      .fetch();
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.order_by).toEqual([{ column: "score", dir: "desc" }]);
-  });
-
-  it("exposes next() when a defaultOrderBy is configured and the page is full", async () => {
-    fetchSpy.mockResolvedValue(
-      new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }),
-    );
-
-    const result = await builderWithDefault([{ column: "id", dir: "asc" }])
-      .limit(2)
-      .fetch();
-
-    expect(result.hasMore).toBe(true);
-    expect(result.next).toBeDefined();
-  });
-
-  it("drives the _fetchNext cursor from the configured defaultOrderBy", async () => {
-    fetchSpy
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), { status: 200 }),
-      )
-      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: "c" }]), { status: 200 }));
-
-    const result = await builderWithDefault([{ column: "id", dir: "asc" }])
-      .limit(2)
-      .fetch();
-    await result.next!();
-
-    const body = JSON.parse(fetchSpy.mock.calls[1][1].body);
-    const cursorFilter = body.filters.find((f: QueryFilter) => f.op === "gt");
-    expect(cursorFilter).toEqual({ column: "id", op: "gt", value: "b" });
-    // The next page pins the same order the cursor assumes.
-    expect(body.order_by).toEqual([{ column: "id", dir: "asc" }]);
-  });
-
-  it("does not apply defaultOrderBy to aggregation queries", async () => {
-    await builderWithDefault([{ column: "id", dir: "asc" }])
-      .count("*", "total")
-      .fetch();
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.order_by).toBeUndefined();
   });
 
   // --- PromiseLike ---

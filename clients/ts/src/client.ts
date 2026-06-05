@@ -7,20 +7,7 @@ import { StreamController } from "./stream/controller.js";
 import { SSETransport } from "./stream/sse.js";
 import { SysNamespace } from "./sys.js";
 import { TableRef } from "./table.js";
-import type {
-  ClientConfig,
-  Database,
-  HttpContext,
-  OrderClause,
-  Result,
-  StreamOptions,
-} from "./types.js";
-
-/** Normalize the optional `defaultOrderBy` config into an array (omitted → []). */
-function normalizeOrderBy(orderBy?: OrderClause | OrderClause[]): OrderClause[] {
-  if (orderBy == null) return [];
-  return Array.isArray(orderBy) ? [...orderBy] : [orderBy];
-}
+import type { ClientConfig, Database, HttpContext, Result, StreamOptions } from "./types.js";
 
 type TableName<DB> = DB extends Database ? Extract<keyof DB, string> : string;
 type RowType<DB, T extends string> = DB extends Database
@@ -32,8 +19,6 @@ type RowType<DB, T extends string> = DB extends Database
 export class WaveHouseClient<DB extends Database = Database> {
   /** @internal */
   readonly _ctx: HttpContext;
-  /** @internal Normalized fallback order for queries without an explicit `.orderBy()`. */
-  private readonly _defaultOrderBy: OrderClause[];
 
   /** Schema introspection namespace. */
   readonly schema: SchemaNamespace;
@@ -54,7 +39,6 @@ export class WaveHouseClient<DB extends Database = Database> {
         maxRetries: config.options?.maxRetries ?? 2,
       },
     };
-    this._defaultOrderBy = normalizeOrderBy(config.options?.defaultOrderBy);
 
     this.schema = new SchemaNamespace(this._ctx);
     this.policy = new PolicyNamespace(this._ctx);
@@ -65,11 +49,8 @@ export class WaveHouseClient<DB extends Database = Database> {
 
   /** Get a table reference for building queries, inserts, and streams. */
   from<T extends TableName<DB>>(table: T): TableRef<RowType<DB, T>> {
-    return new TableRef<RowType<DB, T>>(
-      this._ctx,
-      table,
-      (t, opts) => this._createStream<RowType<DB, T>>(t, opts),
-      this._defaultOrderBy,
+    return new TableRef<RowType<DB, T>>(this._ctx, table, (t, opts) =>
+      this._createStream<RowType<DB, T>>(t, opts),
     );
   }
 

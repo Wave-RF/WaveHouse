@@ -55,19 +55,11 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
   private readonly _ctx: HttpContext;
   /** @internal */
   private readonly _createStream: CreateStreamFn<Row>;
-  /** @internal Client-configured fallback order, applied when no explicit `.orderBy()`. */
-  private readonly _defaultOrderBy: OrderClause[];
 
-  constructor(
-    ctx: HttpContext,
-    state: QueryState,
-    createStream: CreateStreamFn<Row>,
-    defaultOrderBy: OrderClause[] = [],
-  ) {
+  constructor(ctx: HttpContext, state: QueryState, createStream: CreateStreamFn<Row>) {
     this._ctx = ctx;
     this._state = Object.freeze({ ...state });
     this._createStream = createStream;
-    this._defaultOrderBy = defaultOrderBy;
   }
 
   // --- Builder methods (each returns a new QueryBuilder) ---
@@ -151,10 +143,10 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     const hasMore = effectiveLimit != null && rows.length >= effectiveLimit;
 
     // Cursor pagination needs an order column to walk. Offer `next()` only when
-    // there's an effective order (an explicit `.orderBy()` or a configured
-    // `defaultOrderBy`); otherwise still report `hasMore` honestly from the row
-    // count, but with `next` undefined — there's no deterministic cursor to build.
-    if (hasMore && this._effectiveOrderBy().length > 0) {
+    // the caller set an explicit `.orderBy()`; otherwise still report `hasMore`
+    // honestly from the row count, but with `next` undefined — there's no
+    // deterministic cursor to build.
+    if (hasMore && this._state.orderBy.length > 0) {
       const nextFn = () => this._fetchNext(rows, effectiveLimit!, opts);
       return okPage(rows, true, nextFn);
     }
@@ -203,37 +195,12 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
   // --- Private helpers ---
 
   private _clone(overrides: Partial<QueryState>): QueryBuilder<Row> {
-    return new QueryBuilder(
-      this._ctx,
-      { ...this._state, ...overrides },
-      this._createStream,
-      this._defaultOrderBy,
-    );
+    return new QueryBuilder(this._ctx, { ...this._state, ...overrides }, this._createStream);
   }
 
   private _addAgg(fn: string, column: string, alias: string): QueryBuilder<Row> {
     const agg: Aggregation = { fn, column, alias };
     return this._clone({ aggregations: [...this._state.aggregations, agg] });
-  }
-
-  /**
-   * Resolve the order to apply to this query:
-   *   1. an explicit `.orderBy()` always wins;
-   *   2. otherwise the client-configured `defaultOrderBy`, but never for
-   *      aggregation queries (those order by their own grouped output);
-   *   3. otherwise none.
-   *
-   * Returning `[]` means "send no `ORDER BY`", which keeps `.fetch()` valid on
-   * tables that lack a conventional sort column such as `received_timestamp`
-   * (#270). Cursor pagination's `next()` is only offered when this is non-empty.
-   * @internal
-   */
-  private _effectiveOrderBy(): OrderClause[] {
-    if (this._state.orderBy.length > 0) return this._state.orderBy;
-    if (this._defaultOrderBy.length > 0 && this._state.aggregations.length === 0) {
-      return this._defaultOrderBy;
-    }
-    return [];
   }
 
   private _buildAST(effectiveLimit?: number): StructuredQuery {
@@ -242,8 +209,10 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     if (this._state.aggregations.length > 0) ast.aggregations = this._state.aggregations;
     if (this._state.filters.length > 0) ast.filters = this._state.filters;
     if (this._state.groupBy.length > 0) ast.group_by = this._state.groupBy;
-    const orderBy = this._effectiveOrderBy();
-    if (orderBy.length > 0) ast.order_by = orderBy;
+    // No implicit default order: emit ORDER BY only when the caller set one via
+    // `.orderBy()`. Sending a hardcoded column here would 500 on tables that
+    // lack it (#270); pagination's `next()` is likewise gated on an explicit order.
+    if (this._state.orderBy.length > 0) ast.order_by = this._state.orderBy;
     if (effectiveLimit != null) ast.limit = effectiveLimit;
     if (this._state.timeRange) ast.time_range = this._state.timeRange;
     return ast;
@@ -254,12 +223,11 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     _limit: number,
     opts?: FetchOptions,
   ): Promise<Result<Row[]>> {
-    // The keyset cursor walks the effective order's first column. `fetch()` only
-    // attaches `next()` when this is non-empty, so a missing cursor means there's
-    // nothing to paginate by — return an empty terminal page rather than guess a
-    // column the table may not have.
-    const effectiveOrder = this._effectiveOrderBy();
-    const cursor = effectiveOrder[0];
+    // The keyset cursor walks the explicit order's first column. `fetch()` only
+    // attaches `next()` when `.orderBy()` was set, so a missing cursor means
+    // there's nothing to paginate by — return an empty terminal page rather than
+    // guess a column the table may not have (#270).
+    const cursor = this._state.orderBy[0];
     if (cursor == null) return okPage([] as unknown as Row[], false);
     const { column: orderCol, dir: orderDir } = cursor;
 
@@ -270,13 +238,9 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
     const cursorOp = orderDir === "desc" ? "lt" : "gt";
     const cursorFilter: QueryFilter = { column: orderCol, op: cursorOp, value: lastValue };
-    // Pin the next page to the same effective order the cursor assumes, so a
-    // configured `defaultOrderBy` stays consistent across pages (the cloned
-    // builder would otherwise just re-derive it, but pinning keeps the cursor's
-    // assumption explicit and survives even if the default later changes).
     const nextBuilder = this._clone({
       filters: [...this._state.filters, cursorFilter],
-      orderBy: effectiveOrder,
+      orderBy: this._state.orderBy,
     });
 
     return nextBuilder.fetch(opts);
