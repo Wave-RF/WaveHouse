@@ -165,7 +165,7 @@ const { data } = await clicks.select('page', 'button').where('page', '=', '/home
 
 ### `.selectAll()`
 
-Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)`; the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
 
 ```ts
 const { data } = await clicks.selectAll().where('country', '=', 'US').limit(10);
@@ -205,7 +205,7 @@ const q = clicks.select('page').select('button'); // SELECT page, button
 
 #### `.selectAll()`
 
-Select every column your role may read (the all-columns wildcard, expanded server-side to your allowed columns). Mutually exclusive with `.select(...)`.
+Select every column your role may read (the all-columns wildcard, expanded server-side to your allowed columns). Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.).
 
 ```ts
 const q = clicks.selectAll().where('country', '=', 'US');

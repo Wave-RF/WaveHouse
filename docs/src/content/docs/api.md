@@ -318,7 +318,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
 | `columns` | string \| string[] | No | Columns to SELECT — an array, or a single string for one column. A literal `"*"` is the column *named* `*`, **not** a wildcard. Omit (or send `[]` / `""`) to select nothing; use `select_all` for a full-row read. Mutually exclusive with `select_all`. |
-| `select_all` | bool | No | Select every column the role may read (the all-columns wildcard, expanded server-side to the allow/deny set). Mutually exclusive with a non-empty `columns`. |
+| `select_all` | bool | No | Select every column the role may read (the all-columns wildcard, expanded server-side to the allow/deny set). Mutually exclusive with a non-empty `columns`, and with `aggregations`. |
 | `aggregations` | object[] | No | Aggregation functions (`fn`, `column`, `alias`). |
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |
