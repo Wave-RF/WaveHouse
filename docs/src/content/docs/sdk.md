@@ -289,7 +289,7 @@ Open a live stream from the builder's table. See [Streaming](#streaming).
 
 ### Pagination
 
-When `limit` is set and the result contains exactly `limit` rows, the result includes `hasMore: true` and a `next()` function. Calling `next()` fetches the next page using cursor-based pagination (adds a filter on the sort column using the last row's value).
+When `limit` is set and the result contains at least `limit` rows, `hasMore` is `true`. Cursor-based pagination's `next()` walks an **order column** — it adds a filter on that column using the last row's value — so `next()` is only attached when the query has an explicit `.orderBy()`. With no order column the result still reports `hasMore` honestly, but `next` is `undefined` (there is no deterministic cursor to build) — add an `.orderBy()` to paginate.
 
 ```ts
 let result = await clicks.select().orderBy('received_timestamp', 'desc').limit(100).fetch();

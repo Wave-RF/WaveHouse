@@ -142,12 +142,14 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     const rows = data!;
     const hasMore = effectiveLimit != null && rows.length >= effectiveLimit;
 
-    if (hasMore) {
+    // next() needs an order column for its cursor; with no .orderBy() we still
+    // report hasMore honestly from the row count but can't offer a next().
+    if (hasMore && this._state.orderBy.length > 0) {
       const nextFn = () => this._fetchNext(rows, effectiveLimit!, opts);
       return okPage(rows, true, nextFn);
     }
 
-    return okPage(rows, false);
+    return okPage(rows, hasMore);
   }
 
   stream(opts?: StreamOptions): StreamController<Row> {
@@ -205,12 +207,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     if (this._state.aggregations.length > 0) ast.aggregations = this._state.aggregations;
     if (this._state.filters.length > 0) ast.filters = this._state.filters;
     if (this._state.groupBy.length > 0) ast.group_by = this._state.groupBy;
-    if (this._state.orderBy.length > 0) {
-      ast.order_by = this._state.orderBy;
-    } else if (effectiveLimit != null && this._state.aggregations.length === 0) {
-      // Default ordering for deterministic cursor pagination.
-      ast.order_by = [{ column: "received_timestamp", dir: "desc" }];
-    }
+    if (this._state.orderBy.length > 0) ast.order_by = this._state.orderBy;
     if (effectiveLimit != null) ast.limit = effectiveLimit;
     if (this._state.timeRange) ast.time_range = this._state.timeRange;
     return ast;
@@ -221,8 +218,11 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
     _limit: number,
     opts?: FetchOptions,
   ): Promise<Result<Row[]>> {
-    const orderCol = this._state.orderBy[0]?.column ?? "received_timestamp";
-    const orderDir = this._state.orderBy[0]?.dir ?? "desc";
+    // No explicit order → no keyset cursor to build; nothing to page by.
+    const cursor = this._state.orderBy[0];
+    if (cursor == null) return okPage([] as unknown as Row[], false);
+    const { column: orderCol, dir: orderDir } = cursor;
+
     const lastRow = prevRows[prevRows.length - 1] as Record<string, unknown>;
     const lastValue = lastRow?.[orderCol];
 
@@ -230,12 +230,9 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
     const cursorOp = orderDir === "desc" ? "lt" : "gt";
     const cursorFilter: QueryFilter = { column: orderCol, op: cursorOp, value: lastValue };
-    // Ensure the next page uses the same order the cursor assumes.
-    const orderBy: OrderClause[] =
-      this._state.orderBy.length > 0 ? this._state.orderBy : [{ column: orderCol, dir: orderDir }];
     const nextBuilder = this._clone({
       filters: [...this._state.filters, cursorFilter],
-      orderBy,
+      orderBy: this._state.orderBy,
     });
 
     return nextBuilder.fetch(opts);
