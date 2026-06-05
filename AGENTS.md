@@ -217,7 +217,7 @@ Agents follow the same universal git hooks as humans (pre-commit + pre-push in `
 
 Agents must create PRs with `gh pr create --draft`. Only humans transition draft → ready-for-review (`gh pr ready` is blocked for agents). Only humans approve or request changes (`gh pr review --approve` / `--request-changes` are blocked).
 
-**PR title format.** The title becomes the squash-merge subject on `main` and is gated by the required `PR housekeeping` check — a bad title blocks merge, so don't discover it from CI. It must be Conventional Commits — `<type>(optional-scope)(optional-!): <subject>` — **≤ 72 chars**, subject **lowercase-first** with **no trailing period**. Types: `feat fix docs refactor test chore ci deps build perf revert style`. Validate before creating: `scripts/lint-pr-title.sh "<title>"` (exit 0 = valid; it prints the reason on failure). `.claude/hooks/agent-bash-gate.sh` runs the same check on `gh pr create` / `gh pr edit --title`, so a malformed title is caught locally before the PR exists. The rule has a single source — `scripts/lint-pr-title.sh`, which mirrors the regex in `.github/workflows/housekeeping.yml`; change them together.
+**PR title format.** The title becomes the squash-merge subject on `main` and is gated by the required `PR housekeeping` check — a bad title blocks merge, so don't discover it from CI. It must be Conventional Commits — `<type>(optional-scope)(optional-!): <subject>` — **≤ 72 chars**, subject **lowercase-first** with **no trailing period**. Types: `feat fix docs refactor test chore ci deps build perf revert style`. Validate before creating: `scripts/lint-pr-title.sh "<title>"` (exit 0 = valid; it prints the reason on failure). `.claude/hooks/agent-bash-gate.sh` runs the same check on `gh pr create` / `gh pr edit --title`, so a malformed title is caught locally before the PR exists. The rule has a single source of truth — `scripts/lint-pr-title.sh` — used by **both** this local gate and the required `PR housekeeping` check (`.github/workflows/housekeeping.yml` calls the same script), so local and CI never drift.
 
 ### Human reviewer assignment is humans-only
 
@@ -381,7 +381,7 @@ docs/                   → Project documentation
 - Input JSON is validated against ClickHouse schemas before processing
 - ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself
 - **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.
-- **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. `pr-title.yml` is an inline check rather than a third-party action).
+- **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. the PR-title check in `housekeeping.yml` is inline bash calling `scripts/lint-pr-title.sh`, not a third-party action).
 
 ## Repository Automation
 

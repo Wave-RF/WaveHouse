@@ -501,10 +501,11 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for four ecosystems:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for five ecosystems:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
 - **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
+- **npm — docs site** (`docs/`), commit prefix `docs:`
 - **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
 - **npm — E2E tests** (`tests/e2e/sdk/`), commit prefix `deps(tests):`
 
@@ -518,7 +519,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
+PR titles must match Conventional Commits format (enforced by the required `PR housekeeping` check, `.github/workflows/housekeeping.yml` — validate locally with `scripts/lint-pr-title.sh "<title>"`):
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -536,7 +537,7 @@ The `main branch protection` ruleset requires the following checks to pass befor
 
 - `Check` — module tidiness, format verification, vulnerability scan
 - `Build` — compile all binaries
-- `Validate` — PR title is Conventional Commits
+- `PR housekeeping` — PR title is Conventional Commits
 
 Plus 1 approving review, and the `Admin approval` check (enforced by `.github/workflows/admin-approval.yml`) requires at least one `APPROVED` review specifically from an admin (Eric or Taite). Linear history, no deletion, no force-push, squash-merge only.
 
@@ -561,15 +562,15 @@ Advisory PR review comes from marketplace apps configured at the org/repo level:
 
 Both are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
 
-### Task Board is the single signal
+### Reviewer assignment and the Task Board
 
-`.github/workflows/project-orchestrator.yml` drives the Task Board (project #7) as the real "who needs to look at this next" channel. GitHub's review-request notifications are treated as noise; what matters is the position of your assigned card on the board.
+Reviewer assignment is automated; the board itself is GitHub-native, not a workflow state machine:
 
-- **Coder flow**: open PR (draft or not) → address bot feedback → once all required checks pass and all review threads are resolved, the orchestrator adds the PR to the board, sets its Status to `Ready`, and assigns the non-author admin. You're done for now.
-- **Reviewer flow**: PR card shows up on your board in `Ready`. You move it to `In progress` when you start reviewing (this is the one manual step). You review. Either (a) approve → `admin-approval.yml` passes, auto-merge takes over, card auto-flips to `Done`; or (b) click "Request changes" → orchestrator moves PR card to `In review`, linked issue card to `Ready` (now the coder's ball).
-- **Coder addressing feedback**: push fixes, resolve threads, then click "re-request review" on your reviewer in GitHub's sidebar (this is the trigger the orchestrator listens for). Orchestrator moves PR card back to `Ready`, issue card back to `In review`. Reviewer sees the card returned to their column.
+- **Reviewer assignment**: on PR open / ready-for-review, the `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) requests review from the non-author admin and sets them as assignee. It does **not** re-request on every push — after addressing feedback, use GitHub's "Re-request review" button (the trigger, if `dismiss_stale_reviews_on_push` cleared the request).
+- **Merge gate**: the `Admin approval` status check (`.github/workflows/admin-approval.yml`) fails until an admin has an `APPROVED` review; the ruleset adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
+- **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review). Dependabot PRs do not appear on the Task Board.
+Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
 
 ### Invoking bots manually
 
@@ -593,7 +594,7 @@ When pushing back on a bot's suggestion, end the reply with the bot's mention (e
 
 ### Auto-labeling PRs
 
-`.github/workflows/label.yml` uses `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
+The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
 
 ### When adding a new `internal/<pkg>/` package
 
