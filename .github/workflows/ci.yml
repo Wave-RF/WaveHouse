@@ -28,8 +28,9 @@ jobs:
     # build artifacts stay hot across phases. Parallelism lives in the
     # Makefile.
     name: CI
-    runs-on: [wave-rf-runners]
-    # Warm: ~2 min. Cold: ~5-8 min. 45 leaves headroom + a hung-job cap.
+    runs-on: ubuntu-latest
+    # Public-repo ubuntu-latest (4-core). Warm: ~5-10 min. Cold: ~15.
+    # 45 leaves headroom + a hung-job cap.
     timeout-minutes: 45
     steps:
       # Composite actions can't self-checkout — checkout first.
@@ -78,21 +79,21 @@ jobs:
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ${{ steps.setup.outputs.pnpm-store-path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Save Playwright browser cache
         if: steps.setup.outputs.playwright-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml') }}
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Save Astro content cache
         if: steps.setup.outputs.astro-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: docs/.astro
-          key: astro-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml', 'docs/astro.config.mjs') }}
+          key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'docs/astro.config.mjs') }}
 
       # Coverage in the job-summary panel. See #133 for post-launch
       # reporting decisions.

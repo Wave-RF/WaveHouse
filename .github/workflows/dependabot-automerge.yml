@@ -24,7 +24,7 @@ permissions:
 jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]'
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout main (trusted composite-action source)
