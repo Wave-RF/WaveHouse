@@ -289,19 +289,23 @@ func TestResolveTimeValue_RelativeDuration(t *testing.T) {
 	result := resolveTimeValue("1h", 0)
 	assert.NotEmpty(t, result)
 	assert.NotEqual(t, "1h", result, "relative duration should resolve to a timestamp")
+
+	assert.NotContains(t, result, "T", "must not emit the RFC3339 T separator")
+	assert.NotContains(t, result, "Z", "must not emit the RFC3339 Z zone suffix")
 }
 
 func TestResolveTimeValue_RFC3339(t *testing.T) {
 	t.Parallel()
+
 	result := resolveTimeValue("2024-01-01T00:00:00Z", 0)
-	assert.Equal(t, "2024-01-01T00:00:00Z", result)
+	assert.Equal(t, "2024-01-01 00:00:00", result)
 }
 
 func TestResolveTimeValue_WithBucketing(t *testing.T) {
 	t.Parallel()
 	// With 60s buckets, a time at :30 should truncate to :00.
 	result := resolveTimeValue("2024-01-01T12:34:30Z", 60)
-	assert.Equal(t, "2024-01-01T12:34:00Z", result)
+	assert.Equal(t, "2024-01-01 12:34:00", result)
 }
 
 func TestBucketTime_ZeroBucket(t *testing.T) {
@@ -449,6 +453,28 @@ func TestBuild_TimeRange_SinceOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`ts` >= ?")
 	assert.NotContains(t, result.SQL, "`ts` <= ?")
+}
+
+func TestBuild_TimeRange_ClickHouseDateTimeFormat(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		TimeRange: &TimeRange{
+			Column: "ts",
+			Since:  "2024-01-01T00:00:00Z",
+			Until:  "2024-01-02T03:04:05Z",
+		},
+	}
+	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	require.NoError(t, err)
+	require.Len(t, result.Params, 2)
+	assert.Equal(t, "2024-01-01 00:00:00", result.Params[0])
+	assert.Equal(t, "2024-01-02 03:04:05", result.Params[1])
+	for _, p := range result.Params {
+		s, ok := p.(string)
+		require.True(t, ok, "time_range bound must be a formatted string param")
+		assert.NotContains(t, s, "T", "must not bind an RFC3339 T-separated string (#238)")
+	}
 }
 
 func TestBuild_FilterUnsupportedOp(t *testing.T) {
