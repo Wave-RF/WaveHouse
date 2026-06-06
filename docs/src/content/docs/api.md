@@ -416,7 +416,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
-| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m", "7d") or RFC3339. |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m", "7d", "2w") or RFC3339. |
 
 **Response:**
 
@@ -426,7 +426,7 @@ JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: M
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation) |
+| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation, or an unparseable `time_range` `since`/`until` — neither a relative duration nor an RFC3339 timestamp) |
 | 403 | `{"error":"forbidden"}` | Role lacks select permission on table |
 | 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
