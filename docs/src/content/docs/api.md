@@ -375,7 +375,9 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 **curl example:**
 
 ```bash
+# Requires an admin-role JWT — see "Generating a JWT for Testing" below.
 curl -X POST http://localhost:8080/v1/admin/query \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
