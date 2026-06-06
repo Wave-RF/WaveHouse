@@ -123,7 +123,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
   // --- Execution ---
 
-  /** Default row limit when none is specified. Matches backend DefaultMaxRows. */
+  /** Default row limit when none is specified — deliberately tighter than the backend's DefaultMaxRows (10000) safety cap. */
   static readonly DEFAULT_LIMIT = 1000;
 
   async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {

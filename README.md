@@ -56,6 +56,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   clickhouse-client --query "CREATE TABLE IF NOT EXISTS events (kind String, user String, received_timestamp DateTime64(3,'UTC') DEFAULT now64(3,'UTC')) ENGINE=MergeTree ORDER BY kind"
 
 # stream live events in one terminal, then ingest one in another and watch it arrive
+# (a 404 "unknown table" here just means schema discovery hasn't seen the new table yet — retry; worst case 60s)
 curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
 # in another terminal, ingest an event (no auth needed with the dev policy)
 curl -sX POST "http://localhost:8080/v1/ingest?table=events" \

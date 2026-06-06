@@ -273,7 +273,7 @@ If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automat
 
 #### `.timeRange(column, since, until?)`
 
-Filter by a time window. `since` accepts RFC3339 timestamps or relative durations in Go duration units (`'1h'`, `'30m'` — hours are the largest unit; day suffixes like `'7d'` aren't accepted yet, use `'168h'` — see [#285](https://github.com/Wave-RF/WaveHouse/issues/285)).
+Filter by a time window. `since` and `until` accept RFC3339 timestamps or relative durations in Go duration units (`'1h'`, `'30m'` — hours are the largest unit; day suffixes like `'7d'` aren't accepted yet, use `'168h'` — see [#285](https://github.com/Wave-RF/WaveHouse/issues/285)).
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
