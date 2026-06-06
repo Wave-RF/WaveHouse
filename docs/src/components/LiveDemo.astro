@@ -3,10 +3,13 @@
 // mock. Counts and the activity feed come from the public read-only role on
 // the WaveHouse instance behind stats.wavehouse.dev (our own GitHub-activity
 // dogfood deployment, Wave-RF/WaveHouse-Stats), fetched in the visitor's
-// browser through @wavehouse/sdk: counts via pipe(), feed via liveQuery()
-// (backfill + SSE). Server-side this renders a stable skeleton ("—" counts,
-// fixed-height feed) so the page is layout-complete without JS and degrades
-// to that skeleton if the demo instance is unreachable.
+// browser through @wavehouse/sdk: every number from one cached gh_summary
+// pipe (Stats#19), the feed from the server-curated gh_activity_recent pipe
+// (Stats#18) plus a live SSE tail. The pre-pipe reads (per-number pipes, a
+// structured-query backfill) remain as fallbacks so a stats-stack rollback
+// degrades the panel to slower, not blank. Server-side this renders a stable
+// skeleton ("—" counts, fixed-height feed) so the page is layout-complete
+// without JS and degrades to that skeleton if the demo is unreachable.
 const REPO_URL = "https://github.com/Wave-RF/WaveHouse";
 const DEMO_HOST = "stats.wavehouse.dev";
 ---
@@ -70,8 +73,9 @@ const DEMO_HOST = "stats.wavehouse.dev";
     >Full demo ↗</a>
   </div>
   <p class="wh-live__byline">
-    Queried in your browser by <code>@wavehouse/sdk</code> — <code>pipe()</code> counts,
-    a <code>count(*)</code> aggregation, and a <code>liveQuery()</code> stream.
+    Queried in your browser by <code>@wavehouse/sdk</code> — one cached <code>pipe()</code>
+    summary, a server-curated <code>pipe()</code> backfill, and a live SSE
+    <code>stream()</code>.
   </p>
 </section>
 
@@ -111,14 +115,15 @@ const DEMO_HOST = "stats.wavehouse.dev";
     "member:added": ["joined the project", "accent"],
     push: ["pushed", "accent"],
   };
-  // Event-type prefilter derived from VERBS. It is server-side ONLY for the
-  // backfill fetch (keeps CI/check churn out of the result so limit(48) finds
-  // enough curated rows); the SSE leg streams every gh_events row and the SDK
-  // filters in-browser (FilteredStreamController) until the curated pipe
-  // (Wave-RF/WaveHouse-Stats#18) lands. Type-only, deliberately: live rows
-  // are raw producer payloads, and an `action` IN-filter would drop a row
-  // whose action field is ever absent before addRow's bare-type fallback
-  // could run. The VERBS lookup in addRow is the final arbiter.
+  // Event types the live tail keeps, derived from VERBS. The SSE leg streams
+  // every gh_events row (nothing is filtered on the wire); the SDK applies
+  // this filter in-browser, and the VERBS lookup in addRow stays the final
+  // arbiter. Type-only, deliberately: live rows are raw producer payloads,
+  // and an `action` IN-filter would drop a row whose action field is ever
+  // absent before addRow's bare-type fallback could run. Backfill curation is
+  // server-side in the gh_activity_recent pipe (Wave-RF/WaveHouse-Stats#18) —
+  // its (event_type, action) pair list and VERBS must stay in sync (the
+  // pipe's YAML carries the mirror-image note).
   const FEED_TYPES = [...new Set(Object.keys(VERBS).map((k) => k.split(":")[0]))];
 
   const MAX_ROWS = 6;
@@ -177,28 +182,41 @@ const DEMO_HOST = "stats.wavehouse.dev";
     const stream = root.querySelector("[data-wh-stream]") as HTMLElement;
     const streamLabel = root.querySelector("[data-wh-stream-label]") as HTMLElement;
 
-    // --- Counts. Targets every [data-wh-live] on the page (the closer band
-    // has a star chip too), so one fetch feeds all placements.
-    async function loadCount(key: string, fetcher: () => Promise<{ ok: boolean; data: unknown }>) {
-      const els = document.querySelectorAll(`[data-wh-live="${key}"]`);
-      if (!els.length) return;
-      const { ok, data } = await fetcher();
-      const rows = data as Record<string, unknown>[] | null;
-      if (!ok || !rows?.length) return; // keep the "—" placeholder
-      const row = rows[0] ?? {};
-      const v = Number(row.total ?? row.count ?? Object.values(row)[0] ?? 0);
-      els.forEach((el) => {
-        el.textContent = fmtInt(v);
+    // --- Counts. Writes every [data-wh-live="<key>"] on the page (the
+    // closer band has a star chip too), so one fetch feeds all placements.
+    function setCount(key: string, v: unknown) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return; // keep the "—" placeholder
+      document.querySelectorAll(`[data-wh-live="${key}"]`).forEach((el) => {
+        el.textContent = fmtInt(n);
         // Placements hidden until real data exists (e.g. closer-band chip).
         el.closest("[data-wh-live-wrap]")?.removeAttribute("hidden");
       });
     }
-    function loadCounts() {
+    async function loadCount(key: string, fetcher: () => Promise<{ ok: boolean; data: unknown }>) {
+      const { ok, data } = await fetcher();
+      const rows = data as Record<string, unknown>[] | null;
+      if (!ok || !rows?.length) return;
+      const row = rows[0] ?? {};
+      setCount(key, row.total ?? row.count ?? Object.values(row)[0] ?? 0);
+    }
+    async function loadCounts() {
+      // One cached gh_summary call (Stats#19) carries every number — incl.
+      // reconciler-observed open_issues / open_prs for any future placement.
+      const { ok, data } = await wh.pipe("gh_summary").fetch();
+      const row = (data as Record<string, unknown>[] | null)?.[0];
+      if (ok && row) {
+        setCount("stars", row.stars);
+        setCount("forks", row.forks);
+        setCount("events7d", row.events_7d);
+        setCount("openIssues", row.open_issues);
+        setCount("openPrs", row.open_prs);
+        return;
+      }
+      // Pre-#19 fallback (per-number reads) so a stats-stack rollback
+      // degrades to slower, not blank. ("168h" not "7d" — see #285.)
       void loadCount("stars", () => wh.pipe("gh_stars_total").fetch());
       void loadCount("forks", () => wh.pipe("gh_forks_total").fetch());
-      // "168h" not "7d": day-suffixed durations 500 on the server today even
-      // though the SDK docs promise them — see Wave-RF/WaveHouse time_range
-      // duration-parsing issue.
       void loadCount("events7d", () =>
         wh.from("gh_events").select().count("*", "total").timeRange("event_ts", "168h").fetch(),
       );
@@ -281,39 +299,60 @@ const DEMO_HOST = "stats.wavehouse.dev";
       streamLabel.textContent = live ? "live" : bad ? "offline" : `${state}…`;
     }
 
-    const lq = wh
+    // Live tail first, so an event landing while the backfill is in flight
+    // renders instead of falling between the two (the composite-key dedup
+    // absorbs the overlap when both deliver the same row).
+    const sse = wh
       .from("gh_events")
       .select("event_type", "action", "actor_login", "event_ts", "number", "title", "ref")
       .where("event_type", "in", FEED_TYPES)
-      .orderBy("event_ts", "desc")
-      .limit(48) // backfill margin: type-only prefilter passes rows VERBS drops (label/assign churn)
-      .liveQuery({
-        initial: (r) => {
-          if (r.ok) {
-            let i = 0;
-            (r.data as GhRow[]).forEach((row) => {
-              if (addRow(row, "bottom", i)) i++;
-            });
-            if (feed.children.length === 0) {
-              feedEmpty.textContent = "Quiet right now — star the repo and make history.";
-              feedEmpty.hidden = false;
-            }
-          } else {
-            feedEmpty.textContent = "Live feed unavailable right now.";
-            feedEmpty.hidden = false;
-            setStream("error");
-          }
-        },
-        next: (ev: unknown) => {
-          const row = ((ev as { data?: GhRow })?.data ?? ev) as GhRow;
-          if (addRow(row, "top") && (row.event_type === "star" || row.event_type === "fork")) {
-            refreshCounts();
-          }
-        },
-        status: (s: string) => setStream(s),
-        error: () => setStream("error"),
-      });
-    cleanups.push(() => lq.close());
+      .stream();
+    const unsub = sse.subscribe({
+      next: (ev: unknown) => {
+        const row = ((ev as { data?: GhRow })?.data ?? ev) as GhRow;
+        if (addRow(row, "top") && (row.event_type === "star" || row.event_type === "fork")) {
+          refreshCounts();
+        }
+      },
+      status: (s: string) => setStream(s),
+      error: () => setStream("error"),
+    });
+    cleanups.push(() => {
+      unsub();
+      sse.close();
+    });
+
+    // Backfill from the server-curated, server-deduped, cached
+    // gh_activity_recent pipe (Stats#18) — a cached page can trail the stream
+    // by the pipe's TTL; anything it misses arrives live or on the next load.
+    // Falls back to the pre-#18 structured query if the pipe is unavailable.
+    void (async () => {
+      let r: { ok: boolean; data: unknown } = await wh
+        .pipe<GhRow>("gh_activity_recent", { limit: 12 })
+        .fetch();
+      if (!r.ok) {
+        r = await wh
+          .from("gh_events")
+          .select("event_type", "action", "actor_login", "event_ts", "number", "title", "ref")
+          .where("event_type", "in", FEED_TYPES)
+          .orderBy("event_ts", "desc")
+          .limit(48) // margin: the type-only filter passes rows VERBS drops (label/assign churn)
+          .fetch();
+      }
+      if (r.ok) {
+        let i = 0;
+        (r.data as GhRow[]).forEach((row) => {
+          if (addRow(row, "bottom", i)) i++;
+        });
+        if (feed.children.length === 0) {
+          feedEmpty.textContent = "Quiet right now — star the repo and make history.";
+          feedEmpty.hidden = false;
+        }
+      } else if (feed.children.length === 0) {
+        feedEmpty.textContent = "Live feed unavailable right now.";
+        feedEmpty.hidden = false;
+      }
+    })();
 
     // --- Boot + slow timers (count safety net, relative-time refresh).
     loadCounts();
