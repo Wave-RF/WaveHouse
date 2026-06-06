@@ -416,7 +416,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
-| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-duration relative values ("1h", "30m" — hours are the largest unit; "7d" is not accepted, use "168h" — see [#285](https://github.com/Wave-RF/WaveHouse/issues/285)). |
 
 **Response:**
 
@@ -513,6 +513,8 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 Returns all discovered ClickHouse table schemas.
 
+> **Admin only.** The schema and DLQ endpoints in this section require the `admin_role` (like [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); other callers get 401 (bad token) / 403. The quickstart's trial `public` role cannot call them.
+
 **Response:**
 
 ```json
@@ -550,13 +552,22 @@ Returns the schema for a specific table.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
+| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 404 | `{"error":"table not found"}` | Table not in discovered schemas |
 
 ---
 
 ### `POST /v1/schema/refresh` — Refresh Schemas
 
-Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`).
+Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`). Admin-only, like the rest of this section.
+
+**Error responses:**
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 401 / 403 | as above | Not the admin role |
+| 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
 
 **Response:**
 

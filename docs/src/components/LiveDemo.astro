@@ -70,8 +70,8 @@ const DEMO_HOST = "stats.wavehouse.dev";
     >Full demo ↗</a>
   </div>
   <p class="wh-live__byline">
-    Queried in your browser by <code>@wavehouse/sdk</code> — counts via <code>pipe()</code>,
-    stream via <code>liveQuery()</code>.
+    Queried in your browser by <code>@wavehouse/sdk</code> — <code>pipe()</code> counts,
+    a <code>count(*)</code> aggregation, and a <code>liveQuery()</code> stream.
   </p>
 </section>
 
@@ -111,12 +111,14 @@ const DEMO_HOST = "stats.wavehouse.dev";
     "member:added": ["joined the project", "accent"],
     push: ["pushed", "accent"],
   };
-  // Server-side prefilter derived from VERBS. Event-type only, deliberately:
-  // liveQuery applies the same filters client-side to streamed rows, and live
-  // rows carry the raw producer payload — an `action` IN-filter would drop a
-  // row whose action field is ever absent before addRow's bare-type fallback
-  // could run. The VERBS lookup in addRow is the final arbiter; this just
-  // keeps the CI/check bulk off the wire.
+  // Event-type prefilter derived from VERBS. It is server-side ONLY for the
+  // backfill fetch (keeps CI/check churn out of the result so limit(48) finds
+  // enough curated rows); the SSE leg streams every gh_events row and the SDK
+  // filters in-browser (FilteredStreamController) until the curated pipe
+  // (Wave-RF/WaveHouse-Stats#18) lands. Type-only, deliberately: live rows
+  // are raw producer payloads, and an `action` IN-filter would drop a row
+  // whose action field is ever absent before addRow's bare-type fallback
+  // could run. The VERBS lookup in addRow is the final arbiter.
   const FEED_TYPES = [...new Set(Object.keys(VERBS).map((k) => k.split(":")[0]))];
 
   const MAX_ROWS = 6;
@@ -210,8 +212,12 @@ const DEMO_HOST = "stats.wavehouse.dev";
 
     // --- Feed.
     const seen = new Set<string>();
+    // Normalize every key part across the two row sources: backfill rows are
+    // ClickHouse-materialized (RFC3339 ts, ""/0 defaults) while live SSE rows
+    // are raw producer payloads (zone-less ts, fields possibly absent) — raw
+    // interpolation would never dedup a row seen via both paths.
     const rowKey = (r: GhRow) =>
-      `${r.event_type}|${r.action}|${r.actor_login}|${r.event_ts}|${r.number}`;
+      `${r.event_type}|${r.action || ""}|${r.actor_login}|${normTs(r.event_ts || "")}|${Number(r.number) || 0}`;
 
     function feedEl(row: GhRow, verb: string, tone: string): HTMLLIElement {
       const li = document.createElement("li");

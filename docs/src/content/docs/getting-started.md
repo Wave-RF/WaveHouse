@@ -47,7 +47,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 ```
 
-Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/refresh` (admin-only). If the first ingest below returns `404 unknown table: clicks`, the refresh simply hasn't picked the new table up yet — wait a few seconds and retry.
+Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/refresh` (admin-only). If the first ingest below returns `404 unknown table: clicks`, the refresh simply hasn't picked the new table up yet — wait and retry (worst case the next refresh is a full 60 seconds out).
 
 ## 3. Ingest an event
 
