@@ -323,7 +323,11 @@ const DEMO_HOST = "stats.wavehouse.dev";
       if (ok && Array.isArray(data)) {
         epm = (data as { minute: string; events: number }[])
           .map((r) => ({ t: minuteMs(r.minute), n: Number(r.events) || 0 }))
-          .filter((r) => Number.isFinite(r.t));
+          .filter((r) => Number.isFinite(r.t))
+          // Ascending by minute: the pipe's order is a cross-repo contract, and
+          // both drawEpm (plots left→right) and bumpEpm (treats last as current
+          // minute) depend on it — sort here so we don't.
+          .sort((a, b) => a.t - b.t);
       }
       drawEpm();
     }
