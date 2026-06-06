@@ -62,6 +62,11 @@ func NewEmbedded(storeDir string, maxBytes int64, logger ...*slog.Logger) (*Embe
 		JetStream:  true,
 		StoreDir:   storeDir,
 		SyncAlways: true, // fsync every JetStream write — publish ACKs only after data is on disk
+		// Without NoSigs, Start() installs a process-wide SIGINT handler that
+		// races main's graceful shutdown (double Shutdown → "close of nil
+		// channel" panic) and os.Exit(0)s past main's defers. WaveHouse owns
+		// the lifecycle; Close() shuts the server down. See #287.
+		NoSigs: true,
 	}
 
 	ns, err := natsserver.NewServer(opts)
