@@ -206,7 +206,7 @@ How an event actually moves through WaveHouse, end to end. The ingest path is sp
 ```mermaid
 flowchart TB
     C["Client<br/>POST /v1/ingest?table={clicks}"]:::client
-    C --> AUTH["JWT auth (optional)"]:::wh
+    C --> AUTH["JWT auth (token optional)"]:::wh
     AUTH --> POL["Policy check<br/>row + column"]:::wh
     POL --> VAL["Schema validation<br/>(system.columns)"]:::wh
     VAL --> DD["Dedupe (optional)"]:::wh

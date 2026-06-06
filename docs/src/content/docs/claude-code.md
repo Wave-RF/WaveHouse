@@ -24,8 +24,8 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 | Layer | Lives in | Applies to | Purpose |
 | ----- | -------- | ---------- | ------- |
 | **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
-| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, both pre-push review markers (code + docs) required on PR pushes |
-| **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: on `VERDICT: ship_it`, writes `tmp/review-passed-<HEAD-sha>` (pre-push-reviewer) or `tmp/docs-review-passed-<HEAD-sha>` (docs-reviewer) |
+| **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main`; PR title linted via `scripts/lint-pr-title.sh` on `gh pr create` / `gh pr edit --title` |
+| **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: on a reviewer's `VERDICT: ship_it`, writes that reviewer's `tmp/<name>-passed-<HEAD-sha>` marker |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
 
 Git hooks are the source of truth for "must pass before merge." `.claude/` layers agent-specific gates and ergonomic hooks on top; it doesn't substitute for the universal gates.
@@ -47,16 +47,19 @@ Tree-keyed so commit-then-push works without a re-run when the tree is unchanged
 
 | Path | Purpose |
 | ---- | ------- |
-| `.claude/settings.json` | Team-wide: `deny` permissions (force-push, gh pr merge / ready / approve, secrets), `worktree.baseRef: "fresh"` + symlinkDirectories, all three hooks wired |
+| `.claude/settings.json` | Team-wide: `deny` permissions (force-push / git reset --hard / filter-branch / update-ref -d, gh pr merge / ready / approve / request-changes, gh repo/release delete, gh secret delete, gh workflow disable, rm -rf / sudo rm), all three hooks wired |
 | `.claude/hooks/gofumpt-on-save.sh` | PostToolUse Edit/Write/MultiEdit: auto-formats `.go` files |
-| `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, both pre-push review markers — code + docs — required on PR pushes) |
-| `.claude/hooks/review-marker.sh` | SubagentStop: on `VERDICT: ship_it`, writes `tmp/review-passed-<HEAD-sha>` (for `pre-push-reviewer`) or `tmp/docs-review-passed-<HEAD-sha>` (for `docs-reviewer`). Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
+| `.claude/hooks/agent-bash-gate.sh` | PreToolUse Bash: catches accidental Agent PR Discipline violations (drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main`; PR title linted via `scripts/lint-pr-title.sh` on `gh pr create` / `gh pr edit --title`) |
+| `.claude/hooks/review-marker.sh` | SubagentStop: on a reviewer's `VERDICT: ship_it`, writes its `tmp/<name>-passed-<HEAD-sha>` marker (the reviewer set comes from `scripts/pre-push-reviewers.sh`). Filters by `agent_type` in-script (SubagentStop has no matcher). Reads `.last_assistant_message` (flat string) rather than PostToolUse:Agent's structured `tool_response` |
 | `.claude/commands/cover.md` | `/cover [suite]` — suite dispatch + coverage threshold analysis |
 | `.claude/commands/docs-review.md` | `/docs-review [path\|all]` — launches the `docs-reviewer` subagent. No-arg = the gating pre-push docs review; a path/`all` = advisory |
-| `.claude/agents/pre-push-reviewer.md` | `pre-push-reviewer` subagent — canonical pre-push **code** review (runs in parallel with `docs-reviewer`); also used for auditing others' PRs locally |
-| `.claude/agents/docs-reviewer.md` | `docs-reviewer` subagent — docs-prose + code↔docs-sync review; **mandatory pre-push gate** (writes `tmp/docs-review-passed-<HEAD-sha>` on ship_it, in parallel with `pre-push-reviewer`); advisory only for ad-hoc path/`all`. Scope via `scripts/docs-prose.sh` |
+| `.claude/commands/prepush.md` | `/prepush [all]` — the pre-push gate: reads `scripts/pre-push-reviewers.sh`, runs the reviewers the change needs in parallel (fresh context), skips the rest on the record (`scripts/skip-pre-push-review.sh`), loops to `ship_it`. `all` forces the full set |
+| `.claude/agents/pre-push-reviewer.md` | `pre-push-reviewer` subagent — canonical pre-push **code** review (one of the parallel pre-push reviewers in `scripts/pre-push-reviewers.sh`); also used for auditing others' PRs locally |
+| `.claude/agents/docs-reviewer.md` | `docs-reviewer` subagent — docs-prose + code↔docs-sync review; **mandatory pre-push gate** (writes `tmp/docs-reviewer-passed-<HEAD-sha>` on ship_it, in parallel with the other pre-push reviewers); advisory only for ad-hoc path/`all`. Scope via `scripts/docs-prose.sh` |
 | `.claude/skills/pr-sync-with-main/SKILL.md` | "Fix this stale PR" workflow — merge origin/main, never rebase or force-push |
-| `.claude/skills/pr-review-locally/SKILL.md` | "Review PR <N> locally" workflow — `wt switch pr:<N>` + `pre-push-reviewer`, no PR comments |
+| `.claude/skills/pr-review-locally/SKILL.md` | "Review PR <N> locally" workflow — `wt switch pr:<N>` + the relevant reviewers (code, docs, …) in parallel, no PR comments |
+| `.claude/skills/pm-triage/SKILL.md` | PM-review workflow — triage feedback / backlog / code TODOs and reconcile issue & PR status into well-scoped, tracked Task Board (project #7) issues; invoked as `/pm-triage` |
+| `.claude/skills/integration-astro-view-transitions/` | Vendored PostHog-authored skill (installed by the PostHog wizard, v1.21.1) — reference patterns for the docs-site analytics: web snippet, ClientRouter view-transitions guard, user identify |
 | `.claude/settings.local.json` | **Your personal overrides** — gitignored; put model choice, status line, allow lists, etc. here |
 | `.config/wt.toml` | Worktrunk project hooks (post-start, pre-merge, pre-remove) |
 
@@ -68,6 +71,7 @@ Notably absent: no `.mcp.json`, no committed status line, no `permissions.allow`
 | ------- | ------------ |
 | `/cover [suite]` | Renders coverage for a suite (unit / integration / e2e / sdk / all / merge) and surfaces drops below threshold |
 | `/docs-review [path\|all]` | Runs the `docs-reviewer` subagent — accuracy vs code, runnable examples, clarity, completeness, + code↔docs sync. No-arg gates the push (writes the docs marker on ship_it); a path/`all` is advisory. Complements misspell / markdownlint / links-validator |
+| `/prepush [all]` | The mandatory pre-push self-review — judges which reviewers in `scripts/pre-push-reviewers.sh` the change needs, runs those in parallel (fresh context), skips the rest on the record (logged), and loops until each reaches `ship_it`. `all` forces the full set |
 
 To add a command: drop a `.md` file in `.claude/commands/`. Filename becomes the slash command. Frontmatter: `description` and `argument-hint`; body is the prompt with `$ARGUMENTS`.
 
@@ -75,12 +79,12 @@ To add a command: drop a `.md` file in `.claude/commands/`. Filename becomes the
 
 | Subagent | When to use |
 | -------- | ----------- |
-| `pre-push-reviewer` | **Mandatory before pushing to a PR branch** (enforced by `.claude/hooks/agent-bash-gate.sh`), run in parallel with `docs-reviewer` — both must reach `ship_it`. Also used for auditing someone else's PR after `wt switch pr:<N>`. Runs the canonical `.github/prompts/pr-review.md` workflow against the local branch in fresh context. Fetches PR comments + CI status + linked-issue acceptance criteria when on a PR branch. Returns `[MUST]`/`[SHOULD]`/`[MAY]` findings + a parseable `VERDICT: ship_it\|iterate\|block` line that drives the `tmp/review-passed-<HEAD-sha>` marker. |
-| `docs-reviewer` | **Mandatory before pushing to a PR branch** — runs in parallel with `pre-push-reviewer` (both enforced by `.claude/hooks/agent-bash-gate.sh`). Reviews docs **prose** (accuracy-vs-code, runnable examples, clarity, completeness) **and code↔docs sync** (code that changed but whose docs didn't), using `.github/prompts/docs-review.md` over the `scripts/docs-prose.sh` denylist set (Starlight site + governance docs incl. the SDK readme). Default (branch) scope emits `VERDICT: ship_it\|iterate\|block` → writes `tmp/docs-review-passed-<HEAD-sha>`; a path/`all` is advisory (no marker). Posts no PR comments, never edits docs. Complements misspell / markdownlint / starlight-links-validator, never duplicates them. |
+| `pre-push-reviewer` | **Mandatory before pushing to a PR branch** (enforced by `.claude/hooks/agent-bash-gate.sh`), run in parallel with the other reviewers in `scripts/pre-push-reviewers.sh` — all must reach `ship_it`. Also used for auditing someone else's PR after `wt switch pr:<N>`. Runs the canonical `.github/prompts/pr-review.md` workflow against the local branch in fresh context. Fetches PR comments + CI status + linked-issue acceptance criteria when on a PR branch. Returns `[MUST]`/`[SHOULD]`/`[MAY]` findings + a parseable `VERDICT: ship_it\|iterate\|block` line that drives the `tmp/pre-push-reviewer-passed-<HEAD-sha>` marker. |
+| `docs-reviewer` | **Mandatory before pushing to a PR branch** — runs in parallel with the other pre-push reviewers (all enforced by `.claude/hooks/agent-bash-gate.sh`). Reviews docs **prose** (accuracy-vs-code, runnable examples, clarity, completeness) **and code↔docs sync** (code that changed but whose docs didn't), using `.github/prompts/docs-review.md` over the `scripts/docs-prose.sh` denylist set (Starlight site + governance docs incl. the SDK readme). Default (branch) scope emits `VERDICT: ship_it\|iterate\|block` → writes `tmp/docs-reviewer-passed-<HEAD-sha>`; a path/`all` is advisory (no marker). Posts no PR comments, never edits docs. Complements misspell / markdownlint / starlight-links-validator, never duplicates them. |
 
 Invoke via the `Agent` tool with `subagent_type: pre-push-reviewer`, or via `/agents`.
 
-To add a subagent: drop a `.md` file in `.claude/agents/`. Frontmatter: `description` (used by main Claude to decide when to delegate), `tools`, `model`. Body is the system prompt.
+To add a subagent: drop a `.md` file in `.claude/agents/`. Frontmatter: `description` (used by main Claude to decide when to delegate), `tools`, `model`. Body is the system prompt. To make a reviewer a **mandatory pre-push gate** (the way `pre-push-reviewer` and `docs-reviewer` are), also add its name to `scripts/pre-push-reviewers.sh` — the single source of truth the hooks and `/prepush` read, so nothing else needs editing. See AGENTS.md §"Adding a pre-push reviewer".
 
 ## Skills
 
@@ -89,7 +93,9 @@ Skills load automatically into Claude's context when conversation patterns match
 | Skill | Triggers on |
 | ----- | ----------- |
 | `pr-sync-with-main` | When a PR shows "out-of-date with base branch", or a user asks to "fix the PR" / "sync with main". Documents the merge-not-rebase procedure and the WaveHouse-specific reason long-lived branches need it. |
-| `pr-review-locally` | When a user asks to "review PR <N>", "audit PR <N>", "look at PR <N>" — pulls the PR down via `wt switch pr:<N>` (or `gh pr checkout`), runs `pre-push-reviewer` in fresh context, surfaces findings without commenting on the PR. |
+| `pr-review-locally` | When a user asks to "review PR <N>", "audit PR <N>", "look at PR <N>" — pulls the PR down via `wt switch pr:<N>` (or `gh pr checkout`), runs the relevant reviewers (code, docs, …) in parallel in fresh context, surfaces their combined findings without commenting on the PR. |
+| `pm-triage` | When a user asks to triage dogfooding feedback, re-prioritize the backlog (P0–P3), sweep code TODOs, or check that work is tracked — runs a PM-style review against the Task Board (project #7) and proposes well-scoped issues. Invoked as `/pm-triage`. |
+| `integration-astro-view-transitions` | PostHog work on the Astro docs site (snippet patterns, view-transitions guard, identify). Vendored PostHog-authored content — wizard-installed, lightly edited only for markdownlint; the live setup (relay host, committed fallback) is documented in `PostHog.astro` itself and the CHANGELOG. |
 
 To add a skill: create `.claude/skills/<name>/SKILL.md` with frontmatter `name` + `description` and the workflow body. Description quality matters — that's what Claude matches against to load the skill.
 
@@ -97,12 +103,12 @@ To add a skill: create `.claude/skills/<name>/SKILL.md` with frontmatter `name` 
 
 Agents (Claude Code etc.) have additional gating beyond what humans face — enforced by `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + deny rules in `.claude/settings.json`. Humans keep full git/gh affordances; agents have these extra constraints:
 
-- **Drafts only.** `gh pr create` must include `--draft`. Only humans transition draft → ready (`gh pr ready` is blocked), approve (`gh pr review --approve` is blocked), or request changes (`gh pr review --request-changes` is blocked).
+- **Drafts only.** `gh pr create` must include `--draft`. Only humans transition draft → ready (`gh pr ready` is blocked), approve (`gh pr review --approve` is blocked), or request changes (`gh pr review --request-changes` is blocked). The gate also lints the PR title on `gh pr create` / `gh pr edit --title` via `scripts/lint-pr-title.sh` — the same rule as the required `PR housekeeping` check, so a malformed title is caught before the PR exists (fail-open when no quoted title is parseable).
 - **No human reviewer assignment.** `gh pr edit --add-reviewer / --add-assignee` and `POST /requested_reviewers` are blocked. The `housekeeping.yml` workflow auto-assigns; humans handle the rest.
 - **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
-- **Pre-push review required on PR branches.** Before `git push` to a branch with an open PR, the agent must invoke **both** `pre-push-reviewer` (code) and `docs-reviewer` (docs prose + code↔docs sync) in fresh context, in parallel. `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate. On iterate, fix the findings and re-invoke (always fresh context) — loop until **both** are clean. The push gate requires both markers.
-- **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci` and the `review-marker.sh` hook; nothing else.
-- **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — `pre-push-reviewer` findings go to you, not the PR.
+- **Pre-push review required on PR branches.** Before `git push` to a branch with commits ahead of `main`, the agent runs the reviewers in `scripts/pre-push-reviewers.sh` (today: `pre-push-reviewer` for code, `docs-reviewer` for docs prose + code↔docs sync) that the change needs — in fresh context, in parallel — and **skips** any with nothing to do via `scripts/skip-pre-push-review.sh <name> "<reason>"` (a logged skip that satisfies the marker, so a docs typo doesn't pay for a full code review). `/prepush` does all of this. `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate; fix and re-invoke (always fresh context) until clean. The push gate requires a marker — from a `ship_it` or a logged skip — from every listed reviewer, and echoes the skips at push time.
+- **Don't bypass.** `--no-verify` and hand-writing markers are policy violations, not regex-blocked. An agent that wants to bypass can edit the gate itself — trust the policy in AGENTS.md §"Agent PR Discipline". Markers come from `make ci`, the `review-marker.sh` hook, and `scripts/skip-pre-push-review.sh` (logged skips); nothing else.
+- **PR reviews on others' PRs stay local.** Use the `pr-review-locally` skill for local-only audits — the reviewers' findings go to you, not the PR.
 
 Full ruleset and rationale: AGENTS.md §"Agent PR Discipline".
 
@@ -182,11 +188,11 @@ The deny list blocks:
 | ------- | --- |
 | `git push --force`, `-f`, `--force-with-lease` | Force-pushing is destructive; also loses inline review-comment anchors |
 | `git reset --hard origin:*` | Throws away local work |
+| `git filter-branch`, `git update-ref -d` | History-rewriting / ref destruction |
 | `gh pr merge`, `gh repo delete`, `gh release delete` | Irreversible / shared-state |
+| `gh pr ready`, `gh pr review --approve` / `-a` / `--request-changes` / `-r` | [Agent PR Discipline](#agent-pr-discipline) — draft→ready and review verdicts are human actions |
 | `gh workflow disable`, `gh secret delete` | Operational footguns |
-| `make deps-wipe`, `make clean-all` | Wipes data / docker volumes / installed tools |
-| `rm -rf /`, `rm -rf $HOME`, `sudo rm` | Filesystem destruction |
-| `Read(./.env)`, `Read(./.env.*)`, `Read(./secrets/**)` | Secrets shouldn't enter Claude's context |
+| `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `sudo rm` | Filesystem destruction |
 
 ## Status line, output style, model
 
@@ -204,15 +210,14 @@ Not committed at project level. Personal preference — put in `.claude/settings
 
 1. Write code (gofumpt-on-save formats Go files as you go).
 2. `git commit` → pre-commit hook runs `make verify` (or skips if `make ci` already validated this tree). Fix anything that fails.
-3. `git push` (first time on a feature branch) → pre-push hook blocks until `make ci` passed for HEAD. Run `make ci`, fix, retry push.
+3. `git push` → the pre-push hook blocks until `make ci` passed for the current tree (run `make ci`, fix, retry). For agents, the agent-bash-gate hook also requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh` on any push of a branch with commits ahead of `main` — including the first push, before the PR exists. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
 4. Open the PR with `gh pr create --draft` (agents required to use `--draft`; humans flip to ready when ready).
-5. **Subsequent pushes** → agent-bash-gate hook ALSO requires `pre-push-reviewer` subagent to have run (fresh context) and returned `VERDICT: ship_it`. Invoke the subagent → on Ship it, marker auto-writes → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
-6. CI workflows fire on the new HEAD. Address review comments per AGENTS.md §Review Response.
+5. CI workflows fire on the new HEAD. Address review comments per AGENTS.md §Review Response.
 
 Helpers along the way:
 
 - Stale PR ("out-of-date with base branch") → ask Claude to "fix the PR" (loads `pr-sync-with-main` skill — merges main, doesn't rebase or force-push).
-- Reviewing someone else's PR → "review PR 120 locally" / "audit PR 120" (loads `pr-review-locally` skill — `wt switch pr:120` + `pre-push-reviewer`, no PR comments).
+- Reviewing someone else's PR → "review PR 120 locally" / "audit PR 120" (loads `pr-review-locally` skill — `wt switch pr:120` + the relevant reviewers in parallel, no PR comments).
 - Re-trigger a bot reviewer → ask Claude to "ping coderabbit again" — Claude posts the appropriate `@<bot>` comment on the PR.
 - Coverage check on a specific suite → `/cover unit` (or `integration`, `e2e`, `sdk`, `all`).
 

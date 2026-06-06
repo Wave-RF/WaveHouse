@@ -8,6 +8,7 @@
 # served at /branding/* — plus docs/public/favicon.ico at the site root for the
 # legacy auto-probe:
 #   branding/favicon.svg            browser favicon, CSS-swaps light/dark
+#   branding/favicon-{light,dark}.svg  static variants (Head.astro live swap)
 #   branding/favicon.ico            16/32/48 multi-resolution legacy fallback
 #   branding/apple-touch-icon.png   180x180 app-icon tile (iOS)
 #   branding/og.png                 1200x630 social card
@@ -148,6 +149,18 @@ cat > "$OUT_KIT/favicon.svg" <<EOF
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$MARK_INNER<style>:root{color:$COLOR_LIGHT}@media (prefers-color-scheme:dark){:root{color:$COLOR_DARK}}</style></svg>
 EOF
 
+# Statically-colored variants for Head.astro's live theme-flip swap (the
+# GitHub favicon.svg/favicon-dark.svg pattern): a distinct URL per scheme
+# keeps Chromium's per-URL favicon cache scheme-keyed, and the fetched file
+# carries no media query for the favicon rasterizer to mis-evaluate. The
+# self-styling favicon.svg above remains the no-JS default.
+cat > "$OUT_KIT/favicon-light.svg" <<EOF
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$(mark_with_color "$COLOR_LIGHT")</svg>
+EOF
+cat > "$OUT_KIT/favicon-dark.svg" <<EOF
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$(mark_with_color "$COLOR_DARK")</svg>
+EOF
+
 # --- 2. Standalone marks (copy-out) -------------------------------------------
 cat > "$OUT_KIT/mark-light.svg" <<EOF
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="$MARK_VIEWBOX" role="img" aria-label="WaveHouse">$(mark_with_color "$COLOR_LIGHT")</svg>
@@ -201,9 +214,9 @@ render_text_png "$TMP/og.svg" "$OUT_KIT/og.png" 1200 630
 # --- 7. Raster marks + lockups (PNG, transparent) -----------------------------
 # For non-SVG consumers: slide decks, GitHub social-preview upload, email sig,
 # anywhere SVG isn't accepted. Marks are pure geometry → rsvg-convert is fine.
-# Lockups carry the wordmark, so they go through resvg + pinned Inter; the
-# committed lockup-*.svg still hold <text> (the SVG-outlining step is separate),
-# but their PNG renders are now true Inter.
+# Lockups carry the wordmark; the committed lockup-*.svg are already outlined
+# to paths in place (outline_lockup_svg, section 3), so rendering their PNGs
+# through resvg + the pinned Inter is belt-and-braces.
 rsvg-convert -w 1024 -h 1024 "$OUT_KIT/mark-light.svg" -o "$OUT_KIT/mark-light.png"
 rsvg-convert -w 1024 -h 1024 "$OUT_KIT/mark-dark.svg"  -o "$OUT_KIT/mark-dark.png"
 render_text_png "$OUT_KIT/lockup-light.svg" "$OUT_KIT/lockup-light.png" 1200 250
@@ -212,7 +225,8 @@ render_text_png "$OUT_KIT/lockup-dark.svg"  "$OUT_KIT/lockup-dark.png"  1200 250
 # --- Report -------------------------------------------------------------------
 printf '%s    colors%s light=%s dark=%s bg=%s ink=%s\n' \
   "$CYAN" "$RESET" "$COLOR_LIGHT" "$COLOR_DARK" "$OG_BG" "$OG_INK"
-for out in favicon.svg favicon.ico apple-touch-icon.png og.png \
+for out in favicon.svg favicon-light.svg favicon-dark.svg favicon.ico \
+           apple-touch-icon.png og.png \
            mark-light.svg mark-dark.svg lockup-dark.svg lockup-light.svg \
            mark-light.png mark-dark.png lockup-light.png lockup-dark.png; do
   printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/branding/$out"
