@@ -983,8 +983,21 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   flex-wrap: wrap;
   gap: 0.75rem;
   justify-content: center;
+  align-items: center;
   margin-top: 0.375rem;
 }
+/* Live stargazer chip — populated by LiveDemo.astro's script from the same
+   pipe() fetch that feeds the hero panel; stays hidden until data arrives. */
+.wh-closer__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--wh-ink-muted);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+.wh-closer__count-star { color: var(--wh-amber); }
+.wh-closer__count [data-wh-live] { color: var(--wh-ink); font-weight: 650; }
 
 /* Reduced-motion guard, scoped to WaveHouse-specific landing/chrome surfaces
    so Starlight's own transitions (and any future plugin transitions used for

@@ -251,7 +251,7 @@ dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 # Slower per change than Astro HMR; the raw dev server remains available as
 # `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
 .PHONY: dev-docs
-dev-docs: install-playwright-docs ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
+dev-docs: install-playwright-docs build-ts ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
 	@$(PNPM) --filter $(DOCS_FILTER) run dev
 
 # preview-docs serves the production build through wrangler (Cloudflare Workers
@@ -526,8 +526,10 @@ build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
 # `build-docs`, so make runs it once and serializes it before the build — Astro's
 # content-sync writes docs/.astro/, so check and build must not run concurrently.
 # (Link validation is separate: owned by starlight-links-validator at build.)
+# build-ts prereq: the landing page imports @wavehouse/sdk (workspace package),
+# which resolves to clients/ts/dist/ for both types and the browser bundle.
 .PHONY: check-docs
-check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
+check-docs: pnpm-install build-ts ## Type-check the docs (astro check — types + content schemas)
 	$(call run,check-docs (astro check),NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
 
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)

@@ -39,7 +39,10 @@ try {
         colorScheme: theme === "dark" ? "dark" : "light",
       });
       const page = await ctx.newPage();
-      await page.goto(`${BASE}${p.url}`, { waitUntil: "networkidle" });
+      // "load", not "networkidle": the landing page holds a live SSE stream
+      // open to stats.wavehouse.dev, so the network never goes idle and a
+      // networkidle wait would time the goto out.
+      await page.goto(`${BASE}${p.url}`, { waitUntil: "load" });
       await page.evaluate((t) => {
         document.documentElement.setAttribute("data-theme", t);
         try {
@@ -47,11 +50,13 @@ try {
         } catch {}
       }, theme);
       // Wait on web fonts + the hero's own ready signal — Hero.astro stamps
-      // `[data-screenshot-ready]` on <html> via animationend on the last
-      // terminal line (first mount) or synchronously when the replay guard
-      // suppresses the entrance choreography (subsequent mounts). Pages
-      // without a hero never get the attribute, so we cap the wait at 5s
-      // and fall through to the screenshot regardless.
+      // `[data-screenshot-ready]` on <html> via animationend on the visual
+      // column's entrance (first mount) or synchronously when the replay
+      // guard suppresses the entrance choreography (subsequent mounts).
+      // Pages without a hero never get the attribute, so we cap the wait at
+      // 5s and fall through to the screenshot regardless. Live-demo data may
+      // or may not have arrived by then — the panel is layout-stable either
+      // way; screenshots assert layout, not live numbers.
       await page.evaluate(() => document.fonts.ready);
       await page.waitForSelector("html[data-screenshot-ready]", { timeout: 5000 }).catch(() => {});
       const filename = `${p.name}-${theme}.png`;
