@@ -279,7 +279,11 @@ if (import.meta.env.DEV && !heroTitle) {
   }
   @media (max-width: 60rem) {
     .wh-hero__inner {
-      grid-template-columns: 1fr;
+      /* minmax(0,…), not 1fr: a bare 1fr track floors at the column's
+         min-content, which the live panel's 3-up stat grid pushes to ~325px —
+         wider than a small phone, so the hero's overflow:hidden clipped the
+         panel's right edge. min-width:0 lets it shrink to the viewport. */
+      grid-template-columns: minmax(0, 1fr);
       gap: 2.5rem;
     }
   }
@@ -408,6 +412,7 @@ if (import.meta.env.DEV && !heroTitle) {
   .wh-hero__visual {
     position: relative;
     display: flex;
+    min-width: 0; /* flex child default min-width:auto would re-floor the panel at min-content */
     opacity: 0;
     transform: translateY(8px);
     animation: wh-fade-up 0.8s 0.3s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;

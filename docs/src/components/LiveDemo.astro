@@ -446,10 +446,13 @@ const DEMO_HOST = "stats.wavehouse.dev";
     50% { opacity: 1; }
   }
 
-  /* Headline counts */
+  /* Headline counts. minmax(0,…), not 1fr: bare 1fr tracks floor at their
+     min-content (the widest label, "EVENTS · 7D"), which summed to a hard
+     ~325px the panel couldn't shrink below on a phone. minmax(0,…) lets the
+     three columns shrink to share whatever width the panel has. */
   .wh-live__stats {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     border-bottom: 1px solid var(--wh-code-border);
   }
   .wh-live__stat {
@@ -457,6 +460,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     flex-direction: column;
     align-items: center;
     gap: 0.1rem;
+    min-width: 0;
     padding: 0.85rem 0.5rem 0.75rem;
   }
   .wh-live__stat + .wh-live__stat {
@@ -471,11 +475,15 @@ const DEMO_HOST = "stats.wavehouse.dev";
     font-variant-numeric: tabular-nums;
   }
   .wh-live__lbl {
+    max-width: 100%;
     font-size: 0.66rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 600;
     color: var(--wh-ink-subtle);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .wh-live__stat:nth-child(1) .wh-live__lbl { color: var(--wh-accent-hi); }
 
@@ -605,9 +613,12 @@ const DEMO_HOST = "stats.wavehouse.dev";
   }
 
   @media (max-width: 26rem) {
-    .wh-live__ev-detail { display: none; }
-    .wh-live__num { font-size: 1.25rem; }
-    .wh-live__cta-text { display: none; }
+    /* ev-detail stays — the ev-body ellipsis truncates it gracefully now that
+       the panel shrinks, which reads better than dropping the title entirely. */
+    .wh-live__num { font-size: 1.3rem; }
+    .wh-live__lbl { font-size: 0.6rem; letter-spacing: 0.04em; }
+    .wh-live__stat { padding: 0.75rem 0.35rem 0.7rem; }
+    .wh-live__cta-text { display: none; } /* redundant with the star button */
   }
 
   @media (prefers-reduced-motion: reduce) {
