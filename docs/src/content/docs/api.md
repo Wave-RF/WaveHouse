@@ -415,7 +415,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
-| `limit` | int | No | Max rows. |
+| `limit` | int | No | Max rows. Omitted or above 10,000 → silently capped at 10,000 (`DefaultMaxRows`); a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-duration relative values ("1h", "30m" — hours are the largest unit; "7d" is not accepted, use "168h" — see [#285](https://github.com/Wave-RF/WaveHouse/issues/285)). Relative values mean that long *ago*. The window applies only when `column` and `since` are set — an `until` without `since` is ignored. |
 
 **Response:**
