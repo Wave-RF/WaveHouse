@@ -88,12 +88,6 @@ if (import.meta.env.DEV && !heroTitle) {
 </script>
 
 <section class="wh-hero">
-  <div class="wh-hero__bg" aria-hidden="true">
-    <div class="wh-hero__grid"></div>
-    <div class="wh-hero__orb wh-hero__orb--a"></div>
-    <div class="wh-hero__orb wh-hero__orb--b"></div>
-  </div>
-
   <div class="wh-hero__inner">
     <div class="wh-hero__text">
       <span class="wh-pill" data-stagger="0">
@@ -178,9 +172,29 @@ if (import.meta.env.DEV && !heroTitle) {
       )}
 
       <div class="wh-hero__meta" data-stagger="4">
-        <span class="wh-hero__meta-item">
-          <kbd>pnpm add</kbd>
-          <span>@wavehouse/sdk</span>
+        <button
+          type="button"
+          class="wh-hero__install"
+          data-copy="pnpm add @wavehouse/sdk"
+          aria-label="Copy: pnpm add @wavehouse/sdk"
+        >
+          <span class="wh-hero__install-prompt" aria-hidden="true">$</span>
+          <span class="wh-hero__install-cmd">pnpm add <span class="wh-hero__install-pkg">@wavehouse/sdk</span></span>
+          <span class="wh-hero__install-icon" aria-hidden="true">
+            <svg class="wh-hero__install-copy" width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <rect x="9" y="9" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="2" />
+              <path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            <svg class="wh-hero__install-check" width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <path d="M4 12.5 9 17.5 20 6.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+        </button>
+        <span class="wh-hero__stars" data-wh-live-wrap hidden>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2.5l2.95 5.98 6.6.96-4.78 4.65 1.13 6.58L12 17.57l-5.9 3.1 1.13-6.58L2.45 9.44l6.6-.96L12 2.5z" />
+          </svg>
+          <span data-wh-live="stars">—</span> stars · live
         </span>
       </div>
     </div>
@@ -226,6 +240,37 @@ if (import.meta.env.DEV && !heroTitle) {
   }
   document.addEventListener('DOMContentLoaded', setupHeroCTATracking);
   document.addEventListener('astro:page-load', setupHeroCTATracking);
+
+  // Click-to-copy install command — devs expect it, and it makes the SDK the
+  // one-line "try it now". Falls back to a manual selection range when the
+  // async clipboard API isn't available (http / older browsers).
+  function setupHeroInstallCopy() {
+    document.querySelectorAll('.wh-hero__install').forEach(function(btn) {
+      if (btn.__whCopyBound) return;
+      btn.__whCopyBound = true;
+      btn.addEventListener('click', function() {
+        var text = btn.getAttribute('data-copy') || '';
+        var done = function() {
+          btn.classList.add('is-copied');
+          window.posthog?.capture('hero_install_copied', { text: text });
+          clearTimeout(btn.__whCopyTimer);
+          btn.__whCopyTimer = setTimeout(function() { btn.classList.remove('is-copied'); }, 1600);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(function() {});
+        } else {
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+            document.body.removeChild(ta); done();
+          } catch (e) {}
+        }
+      });
+    });
+  }
+  document.addEventListener('DOMContentLoaded', setupHeroInstallCopy);
+  document.addEventListener('astro:page-load', setupHeroInstallCopy);
 </script>
 
 <style>
@@ -233,71 +278,9 @@ if (import.meta.env.DEV && !heroTitle) {
     position: relative;
     isolation: isolate;
     padding: 4rem 0 5rem;
-    overflow: hidden;
-  }
-  .wh-hero__bg {
-    position: absolute;
-    inset-block: -10% 0;
-    /* Full-bleed: span the viewport even though the hero content is capped, so
-       the grid reaches both screen edges instead of stopping ~54px past the
-       hero and shrinking to a center blob on wide screens (audit). */
-    inset-inline: calc(50% - 50vw);
-    pointer-events: none;
-    z-index: -1;
-  }
-  .wh-hero__grid {
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(var(--wh-border) 1px, transparent 1px),
-      linear-gradient(90deg, var(--wh-border) 1px, transparent 1px);
-    background-size: 64px 64px;
-    background-position: center -1px;
-    opacity: 0.5;
-    /* Wider, gentler ellipse so the grid reads as a backdrop that fills the
-       hero band and fades out near the edges — not a small shrinking core. */
-    mask-image: radial-gradient(
-      ellipse 78% 82% at 50% 24%,
-      black 0%,
-      black 52%,
-      transparent 100%
-    );
-    -webkit-mask-image: radial-gradient(
-      ellipse 78% 82% at 50% 24%,
-      black 0%,
-      black 52%,
-      transparent 100%
-    );
-  }
-  :root[data-theme="light"] .wh-hero__grid { opacity: 0.7; }
-  .wh-hero__orb {
-    position: absolute;
-    border-radius: 999px;
-    filter: blur(96px);
-    pointer-events: none;
-  }
-  .wh-hero__orb--a {
-    width: 320px;
-    height: 320px;
-    background: var(--wh-accent);
-    top: 10%;
-    right: 8%;
-    opacity: 0.22;
-    animation: wh-orb-drift 16s ease-in-out infinite alternate;
-  }
-  .wh-hero__orb--b {
-    width: 280px;
-    height: 280px;
-    background: var(--wh-sky);
-    bottom: -10%;
-    left: 6%;
-    opacity: 0.18;
-    animation: wh-orb-drift 22s ease-in-out -8s infinite alternate;
-  }
-
-  @keyframes wh-orb-drift {
-    0%   { transform: translate(0, 0) scale(1); }
-    100% { transform: translate(-30px, 40px) scale(1.12); }
+    /* No overflow:hidden — the atmospheric grid + glow are now page-level
+       (global.css, body:has(.wh-hero)::before/::after), so nothing here needs
+       clipping and clipping is what trapped the old grid in a centered box. */
   }
 
   .wh-hero__inner {
@@ -421,26 +404,68 @@ if (import.meta.env.DEV && !heroTitle) {
   .wh-hero__meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.75rem;
+    align-items: center;
+    gap: 0.625rem 1rem;
     margin-top: 0.25rem;
     color: var(--wh-ink-subtle);
     font-size: 0.875rem;
   }
-  .wh-hero__meta-item {
+
+  /* Click-to-copy install command — a faux terminal chip. */
+  .wh-hero__install {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
-  }
-  .wh-hero__meta kbd {
+    padding: 0.4rem 0.7rem;
     font-family: var(--sl-font-mono);
     font-size: 0.8125rem;
-    background: var(--wh-surface);
-    border: 1px solid var(--wh-border);
-    border-radius: var(--radius-xs);
-    padding: 0.2rem 0.5rem;
+    line-height: 1;
+    background: var(--wh-code-bg);
+    border: 1px solid var(--wh-code-border);
+    border-radius: var(--radius-sm);
     color: var(--wh-ink-muted);
-    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
   }
+  .wh-hero__install:hover {
+    border-color: var(--wh-accent);
+    transform: translateY(-1px);
+  }
+  .wh-hero__install-prompt { color: var(--wh-accent-text); font-weight: 700; }
+  .wh-hero__install-pkg { color: var(--wh-ink); }
+  .wh-hero__install-icon {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    margin-left: 0.1rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-hero__install-icon svg { position: absolute; transition: opacity 0.15s ease, transform 0.15s ease; }
+  .wh-hero__install:hover .wh-hero__install-copy { color: var(--wh-accent-text); }
+  .wh-hero__install-check { color: var(--wh-emerald); opacity: 0; transform: scale(0.6); }
+  .wh-hero__install.is-copied .wh-hero__install-copy { opacity: 0; transform: scale(0.6); }
+  .wh-hero__install.is-copied .wh-hero__install-check { opacity: 1; transform: scale(1); }
+  .wh-hero__install.is-copied { border-color: var(--wh-emerald); }
+
+  /* Live star count — social proof fed by the same demo data (data-wh-live). */
+  .wh-hero__stars {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8125rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-hero__stars svg { color: var(--wh-amber); }
+  .wh-hero__stars [data-wh-live] {
+    color: var(--wh-ink);
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+  }
+  /* display:inline-flex would otherwise beat the [hidden] UA default — keep the
+     chip hidden until the live star count arrives. */
+  .wh-hero__stars[hidden] { display: none; }
 
   .wh-hero__visual {
     position: relative;
@@ -451,11 +476,7 @@ if (import.meta.env.DEV && !heroTitle) {
     animation: wh-fade-up 0.8s 0.3s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
   }
 
-  :root[data-theme="light"] .wh-hero__orb--a { opacity: 0.16; }
-  :root[data-theme="light"] .wh-hero__orb--b { opacity: 0.12; }
-
   @media (prefers-reduced-motion: reduce) {
-    .wh-hero__orb,
     .wh-hero__text > [data-stagger],
     .wh-hero__visual {
       animation: none !important;

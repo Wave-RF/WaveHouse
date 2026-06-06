@@ -110,6 +110,13 @@
   --wh-code-bg: #0F1116;
   --wh-code-border: #1B1E26;
 
+  /* Landing atmosphere — the full-page grid field + hero glow (page-level,
+     not clipped by the hero). Teal-tinted lines read as a "signal field"
+     rather than generic graph paper. */
+  --wh-grid-line: rgba(150, 200, 210, 0.07);
+  --wh-glow-hero: rgba(6, 176, 191, 0.22);
+  --wh-glow-hero-2: rgba(29, 201, 216, 0.13);
+
   --wh-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --wh-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.32);
   --wh-shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.48);
@@ -189,6 +196,10 @@
 
   --wh-code-bg: #F4F5F7;
   --wh-code-border: #E4E6EB;
+
+  --wh-grid-line: rgba(8, 109, 119, 0.07);
+  --wh-glow-hero: rgba(6, 176, 191, 0.10);
+  --wh-glow-hero-2: rgba(43, 126, 135, 0.07);
 
   --wh-shadow-sm: 0 1px 2px rgba(15, 17, 22, 0.04);
   --wh-shadow-md: 0 8px 24px rgba(15, 17, 22, 0.08);
@@ -939,24 +950,51 @@ site-search button kbd {
 
 /* ---------- Utility classes for landing page ---------- */
 
-/* Landing-page texture: a faint, calm grid behind the WHOLE splash page so it
-   isn't dead-flat below the hero (the hero carries a crisper, full-bleed grid
-   of its own). Fixed + full-viewport, scoped to the landing via :has(.wh-hero).
-   Uses the near-invisible --wh-bg-grid line color, so it reads as quiet
-   texture, never as content. A gentle vertical fade keeps the very bottom
-   (footer) clean. */
+/* ---------- Landing atmosphere ----------
+   The splash background is built from two PAGE-LEVEL fixed layers (scoped via
+   :has(.wh-hero)), deliberately NOT inside .wh-hero — that section has
+   overflow:hidden, which previously clipped the grid to a centered ~1080px box
+   and sliced the glow into a hard colored edge. Page-level + fixed means the
+   grid is edge-to-edge, runs under the translucent navbar, and stays
+   continuous as you scroll; the glow has pure radial falloff (no clipped
+   edges). Both sit behind all content (negative z-index). */
+
+/* Layer 1 — the signal-field grid: full-viewport, continuous, soft-cornered. */
 body:has(.wh-hero)::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--wh-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wh-grid-line) 1px, transparent 1px);
+  background-size: 72px 72px;
+  background-position: center top;
+  /* Soft vignette: essentially full-bleed, fading only at the far corners so
+     it never reads as a hard rectangle. */
+  -webkit-mask-image: radial-gradient(125% 125% at 50% 32%, black 58%, transparent 100%);
+  mask-image: radial-gradient(125% 125% at 50% 32%, black 58%, transparent 100%);
+}
+
+/* Layer 2 — the hero glow: soft teal energy anchored to the top, breathing. */
+body:has(.wh-hero)::after {
   content: "";
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background-image:
-    linear-gradient(var(--wh-bg-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--wh-bg-grid) 1px, transparent 1px);
-  background-size: 64px 64px;
-  -webkit-mask-image: linear-gradient(180deg, black 0%, black 55%, transparent 100%);
-  mask-image: linear-gradient(180deg, black 0%, black 55%, transparent 100%);
+  background:
+    radial-gradient(62% 48% at 50% -6%, var(--wh-glow-hero) 0%, transparent 72%),
+    radial-gradient(42% 40% at 84% 2%, var(--wh-glow-hero-2) 0%, transparent 74%);
+  animation: wh-atmo-breathe 16s ease-in-out infinite alternate;
+}
+@keyframes wh-atmo-breathe {
+  from { opacity: 0.82; transform: translateY(0); }
+  to   { opacity: 1.06; transform: translateY(-1.5%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body:has(.wh-hero)::after { animation: none; }
 }
 
 .wh-pill {
