@@ -416,7 +416,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
-| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m", "7d") or RFC3339. |
 
 **Response:**
 
