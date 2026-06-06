@@ -273,7 +273,7 @@ If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automat
 
 #### `.timeRange(column, since, until?)`
 
-Filter by a time window. `since` accepts RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`).
+Filter by a time window. `since` accepts RFC3339 timestamps or relative durations in Go duration units (`'1h'`, `'30m'` — hours are the largest unit; day suffixes like `'7d'` aren't accepted yet, use `'168h'` — see #285).
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
@@ -758,6 +758,6 @@ The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` e
 make test-e2e          # Run all E2E tests (the orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary, then runs the SDK suite)
 ```
 
-Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress` (each `*.test.ts`).
+Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress` (each `*.test.ts`).
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

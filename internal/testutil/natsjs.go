@@ -23,6 +23,7 @@ func NewJetStream(t *testing.T) jetstream.JetStream {
 		DontListen: true,
 		JetStream:  true,
 		StoreDir:   t.TempDir(),
+		NoSigs:     true, // never let an embedded server own process signals — see #287
 	}
 	ns, err := natsserver.NewServer(opts)
 	require.NoError(t, err)

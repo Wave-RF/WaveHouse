@@ -47,14 +47,14 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 ```
 
-Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/refresh`.
+Schemas refresh every 60 seconds by default, or on demand via `POST /v1/schema/refresh` (admin-only). If the first ingest below returns `404 unknown table: clicks`, the refresh simply hasn't picked the new table up yet — wait a few seconds and retry.
 
 ## 3. Ingest an event
 
 The JWT middleware always runs, but with no secret configured (the default) every request resolves to the policy `default_role` — which the trial policy from step 1 maps to the `public` role (granted insert on the demo tables). So you can POST straight to `/v1/ingest?table=clicks` with no token:
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}

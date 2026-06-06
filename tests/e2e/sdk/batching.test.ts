@@ -43,8 +43,14 @@ describe("Ingest Batching Triggers", () => {
         100,
       );
 
-      const elapsed = Date.now() - apiEndTime;
-      console.log(`All 500 events uploaded (buffered CH insert) in ${elapsed}ms`);
+      // Anchor the proof to startTime, NOT apiEndTime: the linger arms when
+      // the FIRST row reaches the worker (≈ startTime), so a broken size
+      // trigger flushes at ≈ startTime + 5s — which measured from apiEndTime
+      // is 5s − ackMs and would pass a bound anchored there. Visibility
+      // strictly before the first-row linger deadline is what proves the
+      // size trigger fired.
+      const elapsed = Date.now() - startTime;
+      console.log(`All 500 events visible (buffered CH insert) ${elapsed}ms after first publish`);
       expect(elapsed).toBeLessThan(5000); // Prove it didn't wait for the 5s timer
     } else {
       // Slow-disk run: the linger fired mid-publish and split the batch, so

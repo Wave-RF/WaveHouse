@@ -113,7 +113,7 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Ingest an event (run Getting Started first to create the `clicks` table; the dev stack ships a trial policy)
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H 'content-type: application/json' \
   -d '{"page":"/home","button":"signup","score":42.5}'
 

@@ -111,17 +111,27 @@ const DEMO_HOST = "stats.wavehouse.dev";
     "member:added": ["joined the project", "accent"],
     push: ["pushed", "accent"],
   };
-  // Server-side prefilters derived from VERBS. Filters AND together, so this
-  // passes some unmapped combos (e.g. discussion:closed) — the VERBS lookup in
-  // addRow is the final arbiter; these just keep CI/label noise off the wire.
+  // Server-side prefilter derived from VERBS. Event-type only, deliberately:
+  // liveQuery applies the same filters client-side to streamed rows, and live
+  // rows carry the raw producer payload — an `action` IN-filter would drop a
+  // row whose action field is ever absent before addRow's bare-type fallback
+  // could run. The VERBS lookup in addRow is the final arbiter; this just
+  // keeps the CI/check bulk off the wire.
   const FEED_TYPES = [...new Set(Object.keys(VERBS).map((k) => k.split(":")[0]))];
-  const FEED_ACTIONS = [...new Set(Object.keys(VERBS).map((k) => k.split(":")[1] ?? ""))];
 
   const MAX_ROWS = 6;
   const fmtInt = (n: number) => Number(n).toLocaleString("en-US");
 
+  // Backfill rows come back RFC3339 from ClickHouse, but live SSE rows carry
+  // the producer's payload as ingested — a zone-less ClickHouse-style
+  // "YYYY-MM-DD HH:MM:SS[.fff]" (UTC by the gh_events contract), which
+  // Date.parse would read as LOCAL time. Normalize to ISO-8601 UTC.
+  function normTs(ts: string): string {
+    return /^\d{4}-\d{2}-\d{2} \d{2}/.test(ts) ? ts.replace(" ", "T") + "Z" : ts;
+  }
+
   function relTime(iso: string): string {
-    const t = Date.parse(iso);
+    const t = Date.parse(normTs(iso));
     if (!Number.isFinite(t)) return "";
     const s = Math.max(0, (Date.now() - t) / 1000);
     if (s < 45) return "just now";
@@ -229,7 +239,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
 
       const time = document.createElement("time");
       time.className = "wh-live__ev-time";
-      time.dateTime = row.event_ts || "";
+      time.dateTime = normTs(row.event_ts || "");
       time.textContent = relTime(row.event_ts);
 
       li.append(dot, body, time);
@@ -269,9 +279,8 @@ const DEMO_HOST = "stats.wavehouse.dev";
       .from("gh_events")
       .select("event_type", "action", "actor_login", "event_ts", "number", "title", "ref")
       .where("event_type", "in", FEED_TYPES)
-      .where("action", "in", FEED_ACTIONS)
       .orderBy("event_ts", "desc")
-      .limit(24) // backfill margin: AND-of-filters still passes some rows VERBS drops
+      .limit(48) // backfill margin: type-only prefilter passes rows VERBS drops (label/assign churn)
       .liveQuery({
         initial: (r) => {
           if (r.ok) {

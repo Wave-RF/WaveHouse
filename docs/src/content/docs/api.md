@@ -230,7 +230,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
@@ -303,7 +303,7 @@ A `200` is returned whenever the body was read and the records were processed â€
 **curl example (JSON array):**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '[{"page":"/home"},{"page":"/about"}]'
 ```
@@ -311,7 +311,7 @@ curl -X POST http://localhost:8080/v1/ingest?table=clicks \
 **curl example (NDJSON):**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/x-ndjson" \
   --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
 ```
@@ -731,7 +731,7 @@ jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 99999999
 
 # Export for use with curl:
 export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}')
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home"}'
