@@ -588,7 +588,7 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 
 ### `GET /v1/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section.
+Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
 
 **Error responses:**
 
@@ -596,6 +596,7 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 | ------ | ---- | ----- |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
 | 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
+| 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 
 **Query Parameters:**
 
@@ -744,6 +745,8 @@ Use `GET /v1/dlq/stats` to monitor DLQ depth.
 ## Generating a JWT for Testing
 
 Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
+
+`"change-me-in-production"` below is the placeholder shipped in the repo's `config.yaml` (what `make dev` / `./bin/wavehouse` load). The compose quickstart sets **no** secret — with no `jwt_secret` configured, no token validates — so set `WH_AUTH_JWT_SECRET` on the `wavehouse` service first and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
