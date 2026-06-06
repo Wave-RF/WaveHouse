@@ -959,6 +959,19 @@ site-search button kbd {
    continuous as you scroll; the glow has pure radial falloff (no clipped
    edges). Both sit behind all content (negative z-index). */
 
+/* Let the page-level grid/glow show through. html paints the base --wh-bg
+   (the canvas), and these two layers live at z-index:-2/-1 — but Starlight's
+   `body { background-color: var(--sl-color-bg) }` (an opaque --wh-bg) paints in
+   the body's own background phase, which sits ABOVE negative-z descendants, so
+   it covered both pseudo-layers. Making the landing's body transparent lets the
+   html canvas be the base color and the grid/glow paint above it, under content.
+   Unlayered (Starlight's rule is in @layer starlight.reset, so this wins on
+   origin regardless of specificity) and scoped to :has(.wh-hero) so only the
+   landing is affected — doc-page bodies keep their opaque --wh-bg fill. */
+body:has(.wh-hero) {
+  background: transparent;
+}
+
 /* Layer 1 — the signal-field grid: full-viewport, continuous, soft-cornered. */
 body:has(.wh-hero)::before {
   content: "";

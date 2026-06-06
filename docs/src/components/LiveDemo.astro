@@ -45,6 +45,41 @@ const DEMO_HOST = "stats.wavehouse.dev";
     </div>
   </div>
 
+  {/* Metrics strip — the real-time proof other tools can't make. Left: the
+      ingest→browser latency, computed per live event from received_timestamp
+      (Stats#33). Right: a live events/min sparkline (Stats#34) + the lifetime
+      total tracked. All degrade to a placeholder when the stream is quiet or a
+      pipe is unavailable. */}
+  <div class="wh-live__metrics">
+    <span
+      class="wh-live__lat"
+      data-wh-lat
+      data-state="waiting"
+      title="real-time path: WaveHouse ingest → your browser (network included)"
+    >
+      <span class="wh-live__lat-bolt" aria-hidden="true">⚡</span>
+      <span class="wh-live__lat-lead">ingested → live</span>
+      <span class="wh-live__lat-ms" data-wh-lat-val></span>
+    </span>
+    <span class="wh-live__epm">
+      {/* Starts hidden via the script (the `hidden` boolean attr isn't on
+          Astro's SVGAttributes type); drawEpm reveals it once there's data. */}
+      <svg
+        class="wh-live__spark"
+        data-wh-epm-svg
+        viewBox="0 0 120 28"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <path class="wh-live__spark-area" data-wh-epm-area d=""></path>
+        <path class="wh-live__spark-line" data-wh-epm-line d="" fill="none"></path>
+      </svg>
+      <span class="wh-live__epm-total" data-wh-live-wrap hidden>
+        <span data-wh-live="totalEvents">—</span> tracked
+      </span>
+    </span>
+  </div>
+
   <div class="wh-live__feed-wrap">
     <ol class="wh-live__feed" data-wh-feed aria-live="off"></ol>
     <p class="wh-live__empty" data-wh-feed-empty>connecting to the live stream…</p>
@@ -181,6 +216,12 @@ const DEMO_HOST = "stats.wavehouse.dev";
     const feedEmpty = root.querySelector("[data-wh-feed-empty]") as HTMLElement;
     const stream = root.querySelector("[data-wh-stream]") as HTMLElement;
     const streamLabel = root.querySelector("[data-wh-stream-label]") as HTMLElement;
+    const latEl = root.querySelector("[data-wh-lat]") as HTMLElement | null;
+    const latVal = root.querySelector("[data-wh-lat-val]") as HTMLElement | null;
+    const epmSvg = root.querySelector("[data-wh-epm-svg]") as SVGElement | null;
+    const epmLine = root.querySelector("[data-wh-epm-line]") as SVGPathElement | null;
+    const epmArea = root.querySelector("[data-wh-epm-area]") as SVGPathElement | null;
+    epmSvg?.setAttribute("hidden", ""); // hidden until drawEpm has data to plot
 
     // --- Counts. Writes every [data-wh-live="<key>"] on the page (the
     // closer band has a star chip too), so one fetch feeds all placements.
@@ -211,6 +252,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
         setCount("events7d", row.events_7d);
         setCount("openIssues", row.open_issues);
         setCount("openPrs", row.open_prs);
+        setCount("totalEvents", row.total_events); // #34: lifetime "N tracked"
         return;
       }
       // Pre-#19 fallback (per-number reads) so a stats-stack rollback
@@ -227,6 +269,73 @@ const DEMO_HOST = "stats.wavehouse.dev";
       countTimer = setTimeout(loadCounts, 400); // debounce bursts of streamed events
     }
     cleanups.push(() => clearTimeout(countTimer));
+
+    // --- #33 latency proof: ingested → live in ~N ms. ev.timestamp is the
+    // server's received_timestamp (ingest clock, RFC3339Nano UTC), carried on
+    // every SSE event — so now − that = the WaveHouse-owned real-time path
+    // (ingest → WAL → SSE → this browser), the thing a frontend-on-ClickHouse
+    // can't do. Browser↔server clock skew makes a single sample noisy, so we
+    // clamp out-of-range values and show the latest sane one (recent median in
+    // the tooltip). normTs is a no-op for the "…Z" format but keeps us correct
+    // if the envelope clock ever drifts to a zone-less string.
+    const latRing: number[] = [];
+    function recordLatency(isoTs: string) {
+      if (!latVal || !latEl) return;
+      const ms = Date.now() - Date.parse(normTs(isoTs));
+      if (!Number.isFinite(ms) || ms < 0 || ms > 60_000) return; // skew / stale — drop
+      latRing.push(ms);
+      if (latRing.length > 30) latRing.shift();
+      const med = [...latRing].sort((a, b) => a - b)[Math.floor(latRing.length / 2)];
+      latVal.textContent = `in ~${fmtInt(Math.round(ms))} ms`;
+      latEl.dataset.state = "live";
+      latEl.title = `WaveHouse ingest → your browser · latest ${Math.round(ms)} ms · recent median ${Math.round(med)} ms (n=${latRing.length})`;
+    }
+
+    // --- #34 events/min sparkline. Backfilled from gh_events_per_minute, then
+    // the current minute's bucket is bumped live as the stream ticks so the
+    // line visibly moves; the 60s reconcile re-syncs history with the server.
+    const minuteMs = (s: string) =>
+      Date.parse(String(s).replace(" ", "T") + (String(s).endsWith("Z") ? "" : "Z"));
+    let epm: { t: number; n: number }[] = [];
+    let epmDrawTimer: ReturnType<typeof setTimeout> | undefined;
+    function drawEpm() {
+      if (!epmSvg || !epmLine || !epmArea) return;
+      const vals = epm.map((r) => r.n);
+      if (!vals.length) {
+        epmSvg.setAttribute("hidden", ""); // quiet — keep the strip clean
+        return;
+      }
+      const max = Math.max(1, ...vals);
+      const W = 120, H = 28, pad = 3, n = vals.length;
+      const x = (i: number) => (n === 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+      const y = (v: number) => H - pad - (v / max) * (H - 2 * pad);
+      const line = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+      epmLine.setAttribute("d", line);
+      epmArea.setAttribute("d", `${line} L${x(n - 1).toFixed(1)} ${H} L${x(0).toFixed(1)} ${H} Z`);
+      epmSvg.removeAttribute("hidden");
+    }
+    function scheduleEpmDraw() {
+      clearTimeout(epmDrawTimer);
+      epmDrawTimer = setTimeout(drawEpm, 250); // debounce bursts so it ticks, not thrashes
+    }
+    async function loadEpm() {
+      const { ok, data } = await wh.pipe("gh_events_per_minute").fetch();
+      if (ok && Array.isArray(data)) {
+        epm = (data as { minute: string; events: number }[])
+          .map((r) => ({ t: minuteMs(r.minute), n: Number(r.events) || 0 }))
+          .filter((r) => Number.isFinite(r.t));
+      }
+      drawEpm();
+    }
+    function bumpEpm() {
+      const m = Math.floor(Date.now() / 60_000) * 60_000; // current UTC minute
+      const last = epm[epm.length - 1];
+      if (last && last.t === m) last.n++;
+      else epm.push({ t: m, n: 1 });
+      while (epm.length > 60) epm.shift();
+      scheduleEpmDraw();
+    }
+    cleanups.push(() => clearTimeout(epmDrawTimer));
 
     // --- Feed.
     const seen = new Set<string>();
@@ -309,7 +418,10 @@ const DEMO_HOST = "stats.wavehouse.dev";
       .stream();
     const unsub = sse.subscribe({
       next: (ev: unknown) => {
-        const row = ((ev as { data?: GhRow })?.data ?? ev) as GhRow;
+        const e = ev as { data?: GhRow; timestamp?: string };
+        const row = (e?.data ?? ev) as GhRow;
+        if (e?.timestamp) recordLatency(e.timestamp); // #33: ingest → browser latency
+        bumpEpm(); // #34: this minute's throughput bucket just grew
         if (addRow(row, "top") && (row.event_type === "star" || row.event_type === "fork")) {
           refreshCounts();
         }
@@ -356,7 +468,13 @@ const DEMO_HOST = "stats.wavehouse.dev";
 
     // --- Boot + slow timers (count safety net, relative-time refresh).
     loadCounts();
-    const countInterval = setInterval(loadCounts, 60_000);
+    loadEpm(); // #34: events/min sparkline backfill (then bumped live by the stream)
+    // gh_summary (the lifetime total) rides loadCounts; reconcile the sparkline
+    // with the server on the same 60s beat so live bumps can't drift.
+    const countInterval = setInterval(() => {
+      loadCounts();
+      loadEpm();
+    }, 60_000);
     const timeInterval = setInterval(() => {
       root.querySelectorAll("time.wh-live__ev-time").forEach((t) => {
         t.textContent = relTime(t.getAttribute("datetime") || "");
@@ -486,6 +604,72 @@ const DEMO_HOST = "stats.wavehouse.dev";
     text-overflow: ellipsis;
   }
   .wh-live__stat:nth-child(1) .wh-live__lbl { color: var(--wh-accent-text); }
+
+  /* Metrics strip — the real-time proof line. Latency (left) + throughput
+     sparkline & lifetime total (right). Thin + mono so it reads as a readout,
+     not another stat row. min-height reserves space so the placeholder→value
+     swap and the sparkline appearing never reflow the panel. */
+  .wh-live__metrics {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 1.9rem;
+    padding: 0.45rem 0.85rem;
+    border-bottom: 1px solid var(--wh-code-border);
+    font-family: var(--sl-font-mono);
+    font-size: 0.7rem;
+  }
+  /* Latency — the wow metric. Bolt is always accent and pulses while waiting;
+     the value lights up from empty placeholder to bright accent on first event. */
+  .wh-live__lat {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wh-live__lat-bolt { color: var(--wh-accent-text); font-size: 0.85em; }
+  .wh-live__lat[data-state="waiting"] .wh-live__lat-bolt {
+    animation: wh-live-pulse 1.2s ease-in-out infinite;
+  }
+  .wh-live__lat-lead { color: var(--wh-ink-muted); }
+  .wh-live__lat-ms {
+    color: var(--wh-accent-text);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Throughput sparkline + lifetime total. */
+  .wh-live__epm {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .wh-live__spark { width: 56px; height: 18px; display: block; flex: none; }
+  .wh-live__spark[hidden] { display: none; }
+  /* preserveAspectRatio="none" stretches the 120×28 viewBox into 56×18, so pin
+     the stroke width with non-scaling-stroke to keep it crisp and even. */
+  .wh-live__spark-line {
+    stroke: var(--wh-emerald);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+  .wh-live__spark-area {
+    fill: color-mix(in oklab, var(--wh-emerald) 16%, transparent);
+    stroke: none;
+  }
+  .wh-live__epm-total { color: var(--wh-ink-subtle); white-space: nowrap; }
+  .wh-live__epm-total[hidden] { display: none; }
+  .wh-live__epm-total [data-wh-live] {
+    color: var(--wh-ink);
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+  }
 
   /* Feed — fixed height so backfill/live inserts never shift the page. */
   .wh-live__feed-wrap {
@@ -623,7 +807,8 @@ const DEMO_HOST = "stats.wavehouse.dev";
 
   @media (prefers-reduced-motion: reduce) {
     .wh-live__event,
-    .wh-live__stream-dot {
+    .wh-live__stream-dot,
+    .wh-live__lat-bolt {
       animation: none !important;
     }
   }
