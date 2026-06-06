@@ -406,7 +406,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
   .wh-live__dot {
     width: 10px;
     height: 10px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
   }
   .wh-live__dot--red   { background: #ff5f57; }
   .wh-live__dot--amber { background: #febc2e; }
@@ -429,7 +429,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
   .wh-live__stream-dot {
     width: 8px;
     height: 8px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--wh-ink-subtle);
   }
   .wh-live__stream[data-state="connecting"] .wh-live__stream-dot {
@@ -485,7 +485,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .wh-live__stat:nth-child(1) .wh-live__lbl { color: var(--wh-accent-hi); }
+  .wh-live__stat:nth-child(1) .wh-live__lbl { color: var(--wh-accent-text); }
 
   /* Feed — fixed height so backfill/live inserts never shift the page. */
   .wh-live__feed-wrap {
@@ -517,7 +517,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     flex: none;
     width: 7px;
     height: 7px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
   }
   .wh-live__tone--accent  { background: var(--wh-accent); box-shadow: 0 0 0 3px var(--wh-accent-glow); }
   .wh-live__tone--emerald { background: var(--wh-emerald); }
@@ -537,7 +537,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     font-weight: 600;
     text-decoration: none;
   }
-  .wh-live__ev-actor:hover { color: var(--wh-accent-hi); }
+  .wh-live__ev-actor:hover { color: var(--wh-accent-text); }
   .wh-live__ev-detail { color: var(--wh-ink-subtle); }
   .wh-live__ev-time {
     flex: none;
@@ -574,7 +574,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
     align-items: center;
     gap: 0.4rem;
     padding: 0.38rem 0.7rem;
-    border-radius: 0.45rem;
+    border-radius: var(--radius-sm);
     background: var(--wh-accent);
     color: var(--wh-accent-ink);
     border: 1px solid var(--wh-accent-hi);
@@ -591,7 +591,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
   .wh-live__cta-text { color: var(--wh-ink-muted); }
   .wh-live__more {
     margin-left: auto;
-    color: var(--wh-accent-hi);
+    color: var(--wh-accent-text);
     font-weight: 600;
     text-decoration: none;
     white-space: nowrap;

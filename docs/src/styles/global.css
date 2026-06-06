@@ -30,8 +30,15 @@
   /* Brand color utilities (text-wave-blue etc.) used to live here but were
      unused; the brand hues now live once in the BRAND PALETTE block below. */
 
-  --radius-card: 0.75rem;
+  /* One radius scale for the whole site (replaces the ad-hoc 3.2/6/6.4/7.2/
+     9/10px values the audit found). xs=chips, sm=buttons/inputs, md=cards/
+     panels/code-frames, lg=large feature panels, pill=tags/dots. */
+  --radius-xs: 0.25rem; /* 4px  */
+  --radius-sm: 0.5rem;  /* 8px  */
+  --radius-md: 0.75rem; /* 12px */
+  --radius-lg: 1rem;    /* 16px */
   --radius-pill: 999px;
+  --radius-card: var(--radius-md); /* legacy alias — existing call sites */
 }
 
 /* ============================================================
@@ -79,10 +86,14 @@
 
   --wh-ink: var(--brand-ink);
   --wh-ink-muted: var(--brand-ink-muted);
-  --wh-ink-subtle: #6B7280;
+  --wh-ink-subtle: #828A94; /* lifted from #6B7280 (3.7:1 on surface, sub-AA) → 5.1:1 */
 
   --wh-accent: var(--brand-blue);
   --wh-accent-hi: var(--brand-blue-hi);
+  /* accent used as TEXT (links, current items, focus ring) — split from the
+     bright rim role so light mode can darken it to an AA-passing value
+     (#1DC9D8 stays 8.9:1 in dark; light overrides to #086D77 = 6:1). */
+  --wh-accent-text: var(--brand-blue-hi);
   --wh-accent-lo: #054249;
   --wh-accent-ink: #04171A;
   --wh-accent-glow: rgba(6, 176, 191, 0.18); /* --brand-blue @ 18% */
@@ -91,6 +102,7 @@
   --wh-sky: var(--brand-sky);
   --wh-olive: var(--brand-olive);
   --wh-terracotta: var(--brand-terracotta);
+  --wh-terracotta-text: #C57B5E; /* lifted terracotta for TEXT (brand #A0573B is 3.4:1) → 5.4:1 */
   --wh-amber: #F59E0B;
   --wh-rose: #F43F5E;
   --wh-emerald: #10B981;
@@ -103,8 +115,6 @@
   --wh-shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.48);
   --wh-shadow-glow: 0 0 0 1px rgba(6, 176, 191, 0.25),
     0 18px 48px -16px rgba(6, 176, 191, 0.45);
-
-  --wh-section-accent: var(--wh-accent);
 
   /* Mermaid theme tokens — consumed by the SVGs after the
      fix-mermaid-output build hook swaps their inline-CSS hex colors
@@ -144,20 +154,23 @@
 }
 
 :root[data-theme="light"] {
-  --wh-bg: #FAFAF9;
-  --wh-bg-grid: #F4F5F7;
+  /* Page sits a step below the white card surface so cards/panels read as
+     distinct layers (was #FAFAF9 → white at 1.04:1, visually flat). */
+  --wh-bg: #F1F2F5;
+  --wh-bg-grid: #E4E6EB;
   --wh-surface: #FFFFFF;
   --wh-surface-elevated: #F4F5F7;
-  --wh-surface-overlay: #EAECEF;
-  --wh-border: #E4E6EB;
-  --wh-border-strong: #D1D5DB;
+  --wh-surface-overlay: #E7E9EE;
+  --wh-border: #DBDEE5;
+  --wh-border-strong: #C7CCD6;
 
   --wh-ink: #14171C;
   --wh-ink-muted: #4B5563;
-  --wh-ink-subtle: #6B7280;
+  --wh-ink-subtle: #5E6573; /* darkened from #6B7280 (4.43:1 on the panel code-bg) → ≥4.5 everywhere */
 
   --wh-accent: var(--brand-blue-deep);
   --wh-accent-hi: var(--brand-blue);
+  --wh-accent-text: var(--brand-blue-deep); /* #086D77 = 6:1 on white (bright #06B0BF was 2.6:1) */
   --wh-accent-lo: #D8EFF2;
   --wh-accent-ink: #FFFFFF;
   --wh-accent-glow: rgba(8, 109, 119, 0.14); /* --brand-blue-deep @ 14% */
@@ -167,6 +180,12 @@
   --wh-sky: var(--brand-sky-deep);
   --wh-olive: var(--brand-olive-deep);
   --wh-terracotta: var(--brand-terracotta-deep);
+  --wh-terracotta-text: var(--brand-terracotta-deep);
+  /* Status hues need AA-passing light variants — the bright dark values
+     (amber 2.2:1, emerald 2.5:1, rose 3.7:1 on white) fail as text/labels. */
+  --wh-amber: #B45309;
+  --wh-emerald: #047857;
+  --wh-rose: #E11D48;
 
   --wh-code-bg: #F4F5F7;
   --wh-code-border: #E4E6EB;
@@ -187,7 +206,7 @@
   --sl-color-accent-low: var(--wh-accent-lo);
   --sl-color-accent: var(--wh-accent);
   --sl-color-accent-high: var(--wh-accent-hi);
-  --sl-color-text-accent: var(--wh-accent-hi);
+  --sl-color-text-accent: var(--wh-accent-text);
 
   --sl-color-white: var(--wh-ink);
   --sl-color-gray-1: #E5E7EB;
@@ -217,8 +236,14 @@
   --sl-text-h4: 1.125rem;
   --sl-text-h5: 1rem;
 
-  --sl-sidebar-width: 19rem;
-  --sl-content-width: 50rem;
+  --sl-sidebar-width: 18.5rem;
+  /* Mobile/tablet default — fits a 768px iPad without clipping (the old 50rem
+     slightly overflowed there). Widened to 58rem only at the `lg` breakpoint
+     below, where the 3-column layout has room: code/tables/wide Mermaid then
+     use the space on large monitors while prose line length stays held by the
+     .sl-markdown-content text-block cap. The shell is also capped + centered
+     on ultrawide via .main-frame so content+TOC don't strand dead space. */
+  --sl-content-width: 45rem;
   --sl-nav-height: 4rem;
 
   --sl-shadow-sm: var(--wh-shadow-sm);
@@ -234,6 +259,24 @@
   --sl-color-gray-5: #C2C9D1;
   --sl-color-gray-6: var(--wh-border);
   --sl-color-gray-7: var(--wh-surface-elevated);
+}
+
+/* Content track widens in two steps so it never starves the right-rail TOC
+   (content does NOT shrink below --sl-content-width in this layout, so an
+   over-wide track squeezes the TOC into ellipsis). 50rem through the laptop
+   range is exactly the pre-sweep width — no TOC regression there. The full
+   58rem engages only ≥100rem, the same breakpoint where .main-frame caps +
+   centers the shell: at ≥1600px there's unambiguous room for sidebar + 58rem
+   content + a comfortable TOC, and the two changes reinforce each other. */
+@media (min-width: 72rem) {
+  :root {
+    --sl-content-width: 50rem;
+  }
+}
+@media (min-width: 100rem) {
+  :root {
+    --sl-content-width: 58rem;
+  }
 }
 
 /* ---------- Mermaid diagram polish ----------
@@ -518,11 +561,13 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
     color: var(--wh-ink);
   }
 
-  /* Focus rings — accent-tinted, never browser-default */
+  /* Focus rings — accent-tinted, never browser-default. No border-radius here:
+     it would square elements that have their own (the ring follows the
+     element's shape via outline). Uses the AA-safe accent-text role so the
+     ring clears 3:1 in light mode too (bright #06B0BF was 2.6:1 on white). */
   :focus-visible {
-    outline: 2px solid var(--wh-accent-hi);
+    outline: 2px solid var(--wh-accent-text);
     outline-offset: 2px;
-    border-radius: 4px;
   }
 
   /* Heading hierarchy tightening */
@@ -544,7 +589,7 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   letter-spacing: -0.03em;
 }
 .sl-markdown-content h2 {
-  margin-top: 3.5rem;
+  margin-top: 4rem; /* one clean section step (was 3.5rem off-scale) */
   font-weight: 650;
   letter-spacing: -0.025em;
   padding-bottom: 0.5rem;
@@ -561,24 +606,30 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 .sl-markdown-content p {
   line-height: 1.7;
 }
+/* Hold prose line length to a comfortable ~70–75ch even as the content track
+   widened to 58rem — text blocks cap, while code/tables/diagrams/headings
+   keep the full width so they breathe on large monitors. */
+.sl-markdown-content :is(p, li, blockquote) {
+  max-width: 46rem;
+}
 
 /* Anchor links in body text — underline-on-hover with accent glow */
 .sl-markdown-content a:not(.not-content a):not(.sl-link-button) {
-  color: var(--wh-accent-hi);
+  color: var(--wh-accent-text);
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--wh-accent-hi) 35%, transparent);
+  text-decoration-color: color-mix(in oklab, var(--wh-accent-text) 35%, transparent);
   text-underline-offset: 3px;
   transition: text-decoration-color 0.15s ease, color 0.15s ease;
 }
 .sl-markdown-content a:not(.not-content a):hover {
-  text-decoration-color: var(--wh-accent-hi);
+  text-decoration-color: var(--wh-accent-text);
 }
 
 /* Inline code — denser, branded surface */
 .sl-markdown-content :not(pre) > code {
   background: var(--wh-code-bg);
   border: 1px solid var(--wh-code-border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0.1em 0.4em;
   font-size: 0.9em;
   color: var(--wh-ink);
@@ -595,21 +646,48 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   mask-image: none !important;
 }
 
-/* Code block container — subtle glow border in dark mode */
+/* Code block container shadow. The radius is set via Expressive Code's own
+   borderRadius config (astro.config.mjs) so the frame and its inner header/
+   tab/<pre> share ONE value — a manual `.frame` radius here desynced from
+   EC's `calc(--ec-brdRad + --ec-brdWd)` inner corners and left a 1px lip. */
 .expressive-code .frame {
-  border-radius: 0.625rem;
   box-shadow: var(--wh-shadow-md);
 }
+.expressive-code .copy button {
+  border-radius: var(--radius-xs);
+}
+.expressive-code .copy button:hover {
+  border-color: var(--wh-accent);
+}
 
-/* Sidebar: tighter labels, accent indicator on current item */
-.sidebar-content nav > ul > li > a,
-.sidebar-content nav > ul > li > details > summary {
-  font-weight: 500;
+/* Sidebar: group-header eyebrows, branded hover, accent current item.
+   (The previous `.sidebar-content nav > ul …` selector matched 0 elements —
+   the DOM is `nav.sidebar > .sidebar-content`, no nested nav — so the intended
+   500-weight never shipped and there was no hover affordance.) */
+.sidebar-content a,
+.sidebar-content summary {
+  border-radius: var(--radius-sm);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.sidebar-content a:not([aria-current="page"]):hover,
+.sidebar-content summary:hover {
+  background: var(--wh-surface-elevated);
+  color: var(--wh-ink);
+}
+/* Section group labels ("Guides" / "Operations" / …) as quiet eyebrows. */
+.sidebar-content summary .group-label span {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--wh-ink-subtle);
 }
 .sidebar-content a[aria-current="page"] {
   background: var(--wh-accent-lo);
-  color: var(--wh-accent-hi);
-  border-left: 2px solid var(--wh-accent-hi);
+  color: var(--wh-accent-text);
+  font-weight: 600;
+  border-left: 2px solid var(--wh-accent-text);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   padding-left: calc(var(--sl-sidebar-item-padding-inline) - 2px);
 }
 
@@ -637,41 +715,59 @@ header.header {
   transition: color 0.12s ease;
 }
 .right-sidebar-panel a[aria-current="true"] {
-  color: var(--wh-accent-hi);
+  color: var(--wh-accent-text);
   font-weight: 500;
 }
 
-/* "Hero" actions: refresh Starlight's default button styles */
-.action.primary {
+/* Unified button shape for Starlight <LinkButton>s (closer band, 404) — match
+   the hero CTA language exactly: 8px rectangle (not a pill), weight 600, the
+   single accent fill #06B0BF. (Was a 56px-tall pill at weight 400 on the
+   brighter #1DC9D8 — the same "Get started" CTA rendered two different ways.)
+   The hero's own buttons live in Hero.astro and already use this language. */
+a.sl-link-button {
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 1.05rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1;
+  gap: 0.4rem;
+  transition: transform 0.15s ease, box-shadow 0.15s ease,
+    background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+a.sl-link-button.primary {
   background: var(--wh-accent);
   color: var(--wh-accent-ink);
   border: 1px solid var(--wh-accent-hi);
-  font-weight: 600;
   box-shadow: var(--wh-shadow-glow);
-  transition: transform 0.15s ease, box-shadow 0.15s ease,
-    background 0.15s ease;
 }
-.action.primary:hover {
+a.sl-link-button.primary:hover {
   background: var(--wh-accent-hi);
   transform: translateY(-1px);
 }
-.action.minimal {
+a.sl-link-button.secondary,
+a.sl-link-button.minimal {
+  background: var(--wh-surface);
   color: var(--wh-ink);
   border: 1px solid var(--wh-border-strong);
-  background: var(--wh-surface);
-  font-weight: 500;
-  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.action.minimal:hover {
+a.sl-link-button.secondary:hover,
+a.sl-link-button.minimal:hover {
   border-color: var(--wh-accent);
   background: var(--wh-surface-elevated);
+  transform: translateY(-1px);
 }
 
-/* Card grid: subtle glow on hover */
-.sl-link-card {
+/* Cards — ONE primitive (12px, --wh-border, elevated surface). Interactive
+   link cards lift on hover; the static feature <Card> grid does not (it isn't
+   clickable). Feature <Card> was the outlier: square (4px), page-bg fill,
+   border-strong — every sibling card was 12px/--wh-border/--wh-surface. */
+.sl-link-card,
+.sl-markdown-content .card {
   background: var(--wh-surface);
   border: 1px solid var(--wh-border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-md);
+}
+.sl-link-card {
   transition: border-color 0.15s ease, transform 0.15s ease,
     box-shadow 0.15s ease;
 }
@@ -679,6 +775,30 @@ header.header {
   border-color: var(--wh-accent);
   transform: translateY(-2px);
   box-shadow: var(--wh-shadow-glow);
+}
+
+/* LLM-tools + Expressive-Code copy chips — branded, single radius, accent
+   focus ring (their scoped styles otherwise win over the @layer base ring). */
+.sllm-tools :is(a, button, summary),
+.sllm-copy-btn,
+.sllm-trigger {
+  border-radius: var(--radius-sm);
+  background: var(--wh-surface);
+  border-color: var(--wh-border);
+}
+.sllm-tools :is(a, button, summary):hover,
+.sllm-copy-btn:hover,
+.sllm-trigger:hover {
+  border-color: var(--wh-accent);
+  color: var(--wh-ink);
+}
+.sllm-copy-btn:focus-visible,
+.sllm-trigger:focus-visible {
+  outline: 2px solid var(--wh-accent-text);
+  outline-offset: 2px;
+}
+.sllm-dropdown .sllm-links {
+  border-radius: var(--radius-sm);
 }
 
 /* Page title — slight gradient on h1 in main content */
@@ -693,69 +813,150 @@ header.header {
   color: transparent;
 }
 
-/* ---------- Reusable section-accent system ----------
- * Pages can opt in to a section accent by adding a class to the
- * <body> via the template-key frontmatter route. The accent flows
- * into the page title's underline and inline anchor color.
- *
- * TODO(follow-up): the body[data-section=…] selectors below have no
- * matcher yet — no Astro layout or component stamps `data-section`
- * onto <body>. The H1 underline still renders because
- * --wh-section-accent inherits the --wh-accent default. Wire up the
- * route-middleware-based stamping in a follow-on PR before adding
- * more rules that depend on `data-section`. */
-
-body[data-section="start"]      { --wh-section-accent: var(--wh-accent); }
-body[data-section="guides"]     { --wh-section-accent: var(--wh-olive); }
-body[data-section="reference"]  { --wh-section-accent: var(--wh-terracotta); }
-body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
-
-/* Underline on page H1 — color tied to the section */
+/* Accent underline on every page H1. (A per-section accent palette was
+   scaffolded here but never wired — nothing stamped body[data-section], so it
+   always resolved to teal anyway. Removed the dead rules; the single accent
+   underline is the intended treatment. If section wayfinding is wanted later,
+   stamp data-section via route middleware and reintroduce the variants.) */
 .content-panel > .sl-container h1::after {
   content: "";
   display: block;
   width: 3rem;
   height: 3px;
   margin-top: 0.75rem;
-  background: var(--wh-section-accent);
-  border-radius: 999px;
+  background: var(--wh-accent);
+  border-radius: var(--radius-pill);
+}
+
+/* ---------- Starlight chrome — brand the default surfaces ----------
+   Pagination, tables, blockquotes, and the search trigger shipped as stock
+   Starlight (token colors only, no treatment) and dragged the whole site back
+   to "default docs theme" next to the polished landing. */
+
+/* Cap + center the doc shell on ultrawide. The sidebar glues to viewport-left
+   while content+TOC center in the leftover, so ≥1680px stranded ~590px of dead
+   space on the right (audit). Scoped to ≥100rem: `.main-frame` is a flex child
+   of `.page`, and `margin-inline:auto` on a flex item makes it size to
+   max-content (breaking the responsive shrink below the cap) — so only apply
+   it where the cap is actually doing something. The fixed glass header stays
+   full-bleed by design. */
+@media (min-width: 100rem) {
+  .main-frame {
+    max-width: 100rem;
+    margin-inline: auto;
+  }
+}
+
+/* Prev/next pagination — mirror the link-card treatment (was a flat bordered
+   box with an 8px radius and a border-only hover). */
+.pagination-links a {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-md);
+  transition: border-color 0.15s ease, transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.pagination-links a:hover {
+  border-color: var(--wh-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--wh-shadow-glow);
+}
+
+/* Tables — card container + branded header (was a bare HTML table: no
+   container, no header fill, hairline rows). */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+  /* Fixed layout + cell wrapping (below) guarantees the table fits its column
+     instead of growing to min-content and overflowing the page on dense
+     tables (e.g. configuration's 4-column env-var table). */
+  table-layout: fixed;
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-md);
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+}
+.sl-markdown-content :is(th, td) {
+  border: 0;
+  border-bottom: 1px solid var(--wh-border);
+  padding: 0.55rem 0.85rem;
+  /* Let long unbreakable tokens (env-var names like WH_SERVER_CORS_ALLOWED_
+     ORIGINS, defaults) wrap so a dense table can't force itself wider than the
+     content column and overflow the page — width:100% + overflow:hidden alone
+     can't shrink non-wrapping cells. */
+  overflow-wrap: anywhere;
+}
+.sl-markdown-content thead th {
+  background: var(--wh-surface-elevated);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--wh-ink-muted);
+}
+/* Don't uppercase case-sensitive literals in header cells (/livez, Content-Type). */
+.sl-markdown-content thead th code {
+  text-transform: none;
+}
+/* Fixed layout distributes columns equally; give the last column (the prose
+   "description / meaning" in the docs' reference tables) extra room so the
+   content-heavy column isn't squeezed into a tall ribbon next to half-empty
+   key/default columns. */
+.sl-markdown-content table :is(th, td):last-child {
+  width: 42%;
+}
+.sl-markdown-content tbody tr:last-child :is(th, td) {
+  border-bottom: 0;
+}
+.sl-markdown-content tbody tr:hover :is(th, td) {
+  background: color-mix(in oklab, var(--wh-surface-elevated) 60%, transparent);
+}
+
+/* Blockquotes — accent rail + faint tint (was a near-invisible gray rule). */
+.sl-markdown-content blockquote {
+  border-inline-start: 3px solid var(--wh-accent);
+  background: color-mix(in oklab, var(--wh-accent) 6%, transparent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  padding: 0.85rem 1.1rem;
+  color: var(--wh-ink-muted);
+}
+
+/* Search trigger — brand the most-visible header control to match the nav. */
+site-search button {
+  background: var(--wh-surface);
+  border-color: var(--wh-border);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+site-search button:hover {
+  border-color: var(--wh-accent);
+  background: var(--wh-surface-elevated);
+}
+site-search button kbd {
+  background: var(--wh-surface-overlay);
+  color: var(--wh-ink-muted);
 }
 
 /* ---------- Utility classes for landing page ---------- */
 
-.wh-grid-bg {
-  background-image:
-    linear-gradient(var(--wh-border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--wh-border) 1px, transparent 1px);
-  background-size: 56px 56px;
-  background-position: -1px -1px;
-  mask-image: radial-gradient(
-    ellipse at center,
-    black 0%,
-    black 40%,
-    transparent 75%
-  );
-  -webkit-mask-image: radial-gradient(
-    ellipse at center,
-    black 0%,
-    black 40%,
-    transparent 75%
-  );
-}
-
-.wh-glow-orb {
-  position: absolute;
-  border-radius: 999px;
-  filter: blur(80px);
-  opacity: 0.35;
+/* Landing-page texture: a faint, calm grid behind the WHOLE splash page so it
+   isn't dead-flat below the hero (the hero carries a crisper, full-bleed grid
+   of its own). Fixed + full-viewport, scoped to the landing via :has(.wh-hero).
+   Uses the near-invisible --wh-bg-grid line color, so it reads as quiet
+   texture, never as content. A gentle vertical fade keeps the very bottom
+   (footer) clean. */
+body:has(.wh-hero)::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
   pointer-events: none;
-}
-
-.wh-glass {
-  background: color-mix(in oklab, var(--wh-surface) 88%, transparent);
-  backdrop-filter: blur(10px) saturate(140%);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-  border: 1px solid var(--wh-border);
+  background-image:
+    linear-gradient(var(--wh-bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wh-bg-grid) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: linear-gradient(180deg, black 0%, black 55%, transparent 100%);
+  mask-image: linear-gradient(180deg, black 0%, black 55%, transparent 100%);
 }
 
 .wh-pill {
@@ -791,15 +992,16 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  padding: 1.25rem 1.25rem 1rem;
+  padding: 1.25rem;
   background: var(--wh-surface);
   border: 1px solid var(--wh-border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-md);
   position: relative;
   overflow: hidden;
-  transition: border-color 0.18s ease, transform 0.18s ease,
-    box-shadow 0.18s ease;
 }
+/* No hover lift: the stat strip is informational, not clickable. A lift +
+   accent border read as a false affordance next to the actually-clickable
+   link cards (audit). A faint static accent wash keeps them from looking bare. */
 .wh-stat::before {
   content: "";
   position: absolute;
@@ -807,19 +1009,10 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   background: linear-gradient(
     135deg,
     var(--wh-accent-glow) 0%,
-    transparent 55%
+    transparent 60%
   );
-  opacity: 0;
-  transition: opacity 0.18s ease;
+  opacity: 0.5;
   pointer-events: none;
-}
-.wh-stat:hover {
-  border-color: var(--wh-accent);
-  transform: translateY(-2px);
-  box-shadow: var(--wh-shadow-md);
-}
-.wh-stat:hover::before {
-  opacity: 1;
 }
 .wh-stat__value {
   font-size: 2.25rem;
@@ -833,7 +1026,7 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   display: inline-block;
   font-size: 0.875rem;
   font-weight: 600;
-  color: var(--wh-accent-hi);
+  color: var(--wh-accent-text); /* not -hi: bright #06B0BF was 2.63:1 on white */
   text-transform: lowercase;
   letter-spacing: 0.02em;
   margin-top: -0.5rem;
@@ -846,7 +1039,7 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
 }
 .wh-stat:nth-child(2) .wh-stat__unit { color: var(--wh-sky); }
 .wh-stat:nth-child(3) .wh-stat__unit { color: var(--wh-olive); }
-.wh-stat:nth-child(4) .wh-stat__unit { color: var(--wh-terracotta); }
+.wh-stat:nth-child(4) .wh-stat__unit { color: var(--wh-terracotta-text); }
 
 @media (max-width: 60rem) {
   .wh-stats {
@@ -879,10 +1072,10 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  padding: 1.25rem 1.375rem;
+  padding: 1.25rem;
   background: var(--wh-surface);
   border: 1px solid var(--wh-border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-md);
 }
 .wh-versus__col--pain {
   border-color: color-mix(in oklab, var(--wh-terracotta) 40%, var(--wh-border));
@@ -896,8 +1089,8 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   font-weight: 650;
   letter-spacing: -0.01em;
 }
-.wh-versus__col--pain .wh-versus__head { color: var(--wh-terracotta); }
-.wh-versus__col--win .wh-versus__head { color: var(--wh-accent-hi); }
+.wh-versus__col--pain .wh-versus__head { color: var(--wh-terracotta-text); }
+.wh-versus__col--win .wh-versus__head { color: var(--wh-accent-text); }
 .wh-versus__col ul {
   list-style: none;
   margin: 0;
@@ -919,8 +1112,8 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   top: 0;
   font-weight: 700;
 }
-.wh-versus__col--pain li::before { content: "✗"; color: var(--wh-terracotta); }
-.wh-versus__col--win li::before { content: "✓"; color: var(--wh-accent-hi); }
+.wh-versus__col--pain li::before { content: "✗"; color: var(--wh-terracotta-text); }
+.wh-versus__col--win li::before { content: "✓"; color: var(--wh-accent-text); }
 .wh-versus__col li strong { color: var(--wh-ink); font-weight: 650; }
 .wh-versus__arrow {
   display: grid;
@@ -950,7 +1143,7 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
     ),
     var(--wh-surface);
   border: 1px solid var(--wh-border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -972,12 +1165,12 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   margin: 0;
 }
 .wh-closer__sub a {
-  color: var(--wh-accent-hi);
+  color: var(--wh-accent-text);
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklab, var(--wh-accent-hi) 35%, transparent);
+  text-decoration-color: color-mix(in oklab, var(--wh-accent-text) 35%, transparent);
   text-underline-offset: 3px;
 }
-.wh-closer__sub a:hover { text-decoration-color: var(--wh-accent-hi); }
+.wh-closer__sub a:hover { text-decoration-color: var(--wh-accent-text); }
 .wh-closer__actions {
   display: flex;
   flex-wrap: wrap;
@@ -1013,18 +1206,11 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
    fire for reduced-motion users, so the one-frame trick is unnecessary. */
 @media (prefers-reduced-motion: reduce) {
   .wh-hero__orb,
-  .wh-wave,
-  .wh-node,
-  .wh-ring,
-  .wh-mesh-lines line,
-  .wh-cursor,
-  .wh-line,
   .wh-hero__text > [data-stagger],
   .wh-hero__visual,
-  .wh-stat,
-  .wh-stat::before,
   .sl-link-card,
-  .action {
+  a.sl-link-button,
+  .pagination-links a {
     animation: none !important;
     transition: none !important;
   }
