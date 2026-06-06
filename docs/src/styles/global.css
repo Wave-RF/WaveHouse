@@ -996,6 +996,9 @@ body[data-section="operations"] { --wh-section-accent: var(--wh-sky); }
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
 }
+/* display:inline-flex above would otherwise beat the [hidden] UA default —
+   without this, the "★ —" placeholder shows for no-JS / demo-down visitors. */
+.wh-closer__count[hidden] { display: none; }
 .wh-closer__count-star { color: var(--wh-amber); }
 .wh-closer__count [data-wh-live] { color: var(--wh-ink); font-weight: 650; }
 

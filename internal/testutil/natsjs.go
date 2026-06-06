@@ -41,6 +41,9 @@ func NewJetStream(t *testing.T) jetstream.JetStream {
 	t.Cleanup(func() {
 		nc.Close()
 		ns.Shutdown()
+		// Wait it out so t.TempDir()'s RemoveAll (LIFO, runs after this)
+		// can't race the still-stopping server's file activity.
+		ns.WaitForShutdown()
 	})
 	return js
 }

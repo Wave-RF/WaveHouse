@@ -586,7 +586,14 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 
 ### `GET /v1/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in the Dead Letter Queue.
+Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section.
+
+**Error responses:**
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
+| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 
 **Query Parameters:**
 

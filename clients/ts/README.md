@@ -108,7 +108,7 @@ Generate TypeScript types from your live WaveHouse schema:
 npm run codegen -- --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-This introspects `/v1/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`.
+This introspects `/v1/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy.
 
 ## Development & Testing
 

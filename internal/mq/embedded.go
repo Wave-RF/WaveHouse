@@ -180,6 +180,11 @@ func (e *EmbeddedNATS) NatsConn() *nats.Conn {
 func (e *EmbeddedNATS) Close() error {
 	e.conn.Close()
 	e.server.Shutdown()
+	// Owning the lifecycle (NoSigs, #287) means waiting it out: without this,
+	// run()'s remaining defers unwind while JetStream is still tearing down
+	// and the process can exit mid-shutdown (as-if-crashed stream state).
+	// Milliseconds for an in-process server.
+	e.server.WaitForShutdown()
 	return nil
 }
 
