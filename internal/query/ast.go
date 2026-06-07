@@ -34,6 +34,6 @@ type OrderClause struct {
 // TimeRange constrains a query to a time window.
 type TimeRange struct {
 	Column string `json:"column"` // timestamp column name
-	Since  string `json:"since"`  // RFC3339 or relative (e.g. "1h", "30m")
+	Since  string `json:"since"`  // RFC3339 or relative (e.g. "1h", "30m", "7d", "2w")
 	Until  string `json:"until"`  // RFC3339 or empty (=now)
 }
