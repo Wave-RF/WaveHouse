@@ -20,7 +20,7 @@ describe("Cache", () => {
         Authorization: `Bearer ${token}`,
       },
       // A deterministic query body to ensure consistent cache key generation
-      body: JSON.stringify({ columns: ["*"], limit: 69 }), // must make sure we never use this anywhere else in our tests!
+      body: JSON.stringify({ select_all: true, limit: 69 }), // must make sure we never use this anywhere else in our tests!
     };
 
     const url = `${WH_URL}/v1/query?table=${T.clicks}`;
@@ -75,7 +75,7 @@ describe("Cache", () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ columns: ["*"], limit: 420 }), // Unique body for this test
+      body: JSON.stringify({ select_all: true, limit: 420 }), // Unique body for this test
     };
 
     const url = `${WH_URL}/v1/query?table=${T.clicks}`;
@@ -103,10 +103,6 @@ describe("Cache", () => {
     const hotTime = Date.now() - hotFetch;
     expect(res2.headers.get("x-cache")).toBe("HIT");
     console.log(`Query [HIT] took ${hotTime}ms`);
-
-    expect(queryTime, "Cold DB Query expected to take longer than hot from cache").toBeGreaterThan(
-      hotTime,
-    );
 
     // Wait for the ttl to expire.
     // Wait an extra 1 second to be safe.

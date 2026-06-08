@@ -9,7 +9,7 @@ Scope: $ARGUMENTS
 
 Invoke the **`docs-reviewer`** subagent (fresh context, for objectivity) and pass it the scope above:
 
-- **empty** → **gating mode**: the branch's changes vs `main` (docs prose **and** code↔docs sync). This is the mandatory pre-push docs review — on `VERDICT: ship_it` the SubagentStop hook writes `tmp/docs-review-passed-<HEAD-sha>`, which `.claude/hooks/agent-bash-gate.sh` requires before the push. Run it alongside `pre-push-reviewer` before pushing.
+- **empty** → **gating mode**: the branch's changes vs `main` (docs prose **and** code↔docs sync). This is the mandatory pre-push docs review — on `VERDICT: ship_it` the SubagentStop hook writes `tmp/docs-reviewer-passed-<HEAD-sha>`, which `.claude/hooks/agent-bash-gate.sh` requires before the push. It's only one of the gating reviewers, though — prefer `/prepush`, which runs them all in parallel.
 - **a path or glob** (e.g. `docs/src/content/docs/api.md`) → **advisory**: just those files, no verdict, no marker.
 - **`all`** → **advisory**: the whole docs-prose set (`scripts/docs-prose.sh all`), no verdict, no marker.
 

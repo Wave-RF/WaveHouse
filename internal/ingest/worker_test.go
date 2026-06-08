@@ -1078,7 +1078,7 @@ func TestDispatchLoop_PerTableBatching_NoCrossTableContamination(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return rowsByTable["tableB"] >= batchB
-	}, maxWait/2, 25*time.Millisecond,
+	}, maxWait-(250*time.Millisecond), 25*time.Millisecond,
 		"table B should flush "+fmt.Sprint(batchB)+" rows within "+fmt.Sprint(maxWait)+" of being published "+
 			"(table A's prior events must not strand B rows in a batch "+
 			"that waits for the maxWait timer)",

@@ -74,7 +74,19 @@ export interface ClientOptions {
 // --- Structured query AST (matches backend wire format) ---
 
 export interface StructuredQuery {
+  /**
+   * Explicit columns to project. A literal "*" is a column named "*", not a
+   * wildcard. Omitting columns (with no aggregations and no select_all) selects
+   * nothing — use select_all for a full-row read. Mutually exclusive with
+   * select_all.
+   */
   columns?: string[];
+  /**
+   * Request every column the caller's role may read (the all-columns wildcard,
+   * expanded server-side to the allowed/denied set). Mutually exclusive with a
+   * non-empty columns list.
+   */
+  select_all?: boolean;
   aggregations?: Aggregation[];
   filters?: QueryFilter[];
   group_by?: string[];
@@ -124,9 +136,37 @@ export type Schemas = Record<string, TableSchema>;
 
 // --- Insert result ---
 
-export interface InsertResult {
-  ok: boolean;
+/**
+ * A per-record outcome from a batch (array / NDJSON) insert. Mirrors the
+ * single-object response shape plus the record's position. Exactly one of
+ * `ok` / `duplicate` / `error` is set.
+ */
+export interface InsertRecordResult {
+  /** 1-based index of the record within the submitted batch. */
+  index: number;
+  /** Set when the record was validated and published. */
+  ok?: boolean;
+  /** Set when dedup skipped the record. */
   duplicate?: boolean;
+  /** Set (with `ok`/`duplicate` absent) when the record was rejected. */
+  error?: string;
+}
+
+export interface InsertResult {
+  /** True for a fully successful insert: a single row, or a batch with no rejected records (`failed === 0`). */
+  ok: boolean;
+  /** Single insert only: set when dedup skipped the row. */
+  duplicate?: boolean;
+  /** Batch insert (array / NDJSON): number of records submitted. */
+  total?: number;
+  /** Batch insert: records validated and published. */
+  succeeded?: number;
+  /** Batch insert: records rejected — see `results`. */
+  failed?: number;
+  /** Batch insert: records skipped by dedup. */
+  duplicates?: number;
+  /** Batch insert: per-record outcomes, each `{index, ok|duplicate|error}` (may be truncated for very large batches; the counts stay authoritative). */
+  results?: InsertRecordResult[];
 }
 
 // --- DLQ types ---

@@ -72,7 +72,7 @@ const terminalLines: TerminalLine[] = [
   The inline script below runs synchronously during HTML parse — including
   on view-transition swaps (`data-astro-rerun`) — and stamps `data-hero-played`
   on <html> before the section paints when the in-memory flag is already set.
-  CSS in this file's <style> block reads that attribute and short-circuits
+  CSS in this file's "style" block reads that attribute and short-circuits
   the entrance animations to their final state. Looping background animations
   (orb drift, wave drift, cursor blink, etc.) are not affected.
 
@@ -85,7 +85,7 @@ const terminalLines: TerminalLine[] = [
   // animation. Subsequent mounts — i.e. view-transition returns — find the
   // flag already set and stamp the attribute synchronously, before paint,
   // which suppresses the entrance animations via the [data-hero-played]
-  // rules in this file's <style> block.
+  // rules in this file's "style" block.
   //
   // Also stamps `[data-screenshot-ready]` on <html> for the
   // scripts/screenshot.mjs Playwright wait — on first mount the bottom-of-
@@ -113,7 +113,7 @@ const terminalLines: TerminalLine[] = [
     <div class="wh-hero__text">
       <span class="wh-pill" data-stagger="0">
         <span class="dot"></span>
-        open source · Apache 2.0
+        Open Source · Apache 2.0
       </span>
 
       <h1 class="wh-hero__title" data-stagger="1">
@@ -142,6 +142,7 @@ const terminalLines: TerminalLine[] = [
                   "wh-hero__action",
                   `wh-hero__action--${action.variant ?? "primary"}`,
                 ]}
+                data-ph-cta={action.text}
                 {...attrs}
               >
                 <span>{action.text}</span>
@@ -317,6 +318,24 @@ const terminalLines: TerminalLine[] = [
       { once: true },
     );
   })();
+</script>
+
+<script is:inline>
+  function setupHeroCTATracking() {
+    document.querySelectorAll('.wh-hero__action[data-ph-cta]').forEach(function(el) {
+      el.removeEventListener('click', el.__whPhHandler);
+      el.__whPhHandler = function() {
+        window.posthog?.capture('hero_cta_clicked', {
+          cta_text: el.getAttribute('data-ph-cta'),
+          cta_href: el.getAttribute('href'),
+          cta_variant: el.classList.contains('wh-hero__action--primary') ? 'primary' : 'secondary'
+        });
+      };
+      el.addEventListener('click', el.__whPhHandler);
+    });
+  }
+  document.addEventListener('DOMContentLoaded', setupHeroCTATracking);
+  document.addEventListener('astro:page-load', setupHeroCTATracking);
 </script>
 
 <style>

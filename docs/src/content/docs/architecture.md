@@ -123,7 +123,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### `policy/` — Access Control
 
-- **policy.go** — Hasura-style policy types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`), `Evaluate()` function that resolves permissions against JWT claims (including `{{ jwt.claim.path }}` template resolution), `IsColumnAllowed()`, `IsAggregationAllowed()`, `Validate()`.
+- **policy.go** — Hasura-style policy types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`), `Evaluate()` function that resolves permissions against JWT claims (including `{{ jwt.claim.path }}` template resolution), the per-column decision `IsColumnAllowed()` plus its batch/projection forms `AllowedProjection()` and `RestrictsColumns()` (used to expand a `select_all` request into a role's allowed columns), `IsAggregationAllowed()`, `Validate()`.
 - **store.go** — `Store` backed by NATS KV bucket `WAVEHOUSE_POLICY`. Supports file-based bootstrap (YAML/JSON), cluster-wide sync via KV Watch, local caching.
 
 ### `pipes/` — Named Query Pipes
@@ -133,7 +133,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 ### `query/` — Structured Query Engine
 
 - **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
-- **builder.go** — `Build()` converts AST to parameterized SQL. Validates all identifiers against schema (SQL injection prevention). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
+- **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the #223 hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `internal/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed (#279). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
 
 ## Data Flows
 
@@ -141,9 +141,11 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ```text
 Client POST /v1/ingest?table={table}
-  → Optional JWT auth middleware
+  → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
+  → Policy check: role allowed to insert into this table (before the body is parsed)
   → Validate JSON body against schema (type checks, required columns)
+  → Policy column rules + check clauses (disallowed columns rejected; claim-derived values enforced or injected)
   → Optional deduplication check (configurable ID field)
   → Publish to NATS JetStream (ingest.{table})
   → 200 OK returned immediately
@@ -226,12 +228,14 @@ consistent.
 
 ```text
 Client GET /v1/stream
-  → Optional JWT auth middleware
+  → JWT auth middleware (always runs; token optional)
   → If ?since= parameter provided:
     → Create ephemeral NATS consumer with DeliverByStartTime
     → Send historical events from JetStream first
   → Subscribe to Hub (in-process pub/sub)
   → Stream live events as they arrive via MQ → Hub → client
+  → Every event (historical + live) passes per-role policy filtering:
+    denied tables skipped, denied columns stripped
 ```
 
 ## Technology Stack

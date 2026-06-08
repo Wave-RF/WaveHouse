@@ -21,11 +21,6 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 ## Full Reference
 
-### Top-Level
-
-| YAML Key | Env Var | Default | Description |
-| -------- | ------- | ------- | ----------- |
-
 ### State
 
 | YAML Key | Env Var | Default | Description |

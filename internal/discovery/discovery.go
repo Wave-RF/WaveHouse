@@ -27,6 +27,19 @@ type TableSchema struct {
 	Columns []Column `json:"columns"`
 }
 
+// ColumnNames returns the table's column names in their discovered order
+// (system.columns position; see Refresh). The query builder uses this to expand
+// a SELECT * into a role's allowed projection, so the order is stable and
+// matches the physical column order. Returns an empty (non-nil) slice for a
+// schema with no columns.
+func (ts *TableSchema) ColumnNames() []string {
+	names := make([]string, 0, len(ts.Columns))
+	for _, c := range ts.Columns {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
 // SchemaRegistry discovers and caches ClickHouse table schemas.
 type SchemaRegistry struct {
 	conn            driver.Conn
