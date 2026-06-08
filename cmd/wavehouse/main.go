@@ -104,30 +104,11 @@ func run() int {
 	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
 	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		// Parse WH_OTEL_HEADERS here — this is the only validation point for
-		// the header map, deliberately in main rather than config.Validate()
-		// so internal/config stays free of the OTel SDK import graph. A
-		// malformed value is FATAL: the InitProvider error below is non-fatal
-		// (we fall back to stdout), so a bad header reaching the exporter would
-		// silently ship telemetry with no auth — fail the boot loudly instead.
-		//
-		// Gated on OTel.Enabled (the OTLP push path), NOT on !Prometheus.Enabled:
-		// when BOTH outputs are on we still push OTLP and still need these
-		// headers, so a !Prometheus check would wrongly skip validation. A
-		// Prometheus-only deployment pushes no OTLP, so a stale/blank value is
-		// irrelevant there and shouldn't block boot.
-		var headers map[string]string
-		if cfg.OTel.Enabled {
-			var err error
-			headers, err = observability.ParseOTelHeaders(cfg.OTel.Headers)
-			if err != nil {
-				logger.Error("invalid otel.headers (WH_OTEL_HEADERS); refusing to start with bad auth config", "error", err)
-				return 1
-			}
-		}
+		// Endpoint, TLS, and auth headers come from the standard
+		// OTEL_EXPORTER_OTLP_* env vars, read by the SDK. A malformed header is
+		// logged and skipped by the SDK (fail-soft); InitProvider's own error is
+		// likewise non-fatal — we log it and fall back to stdout below.
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
-			Endpoint:          cfg.OTel.Addr,
-			Headers:           headers,
 			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
 			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
 			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
@@ -158,11 +139,15 @@ func run() int {
 				)
 				slog.SetDefault(logger)
 			}
+			otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+			if otlpEndpoint == "" {
+				otlpEndpoint = "localhost:4317 (SDK default)"
+			}
 			switch {
 			case cfg.OTel.Enabled && cfg.Prometheus.Enabled:
-				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr, "prometheus", true)
+				logger.Info("observability pipeline established", "otlp_endpoint", otlpEndpoint, "prometheus", true)
 			case cfg.OTel.Enabled:
-				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr)
+				logger.Info("observability pipeline established", "otlp_endpoint", otlpEndpoint)
 			case cfg.Prometheus.Enabled:
 				logger.Info("observability pipeline established", "prometheus", true)
 			}

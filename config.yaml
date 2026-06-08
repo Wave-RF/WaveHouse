@@ -19,8 +19,9 @@ server:
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
-  addr: "127.0.0.1:4317" # `https://...` → TLS, `http://...` or bare host:port → plaintext
-  # headers: ""          # comma-separated key=value cloud auth, e.g. "x-honeycomb-team=API_KEY"
+  # Endpoint, TLS, custom CA, mTLS, and auth headers come from the standard
+  # OTEL_EXPORTER_OTLP_* env vars (OTEL_EXPORTER_OTLP_ENDPOINT=https://host:port,
+  # OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=KEY), read by the OTel SDK.
   traces:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS

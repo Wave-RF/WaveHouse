@@ -8,6 +8,10 @@
 // says they do — the kind of regression that unit tests against a no-op
 // global can miss.
 //
+// The OTLP destination is configured the way production configures it: via the
+// standard OTEL_EXPORTER_OTLP_* env vars (set per-test with t.Setenv), which
+// the SDK reads. InitProvider itself passes no endpoint/TLS/header options.
+//
 // InitProvider mutates global OTel state (tracer/meter/logger providers,
 // propagator). Tests in this file MUST NOT run in parallel and MUST save/
 // restore the globals on entry/exit. They share the `env(t)` infrastructure
@@ -98,9 +102,9 @@ func TestOTel_TraceSampling(t *testing.T) {
 			// No t.Parallel: each case mutates OTel globals via initAndShutdown.
 			guardOTelGlobals(t)
 			r := testutil.NewFakeOTLP(t)
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
 
 			shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-				Endpoint:         r.Addr(),
 				TracesEnabled:    true,
 				TracesSampleRate: tc.rate,
 			})
@@ -123,11 +127,11 @@ func TestOTel_TraceSampling(t *testing.T) {
 func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
 
 	// Logs path: enable the OTel logger pipeline first, then build the
 	// slog logger that fans out to (stdout, OTLP) and sample DEBUG/INFO.
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:    r.Addr(),
 		LogsEnabled: true,
 	})
 
@@ -159,9 +163,9 @@ func TestOTel_LogSampling_WarnFloorAlwaysExports(t *testing.T) {
 func TestOTel_PerSignal_TracesOnly(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
 
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         r.Addr(),
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   false,
@@ -189,9 +193,9 @@ func TestOTel_PerSignal_TracesOnly(t *testing.T) {
 func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
 
 	shutdown, promHandler := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:          r.Addr(),
 		MetricsEnabled:    true,
 		PrometheusEnabled: true,
 	})
@@ -234,9 +238,9 @@ func TestOTel_PrometheusScrape_ExposesMetrics(t *testing.T) {
 func TestOTel_PerSignal_LogsOnly(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
 
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:       r.Addr(),
 		TracesEnabled:  false,
 		MetricsEnabled: false,
 		LogsEnabled:    true,
@@ -266,8 +270,8 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 	// succeed. gRPC exporters dial lazily, so InitProvider must still
 	// succeed regardless. This is the critical "OTel down doesn't kill
 	// the binary" invariant.
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
 	cfg := observability.ProviderConfig{
-		Endpoint:         "127.0.0.1:1",
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   true,
@@ -316,22 +320,22 @@ func TestOTel_UnreachableEndpoint_DoesNotBlockStartupOrEmits(t *testing.T) {
 }
 
 // TestOTel_TLSPath_AllSignals pins the https:// → TLS dial path on every
-// OTLP exporter (traces, metrics, logs). A regression that re-adds
-// WithInsecure on one branch would TLS-handshake against the plaintext side
-// and surface as a missing count on the corresponding receiver.
+// OTLP exporter (traces, metrics, logs), with trust supplied via
+// OTEL_EXPORTER_OTLP_CERTIFICATE — the same custom-CA path a real operator
+// uses for a private gateway. A regression that broke the TLS dial on one
+// branch would surface as a missing count on the corresponding receiver.
 func TestOTel_TLSPath_AllSignals(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLPTLS(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://"+r.Addr())
+	t.Setenv("OTEL_EXPORTER_OTLP_CERTIFICATE", r.CertFile(t))
 
-	cfg := observability.ProviderConfig{
-		Endpoint:         "https://" + r.Addr(),
+	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   true,
 		LogsEnabled:      true,
-	}
-	cfg.SetTLSConfigForTesting(r.TLSConfig())
-	shutdown, _ := initAndShutdown(t, cfg)
+	})
 
 	_, span := otel.Tracer("test").Start(context.Background(), "tls-op")
 	span.End()
@@ -354,20 +358,16 @@ func TestOTel_TLSPath_AllSignals(t *testing.T) {
 	assert.GreaterOrEqual(t, r.LogCount(), 1, "TLS path must deliver logs end-to-end")
 }
 
-// TestOTel_Headers_AppliedToAllSignals verifies ProviderConfig.Headers
+// TestOTel_Headers_AppliedToAllSignals verifies OTEL_EXPORTER_OTLP_HEADERS
 // propagates as gRPC metadata on every OTLP exporter — a single missing
 // exporter would silently 401 against cloud OTLP gateways.
 func TestOTel_Headers_AppliedToAllSignals(t *testing.T) {
 	guardOTelGlobals(t)
 	r := testutil.NewFakeOTLP(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer test-token,x-honeycomb-team=abc123")
 
-	headers := map[string]string{
-		"authorization":    "Bearer test-token",
-		"x-honeycomb-team": "abc123",
-	}
 	shutdown, _ := initAndShutdown(t, observability.ProviderConfig{
-		Endpoint:         r.Addr(),
-		Headers:          headers,
 		TracesEnabled:    true,
 		TracesSampleRate: 1.0,
 		MetricsEnabled:   true,

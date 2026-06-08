@@ -333,50 +333,49 @@ When `dlq.enabled` is `true` (default), failed batch inserts are published to th
 
 ## Observability
 
-Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) and point `otel.addr` at the OTLP gRPC endpoint to export traces, metrics, and logs. `otel.addr` is scheme-aware — `https://` selects TLS, a bare `host:port` or `http://` stays plaintext — and `otel.headers` carries cloud auth, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
+Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) to export traces, metrics, and logs, then point the OpenTelemetry SDK at your collector or gateway with the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var (an `https://` URL selects TLS, `http://` stays plaintext; default `localhost:4317`). `OTEL_EXPORTER_OTLP_HEADERS` carries cloud auth and `OTEL_EXPORTER_OTLP_CERTIFICATE` trusts a private CA, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
 
 WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
 ### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
-Point `otel.addr` at a plaintext OTLP gRPC endpoint. All three signals (traces, metrics, logs) push through the same connection. This is the default and the simplest setup.
+WaveHouse defaults to a plaintext `localhost:4317` collector, so for a local collector on the default port, enabling OTel is all you need. To point elsewhere, set `OTEL_EXPORTER_OTLP_ENDPOINT`. All three signals (traces, metrics, logs) push through the same connection. This is the simplest setup.
 
 ```yaml
 otel:
-  enabled: true
-  addr: 127.0.0.1:4317   # bare host:port — plaintext gRPC
+  enabled: true   # exports to OTEL_EXPORTER_OTLP_ENDPOINT, default http://localhost:4317 (plaintext)
 ```
 
 ### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud)
 
-`otel.addr` is scheme-aware: `https://` selects TLS (system root CAs), `http://` or no scheme stays plaintext. Combine with `otel.headers` for the per-RPC auth every cloud OTLP gateway expects — no sidecar required to terminate TLS or inject auth.
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an `https://` URL to select TLS (system root CAs), and `OTEL_EXPORTER_OTLP_HEADERS` for the per-RPC auth every cloud OTLP gateway expects — no sidecar required to terminate TLS or inject auth. For a private or self-signed gateway, point `OTEL_EXPORTER_OTLP_CERTIFICATE` at the CA certificate; for mutual TLS, add `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`.
 
 **Honeycomb** (single endpoint, per-RPC auth):
 
 ```bash
 export WH_OTEL_ENABLED=true
-export WH_OTEL_ADDR=https://api.honeycomb.io:443
-export WH_OTEL_HEADERS=x-honeycomb-team=YOUR_API_KEY
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io:443
+export OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=YOUR_API_KEY
 ```
 
 **Grafana Cloud OTLP gateway** (Basic auth):
 
 ```bash
 export WH_OTEL_ENABLED=true
-export WH_OTEL_ADDR=https://otlp-gateway-prod-us-east-0.grafana.net:443
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-east-0.grafana.net:443
 # instanceID:token, base64-encoded (tr -d '\n' strips base64's line wrap)
-export WH_OTEL_HEADERS="authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')"
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic $(printf '%s' "$INSTANCE_ID:$TOKEN" | base64 | tr -d '\n')"
 ```
 
-mTLS / client-certificate auth is not yet supported.
+Mutual TLS is supported via `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`; a private/self-signed gateway is trusted via `OTEL_EXPORTER_OTLP_CERTIFICATE`.
 
 ### Pattern: Datadog (via local DDOT Collector)
 
-Datadog has no public direct-to-cloud OTLP endpoint — telemetry must transit a local OTLP receiver that re-exports over Datadog's own protocol. The supported receiver is the [DDOT Collector](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/) embedded in the Datadog Agent, which exposes a standard OTLP receiver on `4317`. Point WaveHouse at the local receiver as plaintext — the API-key auth lives on the Agent, so `otel.headers` stays empty:
+Datadog has no public direct-to-cloud OTLP endpoint — telemetry must transit a local OTLP receiver that re-exports over Datadog's own protocol. The supported receiver is the [DDOT Collector](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/) embedded in the Datadog Agent, which exposes a standard OTLP receiver on `4317`. Point WaveHouse at the local receiver as plaintext — the API-key auth lives on the Agent, so no `OTEL_EXPORTER_OTLP_HEADERS` is needed:
 
 ```bash
 export WH_OTEL_ENABLED=true
-export WH_OTEL_ADDR=127.0.0.1:4317   # plaintext gRPC; DD_API_KEY is on the Agent
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317   # plaintext gRPC; DD_API_KEY is on the Agent
 ```
 
 ### Pattern: Grafana Cloud / Mimir / Loki / Tempo via Grafana Alloy
@@ -384,7 +383,7 @@ export WH_OTEL_ADDR=127.0.0.1:4317   # plaintext gRPC; DD_API_KEY is on the Agen
 The Grafana stack typically wants Prometheus-style scraping for metrics, stdout scraping for logs, and OTLP push for traces. Wire it like this:
 
 - **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API. No WaveHouse config needed — stdout always emits 100%.
-- **Traces**: Set `otel.addr` to Alloy's `otelcol.receiver.otlp` listener (`alloy:4317`). Alloy forwards to Tempo.
+- **Traces**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` to Alloy's `otelcol.receiver.otlp` listener (`http://alloy:4317`). Alloy forwards to Tempo.
 - **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics` (or whatever port you configured). The `prometheus` block is independent of `otel.*` — you can leave `otel.enabled: false` if Alloy is only scraping (no OTLP push at all), or combine the two if traces still go via OTLP.
 
 For the metrics path specifically: WaveHouse uses the OTel SDK's Prometheus exporter under the hood, which translates OTel metric names to Prometheus conventions automatically (dots and dashes become underscores; counters get a `_total` suffix). Existing OTel instruments don't need renaming.
@@ -407,9 +406,9 @@ make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
 make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
 ```
 
-All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the default environment variable `WH_OTEL_ADDR=127.0.0.1:4317` will route telemetry to these containers automatically.
+All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the SDK's default endpoint (`localhost:4317`) routes telemetry to these containers automatically.
 
-If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment variables to reach the host-bound collector: `WH_OTEL_ADDR=host.docker.internal:4317`.
+If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to reach the host-bound collector: `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
 
 ### Dashboards
 

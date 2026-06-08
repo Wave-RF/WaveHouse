@@ -2,7 +2,6 @@ package observability
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"google.golang.org/grpc/credentials"
 
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
@@ -44,31 +42,18 @@ var runtimeStartOnce sync.Once
 // set — the underlying OTel MeterProvider is the shared substrate. When
 // PrometheusEnabled is true InitProvider returns a non-nil promHandler.
 //
-// Endpoint is the OTLP gRPC target for every enabled signal. An `https://`
-// scheme selects TLS (system root CAs by default); `http://` or a bare
-// host:port stays plaintext gRPC — the SDK's WithEndpointURL derives this from
-// the scheme (see schemeURL). Headers is applied as gRPC metadata to every
-// OTLP exporter (the cloud-auth knob). Endpoint is dialed only by the OTLP
-// exporters (traces / metrics-OTLP / logs); Prometheus-only operation leaves
-// it unused.
-//
-// tlsConfig overrides the client *tls.Config for `https://` endpoints. It is
-// unexported and only settable via SetTLSConfigForTesting (compiled in under
-// the integration build tag), so the production binary always passes nil to
-// credentials.NewTLS — which yields gRPC's standard client TLS: system root
-// CAs, the TLS 1.2 floor that HTTP/2 mandates, negotiating up to 1.3. We set
-// no MinVersion of our own on purpose; pinning a higher floor (e.g. TLS 1.3)
-// would break endpoints that top out at 1.2 with no operator escape hatch. A
-// test-only trust hook can never be reached in prod.
+// The OTLP exporters take no endpoint/TLS/header options here: the
+// OpenTelemetry SDK reads those from the standard OTEL_EXPORTER_OTLP_* env vars
+// — endpoint (with `https://` selecting TLS via system root CAs), a custom CA
+// via _CERTIFICATE, mutual TLS via _CLIENT_CERTIFICATE/_CLIENT_KEY, and auth
+// _HEADERS. A malformed header is logged and skipped by the SDK (fail-soft),
+// not fatal.
 type ProviderConfig struct {
-	Endpoint          string
-	Headers           map[string]string
 	TracesEnabled     bool
 	TracesSampleRate  float64
 	MetricsEnabled    bool
 	PrometheusEnabled bool
 	LogsEnabled       bool
-	tlsConfig         *tls.Config
 }
 
 // InitProvider sets up the OpenTelemetry pipeline, registering only the
@@ -133,17 +118,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	)
 
 	if cfg.TracesEnabled {
-		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpointURL(schemeURL(cfg.Endpoint))}
-		// Production passes no TLS option: the SDK derives TLS-vs-plaintext
-		// from the scheme and, for `https://`, defaults to system root CAs.
-		// cfg.tlsConfig is the integration-test trust hook only.
-		if cfg.tlsConfig != nil {
-			opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(cfg.tlsConfig)))
-		}
-		if len(cfg.Headers) > 0 {
-			opts = append(opts, otlptracegrpc.WithHeaders(cfg.Headers))
-		}
-		traceExporter, err := otlptracegrpc.New(ctx, opts...)
+		traceExporter, err := otlptracegrpc.New(ctx)
 		if err != nil {
 			handleErr(err)
 			return shutdown, nil, err
@@ -163,14 +138,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		readers := []metric.Reader{}
 
 		if cfg.MetricsEnabled {
-			opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpointURL(schemeURL(cfg.Endpoint))}
-			if cfg.tlsConfig != nil {
-				opts = append(opts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(cfg.tlsConfig)))
-			}
-			if len(cfg.Headers) > 0 {
-				opts = append(opts, otlpmetricgrpc.WithHeaders(cfg.Headers))
-			}
-			metricExporter, err := otlpmetricgrpc.New(ctx, opts...)
+			metricExporter, err := otlpmetricgrpc.New(ctx)
 			if err != nil {
 				handleErr(err)
 				return shutdown, nil, err
@@ -224,14 +192,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	}
 
 	if cfg.LogsEnabled {
-		opts := []otlploggrpc.Option{otlploggrpc.WithEndpointURL(schemeURL(cfg.Endpoint))}
-		if cfg.tlsConfig != nil {
-			opts = append(opts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(cfg.tlsConfig)))
-		}
-		if len(cfg.Headers) > 0 {
-			opts = append(opts, otlploggrpc.WithHeaders(cfg.Headers))
-		}
-		logExporter, err := otlploggrpc.New(ctx, opts...)
+		logExporter, err := otlploggrpc.New(ctx)
 		if err != nil {
 			handleErr(err)
 			return shutdown, nil, err

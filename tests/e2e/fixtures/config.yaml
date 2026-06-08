@@ -41,4 +41,3 @@ policy:
 # so the absence of a collector at :4317 doesn't matter for the suite.
 otel:
   enabled: true
-  addr: "127.0.0.1:4317"

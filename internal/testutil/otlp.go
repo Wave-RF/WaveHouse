@@ -7,8 +7,8 @@
 // Usage:
 //
 //	r := testutil.NewFakeOTLP(t)
-//	cfg := observability.ProviderConfig{Endpoint: r.Addr(), ...}
-//	shutdown, _ := observability.InitProvider(ctx, "svc", cfg)
+//	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+r.Addr())
+//	shutdown, _, _ := observability.InitProvider(ctx, "svc", observability.ProviderConfig{...})
 //	... emit spans/metrics/logs ...
 //	_ = shutdown(ctx)  // forces a final flush
 //	assert.Equal(t, expected, r.SpanCount())
@@ -17,9 +17,11 @@
 // exports and only drains on shutdown (or after the batch timeout).
 //
 // NewFakeOTLPTLS is the TLS variant — it mints an ephemeral self-signed cert
-// and exposes the matching client *tls.Config via TLSConfig(). Each Export
-// RPC's gRPC metadata is also captured (LastTraceHeaders / LastMetricHeaders /
-// LastLogHeaders) for asserting auth-header propagation.
+// and exposes it as a PEM file via CertFile(t), which the test points the SDK
+// at with OTEL_EXPORTER_OTLP_CERTIFICATE (the same custom-CA path a real
+// operator uses for a private gateway). Each Export RPC's gRPC metadata is also
+// captured (LastTraceHeaders / LastMetricHeaders / LastLogHeaders) for
+// asserting auth-header propagation.
 package testutil
 
 import (
@@ -30,8 +32,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -52,9 +57,9 @@ import (
 // log Export RPCs and captures every received payload (and each request's
 // gRPC metadata). Cleanup is registered on the *testing.T automatically.
 type FakeOTLP struct {
-	addr      string
-	server    *grpc.Server
-	tlsConfig *tls.Config // non-nil only when constructed via NewFakeOTLPTLS
+	addr    string
+	server  *grpc.Server
+	certPEM []byte // PEM of the self-signed server cert; non-nil only via NewFakeOTLPTLS
 
 	mu      sync.Mutex
 	traces  []*tracepb.ResourceSpans
@@ -75,22 +80,22 @@ func NewFakeOTLP(t *testing.T) *FakeOTLP {
 }
 
 // NewFakeOTLPTLS is the TLS variant: mints an ephemeral self-signed cert
-// (SAN 127.0.0.1) and exposes the matching client *tls.Config via TLSConfig().
+// (SAN 127.0.0.1) and exposes it as a PEM file via CertFile(t).
 func NewFakeOTLPTLS(t *testing.T) *FakeOTLP {
 	t.Helper()
 
-	cert, clientCfg := ephemeralTLSPair(t)
+	cert, certPEM := ephemeralTLSPair(t)
 	serverCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	return newFakeOTLP(t, &fakeOTLPTLS{server: serverCfg, client: clientCfg})
+	return newFakeOTLP(t, &fakeOTLPTLS{server: serverCfg, certPEM: certPEM})
 }
 
 type fakeOTLPTLS struct {
-	server *tls.Config
-	client *tls.Config
+	server  *tls.Config
+	certPEM []byte
 }
 
 func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
@@ -106,7 +111,7 @@ func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
 	r := &FakeOTLP{addr: lis.Addr().String()}
 	if tlsCfg != nil {
 		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsCfg.server)))
-		r.tlsConfig = tlsCfg.client
+		r.certPEM = tlsCfg.certPEM
 	}
 	r.server = grpc.NewServer(serverOpts...)
 
@@ -126,8 +131,9 @@ func newFakeOTLP(t *testing.T, tlsCfg *fakeOTLPTLS) *FakeOTLP {
 }
 
 // ephemeralTLSPair mints a one-shot ECDSA self-signed cert valid for 127.0.0.1
-// and returns it along with a client tls.Config that trusts only this cert.
-func ephemeralTLSPair(t *testing.T) (tls.Certificate, *tls.Config) {
+// and returns it (for the server) along with its PEM encoding (for the client
+// to trust via OTEL_EXPORTER_OTLP_CERTIFICATE).
+func ephemeralTLSPair(t *testing.T) (tls.Certificate, []byte) {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -156,27 +162,29 @@ func ephemeralTLSPair(t *testing.T) (tls.Certificate, *tls.Config) {
 		Certificate: [][]byte{der},
 		PrivateKey:  priv,
 	}
-	parsed, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("FakeOTLPTLS: parse cert: %v", err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(parsed)
-	return cert, &tls.Config{
-		RootCAs:    pool,
-		ServerName: "127.0.0.1",
-		MinVersion: tls.VersionTLS13,
-	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	return cert, certPEM
 }
 
 // Addr returns the listener address (e.g. "127.0.0.1:42891") suitable for
-// passing to observability.ProviderConfig.Endpoint.
+// OTEL_EXPORTER_OTLP_ENDPOINT (prefix with http:// for plaintext or https://
+// for the TLS variant), typically set via t.Setenv before InitProvider.
 func (r *FakeOTLP) Addr() string { return r.addr }
 
-// TLSConfig returns the client-side tls.Config that trusts this server's
-// ephemeral cert. Returns nil when the server was constructed via the plaintext
-// NewFakeOTLP.
-func (r *FakeOTLP) TLSConfig() *tls.Config { return r.tlsConfig }
+// CertFile writes the receiver's self-signed certificate to a temp PEM file and
+// returns its path, suitable for OTEL_EXPORTER_OTLP_CERTIFICATE. Only valid for
+// a server constructed via NewFakeOTLPTLS.
+func (r *FakeOTLP) CertFile(t *testing.T) string {
+	t.Helper()
+	if r.certPEM == nil {
+		t.Fatal("CertFile: server was not constructed via NewFakeOTLPTLS")
+	}
+	path := filepath.Join(t.TempDir(), "otlp-ca.pem")
+	if err := os.WriteFile(path, r.certPEM, 0o600); err != nil {
+		t.Fatalf("CertFile: write cert: %v", err)
+	}
+	return path
+}
 
 // SpanCount returns the total number of spans received across all RPCs.
 // Spans are flattened across resource and scope groupings.
