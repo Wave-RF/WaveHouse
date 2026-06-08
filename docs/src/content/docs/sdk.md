@@ -291,7 +291,7 @@ If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automat
 
 #### `.timeRange(column, since, until?)`
 
-Filter by a time window. `since` accepts RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`, `'2w'`).
+Filter by a time window. `since` and `until` accept RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`, `'2w'` — day and week suffixes expand to hours, so `'7d'` is `'168h'`).
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
@@ -454,7 +454,7 @@ const { data } = await wh.policy.validate(policyDraft);
 
 ## DLQ — `wh.dlq`
 
-Dead Letter Queue operations.
+Dead Letter Queue operations. Requires the admin role (`policy.admin_role`).
 
 ```ts
 // Get DLQ statistics
@@ -463,10 +463,9 @@ const { data } = await wh.dlq.list();
 
 // Stats for a specific table
 const { data } = await wh.dlq.table('clicks');
-
-// Stream DLQ events
-const stream = wh.dlq.stream();
 ```
+
+`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events — live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---
 
@@ -494,7 +493,7 @@ Streams use SSE (Server-Sent Events) for both unauthenticated connections and fo
 
 ### `StreamController`
 
-Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace`. It is **NOT thenable**.
+Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace` (the DLQ variant is not yet functional server-side — [#197](https://github.com/Wave-RF/WaveHouse/issues/197)). It is **NOT thenable**.
 
 ```ts
 const stream = wh.from('clicks').stream({ since: '2026-01-01T00:00:00Z' });
@@ -707,7 +706,7 @@ createClient<DB>(config) → WaveHouseClient
 ├── .dlq
 │   ├── .list() → Promise<Result<DLQStats>>
 │   ├── .table(name) → Promise<Result<DLQStats>>
-│   └── .stream() → StreamController
+│   └── .stream() → StreamController  // not yet functional server-side — #197
 └── .sys
     └── .health() → Promise<Result<void>>
 
@@ -777,6 +776,6 @@ The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` e
 make test-e2e          # Run all E2E tests (the orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary, then runs the SDK suite)
 ```
 
-Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress` (each `*.test.ts`).
+Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress` (each `*.test.ts`).
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

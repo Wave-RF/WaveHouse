@@ -51,7 +51,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `schema.refresh_interval` | `WH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh`. |
+| `schema.refresh_interval` | `WH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh` (admin-only). |
 
 ### Message Queue (NATS)
 
@@ -78,7 +78,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. With neither this nor `jwks_url` set, no token can validate, so every request is the policy `default_role`. |
+| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. Set this (or `jwks_url`) so presented tokens are verified; see [Access Control](/access-control). |
 | `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored (not a per-token fallback); the endpoint must be reachable at startup or the server fails to boot. |
 | `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
 

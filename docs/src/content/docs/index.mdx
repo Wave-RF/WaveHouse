@@ -113,7 +113,7 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Ingest an event (run Getting Started first to create the `clicks` table; the dev stack ships a trial policy)
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H 'content-type: application/json' \
   -d '{"page":"/home","button":"signup","score":42.5}'
 
@@ -160,6 +160,10 @@ WaveHouse is fail-closed, so the standalone stack ships a permissive trial polic
   <div class="wh-closer__actions">
     <LinkButton href="/getting-started" icon="right-arrow">Get started in five minutes</LinkButton>
     <LinkButton href="https://github.com/Wave-RF/WaveHouse" variant="secondary" icon="external">Star on GitHub</LinkButton>
+    <span class="wh-closer__count" data-wh-live-wrap hidden>
+      <span class="wh-closer__count-star" aria-hidden="true">★</span>
+      <span data-wh-live="stars">—</span> and counting — counted live by WaveHouse
+    </span>
   </div>
 </div>
 

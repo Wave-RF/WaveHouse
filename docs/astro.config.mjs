@@ -117,7 +117,12 @@ export default defineConfig({
       expressiveCode: {
         themes: ["github-dark", "github-light"],
         styleOverrides: {
-          borderRadius: "0.5rem",
+          // 0.75rem − 1px so the frame's OUTER corner lands at exactly 12px
+          // (--radius-md, matching cards): EC adds the 1px border width to the
+          // configured radius for the frame, and derives the inner header/tab/
+          // <pre> corners from the same base, so frame and inner stay in sync
+          // (a manual `.frame` radius in global.css used to desync them).
+          borderRadius: "calc(0.75rem - 1px)",
           codeFontFamily: "'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace",
           uiFontFamily: "'Inter Variable', ui-sans-serif, system-ui, sans-serif",
           frames: {

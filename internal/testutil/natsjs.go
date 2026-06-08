@@ -23,6 +23,7 @@ func NewJetStream(t *testing.T) jetstream.JetStream {
 		DontListen: true,
 		JetStream:  true,
 		StoreDir:   t.TempDir(),
+		NoSigs:     true, // never let an embedded server own process signals — see #287
 	}
 	ns, err := natsserver.NewServer(opts)
 	require.NoError(t, err)
@@ -40,6 +41,9 @@ func NewJetStream(t *testing.T) jetstream.JetStream {
 	t.Cleanup(func() {
 		nc.Close()
 		ns.Shutdown()
+		// Wait it out so t.TempDir()'s RemoveAll (LIFO, runs after this)
+		// can't race the still-stopping server's file activity.
+		ns.WaitForShutdown()
 	})
 	return js
 }
