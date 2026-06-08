@@ -73,7 +73,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
-- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table{.scope}}`.
+- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`.
 - **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
 - **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
@@ -110,8 +110,8 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 
 ### `ingest/` — Ingest Pipeline, DLQ & Sweeping
 
-- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/admin/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. Failed batches are routed to the DLQ (`sendToDLQ`), which republishes the original `EventMessage` envelope to `dlq.{table{.scope}}` NATS subjects with the failure context in `X-DLQ-*` headers when DLQ is enabled — see [Ingest Pipeline](/ingest-pipeline) for the worker internals.
-- **types.go** — `EventMessage` struct (TableName, Scope, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
+- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/admin/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. Failed batches are routed to the DLQ (`sendToDLQ`), which republishes the original `EventMessage` envelope to `dlq.{table}` NATS subjects with the failure context in `X-DLQ-*` headers when DLQ is enabled — see [Ingest Pipeline](/ingest-pipeline) for the worker internals.
+- **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
 - **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
 
 ### `mq/` — Message Queue
@@ -170,7 +170,7 @@ Ingest worker pipeline (StartIngestWorker):
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
 
   (Insert-only pipeline. The wire format `EventMessage` carries only
-  {table_name, scope, received_timestamp, data}; non-insert mutations
+  {table_name, received_timestamp, data}; non-insert mutations
   DELETE/UPDATE/TRUNCATE/DROP/etc. must go through POST /v1/admin/query — the
   /v1/admin/* RequireAdmin gate rejects non-admin callers at the API layer, so
   a no/invalid-token request (resolved to default_role, not admin in a
