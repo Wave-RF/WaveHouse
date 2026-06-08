@@ -779,8 +779,8 @@ func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 // whichever is chosen.
 
 // weirdColumnSchema returns a schema whose weird column names are all legal
-// ClickHouse identifiers but illegal under validIdentifierRe. "id" is a normal
-// anchor so each clause can isolate one weird column.
+// ClickHouse identifiers but would be rejected by a strict identifier regex.
+// "id" is a normal anchor so each clause can isolate one weird column.
 func weirdColumnSchema() *discovery.TableSchema {
 	return &discovery.TableSchema{
 		Name: "weird",
@@ -829,12 +829,6 @@ func TestBuild_PermissiveColumnNames_AcceptedInEveryClause(t *testing.T) {
 // accepted permissively, including injection-shaped ones. Containment (that a
 // crafted alias cannot break out of the AS position) is an escaping property
 // proven by TestIntegration_AliasInjectionContained, not a rejection.
-//
-// NOTE: this is the new contract that SUPERSEDES
-// TestBuild_RejectsInjectionViaAggregationAlias (which encodes the old strict-
-// regex behavior). The two are intentionally contradictory right now: implementing
-// permissive aliases means reconciling them — keep this one, retire the strict one
-// (or, if aliases end up locked to the regex after all, do the reverse).
 func TestBuild_PermissiveAliases_Accepted(t *testing.T) {
 	t.Parallel()
 	aliases := []string{
