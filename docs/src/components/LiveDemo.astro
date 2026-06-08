@@ -1,0 +1,819 @@
+---
+// Live demo panel — the hero's visual is a real WaveHouse consumer, not a
+// mock. Counts and the activity feed come from the public read-only role on
+// the WaveHouse instance behind stats.wavehouse.dev (our own GitHub-activity
+// dogfood deployment, Wave-RF/WaveHouse-Stats), fetched in the visitor's
+// browser through @wavehouse/sdk: every number from one cached gh_summary
+// pipe (Stats#19), the feed from the server-curated gh_activity_recent pipe
+// (Stats#18) plus a live SSE tail. The pre-pipe reads (per-number pipes, a
+// structured-query backfill) remain as fallbacks so a stats-stack rollback
+// degrades the panel to slower, not blank. Server-side this renders a stable
+// skeleton ("—" counts, fixed-height feed) so the page is layout-complete
+// without JS and degrades to that skeleton if the demo is unreachable.
+const REPO_URL = "https://github.com/Wave-RF/WaveHouse";
+const DEMO_HOST = "stats.wavehouse.dev";
+---
+
+<section
+  class="wh-live"
+  data-wh-live-root
+  aria-label="Live demo — GitHub activity for Wave-RF/WaveHouse, served by WaveHouse"
+>
+  <div class="wh-live__chrome">
+    <span class="wh-live__dot wh-live__dot--red"></span>
+    <span class="wh-live__dot wh-live__dot--amber"></span>
+    <span class="wh-live__dot wh-live__dot--green"></span>
+    <span class="wh-live__title">{DEMO_HOST}</span>
+    <span class="wh-live__stream" data-wh-stream data-state="connecting">
+      <span class="wh-live__stream-dot" aria-hidden="true"></span>
+      <span data-wh-stream-label>connecting…</span>
+    </span>
+  </div>
+
+  <div class="wh-live__stats">
+    <div class="wh-live__stat">
+      <span class="wh-live__num" data-wh-live="stars">—</span>
+      <span class="wh-live__lbl">stargazers</span>
+    </div>
+    <div class="wh-live__stat">
+      <span class="wh-live__num" data-wh-live="forks">—</span>
+      <span class="wh-live__lbl">forks</span>
+    </div>
+    <div class="wh-live__stat">
+      <span class="wh-live__num" data-wh-live="events7d">—</span>
+      <span class="wh-live__lbl">events · 7d</span>
+    </div>
+  </div>
+
+  {/* Metrics strip — the real-time proof other tools can't make. Left: the
+      ingest→browser latency, computed per live event from received_timestamp
+      (Stats#33). Right: a live events/min sparkline (Stats#34) + the lifetime
+      total tracked. All degrade to a placeholder when the stream is quiet or a
+      pipe is unavailable. */}
+  <div class="wh-live__metrics">
+    <span
+      class="wh-live__lat"
+      data-wh-lat
+      data-state="waiting"
+      title="real-time path: WaveHouse ingest → your browser (network included)"
+    >
+      <span class="wh-live__lat-bolt" aria-hidden="true">⚡</span>
+      <span class="wh-live__lat-lead">ingested → live</span>
+      <span class="wh-live__lat-ms" data-wh-lat-val></span>
+    </span>
+    <span class="wh-live__epm">
+      {/* Starts hidden via the script (the `hidden` boolean attr isn't on
+          Astro's SVGAttributes type); drawEpm reveals it once there's data. */}
+      <svg
+        class="wh-live__spark"
+        data-wh-epm-svg
+        viewBox="0 0 120 28"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <path class="wh-live__spark-area" data-wh-epm-area d=""></path>
+        <path class="wh-live__spark-line" data-wh-epm-line d="" fill="none"></path>
+      </svg>
+      <span class="wh-live__epm-total" data-wh-live-wrap hidden>
+        <span data-wh-live="totalEvents">—</span> tracked
+      </span>
+    </span>
+  </div>
+
+  <div class="wh-live__feed-wrap">
+    <ol class="wh-live__feed" data-wh-feed aria-live="off"></ol>
+    <p class="wh-live__empty" data-wh-feed-empty>connecting to the live stream…</p>
+  </div>
+
+  <div class="wh-live__cta">
+    <a
+      class="wh-live__star"
+      href={REPO_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      data-ph-demo="star_repo"
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 2.5l2.95 5.98 6.6.96-4.78 4.65 1.13 6.58L12 17.57l-5.9 3.1 1.13-6.58L2.45 9.44l6.6-.96L12 2.5z"></path>
+      </svg>
+      <span>Star Wave-RF/WaveHouse</span>
+    </a>
+    <span class="wh-live__cta-text">and watch it land here, live</span>
+    <a
+      class="wh-live__more"
+      href={`https://${DEMO_HOST}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      data-ph-demo="full_demo"
+    >Full demo ↗</a>
+  </div>
+  <p class="wh-live__byline">
+    Queried in your browser by <code>@wavehouse/sdk</code> — one cached <code>pipe()</code>
+    summary, a server-curated <code>pipe()</code> backfill, and a live SSE
+    <code>stream()</code>.
+  </p>
+</section>
+
+<script>
+  import { createClient } from "@wavehouse/sdk";
+
+  // Build-time overridable so a fork / staging docs build can point elsewhere.
+  const BASE_URL: string =
+    import.meta.env.PUBLIC_WAVEHOUSE_STATS_URL || "https://stats.wavehouse.dev";
+
+  type GhRow = {
+    event_type: string;
+    action: string;
+    actor_login: string;
+    event_ts: string;
+    number: number;
+    title: string;
+    ref: string;
+  };
+
+  // Curated event verbs for the hero feed — the human-meaningful subset of
+  // what the full demo shows (it also renders CI runs, comments, label churn).
+  // key = `${event_type}:${action}` (bare event_type when action is empty).
+  const VERBS: Record<string, [string, string]> = {
+    "star:created": ["starred the repo", "accent"],
+    "star:deleted": ["unstarred the repo", "muted"],
+    "fork:created": ["forked the repo", "accent"],
+    "issues:opened": ["opened an issue", "emerald"],
+    "issues:closed": ["closed an issue", "rose"],
+    "issues:reopened": ["reopened an issue", "amber"],
+    "pull_request:opened": ["opened a pull request", "emerald"],
+    "pull_request:closed": ["closed a pull request", "rose"],
+    "pull_request:reopened": ["reopened a pull request", "amber"],
+    "pull_request_review:submitted": ["reviewed a pull request", "emerald"],
+    "release:published": ["published a release", "amber"],
+    "discussion:created": ["started a discussion", "emerald"],
+    "member:added": ["joined the project", "accent"],
+    push: ["pushed", "accent"],
+  };
+  // Event types the live tail keeps, derived from VERBS. The SSE leg streams
+  // every gh_events row (nothing is filtered on the wire); the SDK applies
+  // this filter in-browser, and the VERBS lookup in addRow stays the final
+  // arbiter. Type-only, deliberately: live rows are raw producer payloads,
+  // and an `action` IN-filter would drop a row whose action field is ever
+  // absent before addRow's bare-type fallback could run. Backfill curation is
+  // server-side in the gh_activity_recent pipe (Wave-RF/WaveHouse-Stats#18) —
+  // its (event_type, action) pair list and VERBS must stay in sync (the
+  // pipe's YAML carries the mirror-image note).
+  const FEED_TYPES = [...new Set(Object.keys(VERBS).map((k) => k.split(":")[0]))];
+
+  const MAX_ROWS = 6;
+  const fmtInt = (n: number) => Number(n).toLocaleString("en-US");
+
+  // Backfill rows come back RFC3339 from ClickHouse, but live SSE rows carry
+  // the producer's payload as ingested — a zone-less ClickHouse-style
+  // "YYYY-MM-DD HH:MM:SS[.fff]" (UTC by the gh_events contract), which
+  // Date.parse would read as LOCAL time. Normalize to ISO-8601 UTC.
+  function normTs(ts: string): string {
+    return /^\d{4}-\d{2}-\d{2} \d{2}/.test(ts) ? ts.replace(" ", "T") + "Z" : ts;
+  }
+
+  function relTime(iso: string): string {
+    const t = Date.parse(normTs(iso));
+    if (!Number.isFinite(t)) return "";
+    const s = Math.max(0, (Date.now() - t) / 1000);
+    if (s < 45) return "just now";
+    if (s < 90) return "1m ago";
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 5400) return "1h ago";
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  }
+
+  function detailText(row: GhRow): string {
+    const num = Number(row.number) > 0 ? `#${row.number}` : "";
+    const title = (row.title || "").trim();
+    const ref = (row.ref || "").trim();
+    if (title) return `${num ? num + " " : ""}${title}`;
+    if (num) return num;
+    if (ref) return ref.replace(/^refs\/(heads|tags)\//, "");
+    return "";
+  }
+
+  let activeRoot: Element | null = null;
+  let teardown: (() => void) | null = null;
+
+  function init() {
+    const root = document.querySelector("[data-wh-live-root]");
+    if (root === activeRoot) return; // same mount (DOMContentLoaded + astro:page-load both fire)
+    teardown?.();
+    teardown = null;
+    activeRoot = root;
+    if (!root) return; // navigated to a page without the panel — torn down above
+
+    const cleanups: (() => void)[] = [];
+    teardown = () => {
+      cleanups.forEach((fn) => fn());
+      activeRoot = null;
+    };
+
+    const wh = createClient({ baseURL: BASE_URL });
+    const feed = root.querySelector("[data-wh-feed]") as HTMLOListElement;
+    const feedEmpty = root.querySelector("[data-wh-feed-empty]") as HTMLElement;
+    const stream = root.querySelector("[data-wh-stream]") as HTMLElement;
+    const streamLabel = root.querySelector("[data-wh-stream-label]") as HTMLElement;
+    const latEl = root.querySelector("[data-wh-lat]") as HTMLElement | null;
+    const latVal = root.querySelector("[data-wh-lat-val]") as HTMLElement | null;
+    const epmSvg = root.querySelector("[data-wh-epm-svg]") as SVGElement | null;
+    const epmLine = root.querySelector("[data-wh-epm-line]") as SVGPathElement | null;
+    const epmArea = root.querySelector("[data-wh-epm-area]") as SVGPathElement | null;
+    epmSvg?.setAttribute("hidden", ""); // hidden until drawEpm has data to plot
+
+    // --- Counts. Writes every [data-wh-live="<key>"] on the page (the
+    // closer band has a star chip too), so one fetch feeds all placements.
+    function setCount(key: string, v: unknown) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return; // keep the "—" placeholder
+      document.querySelectorAll(`[data-wh-live="${key}"]`).forEach((el) => {
+        el.textContent = fmtInt(n);
+        // Placements hidden until real data exists (e.g. closer-band chip).
+        el.closest("[data-wh-live-wrap]")?.removeAttribute("hidden");
+      });
+    }
+    async function loadCount(key: string, fetcher: () => Promise<{ ok: boolean; data: unknown }>) {
+      const { ok, data } = await fetcher();
+      const rows = data as Record<string, unknown>[] | null;
+      if (!ok || !rows?.length) return;
+      const row = rows[0] ?? {};
+      setCount(key, row.total ?? row.count ?? Object.values(row)[0] ?? 0);
+    }
+    async function loadCounts() {
+      // One cached gh_summary call (Stats#19) carries every number — incl.
+      // reconciler-observed open_issues / open_prs for any future placement.
+      const { ok, data } = await wh.pipe("gh_summary").fetch();
+      const row = (data as Record<string, unknown>[] | null)?.[0];
+      if (ok && row) {
+        setCount("stars", row.stars);
+        setCount("forks", row.forks);
+        setCount("events7d", row.events_7d);
+        setCount("openIssues", row.open_issues);
+        setCount("openPrs", row.open_prs);
+        setCount("totalEvents", row.total_events); // #34: lifetime "N tracked"
+        return;
+      }
+      // Pre-#19 fallback (per-number reads) so a stats-stack rollback
+      // degrades to slower, not blank.
+      void loadCount("stars", () => wh.pipe("gh_stars_total").fetch());
+      void loadCount("forks", () => wh.pipe("gh_forks_total").fetch());
+      void loadCount("events7d", () =>
+        wh.from("gh_events").select().count("*", "total").timeRange("event_ts", "168h").fetch(),
+      );
+    }
+    let countTimer: ReturnType<typeof setTimeout> | undefined;
+    function refreshCounts() {
+      clearTimeout(countTimer);
+      countTimer = setTimeout(loadCounts, 400); // debounce bursts of streamed events
+    }
+    cleanups.push(() => clearTimeout(countTimer));
+
+    // --- #33 latency proof: ingested → live in ~N ms. ev.timestamp is the
+    // server's received_timestamp (ingest clock, RFC3339Nano UTC), carried on
+    // every SSE event — so now − that = the WaveHouse-owned real-time path
+    // (ingest → WAL → SSE → this browser), the thing a frontend-on-ClickHouse
+    // can't do. Browser↔server clock skew makes a single sample noisy, so we
+    // clamp out-of-range values and show the latest sane one (recent median in
+    // the tooltip). normTs is a no-op for the "…Z" format but keeps us correct
+    // if the envelope clock ever drifts to a zone-less string.
+    const latRing: number[] = [];
+    function recordLatency(isoTs: string) {
+      if (!latVal || !latEl) return;
+      const ms = Date.now() - Date.parse(normTs(isoTs));
+      if (!Number.isFinite(ms) || ms < 0 || ms > 60_000) return; // skew / stale — drop
+      latRing.push(ms);
+      if (latRing.length > 30) latRing.shift();
+      const med = [...latRing].sort((a, b) => a - b)[Math.floor(latRing.length / 2)];
+      latVal.textContent = `in ~${fmtInt(Math.round(ms))} ms`;
+      latEl.dataset.state = "live";
+      latEl.title = `WaveHouse ingest → your browser · latest ${Math.round(ms)} ms · recent median ${Math.round(med)} ms (n=${latRing.length})`;
+    }
+
+    // --- #34 events/min sparkline. Backfilled from gh_events_per_minute, then
+    // the current minute's bucket is bumped live as the stream ticks so the
+    // line visibly moves; the 60s reconcile re-syncs history with the server.
+    const minuteMs = (s: string) =>
+      Date.parse(String(s).replace(" ", "T") + (String(s).endsWith("Z") ? "" : "Z"));
+    let epm: { t: number; n: number }[] = [];
+    let epmDrawTimer: ReturnType<typeof setTimeout> | undefined;
+    function drawEpm() {
+      if (!epmSvg || !epmLine || !epmArea) return;
+      const vals = epm.map((r) => r.n);
+      if (!vals.length) {
+        epmSvg.setAttribute("hidden", ""); // quiet — keep the strip clean
+        return;
+      }
+      const max = Math.max(1, ...vals);
+      const W = 120, H = 28, pad = 3, n = vals.length;
+      const x = (i: number) => (n === 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+      const y = (v: number) => H - pad - (v / max) * (H - 2 * pad);
+      const line = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+      epmLine.setAttribute("d", line);
+      epmArea.setAttribute("d", `${line} L${x(n - 1).toFixed(1)} ${H} L${x(0).toFixed(1)} ${H} Z`);
+      epmSvg.removeAttribute("hidden");
+    }
+    function scheduleEpmDraw() {
+      clearTimeout(epmDrawTimer);
+      epmDrawTimer = setTimeout(drawEpm, 250); // debounce bursts so it ticks, not thrashes
+    }
+    async function loadEpm() {
+      const { ok, data } = await wh.pipe("gh_events_per_minute").fetch();
+      if (ok && Array.isArray(data)) {
+        epm = (data as { minute: string; events: number }[])
+          .map((r) => ({ t: minuteMs(r.minute), n: Number(r.events) || 0 }))
+          .filter((r) => Number.isFinite(r.t))
+          // Ascending by minute: the pipe's order is a cross-repo contract, and
+          // both drawEpm (plots left→right) and bumpEpm (treats last as current
+          // minute) depend on it — sort here so we don't.
+          .sort((a, b) => a.t - b.t);
+      }
+      drawEpm();
+    }
+    function bumpEpm() {
+      const m = Math.floor(Date.now() / 60_000) * 60_000; // current UTC minute
+      const last = epm[epm.length - 1];
+      if (last && last.t === m) last.n++;
+      else epm.push({ t: m, n: 1 });
+      while (epm.length > 60) epm.shift();
+      scheduleEpmDraw();
+    }
+    cleanups.push(() => clearTimeout(epmDrawTimer));
+
+    // --- Feed.
+    const seen = new Set<string>();
+    // Normalize every key part across the two row sources: backfill rows are
+    // ClickHouse-materialized (RFC3339 ts, ""/0 defaults) while live SSE rows
+    // are raw producer payloads (zone-less ts, fields possibly absent) — raw
+    // interpolation would never dedup a row seen via both paths.
+    const rowKey = (r: GhRow) =>
+      `${r.event_type}|${r.action || ""}|${r.actor_login}|${normTs(r.event_ts || "")}|${Number(r.number) || 0}`;
+
+    function feedEl(row: GhRow, verb: string, tone: string): HTMLLIElement {
+      const li = document.createElement("li");
+      li.className = "wh-live__event";
+
+      const dot = document.createElement("span");
+      dot.className = `wh-live__ev-dot wh-live__tone--${tone}`;
+
+      const body = document.createElement("span");
+      body.className = "wh-live__ev-body";
+      const actor = document.createElement("a");
+      actor.className = "wh-live__ev-actor";
+      actor.href = `https://github.com/${encodeURIComponent(row.actor_login || "")}`;
+      actor.target = "_blank";
+      actor.rel = "noopener noreferrer";
+      actor.textContent = row.actor_login || "someone";
+      const verbEl = document.createElement("span");
+      verbEl.className = "wh-live__ev-verb";
+      verbEl.textContent = ` ${verb} `;
+      const detail = document.createElement("span");
+      detail.className = "wh-live__ev-detail";
+      detail.textContent = detailText(row);
+      body.append(actor, verbEl, detail);
+      body.title = `${row.actor_login} ${verb} ${detailText(row)}`.trim();
+
+      const time = document.createElement("time");
+      time.className = "wh-live__ev-time";
+      time.dateTime = normTs(row.event_ts || "");
+      time.textContent = relTime(row.event_ts);
+
+      li.append(dot, body, time);
+      return li;
+    }
+
+    function addRow(row: GhRow | null | undefined, where: "top" | "bottom", stagger = 0): boolean {
+      if (!row?.event_type) return false;
+      const verb = VERBS[row.action ? `${row.event_type}:${row.action}` : row.event_type];
+      if (!verb) return false; // not in the curated set
+      if (where === "bottom" && feed.children.length >= MAX_ROWS) return false;
+      const k = rowKey(row);
+      if (seen.has(k)) return false; // webhook redeliveries / fetch-stream overlap
+      seen.add(k);
+      const el = feedEl(row, verb[0], verb[1]);
+      el.dataset.k = k;
+      el.style.setProperty("--d", `${stagger * 70}ms`);
+      if (where === "top") feed.prepend(el);
+      else feed.append(el);
+      while (feed.children.length > MAX_ROWS) {
+        const last = feed.lastElementChild as HTMLElement;
+        seen.delete(last.dataset.k ?? "");
+        last.remove();
+      }
+      feedEmpty.hidden = true;
+      return true;
+    }
+
+    function setStream(state: string) {
+      const live = state === "live";
+      const bad = state === "error" || state === "closed";
+      stream.dataset.state = live ? "live" : bad ? "down" : "connecting";
+      streamLabel.textContent = live ? "live" : bad ? "offline" : `${state}…`;
+    }
+
+    // Live tail first, so an event landing while the backfill is in flight
+    // renders instead of falling between the two (the composite-key dedup
+    // absorbs the overlap when both deliver the same row).
+    const sse = wh
+      .from("gh_events")
+      .select("event_type", "action", "actor_login", "event_ts", "number", "title", "ref")
+      .where("event_type", "in", FEED_TYPES)
+      .stream();
+    const unsub = sse.subscribe({
+      next: (ev: unknown) => {
+        const e = ev as { data?: GhRow; timestamp?: string };
+        const row = (e?.data ?? ev) as GhRow;
+        if (e?.timestamp) recordLatency(e.timestamp); // #33: ingest → browser latency
+        bumpEpm(); // #34: this minute's throughput bucket just grew
+        if (addRow(row, "top") && (row.event_type === "star" || row.event_type === "fork")) {
+          refreshCounts();
+        }
+      },
+      status: (s: string) => setStream(s),
+      error: () => setStream("error"),
+    });
+    cleanups.push(() => {
+      unsub();
+      sse.close();
+    });
+
+    // Backfill from the server-curated, server-deduped, cached
+    // gh_activity_recent pipe (Stats#18) — a cached page can trail the stream
+    // by the pipe's TTL; anything it misses arrives live or on the next load.
+    // Falls back to the pre-#18 structured query if the pipe is unavailable.
+    void (async () => {
+      let r: { ok: boolean; data: unknown } = await wh
+        .pipe<GhRow>("gh_activity_recent", { limit: 12 })
+        .fetch();
+      if (!r.ok) {
+        r = await wh
+          .from("gh_events")
+          .select("event_type", "action", "actor_login", "event_ts", "number", "title", "ref")
+          .where("event_type", "in", FEED_TYPES)
+          .orderBy("event_ts", "desc")
+          .limit(48) // margin: the type-only filter passes rows VERBS drops (label/assign churn)
+          .fetch();
+      }
+      if (r.ok) {
+        let i = 0;
+        (r.data as GhRow[]).forEach((row) => {
+          if (addRow(row, "bottom", i)) i++;
+        });
+        if (feed.children.length === 0) {
+          feedEmpty.textContent = "Quiet right now — star the repo and make history.";
+          feedEmpty.hidden = false;
+        }
+      } else if (feed.children.length === 0) {
+        feedEmpty.textContent = "Live feed unavailable right now.";
+        feedEmpty.hidden = false;
+      }
+    })();
+
+    // --- Boot + slow timers (count safety net, relative-time refresh).
+    loadCounts();
+    loadEpm(); // #34: events/min sparkline backfill (then bumped live by the stream)
+    // gh_summary (the lifetime total) rides loadCounts; reconcile the sparkline
+    // with the server on the same 60s beat so live bumps can't drift.
+    const countInterval = setInterval(() => {
+      loadCounts();
+      loadEpm();
+    }, 60_000);
+    const timeInterval = setInterval(() => {
+      root.querySelectorAll("time.wh-live__ev-time").forEach((t) => {
+        t.textContent = relTime(t.getAttribute("datetime") || "");
+      });
+    }, 30_000);
+    cleanups.push(() => clearInterval(countInterval));
+    cleanups.push(() => clearInterval(timeInterval));
+
+    // --- CTA analytics, same shape as the hero buttons' tracking.
+    root.querySelectorAll<HTMLAnchorElement>("[data-ph-demo]").forEach((el) => {
+      el.addEventListener("click", () => {
+        (window as { posthog?: { capture: (e: string, p: object) => void } }).posthog?.capture(
+          "live_demo_cta_clicked",
+          { target: el.getAttribute("data-ph-demo"), href: el.href },
+        );
+      });
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+  document.addEventListener("astro:page-load", init);
+</script>
+
+{/* is:global, not scoped: the feed rows are created at runtime by the script
+    above, so they never receive Astro's scope attribute and scoped selectors
+    would skip them. Everything here is namespaced under .wh-live__*. */}
+<style is:global>
+  .wh-live {
+    width: 100%;
+    border-radius: var(--radius-card);
+    background: var(--wh-code-bg);
+    border: 1px solid var(--wh-code-border);
+    box-shadow: var(--wh-shadow-lg);
+    overflow: hidden;
+    font-size: 0.8125rem;
+  }
+
+  /* Chrome bar — visual continuity with the terminal this panel replaced. */
+  .wh-live__chrome {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.85rem;
+    border-bottom: 1px solid var(--wh-code-border);
+    background: color-mix(in oklab, var(--wh-code-bg) 80%, var(--wh-surface));
+  }
+  .wh-live__dot {
+    width: 10px;
+    height: 10px;
+    border-radius: var(--radius-pill);
+  }
+  .wh-live__dot--red   { background: #ff5f57; }
+  .wh-live__dot--amber { background: #febc2e; }
+  .wh-live__dot--green { background: #28c840; }
+  .wh-live__title {
+    margin-left: 0.5rem;
+    color: var(--wh-ink-subtle);
+    font-family: var(--sl-font-mono);
+    font-size: 0.7rem;
+  }
+  .wh-live__stream {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.7rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-live__stream-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: var(--wh-ink-subtle);
+  }
+  .wh-live__stream[data-state="connecting"] .wh-live__stream-dot {
+    animation: wh-live-pulse 1.2s ease-in-out infinite;
+  }
+  .wh-live__stream[data-state="live"] .wh-live__stream-dot {
+    background: var(--wh-emerald);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--wh-emerald) 18%, transparent);
+  }
+  .wh-live__stream[data-state="live"] [data-wh-stream-label] { color: var(--wh-emerald); }
+  .wh-live__stream[data-state="down"] .wh-live__stream-dot { background: var(--wh-rose); }
+  @keyframes wh-live-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+
+  /* Headline counts. minmax(0,…), not 1fr: bare 1fr tracks floor at their
+     min-content (the widest label, "EVENTS · 7D"), which summed to a hard
+     ~325px the panel couldn't shrink below on a phone. minmax(0,…) lets the
+     three columns shrink to share whatever width the panel has. */
+  .wh-live__stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-bottom: 1px solid var(--wh-code-border);
+  }
+  .wh-live__stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.1rem;
+    min-width: 0;
+    padding: 0.85rem 0.5rem 0.75rem;
+  }
+  .wh-live__stat + .wh-live__stat {
+    border-left: 1px solid var(--wh-code-border);
+  }
+  .wh-live__num {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    color: var(--wh-ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .wh-live__lbl {
+    max-width: 100%;
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    color: var(--wh-ink-subtle);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wh-live__stat:nth-child(1) .wh-live__lbl { color: var(--wh-accent-text); }
+
+  /* Metrics strip — the real-time proof line. Latency (left) + throughput
+     sparkline & lifetime total (right). Thin + mono so it reads as a readout,
+     not another stat row. min-height reserves space so the placeholder→value
+     swap and the sparkline appearing never reflow the panel. */
+  .wh-live__metrics {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 1.9rem;
+    padding: 0.45rem 0.85rem;
+    border-bottom: 1px solid var(--wh-code-border);
+    font-family: var(--sl-font-mono);
+    font-size: 0.7rem;
+  }
+  /* Latency — the wow metric. Bolt is always accent and pulses while waiting;
+     the value lights up from empty placeholder to bright accent on first event. */
+  .wh-live__lat {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wh-live__lat-bolt { color: var(--wh-accent-text); font-size: 0.85em; }
+  .wh-live__lat[data-state="waiting"] .wh-live__lat-bolt {
+    animation: wh-live-pulse 1.2s ease-in-out infinite;
+  }
+  .wh-live__lat-lead { color: var(--wh-ink-muted); }
+  .wh-live__lat-ms {
+    color: var(--wh-accent-text);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Throughput sparkline + lifetime total. */
+  .wh-live__epm {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .wh-live__spark { width: 56px; height: 18px; display: block; flex: none; }
+  .wh-live__spark[hidden] { display: none; }
+  /* preserveAspectRatio="none" stretches the 120×28 viewBox into 56×18, so pin
+     the stroke width with non-scaling-stroke to keep it crisp and even. */
+  .wh-live__spark-line {
+    stroke: var(--wh-emerald);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+  .wh-live__spark-area {
+    fill: color-mix(in oklab, var(--wh-emerald) 16%, transparent);
+    stroke: none;
+  }
+  .wh-live__epm-total { color: var(--wh-ink-subtle); white-space: nowrap; }
+  .wh-live__epm-total[hidden] { display: none; }
+  .wh-live__epm-total [data-wh-live] {
+    color: var(--wh-ink);
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Feed — fixed height so backfill/live inserts never shift the page. */
+  .wh-live__feed-wrap {
+    position: relative;
+    height: calc(6 * 2.35rem + 0.5rem);
+    padding: 0.25rem 0.85rem;
+    overflow: hidden;
+  }
+  .wh-live__feed {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .wh-live__event {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    height: 2.35rem;
+    border-top: 1px solid color-mix(in oklab, var(--wh-code-border) 60%, transparent);
+    animation: wh-live-in 0.35s ease-out both;
+    animation-delay: var(--d, 0ms);
+  }
+  .wh-live__event:first-child { border-top: none; }
+  @keyframes wh-live-in {
+    from { opacity: 0; transform: translateY(-3px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .wh-live__ev-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: var(--radius-pill);
+  }
+  .wh-live__tone--accent  { background: var(--wh-accent); box-shadow: 0 0 0 3px var(--wh-accent-glow); }
+  .wh-live__tone--emerald { background: var(--wh-emerald); }
+  .wh-live__tone--amber   { background: var(--wh-amber); }
+  .wh-live__tone--rose    { background: var(--wh-rose); }
+  .wh-live__tone--muted   { background: var(--wh-ink-subtle); }
+  .wh-live__ev-body {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--wh-ink-muted);
+  }
+  .wh-live__ev-actor {
+    color: var(--wh-ink);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .wh-live__ev-actor:hover { color: var(--wh-accent-text); }
+  .wh-live__ev-detail { color: var(--wh-ink-subtle); }
+  .wh-live__ev-time {
+    flex: none;
+    color: var(--wh-ink-subtle);
+    font-family: var(--sl-font-mono);
+    font-size: 0.7rem;
+    white-space: nowrap;
+  }
+  .wh-live__empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 0 1.5rem;
+    text-align: center;
+    color: var(--wh-ink-subtle);
+  }
+  /* display:flex above would otherwise beat the [hidden] UA default. */
+  .wh-live__empty[hidden] { display: none; }
+
+  /* CTA footer */
+  .wh-live__cta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.7rem 0.85rem 0.15rem;
+    border-top: 1px solid var(--wh-code-border);
+  }
+  .wh-live__star {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.38rem 0.7rem;
+    border-radius: var(--radius-sm);
+    background: var(--wh-accent);
+    color: var(--wh-accent-ink);
+    border: 1px solid var(--wh-accent-hi);
+    font-weight: 600;
+    font-size: 0.78rem;
+    line-height: 1;
+    text-decoration: none;
+    transition: background 0.15s ease, transform 0.15s ease;
+  }
+  .wh-live__star:hover {
+    background: var(--wh-accent-hi);
+    transform: translateY(-1px);
+  }
+  .wh-live__cta-text { color: var(--wh-ink-muted); }
+  .wh-live__more {
+    margin-left: auto;
+    color: var(--wh-accent-text);
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .wh-live__more:hover { text-decoration: underline; }
+  .wh-live__byline {
+    margin: 0;
+    padding: 0.35rem 0.85rem 0.7rem;
+    color: var(--wh-ink-subtle);
+    font-size: 0.7rem;
+  }
+  .wh-live__byline code {
+    font-family: var(--sl-font-mono);
+    font-size: 0.95em;
+    color: var(--wh-ink-muted);
+    background: transparent;
+    padding: 0;
+    border: 0;
+  }
+
+  @media (max-width: 26rem) {
+    /* ev-detail stays — the ev-body ellipsis truncates it gracefully now that
+       the panel shrinks, which reads better than dropping the title entirely. */
+    .wh-live__num { font-size: 1.3rem; }
+    .wh-live__lbl { font-size: 0.6rem; letter-spacing: 0.04em; }
+    .wh-live__stat { padding: 0.75rem 0.35rem 0.7rem; }
+    .wh-live__cta-text { display: none; } /* redundant with the star button */
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .wh-live__event,
+    .wh-live__stream-dot,
+    .wh-live__lat-bolt {
+      animation: none !important;
+    }
+  }
+</style>

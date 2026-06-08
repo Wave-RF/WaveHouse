@@ -6,6 +6,7 @@
 import EditLink from "virtual:starlight/components/EditLink";
 import LastUpdated from "virtual:starlight/components/LastUpdated";
 import Pagination from "virtual:starlight/components/Pagination";
+import MermaidZoom from "./MermaidZoom.astro";
 import WaveMark from "./WaveMark.astro";
 
 const year = new Date().getFullYear();
@@ -122,6 +123,10 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     </footer>
   )
 }
+
+{/* Click-to-zoom for Mermaid diagrams — rendered once per page from here
+    (Footer is on every page); self-contained script + styles, no markup. */}
+<MermaidZoom />
 
 <script is:inline>
   function setupFooterLinkTracking() {

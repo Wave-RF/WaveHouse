@@ -17,8 +17,9 @@ allowBuilds:
 
 minimumReleaseAge: 10080
 
-# Fail an install when the active Node doesn't satisfy a package's engines.node
-# (floor is ">=22" in every package.json; exact dev/CI version pinned in .nvmrc).
+# Fail an install when the active Node doesn't satisfy a package's engines.node.
+# The published SDK (clients/ts) declares ">=18" for external consumers; the
+# root, e2e, and docs packages require ">=22" — the dev/CI version pinned in .nvmrc.
 engineStrict: true
 
 catalog:
