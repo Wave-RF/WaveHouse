@@ -13,6 +13,24 @@ sidebar:
 npm install @wavehouse/sdk
 ```
 
+This works in any bundler-based framework — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — via `import { createClient } from '@wavehouse/sdk'`.
+
+### No build step (CDN)
+
+No bundler or `npm` required — drop the SDK into a static HTML file you deploy over FTP, object storage, or any static host. The ES module loads natively in modern browsers:
+
+```html
+<script type="module">
+  import { createClient } from 'https://esm.sh/@wavehouse/sdk';
+
+  const wh = createClient({ baseURL: 'https://your-wavehouse.example.com' });
+  const { data } = await wh.from('clicks').select('page').limit(10);
+  console.log(data);
+</script>
+```
+
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming uses the browser's native `EventSource`, so it needs no polyfill either way.
+
 ## Quick Start
 
 ```ts
@@ -720,13 +738,13 @@ StreamController (NOT thenable)
 
 ## Codegen CLI
 
-Generate TypeScript types from a running WaveHouse instance:
+Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin, so after `npm install @wavehouse/sdk` you can run it with `npx`:
 
 ```bash
-# From the SDK package (clients/ts/):
+npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
+
+# Or, working inside this repo (clients/ts/):
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
-# or directly:
-npx tsx src/cli/codegen.ts --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
 Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
