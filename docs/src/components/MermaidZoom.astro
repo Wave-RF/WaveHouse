@@ -1,0 +1,215 @@
+---
+// Click-to-zoom for Mermaid diagrams. Diagrams render inside the ~46–58rem
+// content column, so wide ones (and dense ones) read small inline; clicking
+// any diagram opens it in a lightbox — small diagrams scale up to fill the
+// viewport, wide ones show at natural size with pan-scroll for full detail.
+//
+// Rendered once (from Footer.astro, which is on every page). The script uses
+// event delegation on `document` so it survives Astro view-transition
+// navigations without re-binding, and a window flag makes init idempotent.
+---
+
+<script is:inline>
+  // is:inline (not a bundled module) to match the codebase's DOM-script
+  // convention (see Footer.astro) and stay out of `astro check`. With view
+  // transitions this re-executes per navigation, so the window flag guards
+  // against re-binding the document-level listeners; per-page work runs from
+  // the persistent `astro:page-load` handler.
+  (() => {
+    if (window.__whMermaidZoomInit) return;
+    window.__whMermaidZoomInit = true;
+
+    const DIAGRAM = ".sl-markdown-content svg[aria-roledescription]";
+    let overlay = null;
+    let lastTrigger = null;
+
+    function close() {
+      if (!overlay) return;
+      overlay.classList.remove("is-open");
+      document.documentElement.style.removeProperty("overflow");
+      const t = lastTrigger;
+      lastTrigger = null;
+      // Let the fade-out run before hiding (keeps it out of the a11y tree).
+      window.setTimeout(() => overlay && overlay.setAttribute("hidden", ""), 180);
+      if (t && typeof t.focus === "function") t.focus();
+    }
+
+    function buildOverlay() {
+      overlay = document.createElement("div");
+      overlay.className = "wh-zoom";
+      overlay.setAttribute("hidden", "");
+      overlay.setAttribute("role", "dialog");
+      overlay.setAttribute("aria-modal", "true");
+      overlay.setAttribute("aria-label", "Enlarged diagram");
+      overlay.innerHTML =
+        '<button class="wh-zoom__close" type="button" aria-label="Close enlarged diagram">' +
+        '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" ' +
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+        '<path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
+        '<div class="wh-zoom__stage"></div>';
+      overlay.addEventListener("click", (e) => {
+        // Backdrop / stage padding click closes; clicks on the SVG itself don't.
+        if (!e.target.closest("svg") || e.target.closest(".wh-zoom__close")) close();
+      });
+      document.body.appendChild(overlay);
+    }
+
+    function open(svg) {
+      if (!overlay) buildOverlay();
+      const stage = overlay.querySelector(".wh-zoom__stage");
+      stage.replaceChildren();
+
+      // Re-id the clone rather than cloneNode-ing as-is: a Mermaid SVG scopes
+      // its entire inline <style> (font-family, themed fills) by the root id
+      // (`#mermaid-abc{…}`) and references markers/gradients via url(#mermaid-abc-…).
+      // Two elements sharing that id in the DOM is invalid and (depending on the
+      // browser) resolves the font/marker refs to the wrong one — the clone then
+      // falls back to a wider font and its labels clip. Rewriting every
+      // occurrence of the id to a unique one keeps the clone fully self-contained.
+      const oldId = svg.getAttribute("id");
+      let markup = svg.outerHTML;
+      if (oldId) markup = markup.split(oldId).join(oldId + "-zoom");
+      const holder = document.createElement("div");
+      holder.innerHTML = markup;
+      const clone = holder.firstElementChild;
+      // viewBox carries the intrinsic size; fall back to the inline max-width.
+      const vb = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
+      const natW = vb.length === 4 && vb[2] ? vb[2] : svg.getBoundingClientRect().width;
+      const natH = vb.length === 4 && vb[3] ? vb[3] : svg.getBoundingClientRect().height;
+      const fit = Math.min((window.innerWidth * 0.94) / natW, (window.innerHeight * 0.9) / natH);
+      // Enlarge diagrams smaller than the viewport (cap 2.5×); show larger
+      // ones at natural size and let the stage scroll for pan.
+      const scale = fit > 1 ? Math.min(fit, 2.5) : 1;
+      clone.style.width = natW * scale + "px";
+      clone.style.height = natH * scale + "px";
+      clone.style.maxWidth = "none";
+      clone.style.minWidth = "0";
+      stage.appendChild(clone);
+
+      overlay.removeAttribute("hidden");
+      // Next frame so the un-hide paints before the open transition.
+      requestAnimationFrame(() => overlay.classList.add("is-open"));
+      document.documentElement.style.overflow = "hidden";
+      overlay.querySelector(".wh-zoom__close").focus();
+    }
+
+    document.addEventListener("click", (e) => {
+      if (overlay && !overlay.hasAttribute("hidden")) return; // already open
+      const svg = e.target.closest(DIAGRAM);
+      if (!svg) return;
+      lastTrigger = svg;
+      open(svg);
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (overlay && !overlay.hasAttribute("hidden")) {
+        if (e.key === "Escape") close();
+        return;
+      }
+      // Enter/Space on a focused diagram opens it.
+      if (e.key === "Enter" || e.key === " ") {
+        const svg = e.target.closest && e.target.closest(DIAGRAM);
+        if (svg) {
+          e.preventDefault();
+          lastTrigger = svg;
+          open(svg);
+        }
+      }
+    });
+
+    // Make diagrams keyboard-focusable + hint the interaction (idempotent;
+    // re-run after every view-transition navigation for the new page's DOM).
+    function enhance() {
+      document.querySelectorAll(DIAGRAM).forEach((svg) => {
+        if (svg.dataset.whZoom) return;
+        svg.dataset.whZoom = "1";
+        svg.setAttribute("tabindex", "0");
+        svg.setAttribute("aria-keyshortcuts", "Enter");
+      });
+    }
+    document.addEventListener("astro:page-load", enhance);
+    if (document.readyState !== "loading") enhance();
+    else document.addEventListener("DOMContentLoaded", enhance);
+  })();
+</script>
+
+<style is:global>
+  /* Affordance: diagrams are click-to-zoom. */
+  .sl-markdown-content svg[aria-roledescription] {
+    cursor: zoom-in;
+  }
+  .sl-markdown-content svg[aria-roledescription]:focus-visible {
+    outline: 2px solid var(--wh-accent-text, var(--wh-accent-hi));
+    outline-offset: 4px;
+    border-radius: var(--radius-sm, 8px);
+  }
+
+  .wh-zoom {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(0.5rem, 3vw, 2.5rem);
+    background: color-mix(in oklab, var(--wh-bg, #0b0e13) 78%, transparent);
+    backdrop-filter: blur(6px);
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+  .wh-zoom.is-open {
+    opacity: 1;
+  }
+  .wh-zoom[hidden] {
+    display: none;
+  }
+  .wh-zoom__stage {
+    max-width: 94vw;
+    max-height: 90vh;
+    overflow: auto;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-md, 12px);
+    /* The cloned SVG's themed fills use --wh-mermaid-* vars resolved on
+       :root, so the diagram keeps its colors inside the overlay. A surface
+       backing reads as a "card" lifted off the dimmed page. */
+    background: var(--wh-mermaid-surface, var(--wh-surface, #14171c));
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+    scrollbar-width: thin;
+    padding: clamp(1rem, 2.5vw, 2rem);
+  }
+  .wh-zoom__stage > svg {
+    display: block;
+  }
+  .wh-zoom__close {
+    position: fixed;
+    top: clamp(0.5rem, 2vw, 1.25rem);
+    right: clamp(0.5rem, 2vw, 1.25rem);
+    width: 2.5rem;
+    height: 2.5rem;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    border: 1px solid var(--wh-border, rgba(255, 255, 255, 0.14));
+    background: var(--wh-surface, #14171c);
+    color: var(--wh-ink, #f1f3f7);
+    cursor: pointer;
+    transition: background 0.12s ease, transform 0.12s ease;
+  }
+  .wh-zoom__close:hover {
+    background: var(--wh-surface-2, #1b1f26);
+    transform: scale(1.05);
+  }
+  .wh-zoom__close:focus-visible {
+    outline: 2px solid var(--wh-accent-text, var(--wh-accent-hi));
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wh-zoom {
+      transition: none;
+    }
+    .wh-zoom__close {
+      transition: none;
+    }
+  }
+</style>

@@ -345,11 +345,13 @@ svg[aria-roledescription^="state"] {
   }
 }
 
-/* Responsive 2-up container for paired mermaid diagrams. Default is
-   vertical stack (better on mobile and the common 1200–1400px laptop
-   widths where two diagrams side-by-side would each be tiny). On
-   genuinely wide viewports (≥1500px) we switch to a flex row so the
-   two diagrams sit alongside each other. */
+/* Container for paired mermaid diagrams (e.g. the DIY-vs-WaveHouse compare).
+   Always a vertical stack: each diagram gets the full content width and
+   renders at a legible size. The previous ≥1500px flex-row variant sat the
+   two side-by-side on wide monitors, which shrank each to ~450px and made the
+   denser diagram hard to read — house style is to favour vertical so diagrams
+   fit the page (see AGENTS.md "Authoring Mermaid diagrams"). Click-to-zoom
+   (MermaidZoom) covers the rare case where you want a diagram bigger still. */
 .sl-markdown-content .diagram-pair {
   display: flex;
   flex-direction: column;
@@ -362,17 +364,6 @@ svg[aria-roledescription^="state"] {
   width: 100%;
   display: flex;
   justify-content: center;
-}
-@media (min-width: 1500px) {
-  .sl-markdown-content .diagram-pair {
-    flex-direction: row;
-    align-items: flex-start;
-    gap: 2rem;
-  }
-  .sl-markdown-content .diagram-pair > p {
-    flex: 1 1 0;
-    min-width: 0;
-  }
 }
 
 /* Mermaid foreignObject content — typography. The aria-role scoping
