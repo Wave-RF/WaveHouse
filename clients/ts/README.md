@@ -8,6 +8,40 @@ Zero-dependency TypeScript client for [WaveHouse](https://github.com/Wave-RF/Wav
 npm install @wavehouse/sdk
 ```
 
+This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
+
+## Use without a build step (CDN)
+
+No bundler, no `npm`, no framework required — drop the SDK straight into an HTML file you deploy over FTP, object storage, or any static host.
+
+**ES module (recommended).** Modern browsers run `type="module"` natively:
+
+```html
+<script type="module">
+  import { createClient } from 'https://esm.sh/@wavehouse/sdk';
+
+  const wh = createClient({ baseURL: 'https://your-wavehouse.example.com' });
+  const { data, error } = await wh.from('clicks').select('page').limit(10);
+  console.log(data ?? error);
+</script>
+```
+
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`). jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
+
+**Classic global (`<script src>`).** For pages that can't use ES modules, the bundled IIFE build attaches everything to a `WaveHouse` global:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/@wavehouse/sdk"></script>
+<script>
+  const wh = WaveHouse.createClient({ baseURL: 'https://your-wavehouse.example.com' });
+  wh.from('clicks').select('page').limit(10).then(({ data }) => console.log(data));
+</script>
+```
+
+**Versioning.** A bare CDN URL serves the latest published **release**; pin for production (`@wavehouse/sdk@0.1.0`) or float on a range (`@0` for the newest 0.x, `@0.1` for 0.1.x). Builds from `main` are published under the `dev` tag — `@wavehouse/sdk@dev` — for trying unreleased changes.
+
+Streaming (`.stream()`) uses the browser's native `EventSource`, so it works in both forms with no polyfill.
+
 ## Quick Start
 
 ```ts
@@ -102,10 +136,10 @@ if (error) {
 
 ## Codegen
 
-Generate TypeScript types from your live WaveHouse schema:
+Generate TypeScript types from your live WaveHouse schema. The package ships a `wavehouse-codegen` bin, so after installing you can run it with `npx`:
 
 ```bash
-npm run codegen -- --url http://localhost:8080 --out ./src/db.d.ts
+npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
 This introspects `/v1/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy.
