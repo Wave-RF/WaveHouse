@@ -513,6 +513,24 @@ PRs are grouped by ecosystem to reduce noise.
 
 **Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Dependabot PRs bypass the `Admin approval` required check entirely (see `admin-approval.yml`), so **all** patch/minor bumps — including workflow-touching ones — merge without human intervention; the trust model for that is CI passing + `dependabot/fetch-metadata` classification.
 
+## Releasing the SDK
+
+The TypeScript SDK (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
+
+- **Dev snapshots.** Every push to `main` publishes `0.0.0-dev.<hash>` under the `dev` dist-tag — but only when the built `dist/` actually changed (the version is a hash of the build output, so an unchanged build resolves to an already-published version and is skipped). Install the bleeding edge with `npm install @wavehouse/sdk@dev`.
+- **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. A stable version goes to the `latest` dist-tag; a prerelease (`sdk-v0.2.0-rc.1`) is published under `alpha`/`beta`/`rc`/`next` — derived from the suffix — and marked as a GitHub pre-release. The tag **must** match `clients/ts/package.json`'s `version`, or the job fails fast.
+
+To cut a release:
+
+```bash
+# 1. Bump "version" in clients/ts/package.json, commit, and merge to main.
+# 2. Tag the release commit and push the tag:
+git tag sdk-v0.1.0
+git push origin sdk-v0.1.0
+```
+
+> **The first tagged release promotes `latest`.** npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+
 ## CI & review automation
 
 This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.

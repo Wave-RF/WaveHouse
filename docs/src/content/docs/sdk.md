@@ -29,7 +29,7 @@ No bundler or `npm` required — drop the SDK into a static HTML file you deploy
 </script>
 ```
 
-Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming uses the browser's native `EventSource`, so it needs no polyfill either way.
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming uses the browser's native `EventSource`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Releasing the SDK](/development#releasing-the-sdk)).
 
 ## Quick Start
 
