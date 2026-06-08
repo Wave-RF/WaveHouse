@@ -58,6 +58,7 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
 # stream live events in one terminal, then ingest one in another and watch it arrive
 curl -N "http://localhost:8080/v1/stream?table=events" & sleep 1
 # in another terminal, ingest an event (no auth needed with the dev policy)
+# (a 404 "unknown table" here just means schema discovery hasn't seen the new table yet — retry; worst case 60s)
 curl -sX POST "http://localhost:8080/v1/ingest?table=events" \
   -H 'content-type: application/json' -d '{"kind":"click","user":"u_42"}'
 ```

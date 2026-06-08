@@ -317,6 +317,15 @@ Source-of-truth pairs that must agree:
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
 
+### Authoring Mermaid diagrams
+
+Diagrams render inside the Starlight content column (~46–58rem wide) as build-time SVG via `astro-themed-mermaid`, themed by `docs/src/config/mermaid-theme.mjs`. **Author them vertically so they fit the page at a legible size** — the single most common diagram mistake here is a wide left-to-right flowchart that gets scaled down to fit the column until its labels are unreadable.
+
+- **Default to top-down**: `flowchart TB`/`TD`, and `direction TB` inside subgraphs — not `LR`/`RL`. A tall diagram keeps full-size nodes and just costs page height (cheap); a wide one shrinks to illegibility. Reserve `LR` for genuinely short chains (≤3–4 nodes) that read naturally as a single line.
+- **Never sit two large diagrams side-by-side.** Wrap comparisons in `<div class="diagram-pair">…</div>`, which stacks them vertically so each gets the full column width. (Two detailed diagrams in a row each shrink to ~half width and stop being readable.)
+- **Keep node labels short.** Labels are measured at build time to size the box; use `<br/>` for a second line rather than one long line. Lean on the `:::` semantic node classes (`wh`, `win`, `pain`, `fail`, `infra`, `neutral`, `store`, `client`) and the `--wh-mermaid-*` vars rather than inline colors.
+- Diagrams are **click-to-zoom** on the site (`docs/src/components/MermaidZoom.astro`), so fine detail is always recoverable — but that's a fallback, not a license to ship an illegible inline diagram.
+
 ## SDK Sync
 
 The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) is the canonical client and ships from this repo. When backend changes alter the public API surface, the SDK needs corresponding updates. The `pre-commit` git hook flags likely misses informationally; consult this table when deciding what to update.

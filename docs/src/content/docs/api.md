@@ -230,7 +230,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 **curl example:**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
@@ -303,7 +303,7 @@ A `200` is returned whenever the body was read and the records were processed �
 **curl example (JSON array):**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '[{"page":"/home"},{"page":"/about"}]'
 ```
@@ -311,7 +311,7 @@ curl -X POST http://localhost:8080/v1/ingest?table=clicks \
 **curl example (NDJSON):**
 
 ```bash
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/x-ndjson" \
   --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
 ```
@@ -375,7 +375,9 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 **curl example:**
 
 ```bash
+# Requires an admin-role JWT — see "Generating a JWT for Testing" below.
 curl -X POST http://localhost:8080/v1/admin/query \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
@@ -418,8 +420,8 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
-| `limit` | int | No | Max rows. |
-| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m", "7d", "2w") or RFC3339. |
+| `limit` | int | No | Max rows. Omitted or above 10,000 → silently capped at 10,000 (`DefaultMaxRows`); a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-duration relative values ("1h", "30m", "7d", "2w" — day and week suffixes expand to hours). Relative values mean that long *ago*. The window applies only when `column` and `since` are set — an `until` without `since` is ignored. |
 
 > **Identifier names.** Table, column, and alias names may contain any characters ClickHouse accepts — dots, spaces, unicode, reserved keywords — because every identifier is backtick-quoted automatically. The one exception is a name containing a literal `?`, which is rejected with `400` (a clickhouse-go positional-binder limitation tracked in [#279](https://github.com/Wave-RF/WaveHouse/issues/279)).
 
@@ -518,6 +520,8 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 Returns all discovered ClickHouse table schemas.
 
+> **Admin only.** The schema and DLQ endpoints in this section require the `admin_role` (like [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); other callers get 401 (bad token) / 403. The quickstart's trial `public` role cannot call them.
+
 **Response:**
 
 ```json
@@ -555,13 +559,22 @@ Returns the schema for a specific table.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
+| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
 | 404 | `{"error":"table not found"}` | Table not in discovered schemas |
 
 ---
 
 ### `POST /v1/schema/refresh` — Refresh Schemas
 
-Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`).
+Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`). Admin-only, like the rest of this section.
+
+**Error responses:**
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 401 / 403 | as above | Not the admin role |
+| 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
 
 **Response:**
 
@@ -580,7 +593,15 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 
 ### `GET /v1/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in the Dead Letter Queue.
+Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
+
+**Error responses:**
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
+| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
+| 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 
 **Query Parameters:**
 
@@ -722,7 +743,7 @@ Same as the wire format — events are passed through directly:
 
 ## Dead Letter Queue (DLQ)
 
-When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ payload is the inner data object that failed to insert (`{"id":"abc","field":...}`).
+When batch inserts to ClickHouse fail (e.g., type errors, connection issues), the failed events are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — failed messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the original `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}` — the failed row is under its `data` key); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
 
 Use `GET /v1/dlq/stats` to monitor DLQ depth.
 
@@ -730,13 +751,15 @@ Use `GET /v1/dlq/stats` to monitor DLQ depth.
 
 Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
 
+`"change-me-in-production"` below is the placeholder shipped in the repo's `config.yaml` (what `make dev` / `./bin/wavehouse` load). The compose quickstart sets **no** secret — set `WH_AUTH_JWT_SECRET` on the `wavehouse` service and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
+
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
 jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}'
 
 # Export for use with curl:
 export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}')
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home"}'

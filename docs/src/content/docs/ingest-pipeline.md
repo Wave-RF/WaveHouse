@@ -16,7 +16,7 @@ goroutine / channel / timer interplay is subtle.
 | File | Contents |
 | --- | --- |
 | `worker.go` | `StartIngestWorker`, the `dispatchLoop`, the per-table `tableBatcher`/`tableLoop`, `flushTable`, `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ` |
-| `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE/WS gap window |
+| `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
 The pipeline is **insert-only**. The wire format carries
@@ -55,11 +55,11 @@ flowchart LR
     TLa -.->|"poison rows"| DLQ["WAVEHOUSE_DLQ<br/>dlq.TABLE"]
 
     Sweep["Active Sweeper"] -.->|"reads AckFloor, purges"| Stream
-    Stream -.->|"DeliverByStartTime gap-fill"| Hub["hub-bridge consumer<br/>(SSE / WS fan-out)"]
+    Stream -.->|"DeliverByStartTime gap-fill"| Hub["hub-bridge consumer<br/>(SSE fan-out)"]
 ```
 
 Note the stream is **dual-use**: it is both the durable buffer feeding the
-worker and the replay buffer that SSE/WS clients gap-fill from. That is why a
+worker and the replay buffer that SSE clients gap-fill from. That is why a
 custom sweeper exists instead of plain work-queue auto-deletion (see
 [Scaling out](#scaling-to-multiple-instances)).
 
@@ -289,7 +289,7 @@ flowchart TD
 ```
 
 `MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in
-ClickHouse, and never past the SSE/WS replay window. If ClickHouse is down the
+ClickHouse, and never past the SSE replay window. If ClickHouse is down the
 `AckFloor` stops advancing, purging freezes, and the stream fills toward
 `MaxBytes` — backpressure by construction. The sweeper is launched fire-and-forget
 (`go sweeper.Start(ctx)`); an interrupted sweep is harmless and idempotent, so it
