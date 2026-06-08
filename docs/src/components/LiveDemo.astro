@@ -256,7 +256,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
         return;
       }
       // Pre-#19 fallback (per-number reads) so a stats-stack rollback
-      // degrades to slower, not blank. ("168h" not "7d" — see #285.)
+      // degrades to slower, not blank.
       void loadCount("stars", () => wh.pipe("gh_stars_total").fetch());
       void loadCount("forks", () => wh.pipe("gh_forks_total").fetch());
       void loadCount("events7d", () =>
