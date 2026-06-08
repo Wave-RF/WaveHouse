@@ -1,11 +1,11 @@
 ---
 name: pr-review-locally
-description: Use when a user wants to review someone else's open PR locally without commenting on the PR. Triggers on phrases like "review PR <N>", "look at PR <N>", "audit PR <N>", "pull down PR <N> and review", "check out PR <N> for me". Covers worktrunk's `wt switch pr:<N>` syntax (gh-CLI-backed) and the `gh pr checkout` fallback. Pairs with the pre-push-reviewer subagent.
+description: Use when a user wants to review someone else's open PR locally without commenting on the PR. Triggers on phrases like "review PR <N>", "look at PR <N>", "audit PR <N>", "pull down PR <N> and review", "check out PR <N> for me". Covers worktrunk's `wt switch pr:<N>` syntax (gh-CLI-backed) and the `gh pr checkout` fallback. Runs the relevant reviewer subagents listed in scripts/pre-push-reviewers.sh (code, docs, …) in parallel.
 ---
 
 # Reviewing someone else's PR locally
 
-For "review PR 120 locally" / "audit this PR" / "pull down PR <N> and tell me what you think" — pull the PR's content into a worktree, run the `pre-push-reviewer` subagent against it in fresh context, surface findings to the user. Don't comment on the PR.
+For "review PR 120 locally" / "audit this PR" / "pull down PR <N> and tell me what you think" — pull the PR's content into a worktree, run the relevant reviewer subagents against it in parallel in fresh context, surface their combined findings to the user. Don't comment on the PR.
 
 ## Procedure
 
@@ -30,28 +30,33 @@ git rev-parse HEAD              # should match the PR's head SHA
 gh pr view --json number,state,headRefName --jq .   # confirm we're on PR 120's branch
 ```
 
-### 2. Invoke the `pre-push-reviewer` subagent
+### 2. Run the relevant reviewers — in parallel
 
-Use the `Agent` tool:
+List the gating reviewers and decide which apply to *this* PR's diff (same run/skip judgment as `/prepush` → "Decide, per reviewer", but lean toward running — an audit favors thoroughness and there's no push-loop cost):
 
-```js
-Agent({
-  subagent_type: "pre-push-reviewer",
-  description: "Review PR <N> locally",
-  prompt: "Review the current branch (PR <N>) against main. Use the canonical
-           .github/prompts/pr-review.md workflow — full PR diff vs merge-base,
-           latest commit, all open PR comments and reviews, CI status. Return
-           [MUST]/[SHOULD]/[MAY] findings and a parseable verdict line."
-})
+```bash
+scripts/pre-push-reviewers.sh        # the reviewer set, one subagent name per line
+git diff --stat main...HEAD          # what the PR changes — guides which reviewers are relevant
 ```
 
-The subagent runs in **fresh context** — no contamination from your current session's assumptions. That's the whole point: the review should be cold-eyed.
+Launch the relevant ones **in a single message** (one `Agent` call each → concurrent), each in **fresh context**; `subagent_type` is the reviewer name. For example:
+
+```js
+// all in one message:
+Agent({ subagent_type: "pre-push-reviewer", description: "Review PR <N> (code)",
+        prompt: "Review the current branch (PR <N>) vs main using .github/prompts/pr-review.md — full diff vs merge-base, latest commit, open PR comments + reviews, CI status. Return [MUST]/[SHOULD]/[MAY] findings + a verdict line." })
+Agent({ subagent_type: "docs-reviewer", description: "Review PR <N> (docs)",
+        prompt: "Review the current branch (PR <N>) — docs prose + code↔docs sync vs main, default branch scope. Return [MUST]/[SHOULD]/[MAY] findings + a verdict line." })
+// …plus any other reviewer scripts/pre-push-reviewers.sh lists that's relevant to this PR
+```
+
+Fresh context is the whole point — cold-eyed, uncontaminated by your session. No markers matter here: this is an audit of someone else's branch, not your push (don't run `skip-pre-push-review.sh` — that's only for satisfying *your own* push gate). If a reviewer's `ship_it` happens to write a marker, it's harmless.
 
 ### 3. Surface findings to the user
 
-Present the subagent's output. Don't auto-fix anything — the PR belongs to someone else. The user decides what to do with the findings.
+Present the subagents' combined output, grouped by reviewer. Don't auto-fix anything — the PR belongs to someone else. The user decides what to do with the findings.
 
-If the user asks "should I approve?", that's their call — you can summarize the verdict (`Ship it` / `Iterate` / `Block`) and highlight the highest-severity findings, but the actual approval decision is theirs.
+If the user asks "should I approve?", that's their call — you can summarize each reviewer's verdict (`Ship it` / `Iterate` / `Block`) and highlight the highest-severity findings, but the actual approval decision is theirs.
 
 ## Findings stay local
 

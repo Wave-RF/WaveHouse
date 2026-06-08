@@ -286,7 +286,8 @@ func TestBuild_InvalidGroupByColumn(t *testing.T) {
 
 func TestResolveTimeValue_RelativeDuration(t *testing.T) {
 	t.Parallel()
-	result := resolveTimeValue("1h", 0)
+	result, err := resolveTimeValue("1h", 0)
+	require.NoError(t, err)
 	assert.NotEmpty(t, result)
 	assert.NotEqual(t, "1h", result, "relative duration should resolve to a timestamp")
 
@@ -297,15 +298,68 @@ func TestResolveTimeValue_RelativeDuration(t *testing.T) {
 func TestResolveTimeValue_RFC3339(t *testing.T) {
 	t.Parallel()
 
-	result := resolveTimeValue("2024-01-01T00:00:00Z", 0)
+	result, err := resolveTimeValue("2024-01-01T00:00:00Z", 0)
+	require.NoError(t, err)
 	assert.Equal(t, "2024-01-01 00:00:00", result)
 }
 
 func TestResolveTimeValue_WithBucketing(t *testing.T) {
 	t.Parallel()
 	// With 60s buckets, a time at :30 should truncate to :00.
-	result := resolveTimeValue("2024-01-01T12:34:30Z", 60)
+	result, err := resolveTimeValue("2024-01-01T12:34:30Z", 60)
+	require.NoError(t, err)
 	assert.Equal(t, "2024-01-01 12:34:00", result)
+}
+
+func TestExpandDayWeek(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"7d":    "168h", // documented day suffix (#285)
+		"1d":    "24h",
+		"2w":    "336h",
+		"1w":    "168h",
+		"0.5d":  "12h",    // fractional magnitude
+		"1d12h": "24h12h", // ParseDuration sums repeated units
+		"1h":    "1h",     // already a unit ParseDuration handles — untouched
+		"30m":   "30m",
+		"":      "", // no component — verbatim
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, expandDayWeek(in), "expandDayWeek(%q)", in)
+	}
+}
+
+func TestResolveTimeValue_DayWeekSuffix(t *testing.T) {
+	t.Parallel()
+	// "7d"/"2w" are documented (sdk.md) but not Go durations; they must resolve
+	// to a real ClickHouse DateTime, not fall through as the raw string (#285).
+	for _, in := range []string{"7d", "2w", "1d12h"} {
+		result, err := resolveTimeValue(in, 0)
+		require.NoError(t, err, "resolveTimeValue(%q)", in)
+		assert.NotEqual(t, in, result, "%q must resolve, not pass through raw", in)
+		assert.NotContains(t, result, "T")
+		assert.NotContains(t, result, "Z")
+	}
+
+	// "7d" must resolve to the same instant as its hour-equivalent "168h".
+	// Bucket to the day so the sub-millisecond gap between the two time.Now()
+	// reads can't make the comparison flaky.
+	day := 86400
+	d7, err := resolveTimeValue("7d", day)
+	require.NoError(t, err)
+	h168, err := resolveTimeValue("168h", day)
+	require.NoError(t, err)
+	assert.Equal(t, h168, d7, `"7d" and "168h" should resolve to the same bucketed time`)
+}
+
+func TestResolveTimeValue_Invalid(t *testing.T) {
+	t.Parallel()
+	// Neither a duration nor a timestamp: must fail closed (→ 400) instead of
+	// reaching ClickHouse as a raw literal (#285).
+	for _, in := range []string{"7dd", "banana", "7 days", "168", "7D"} {
+		_, err := resolveTimeValue(in, 0)
+		require.Error(t, err, "resolveTimeValue(%q) should error", in)
+	}
 }
 
 func TestBucketTime_ZeroBucket(t *testing.T) {
@@ -430,6 +484,16 @@ func TestBuild_InvalidColumns(t *testing.T) {
 				TimeRange: &TimeRange{Column: "nonexistent", Since: "2024-01-01T00:00:00Z"},
 			},
 			wantErr: "unknown column",
+		},
+		{
+			// Valid column, unparseable duration: must fail closed at Build
+			// (→ 400) rather than reach ClickHouse as a raw literal (#285).
+			name: "invalid time range since duration",
+			sq: &StructuredQuery{
+				Columns:   []string{"page"},
+				TimeRange: &TimeRange{Column: "ts", Since: "banana"},
+			},
+			wantErr: "invalid time value",
 		},
 	}
 	for _, tt := range tests {

@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -315,12 +316,18 @@ func buildWhere(filters []Filter, timeRange *TimeRange, bucketSeconds int) ([]st
 
 	if timeRange != nil && timeRange.Column != "" && timeRange.Since != "" {
 		col := chsql.QuoteIdent(timeRange.Column)
-		sinceTime := resolveTimeValue(timeRange.Since, bucketSeconds)
+		sinceTime, err := resolveTimeValue(timeRange.Since, bucketSeconds)
+		if err != nil {
+			return nil, nil, fmt.Errorf("time_range since: %w", err)
+		}
 		parts = append(parts, fmt.Sprintf("%s >= ?", col))
 		params = append(params, sinceTime)
 
 		if timeRange.Until != "" {
-			untilTime := resolveTimeValue(timeRange.Until, bucketSeconds)
+			untilTime, err := resolveTimeValue(timeRange.Until, bucketSeconds)
+			if err != nil {
+				return nil, nil, fmt.Errorf("time_range until: %w", err)
+			}
 			parts = append(parts, fmt.Sprintf("%s <= ?", col))
 			params = append(params, untilTime)
 		}
@@ -389,25 +396,57 @@ func formatClickHouseTime(t time.Time) string {
 	return t.UTC().Format(clickHouseDateTimeLayout)
 }
 
+// dayWeekRe matches a duration component with a day ("d") or week ("w") unit —
+// the two units time.ParseDuration rejects (it stops at hours). The magnitude
+// may be fractional, e.g. "0.5d".
+var dayWeekRe = regexp.MustCompile(`(\d+(?:\.\d+)?)([dw])`)
+
+// expandDayWeek rewrites the day/week components of a duration string into hours
+// so time.ParseDuration accepts them: "7d" → "168h", "2w" → "336h", "1d12h" →
+// "24h12h" (ParseDuration sums repeated units). Components in units it already
+// understands are left untouched, and a string with no day/week component is
+// returned verbatim. This keeps the documented "7d"-style ranges working
+// (sdk.md) without reimplementing duration parsing. RFC3339 timestamps contain
+// no lowercase d/w, so they pass through unchanged.
+func expandDayWeek(s string) string {
+	return dayWeekRe.ReplaceAllStringFunc(s, func(m string) string {
+		sub := dayWeekRe.FindStringSubmatch(m)
+		n, err := strconv.ParseFloat(sub[1], 64)
+		if err != nil {
+			return m // regex guarantees a numeric sub[1]; never corrupt on surprise input
+		}
+		hoursPerUnit := 24.0
+		if sub[2] == "w" {
+			hoursPerUnit = 168.0
+		}
+		return strconv.FormatFloat(n*hoursPerUnit, 'f', -1, 64) + "h"
+	})
+}
+
 // resolveTimeValue parses an RFC3339 timestamp or a relative duration like "1h",
-// "30m" and renders it as a ClickHouse DateTime literal (see formatClickHouseTime).
-// When bucketSeconds > 0, timestamps are bucketed (truncated) to the nearest
-// boundary. An unrecognised value is returned unchanged, which will likely
-// cause a ClickHouse error.
+// "30m", "7d" or "2w" and renders it as a ClickHouse DateTime literal (see
+// formatClickHouseTime). When bucketSeconds > 0, timestamps are bucketed
+// (truncated) to the nearest boundary.
+//
+// A value that is neither a duration nor a timestamp is rejected with an error
+// (which the builder surfaces as a 400) rather than returned unchanged: passing
+// a raw string to ClickHouse surfaces as an opaque DateTime parse error (#285).
 //
 // The output deliberately matches coerceFilterValue's format rather than RFC3339:
 // a bare "…T…Z" string is rejected by DateTime64 columns.
-func resolveTimeValue(val string, bucketSeconds int) string {
-	// Try relative duration first (e.g., "1h", "30m", "5m").
-	if d, err := time.ParseDuration(val); err == nil {
-		return formatClickHouseTime(bucketTime(time.Now().UTC().Add(-d), bucketSeconds))
+func resolveTimeValue(val string, bucketSeconds int) (string, error) {
+	// Try a relative duration first (e.g., "1h", "30m", "7d", "2w"). Go's
+	// time.ParseDuration only understands units up to hours, so day/week
+	// suffixes are pre-expanded to hours.
+	if d, err := time.ParseDuration(expandDayWeek(val)); err == nil {
+		return formatClickHouseTime(bucketTime(time.Now().UTC().Add(-d), bucketSeconds)), nil
 	}
 	// Try an absolute timestamp (RFC3339Nano accepts fractional and whole-second
 	// input); normalise to UTC before bucketing.
 	if t, err := time.Parse(time.RFC3339Nano, val); err == nil {
-		return formatClickHouseTime(bucketTime(t.UTC(), bucketSeconds))
+		return formatClickHouseTime(bucketTime(t.UTC(), bucketSeconds)), nil
 	}
-	return val
+	return "", fmt.Errorf("invalid time value %q: want an RFC3339 timestamp or a relative duration such as \"1h\", \"30m\", \"7d\", \"2w\"", val)
 }
 
 // bucketTime truncates a time to the nearest bucket boundary.

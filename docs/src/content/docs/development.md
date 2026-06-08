@@ -18,7 +18,7 @@ You need these on your `PATH` before any `make` recipe will work end-to-end:
 | **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
 | **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
 | **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json` and `docs/package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
+| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
 | **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time; nothing else in the docs *build* uses a browser — the manual `docs/scripts/screenshot.mjs` QA helper drives the same Chromium). `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
 
 ### Verify your setup
 
@@ -365,7 +365,7 @@ Install options:
 - **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 - **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 
-The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control). Enabled linters:
+The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
 - **errcheck** — Unchecked error returns
 - **govet** — Suspicious constructs
@@ -376,12 +376,12 @@ The configuration is in `.golangci.yml` (v2 format with `default: none` for expl
 - **revive** — Extensible linter (replaces golint)
 - **ineffassign** — Ineffective assignments
 - **misspell** — Spelling errors in comments/strings
-- **gofumpt** — Strict formatting (superset of gofmt)
-- **goimports** — Import ordering and grouping
 - **bodyclose** — Unclosed HTTP response bodies
 - **noctx** — HTTP requests without context
 - **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
 - **tparallel** — Missing `t.Parallel()` in test subtests
+
+Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
 
 ## Project Structure
 
@@ -473,7 +473,7 @@ Run `make help` to see all targets. Key ones:
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
 | `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`) |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
@@ -501,10 +501,11 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for four ecosystems:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for five ecosystems:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
 - **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
+- **npm — docs site** (`docs/`), commit prefix `docs:`
 - **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
 - **npm — E2E tests** (`tests/e2e/sdk/`), commit prefix `deps(tests):`
 
@@ -518,7 +519,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format (enforced by `.github/workflows/pr-title.yml` as the required `Validate` status check):
+PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the required `PR housekeeping` check (`.github/workflows/housekeeping.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -526,23 +527,21 @@ PR titles must match Conventional Commits format (enforced by `.github/workflows
 
 Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`.
 
-The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`).
+The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
 If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
 
 ### Required status checks
 
-The `main branch protection` ruleset requires the following checks to pass before any PR can merge:
+The `main branch protection` ruleset requires three status checks to pass before any PR can merge:
 
-- `Check` — module tidiness, format verification, vulnerability scan
-- `Build` — compile all binaries
-- `Validate` — PR title is Conventional Commits
+- `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
+- `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
+- `Admin approval` — at least one `APPROVED` review from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
 
-Plus 1 approving review, and the `Admin approval` check (enforced by `.github/workflows/admin-approval.yml`) requires at least one `APPROVED` review specifically from an admin (Eric or Taite). Linear history, no deletion, no force-push, squash-merge only.
+The ruleset also enforces 1 approving review, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only.
 
 Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
-
-> **Note — temporarily relaxed**: `Lint`, `Test`, and `Integration Tests` are *not* currently required while pre-existing failures on `main` are being fixed (tracked in #57). They'll rejoin required once main is green.
 
 ### Merge behavior
 
@@ -561,15 +560,15 @@ Advisory PR review comes from marketplace apps configured at the org/repo level:
 
 Both are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
 
-### Task Board is the single signal
+### Reviewer assignment and the Task Board
 
-`.github/workflows/project-orchestrator.yml` drives the Task Board (project #7) as the real "who needs to look at this next" channel. GitHub's review-request notifications are treated as noise; what matters is the position of your assigned card on the board.
+Reviewer assignment is automated; the board itself is GitHub-native, not a workflow state machine:
 
-- **Coder flow**: open PR (draft or not) → address bot feedback → once all required checks pass and all review threads are resolved, the orchestrator adds the PR to the board, sets its Status to `Ready`, and assigns the non-author admin. You're done for now.
-- **Reviewer flow**: PR card shows up on your board in `Ready`. You move it to `In progress` when you start reviewing (this is the one manual step). You review. Either (a) approve → `admin-approval.yml` passes, auto-merge takes over, card auto-flips to `Done`; or (b) click "Request changes" → orchestrator moves PR card to `In review`, linked issue card to `Ready` (now the coder's ball).
-- **Coder addressing feedback**: push fixes, resolve threads, then click "re-request review" on your reviewer in GitHub's sidebar (this is the trigger the orchestrator listens for). Orchestrator moves PR card back to `Ready`, issue card back to `In review`. Reviewer sees the card returned to their column.
+- **Reviewer assignment**: on PR open / ready-for-review, the `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) requests review from the non-author admin and sets them as assignee. It does **not** re-request on every push — after addressing feedback, use GitHub's "Re-request review" button (the trigger, if `dismiss_stale_reviews_on_push` cleared the request).
+- **Merge gate**: the `Admin approval` status check (`.github/workflows/admin-approval.yml`) fails until an admin has an `APPROVED` review; the ruleset adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
+- **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review). Dependabot PRs do not appear on the Task Board.
+Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
 
 ### Invoking bots manually
 
@@ -578,7 +577,7 @@ Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch
 
 ### Review-response expectations
 
-Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response (MANDATORY)": accept / push back / defer, reply with detail, resolve when settled.
+Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response": accept / push back / defer, reply with detail, resolve when settled.
 
 When pushing back on a bot's suggestion, end the reply with the bot's mention (e.g. `@coderabbitai`) to invite a counter-reply so the dialog actually loops.
 
@@ -593,7 +592,7 @@ When pushing back on a bot's suggestion, end the reply with the bot's mention (e
 
 ### Auto-labeling PRs
 
-`.github/workflows/label.yml` uses `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
+The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
 
 ### When adding a new `internal/<pkg>/` package
 

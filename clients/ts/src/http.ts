@@ -5,6 +5,14 @@ interface RequestOptions {
   method: string;
   path: string;
   body?: unknown;
+  /**
+   * Pre-serialized request body, sent verbatim (no `JSON.stringify`) — e.g.
+   * NDJSON text. Takes precedence over `body`. Must be re-sendable so retries
+   * work, hence a string rather than a stream.
+   */
+  rawBody?: string;
+  /** Override the request Content-Type (default `application/json`). */
+  contentType?: string;
   params?: Record<string, string>;
   signal?: AbortSignal;
 }
@@ -23,9 +31,17 @@ export interface HttpResult<T> {
 export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promise<HttpResult<T>> {
   const url = buildURL(ctx.baseURL, opts.path, opts.params);
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    "Content-Type": opts.contentType ?? "application/json",
     Accept: "application/json",
   };
+
+  // Serialize once so every retry attempt re-sends an identical body.
+  const requestBody: string | undefined =
+    opts.rawBody !== undefined
+      ? opts.rawBody
+      : opts.body !== undefined
+        ? JSON.stringify(opts.body)
+        : undefined;
 
   if (ctx.auth) {
     const token = await ctx.auth();
@@ -42,7 +58,7 @@ export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promis
       const res = await fetch(url, {
         method: opts.method,
         headers,
-        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        body: requestBody,
         signal: opts.signal,
       });
 

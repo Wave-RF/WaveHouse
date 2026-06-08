@@ -141,9 +141,11 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ```text
 Client POST /v1/ingest?table={table}
-  → Optional JWT auth middleware
+  → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
+  → Policy check: role allowed to insert into this table (before the body is parsed)
   → Validate JSON body against schema (type checks, required columns)
+  → Policy column rules + check clauses (disallowed columns rejected; claim-derived values enforced or injected)
   → Optional deduplication check (configurable ID field)
   → Publish to NATS JetStream (ingest.{table})
   → 200 OK returned immediately
@@ -226,12 +228,14 @@ consistent.
 
 ```text
 Client GET /v1/stream
-  → Optional JWT auth middleware
+  → JWT auth middleware (always runs; token optional)
   → If ?since= parameter provided:
     → Create ephemeral NATS consumer with DeliverByStartTime
     → Send historical events from JetStream first
   → Subscribe to Hub (in-process pub/sub)
   → Stream live events as they arrive via MQ → Hub → client
+  → Every event (historical + live) passes per-role policy filtering:
+    denied tables skipped, denied columns stripped
 ```
 
 ## Technology Stack

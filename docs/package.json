@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "astro dev",
+    "dev": "node scripts/dev.mjs",
     "start": "astro dev",
     "build": "astro build",
     "check": "astro check",
@@ -19,7 +19,7 @@
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@tailwindcss/vite": "^4.3.0",
     "astro": "^6.1.5",
-    "astro-themed-mermaid": "github:Wave-RF/astro-themed-mermaid#v0.1.1",
+    "astro-themed-mermaid": "github:Wave-RF/astro-themed-mermaid#v0.2.0",
     "cloudflare-md-router": "github:Wave-RF/cloudflare-md-router",
     "katex": "^0.16.11",
     "rehype-katex": "^7.0.1",

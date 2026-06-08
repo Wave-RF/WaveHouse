@@ -160,7 +160,17 @@ A binary built without the `-ldflags` injection (e.g. a bare `go build` rather t
 
 ### `POST /v1/ingest?table={table}` — Ingest Data
 
-Accepts a flat JSON object, validates it against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
+Accepts a single flat JSON object, a JSON array of objects, or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
+
+**The format is auto-detected from the body — `Content-Type` is only a hint.** The first non-whitespace byte decides: `[` selects a JSON array, anything else a single JSON object. An explicit `Content-Type: application/x-ndjson` selects NDJSON line-framing *unless* the body starts with `[` (the array wins), so a batch works whether or not the header matches.
+
+| Body | Typical `Content-Type` | Response |
+| ---- | ---------------------- | -------- |
+| one flat JSON object | `application/json` *(default)* | `{"ok":true}` (or `{"duplicate":true}`) |
+| a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
+| one JSON object per line (NDJSON) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
+
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -207,8 +217,12 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
+| 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
+| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
+| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
 | 500 | `{"error":"publish failed"}` | Message queue error |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
@@ -219,6 +233,87 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
+```
+
+#### Batch Ingest
+
+A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
+
+- **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
+- **NDJSON** — the streaming-friendly form for very large uploads. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+
+**Request (JSON array):**
+
+```http
+POST /v1/ingest?table=clicks
+Content-Type: application/json
+
+[{"page": "/home", "score": 42.5}, {"page": "/about"}, {"page": "/pricing", "score": 7}]
+```
+
+**Request (NDJSON):**
+
+```http
+POST /v1/ingest?table=clicks
+Content-Type: application/x-ndjson
+
+{"page": "/home", "score": 42.5}
+{"page": "/about"}
+{"page": "/pricing", "score": 7}
+```
+
+**Response (`200`):** a per-record summary. Each `results` entry mirrors the single-object response (`ok` / `duplicate` / `error`) plus its 1-based `index`.
+
+```json
+{
+  "total": 3,
+  "succeeded": 2,
+  "failed": 1,
+  "duplicates": 0,
+  "results": [
+    { "index": 1, "ok": true },
+    { "index": 2, "ok": true },
+    { "index": 3, "error": "validation failed: ..." }
+  ]
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `total` | records read from the body |
+| `succeeded` | records validated and published |
+| `failed` | records rejected — see `results` |
+| `duplicates` | records skipped by dedup (when enabled) |
+| `results` | per-record outcomes, each `{ index, ok\|duplicate\|error }` with `index` the 1-based record position. Truncated to the first 10,000 entries for very large batches (the counts stay authoritative). |
+
+A `200` is returned whenever the body was read and the records were processed — **even if every record failed**, so branch on `failed`/`results`, not the status code. Per-record problems (a malformed NDJSON line, a non-object array element, schema validation, column/check permission failures) are reported in `results` and the batch continues. Whole-request conditions abort with a non-`200` instead:
+
+| Status | Body | Cause |
+| ------ | ---- | ----- |
+| 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
+| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
+| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
+| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
+| 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
+| 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
+
+> **At-least-once on retry.** A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+
+**curl example (JSON array):**
+
+```bash
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+  -H "Content-Type: application/json" \
+  -d '[{"page":"/home"},{"page":"/about"}]'
+```
+
+**curl example (NDJSON):**
+
+```bash
+curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
 ```
 
 ---
@@ -324,7 +419,7 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
 | `limit` | int | No | Max rows. |
-| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m") or RFC3339. |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since` can be relative ("1h", "30m", "7d", "2w") or RFC3339. |
 
 > **Identifier names.** Table, column, and alias names may contain any characters ClickHouse accepts — dots, spaces, unicode, reserved keywords — because every identifier is backtick-quoted automatically. The one exception is a name containing a literal `?`, which is rejected with `400` (a clickhouse-go positional-binder limitation tracked in [#279](https://github.com/Wave-RF/WaveHouse/issues/279)).
 
@@ -336,7 +431,7 @@ JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: M
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation) |
+| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation, or an unparseable `time_range` `since`/`until` — neither a relative duration nor an RFC3339 timestamp) |
 | 403 | `{"error":"forbidden"}` | Role lacks select permission on table |
 | 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
@@ -633,14 +728,14 @@ Use `GET /v1/dlq/stats` to monitor DLQ depth.
 
 ## Generating a JWT for Testing
 
-Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves).
+Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):
-jwt encode --secret "change-me-in-production" '{"exp": 9999999999}'
+jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}'
 
 # Export for use with curl:
-export TOKEN=$(jwt encode --secret "change-me-in-production" '{"exp": 9999999999}')
+export TOKEN=$(jwt encode --secret "change-me-in-production" '{"role": "admin", "exp": 9999999999}')
 curl -X POST http://localhost:8080/v1/ingest?table=clicks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \

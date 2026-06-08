@@ -74,6 +74,7 @@ export const SUITES = [
   "dlq",
   "streaming",
   "ingest",
+  "ndjson",
   "query",
   "cache",
   "admin",
