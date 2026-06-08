@@ -121,7 +121,9 @@ const clicks = wh.from('clicks');
 
 ### `.fetch(opts?)`
 
-Shortcut for `SELECT *` with a default limit of 1000.
+Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
+
+To paginate, chain an explicit `.orderBy()` — a bare `.fetch()` sends no default order (see [Pagination](#pagination)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
 
 ```ts
 const { data, error, hasMore, next } = await clicks.fetch();
@@ -181,6 +183,14 @@ Start a query builder chain. See [Query Builder](#query-builder).
 const { data } = await clicks.select('page', 'button').where('page', '=', '/home').limit(10);
 ```
 
+### `.selectAll()`
+
+Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+
+```ts
+const { data } = await clicks.selectAll().where('country', '=', 'US').limit(10);
+```
+
 ### `.stream(opts?)`
 
 Open a real-time event subscription. See [Streaming](#streaming).
@@ -207,10 +217,18 @@ All methods return a new `QueryBuilder` — the original is unchanged.
 
 #### `.select(...columns)`
 
-Append columns to the SELECT clause.
+Append columns to the SELECT clause. A literal `'*'` is the column *named* `*`, not a wildcard — use `.selectAll()` for all columns.
 
 ```ts
 const q = clicks.select('page').select('button'); // SELECT page, button
+```
+
+#### `.selectAll()`
+
+Select every column your role may read (the all-columns wildcard, expanded server-side to your allowed columns). Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.).
+
+```ts
+const q = clicks.selectAll().where('country', '=', 'US');
 ```
 
 #### `.where(column, op, value)`
@@ -659,12 +677,13 @@ createClient<DB>(config) → WaveHouseClient
 ├── .from(table) → TableRef (NOT thenable)
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>
 │   ├── .select(...cols?) → QueryBuilder (PromiseLike)
-│   │   ├── .select() .where() .count() .sum() .avg() .min() .max()
+│   │   ├── .select() .selectAll() .where() .count() .sum() .avg() .min() .max()
 │   │   │   .countDistinct() .aggregate() .groupBy() .orderBy()
 │   │   │   .limit() .timeRange() .cacheTTL()
 │   │   ├── .fetch(opts?) → Promise<Result<Row[]>>
 │   │   ├── .stream(opts?) → StreamController
 │   │   └── .liveQuery(subscriber, opts?) → LiveQuery
+│   ├── .selectAll() → QueryBuilder (PromiseLike)
 │   ├── .insert(data) → Promise<Result<InsertResult>>
 │   ├── .insertNDJSON(source) → Promise<Result<InsertResult>>
 │   ├── .schema() → Promise<Result<TableSchema>>
