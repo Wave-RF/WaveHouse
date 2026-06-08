@@ -273,7 +273,7 @@ If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automat
 
 #### `.timeRange(column, since, until?)`
 
-Filter by a time window. `since` accepts RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`).
+Filter by a time window. `since` accepts RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`, `'2w'`).
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
