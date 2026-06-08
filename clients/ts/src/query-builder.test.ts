@@ -188,10 +188,13 @@ describe("QueryBuilder", () => {
 
   // --- Empty AST ---
 
-  it("omits empty arrays and undefined fields from AST", async () => {
+  it("a bare query defaults to select_all and omits empty arrays", async () => {
     await builder().fetch();
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    // Bare .fetch() means "read the table": the SDK opts into select_all so it
+    // returns rows, even though the wire default for omitted columns is nothing.
+    expect(body.select_all).toBe(true);
     expect(body.columns).toBeUndefined();
     expect(body.aggregations).toBeUndefined();
     expect(body.filters).toBeUndefined();
@@ -200,6 +203,28 @@ describe("QueryBuilder", () => {
     // received_timestamp default, so .fetch() stays valid on any schema (#270).
     expect(body.order_by).toBeUndefined();
     expect(body.time_range).toBeUndefined();
+  });
+
+  it(".select(...) sends explicit columns, not select_all", async () => {
+    await builder().select("page", "button").fetch();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.columns).toEqual(["page", "button"]);
+    expect(body.select_all).toBeUndefined();
+  });
+
+  it(".selectAll() sends select_all and no columns", async () => {
+    await builder().selectAll().fetch();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.select_all).toBe(true);
+    expect(body.columns).toBeUndefined();
+  });
+
+  it("an aggregation-only query does not default to select_all", async () => {
+    await builder().count("*", "n").fetch();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.select_all).toBeUndefined();
+    expect(body.columns).toBeUndefined();
+    expect(body.aggregations).toEqual([{ fn: "count", column: "*", alias: "n" }]);
   });
 
   // --- Fetch endpoint ---

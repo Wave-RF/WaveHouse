@@ -17,6 +17,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTableSchema_ColumnNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		schema *TableSchema
+		want   []string
+	}{
+		{
+			name: "preserves discovered order",
+			schema: &TableSchema{Name: "clicks", Columns: []Column{
+				{Name: "page"}, {Name: "user_id"}, {Name: "ts"},
+			}},
+			want: []string{"page", "user_id", "ts"},
+		},
+		{
+			name:   "no columns yields empty non-nil slice",
+			schema: &TableSchema{Name: "empty"},
+			want:   []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.schema.ColumnNames()
+			assert.Equal(t, tt.want, got)
+			assert.NotNil(t, got)
+		})
+	}
+}
+
 func TestNewSchemaRegistry_ConstructorDefaults(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
