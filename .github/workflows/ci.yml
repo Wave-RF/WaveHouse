@@ -33,7 +33,13 @@ jobs:
     timeout-minutes: 45
     steps:
       # Composite actions can't self-checkout — checkout first.
+      # fetch-depth: 0 (full history) so the docs build can read each page's
+      # real last-commit date from git: Starlight's `lastUpdated` footer and the
+      # sitemap's <lastmod> both silently fall back to the build time on the
+      # default shallow (depth-1) clone, making every page look freshly edited.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
 
       - id: setup
         uses: ./.github/actions/setup-env

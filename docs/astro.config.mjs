@@ -1,5 +1,6 @@
 // @ts-check
 
+import sitemap from "@astrojs/sitemap";
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
@@ -11,6 +12,7 @@ import starlightLinksValidator from "starlight-links-validator";
 import starlightLlmTools from "starlight-llm-tools";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
 import { sidebar } from "./src/config/sidebar.ts";
+import { sitemapLastmod } from "./src/config/sitemap-lastmod.mjs";
 
 // Color-agnostic Mermaid plugin (astro-themed-mermaid pkg) + WaveHouse's palette
 // (src/config/mermaid-theme). Diagram colors are defined once in global.css
@@ -161,6 +163,11 @@ export default defineConfig({
             ]),
       ],
     }),
+    // Starlight auto-adds @astrojs/sitemap only if we haven't — so providing
+    // our own (same integration, plus a `serialize` that injects per-page
+    // <lastmod> from git) is the supported way to enrich it. Nothing is lost:
+    // Starlight's own sitemap config is empty for a single-locale site.
+    sitemap({ serialize: sitemapLastmod }),
     mermaid.integration,
   ],
 });
