@@ -50,7 +50,9 @@ WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the 
 ```text
 internal/
 ├── api/         HTTP layer (Chi router, handlers, middleware, Hub)
+├── auth/        JWT/JWKS authentication middleware (HMAC or JWKS, role extraction)
 ├── cache/       In-process Ristretto cache with singleflight coalescing
+├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
 ├── config/      YAML + env var configuration loading
 ├── dedupe/      Optional deduplication (Pebble)
 ├── discovery/   ClickHouse schema introspection and validation
@@ -67,7 +69,7 @@ internal/
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with RequestID, RealIP, and a custom JSON recoverer (`jsonRecoverer`) that emits a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
 
 - **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin`, role == `policy.admin_role`): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
-- **`internal/auth`** — JWT auth middleware supporting HMAC and JWKS validation and role extraction from a configurable claim path. It always runs (no on/off flag) and never rejects: a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud.
+- **auth middleware** — the JWT/JWKS authentication middleware is its own package, [`auth/`](#auth--authentication); the router runs it on every `/v1/*` route.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
@@ -79,6 +81,11 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
 - **health.go** — Liveness (`/livez`), readiness (`/readyz`), and a content-free `Online` ping (`/v1/health`, the SDK's public liveness check); `/healthz` is a permanent alias of `/livez`, and `/health`/`/ready` are deprecated aliases. All three consult an optional `BootState` so they can return 503 while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/livez` returns 200 and stays there. `/readyz` additionally pings ClickHouse each call; `/v1/health` deliberately does not.
+
+### `auth/` — Authentication
+
+- **auth.go** — `Middleware(cfg)`: the JWT auth middleware. Verifies tokens with HMAC **or** JWKS (never both), with the accepted `alg` pinned to the active verifier and checked before any key is consulted (rejects `alg: none` and cross-family confusion). Extracts the caller's role from a configurable dot-path claim (`auth.role_claim`, default `role`). It always runs and never rejects — a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud (`401`, not a bare `403`).
+- **context.go** — request-context accessors and their setters for the role, claims, and token error (`RoleFromContext`, `ClaimsFromContext`, `AuthErrorFromContext`, and the matching `With*` helpers).
 
 ### `cache/` — Query Cache
 
@@ -134,6 +141,10 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 - **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
 - **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the #223 hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `internal/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed (#279). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
+
+### `chsql/` — ClickHouse SQL Helpers
+
+- **chsql.go** — Dependency-free ClickHouse SQL helpers shared by `query/` and `policy/`, kept in their own package to break an import cycle. `QuoteIdent` is the single place every identifier — column, table, alias — becomes SQL text: always backtick-quoted and escaped, so any ClickHouse-legal name (dots, spaces, unicode, keywords) is safe. `BindUnsafe` reports whether a name contains a literal `?`, which would desync clickhouse-go's positional binder; such names are rejected fail-closed rather than silently mis-bound.
 
 ## Data Flows
 

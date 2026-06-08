@@ -217,8 +217,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
-| 400 | `{"error":"validation failed: ..."}` | Schema validation errors (unknown fields, type mismatches, missing required columns) |
-| 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure |
+| 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
@@ -273,7 +272,7 @@ Content-Type: application/x-ndjson
   "results": [
     { "index": 1, "ok": true },
     { "index": 2, "ok": true },
-    { "index": 3, "error": "validation failed: ..." }
+    { "index": 3, "error": "unknown column \"referrer\" for table \"clicks\"" }
   ]
 }
 ```
