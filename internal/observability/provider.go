@@ -192,7 +192,15 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	}
 
 	if cfg.LogsEnabled {
-		logExporter, err := otlploggrpc.New(ctx)
+		// Endpoint/headers come from the env like the other signals; the TLS
+		// options are the one exception — see logExporterTLSOptions for the
+		// otlploggrpc v0.19 custom-CA/mTLS workaround (nil when none is set).
+		logOpts, err := logExporterTLSOptions()
+		if err != nil {
+			handleErr(err)
+			return shutdown, nil, err
+		}
+		logExporter, err := otlploggrpc.New(ctx, logOpts...)
 		if err != nil {
 			handleErr(err)
 			return shutdown, nil, err
