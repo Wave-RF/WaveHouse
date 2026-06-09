@@ -309,10 +309,15 @@ if (import.meta.env.DEV && !heroTitle) {
     gap: 1.5rem;
     align-items: flex-start;
   }
+  /* Entrance animates TRANSFORM ONLY, never opacity. An element painted at
+     opacity:0 isn't an eligible LCP candidate, so fading the hero in gave a
+     "NO_LCP" error in PageSpeed/Lighthouse on mobile — the hero is the only
+     above-the-fold content, so its h1/tagline/panel are the sole LCP
+     candidates and all started invisible. Translating a fully-opaque element
+     keeps it paintable and LCP-eligible (same fix as wave-rf.com's hero). */
   .wh-hero__text > [data-stagger] {
-    opacity: 0;
     transform: translateY(8px);
-    animation: wh-fade-up 0.6s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
+    animation: wh-rise 0.6s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
     animation-delay: calc(0.12s * var(--stagger, 0) + 0.05s);
   }
   .wh-hero__text > [data-stagger="0"] { --stagger: 0; }
@@ -321,9 +326,8 @@ if (import.meta.env.DEV && !heroTitle) {
   .wh-hero__text > [data-stagger="3"] { --stagger: 3; }
   .wh-hero__text > [data-stagger="4"] { --stagger: 4; }
 
-  @keyframes wh-fade-up {
+  @keyframes wh-rise {
     to {
-      opacity: 1;
       transform: translateY(0);
     }
   }
@@ -471,9 +475,8 @@ if (import.meta.env.DEV && !heroTitle) {
     position: relative;
     display: flex;
     min-width: 0; /* flex child default min-width:auto would re-floor the panel at min-content */
-    opacity: 0;
     transform: translateY(8px);
-    animation: wh-fade-up 0.8s 0.3s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
+    animation: wh-rise 0.8s 0.3s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
   }
 
   @media (prefers-reduced-motion: reduce) {
