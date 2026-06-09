@@ -391,12 +391,15 @@ WaveHouse/
 │   └── wavehouse/          # Standalone all-in-one binary
 ├── internal/               # Private application packages
 │   ├── api/                # HTTP handlers, router, middleware
+│   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # L1 (Ristretto) + L2 caching
+│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
+│   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
