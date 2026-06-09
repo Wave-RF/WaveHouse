@@ -34,9 +34,9 @@ jobs:
     steps:
       # Composite actions can't self-checkout — checkout first.
       # fetch-depth: 0 (full history) so the docs build can read each page's
-      # real last-commit date from git: Starlight's `lastUpdated` footer and the
-      # sitemap's <lastmod> both silently fall back to the build time on the
-      # default shallow (depth-1) clone, making every page look freshly edited.
+      # real last-commit date from git: Starlight's `lastUpdated` footer
+      # silently falls back to the build time on the default shallow (depth-1)
+      # clone, making every page look freshly edited.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
@@ -232,10 +232,14 @@ jobs:
           fi
 
       # One sticky comment, updated in place (matched by the marker) so
-      # re-pushes don't spam the PR. gh + GITHUB_TOKEN, same pattern as the
-      # triage/housekeeping workflows — no extra action dependency.
-      - name: Comment docs preview URL
-        if: steps.preview.outputs.url != ''
+      # re-pushes don't spam the PR. Runs whether the upload succeeded or
+      # failed — `!cancelled()` + an outcome check, since a bare `if:` is
+      # implicitly `success()` and would skip after the upload step's exit 1 —
+      # so a failed deploy is noted rather than leaving a stale "live" comment.
+      # Skipped only when no upload was attempted (outcome == 'skipped'). gh +
+      # GITHUB_TOKEN, same pattern as the triage/housekeeping workflows.
+      - name: Comment docs preview status
+        if: ${{ !cancelled() && (steps.preview.outcome == 'success' || steps.preview.outcome == 'failure') }}
         continue-on-error: true
         shell: bash
         env:
@@ -243,18 +247,76 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           URL: ${{ steps.preview.outputs.url }}
           SHA: ${{ github.event.pull_request.head.sha }}
+          PREVIEW_OUTCOME: ${{ steps.preview.outcome }}
         run: |
           marker='<!-- docs-preview-comment -->'
-          # Surface what the preview is actually built on: the commit subject
-          # and the upload time, so a stale preview is obvious at a glance.
-          # %s args (not the format string) carry the subject so a `%` in a
-          # commit message can't be read as a printf directive.
-          subject="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '.commit.message' 2>/dev/null | head -1 || true)"
-          [ -z "$subject" ] && subject='(commit message unavailable)'
-          updated="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          # Surface who/what/when the preview is built on so a stale or
+          # surprising one is obvious: commit subject, author(s) (incl.
+          # Co-authored-by trailers), and the commit's own timestamp. Read from
+          # git, not the REST API — the API normalizes commit dates to UTC and
+          # drops the commit's timezone; git's %cI keeps the original offset.
+          # fetch-depth: 0 in the checkout step guarantees the head commit is
+          # present locally. User-controlled text goes through %s args, never
+          # the printf format, so a `%` in a message or name can't act as a
+          # directive.
+          git cat-file -e "${SHA}^{commit}" 2>/dev/null || git fetch --quiet origin "$SHA" 2>/dev/null || true
+          subject="$(git show -s --format=%s "$SHA" 2>/dev/null || true)"
+          [ -z "$subject" ] && subject='(commit subject unavailable)'
+          author="$(git show -s --format=%an "$SHA" 2>/dev/null || true)"
+          committer="$(git show -s --format=%cn "$SHA" 2>/dev/null || true)"
+          # author first, then Co-authored-by names (emails stripped), deduped.
+          authors="$author"
+          while IFS= read -r ca; do
+            [ -z "$ca" ] && continue
+            [ "$ca" = "$author" ] && continue
+            if [ -z "$authors" ]; then authors="$ca"; else authors="$authors, $ca"; fi
+          done < <(git show -s --format=%B "$SHA" 2>/dev/null \
+            | grep -iE '^[[:space:]]*Co-authored-by:' \
+            | sed -E 's/^[^:]*:[[:space:]]*//; s/ *<[^>]*> *//g; s/[[:space:]]+$//')
+          [ -z "$authors" ] && authors='(author unavailable)'
+          credit="By $authors"
+          # Note a distinct human committer (someone else applied the patch);
+          # skip GitHub's web-flow merge/edit bot and anyone already credited.
+          if [ -n "$committer" ] && [ "$committer" != "$author" ] && [ "$committer" != "GitHub" ]; then
+            case ", $authors, " in
+              *", $committer, "*) ;;
+              *) credit="$credit (committed by $committer)" ;;
+            esac
+          fi
+          # Commit time in its own timezone: 2026-06-09T10:04:27-04:00 -> 2026-06-09 10:04 UTC-04:00
+          ciso="$(git show -s --format=%cI "$SHA" 2>/dev/null || true)"
+          if [ -n "$ciso" ]; then
+            day="${ciso%%T*}"; hm="${ciso#*T}"; hm="${hm:0:5}"
+            case "$ciso" in
+              *Z|*+00:00) off='UTC' ;;
+              *) off="UTC${ciso: -6}" ;;
+            esac
+            commit_meta="$credit · $day $hm $off"
+          else
+            commit_meta="$credit"
+          fi
+          # Rebuild/upload time — distinct from the commit time (a CI re-run, or
+          # a push made long after authoring, makes them differ) and shown so a
+          # failed or restarted deploy is legible. A static PR comment can't
+          # localize to each viewer's browser, so we pin to the maintainer
+          # team's zone, shown DST-aware via %Z (EST/EDT) and falling back to
+          # UTC if the runner lacks the zone data. (The commit line above keeps
+          # the numeric offset — git records only the offset, not a zone name.)
+          rebuilt="$(TZ='America/Detroit' date '+%Y-%m-%d %H:%M %Z')"
+          tz_note='maintainer-team timezone'
           commit_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/commit/${SHA}"
-          body="$(printf '%s\n📚 **Docs preview** is live: %s\n\nLive on [`%s`](%s) — %s\n_Updated %s_' \
-            "$marker" "$URL" "${SHA:0:7}" "$commit_url" "$subject" "$updated")"
+          commit_block="$(printf 'Commit [`%s`](%s) — %s\n_%s_' "${SHA:0:7}" "$commit_url" "$subject" "$commit_meta")"
+          # Status line + time label reflect how the upload actually went.
+          if [ "$PREVIEW_OUTCOME" = 'success' ] && [ -n "$URL" ]; then
+            body="$(printf '%s\n📚 **Docs preview** is live: %s\n\n%s\n_Rebuilt & deployed %s — %s_' \
+              "$marker" "$URL" "$commit_block" "$rebuilt" "$tz_note")"
+          elif [ "$PREVIEW_OUTCOME" = 'success' ]; then
+            body="$(printf '%s\n📚 **Docs preview** uploaded, but its URL could not be parsed from the wrangler output — see the run log.\n\n%s\n_Rebuilt %s — %s_' \
+              "$marker" "$commit_block" "$rebuilt" "$tz_note")"
+          else
+            body="$(printf '%s\n⚠️ **Docs preview** failed to upload (3 attempts) — any earlier preview is now stale. See the run log.\n\n%s\n_Upload failed %s — %s_' \
+              "$marker" "$commit_block" "$rebuilt" "$tz_note")"
+          fi
           cid="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
             --jq 'map(select(.body | startswith("<!-- docs-preview-comment -->"))) | .[0].id // empty' | head -1 || true)"
           if [ -n "$cid" ]; then
@@ -262,4 +324,4 @@ jobs:
           else
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body" >/dev/null
           fi
-          echo "Commented preview URL on PR #${PR}: ${URL}"
+          echo "Updated docs-preview comment on PR #${PR} (outcome=${PREVIEW_OUTCOME}, url=${URL:-none})"
