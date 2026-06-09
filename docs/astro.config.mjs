@@ -2,13 +2,13 @@
 
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
+import { themedMermaid } from "@wave-rf/astro-themed-mermaid";
+import starlightLlmTools from "@wave-rf/starlight-llm-tools";
 import { defineConfig } from "astro/config";
-import { themedMermaid } from "astro-themed-mermaid";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import starlightImageZoom from "starlight-image-zoom";
 import starlightLinksValidator from "starlight-links-validator";
-import starlightLlmTools from "starlight-llm-tools";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
 import { sidebar } from "./src/config/sidebar.ts";
 

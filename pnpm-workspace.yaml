@@ -17,6 +17,13 @@ allowBuilds:
 
 minimumReleaseAge: 10080
 
+# Exempt our own first-party packages from the release-age cooldown above. The
+# cooldown is a supply-chain defense against compromised third-party releases;
+# packages we publish ourselves (the @wave-rf/* scope) are trusted immediately,
+# and gating them would block consuming a freshly tagged release for 7 days.
+minimumReleaseAgeExclude:
+  - "@wave-rf/*"
+
 # Fail an install when the active Node doesn't satisfy a package's engines.node.
 # The published SDK (clients/ts) declares ">=18" for external consumers; the
 # root, e2e, and docs packages require ">=22" — the dev/CI version pinned in .nvmrc.
