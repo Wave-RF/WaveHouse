@@ -184,7 +184,7 @@ func TestFindGapSequence(t *testing.T) {
 		if seq <= 60 {
 			return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Duration(61-seq) * time.Minute)}, nil
 		}
-		return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Duration(int64(seq-60)) * time.Minute)}, nil //nolint:gosec // test-only, values are small
+		return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Duration(seq-60) * time.Minute)}, nil //nolint:gosec // test-only, values are small
 	}
 	// seqs 40..60 missing (already purged), <40 are old, >60 are within window.
 	sparseSequences := func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
@@ -269,10 +269,7 @@ func TestFindGapSequence(t *testing.T) {
 			seq, err := s.findGapSequence(context.Background(), ms)
 
 			if tt.wantErrSub != "" {
-				assert.Error(t, err)
-				if err != nil {
-					assert.Contains(t, err.Error(), tt.wantErrSub)
-				}
+				assert.ErrorContains(t, err, tt.wantErrSub)
 				return
 			}
 			assert.NoError(t, err)
