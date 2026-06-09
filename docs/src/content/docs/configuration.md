@@ -134,7 +134,7 @@ Prometheus exposition is its own top-level config block, independent of `otel.*`
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `prometheus.enabled` | `WH_PROMETHEUS_ENABLED` | `false` | Expose a Prometheus-format `/metrics` endpoint. Works standalone (no OTel push) or alongside `otel.metrics.enabled`. |
-| `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`. |
+| `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`, and may not collide with a reserved probe path (`/livez`, `/readyz`, `/healthz`, `/health`, `/ready`). When `port` is `0` (mounted on the main server) it also may not be `/v1` or sit under `/v1/`, which would shadow the authenticated API. An invalid path fails validation at startup. |
 | `prometheus.port` | `WH_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
 
 ### Logging
@@ -151,6 +151,8 @@ data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 server:
   port: 8080
   shutdown_timeout: 10
+  cors_allowed_origins:
+    - "*"
 
 clickhouse:
   addr: localhost:9000
@@ -159,6 +161,7 @@ clickhouse:
   database: default
   username: default
   password: ""
+  query_timeout: 30s
 
 mq:
   gap_window_minutes: 15

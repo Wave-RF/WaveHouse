@@ -20,7 +20,7 @@ goroutine / channel / timer interplay is subtle.
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
 The pipeline is **insert-only**. The wire format carries
-`{table_name, scope, received_timestamp, data}` and nothing else; the worker
+`{table_name, received_timestamp, data}` and nothing else; the worker
 validates and bulk-`INSERT`s. Non-insert mutations go through a different admin path.
 
 ## High-level shape
