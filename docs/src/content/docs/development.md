@@ -28,7 +28,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
 - **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time) and `starlight-links-validator`. The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`.
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time; nothing else in the docs *build* uses a browser — the manual `docs/scripts/screenshot.mjs` QA helper drives the same Chromium). `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
 
 ### Verify your setup
 
@@ -98,7 +98,7 @@ Then the tokenless data-plane calls work (create a `clicks` table first — see 
 
 ```bash
 # Ingest an event
-curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 # → {"ok":true}
@@ -229,13 +229,13 @@ WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
 Then include the dedup field in your ingest body:
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
 # → {"ok":true}
 
 # Same event_id again → deduplicated
-curl -s -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"event_id": "550e8400-e29b-41d4-a716-446655440001", "page": "/home"}'
 # → {"duplicate":true}
@@ -349,7 +349,7 @@ KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
 
 **If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
 
-**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress`.
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`.
 
 ## Linting
 
@@ -391,12 +391,15 @@ WaveHouse/
 │   └── wavehouse/          # Standalone all-in-one binary
 ├── internal/               # Private application packages
 │   ├── api/                # HTTP handlers, router, middleware
+│   ├── auth/               # JWT/JWKS authentication middleware
 │   ├── cache/              # L1 (Ristretto) + L2 caching
+│   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
+│   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
@@ -473,7 +476,7 @@ Run `make help` to see all targets. Key ones:
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
 | `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
 | **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`) |
+| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
 | `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
@@ -513,6 +516,24 @@ PRs are grouped by ecosystem to reduce noise.
 
 **Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Dependabot PRs bypass the `Admin approval` required check entirely (see `admin-approval.yml`), so **all** patch/minor bumps — including workflow-touching ones — merge without human intervention; the trust model for that is CI passing + `dependabot/fetch-metadata` classification.
 
+## Releasing the SDK
+
+The TypeScript SDK (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
+
+- **Dev snapshots.** Every push to `main` publishes `0.0.0-dev.<hash>` under the `dev` dist-tag — but only when the built `dist/` actually changed (the version is a hash of the build output, so an unchanged build resolves to an already-published version and is skipped). Install the bleeding edge with `npm install @wavehouse/sdk@dev`.
+- **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. A stable version goes to the `latest` dist-tag; a prerelease (`sdk-v0.2.0-rc.1`) is published under `alpha`/`beta`/`rc`/`next` — derived from the suffix — and marked as a GitHub pre-release. The tag **must** match `clients/ts/package.json`'s `version`, or the job fails fast.
+
+To cut a release:
+
+```bash
+# 1. Bump "version" in clients/ts/package.json, commit, and merge to main.
+# 2. Tag the release commit and push the tag:
+git tag sdk-v0.1.0
+git push origin sdk-v0.1.0
+```
+
+> **The first tagged release promotes `latest`.** npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+
 ## CI & review automation
 
 This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.
@@ -527,7 +548,7 @@ PR titles must match Conventional Commits format and stay ≤ 72 characters — 
 
 Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`.
 
-The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`).
+The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
 If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
 

@@ -30,7 +30,8 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
   "
 
 # Ingest data (the standalone stack ships a permissive trial policy; WaveHouse is fail-closed otherwise — see Getting Started)
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+# A 404 "unknown table" right after creating the table means schema discovery hasn't picked it up yet — retry (worst case 60s)
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
@@ -325,7 +326,7 @@ CREATE TABLE IF NOT EXISTS clicks (
 ORDER BY (page);
 ```
 
-WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/schema/refresh`.
+WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/schema/refresh` (admin-only).
 
 ## Dead Letter Queue (DLQ)
 
@@ -406,6 +407,6 @@ docker compose -f deployments/compose/standalone.yaml up -d
 
 ```bash
 rm -rf data/         # Removes embedded NATS + Pebble data (run `make clean-all` to also drop docker volumes)
-make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/
+make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
 make build && ./bin/wavehouse
 ```

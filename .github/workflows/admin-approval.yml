@@ -21,7 +21,8 @@ name: Admin approval
 # to admin review like any human PR — closed a hole where a bot's
 # APPROVED review (e.g. CodeRabbit) could merge a major bump (see
 # #130, PR #127). The ruleset's `required_approving_review_count`
-# is 0; this status check is the single admin-review gate.
+# is 1 (any collaborator's approval satisfies it); this status check
+# is what makes one of those approvals specifically an admin's.
 
 on:
   pull_request:

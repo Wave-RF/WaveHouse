@@ -28,6 +28,24 @@ export const mermaidTheme = {
     ),
   },
 
+  // Injected into the build-time render page so Mermaid MEASURES node labels
+  // with the same metrics global.css DISPLAYS them at. The node-label rule
+  // below MUST mirror `.nodeLabel p { font-weight; letter-spacing }` in
+  // global.css (search "Mermaid foreignObject content — typography"): without
+  // it, boxes are measured at the default weight 400 while the browser renders
+  // weight 500, so the last glyph of the longest label in each node clips on
+  // the right ("Buffer Consumer" → "Buffer Consume"). `padding-inline` adds a
+  // hair of sub-pixel safety. Selectors are BARE — no `svg[aria-roledescription
+  // …]` ancestor — because Mermaid measures the label before that wrapper
+  // exists (see astro-themed-mermaid's `measurementCss` docs). Cluster titles
+  // are reset to the default measurement: they render as overflow:visible pills
+  // sized separately by the plugin, so a weight bump there would only mis-center
+  // them.
+  measurementCss: [
+    ".nodeLabel p{font-weight:500;letter-spacing:-0.005em;padding-inline:1.5px;}",
+    ".cluster-label .nodeLabel p{font-weight:400;letter-spacing:normal;padding-inline:0;}",
+  ].join(""),
+
   // Mermaid `base` theme. Build-time hex; the ones that should respond to
   // light/dark are rewritten by colorReplacements below (others stay fixed,
   // e.g. the brand-blue default node border).

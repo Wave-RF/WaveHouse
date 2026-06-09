@@ -35,6 +35,8 @@ describe("TableRef", () => {
     expect(url).toContain("/v1/query?table=clicks");
     const body = JSON.parse(init.body);
     expect(body.limit).toBe(1000);
+    // A bare fetch is a full-row read → select_all (not an empty projection).
+    expect(body.select_all).toBe(true);
   });
 
   it("fetch() respects limit option", async () => {
@@ -51,6 +53,15 @@ describe("TableRef", () => {
     // QueryBuilder is PromiseLike
     expect(typeof qb.then).toBe("function");
     expect(typeof qb.where).toBe("function");
+  });
+
+  it("selectAll() returns a QueryBuilder that sends select_all", async () => {
+    const qb = table().selectAll();
+    expect(typeof qb.where).toBe("function");
+    await qb.fetch();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.select_all).toBe(true);
+    expect(body.columns).toBeUndefined();
   });
 
   // --- insert ---

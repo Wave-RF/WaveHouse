@@ -26,6 +26,7 @@ hero:
 ---
 
 import { Card, CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/components';
+import HomepageCtaTracking from '../../components/HomepageCtaTracking.astro';
 
 <div class="wh-stats not-content">
   <div class="wh-stat">
@@ -79,24 +80,24 @@ ClickHouse is a phenomenal OLAP database, but pointing a frontend straight at it
 If you're building user-facing analytics, **WaveHouse is like Supabase for ClickHouse** — or an open-source Tinybird that pushes data to the frontend in real time over SSE, not just via pull-based REST.
 
 <CardGrid>
-	<Card title="Schema-aware validation" icon="approve-check">
-		WaveHouse discovers your ClickHouse schemas via `system.columns` and validates every ingest against the real schema — unknown fields, type mismatches, and null violations are rejected at the edge.
-	</Card>
-	<Card title="Async buffered ingest" icon="rocket">
-		Writes land in a durable NATS JetStream WAL and return `200 OK` instantly. A background worker batch-flushes to ClickHouse — never drop a packet.
-	</Card>
-	<Card title="Real-time push" icon="bars">
-		Every event is broadcast to SSE subscribers **before** it's flushed to ClickHouse. Gap-fill from JetStream history for late-connecting clients.
-	</Card>
-	<Card title="In-process query cache" icon="laptop">
-		Ristretto cache plus Go `singleflight` coalesces identical concurrent queries — dashboards survive thundering herds without an extra cache tier to operate.
-	</Card>
-	<Card title="Hasura-style access control" icon="seti:lock">
-		Per-table, per-role column and row-level policies with JWT claim templating. Stored in NATS KV with file-based bootstrap and cluster sync.
-	</Card>
-	<Card title="TypeScript SDK" icon="seti:typescript">
-		`@wavehouse/sdk` — zero-dependency client with type-safe query builder, live queries, real-time streaming, and codegen from your schemas.
-	</Card>
+ <Card title="Schema-aware validation" icon="approve-check">
+  WaveHouse discovers your ClickHouse schemas via `system.columns` and validates every ingest against the real schema — unknown fields, type mismatches, and null violations are rejected at the edge.
+ </Card>
+ <Card title="Async buffered ingest" icon="rocket">
+  Writes land in a durable NATS JetStream WAL and return `200 OK` instantly. A background worker batch-flushes to ClickHouse — never drop a packet.
+ </Card>
+ <Card title="Real-time push" icon="bars">
+  Every event is broadcast to SSE subscribers **before** it's flushed to ClickHouse. Gap-fill from JetStream history for late-connecting clients.
+ </Card>
+ <Card title="In-process query cache" icon="laptop">
+  Ristretto cache plus Go `singleflight` coalesces identical concurrent queries — dashboards survive thundering herds without an extra cache tier to operate.
+ </Card>
+ <Card title="Hasura-style access control" icon="seti:lock">
+  Per-table, per-role column and row-level policies with JWT claim templating. Stored in NATS KV with file-based bootstrap and cluster sync.
+ </Card>
+ <Card title="TypeScript SDK" icon="seti:typescript">
+  `@wavehouse/sdk` — zero-dependency client with type-safe query builder, live queries, real-time streaming, and codegen from your schemas.
+ </Card>
 </CardGrid>
 
 **Plus** — optional [deduplication](/configuration#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
@@ -112,7 +113,7 @@ cd WaveHouse
 docker compose -f deployments/compose/standalone.yaml up -d
 
 # Ingest an event (run Getting Started first to create the `clicks` table; the dev stack ships a trial policy)
-curl -X POST http://localhost:8080/v1/ingest?table=clicks \
+curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H 'content-type: application/json' \
   -d '{"page":"/home","button":"signup","score":42.5}'
 
@@ -125,32 +126,32 @@ WaveHouse is fail-closed, so the standalone stack ships a permissive trial polic
 ## How it ships
 
 <Card title="A single binary, one dependency" icon="seti:config">
-	One `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
+ One `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
 </Card>
 
 ## Where to next
 
 <CardGrid>
-	<LinkCard
-		title="Getting Started"
-		description="Five-minute quickstart — Docker Compose, first ingest, first query, first stream."
-		href="/getting-started"
-	/>
-	<LinkCard
-		title="Architecture"
-		description="System design, ingest/query/streaming data flows, and the internal package map."
-		href="/architecture"
-	/>
-	<LinkCard
-		title="API Reference"
-		description="Every endpoint, authentication, and request/response format."
-		href="/api"
-	/>
-	<LinkCard
-		title="TypeScript SDK"
-		description="Query builder, live queries, streaming, and schema codegen."
-		href="/sdk"
-	/>
+ <LinkCard
+  title="Getting Started"
+  description="Five-minute quickstart — Docker Compose, first ingest, first query, first stream."
+  href="/getting-started"
+ />
+ <LinkCard
+  title="Architecture"
+  description="System design, ingest/query/streaming data flows, and the internal package map."
+  href="/architecture"
+ />
+ <LinkCard
+  title="API Reference"
+  description="Every endpoint, authentication, and request/response format."
+  href="/api"
+ />
+ <LinkCard
+  title="TypeScript SDK"
+  description="Query builder, live queries, streaming, and schema codegen."
+  href="/sdk"
+ />
 </CardGrid>
 
 <div class="wh-closer not-content">
@@ -159,5 +160,11 @@ WaveHouse is fail-closed, so the standalone stack ships a permissive trial polic
   <div class="wh-closer__actions">
     <LinkButton href="/getting-started" icon="right-arrow">Get started in five minutes</LinkButton>
     <LinkButton href="https://github.com/Wave-RF/WaveHouse" variant="secondary" icon="external">Star on GitHub</LinkButton>
+    <span class="wh-closer__count" data-wh-live-wrap hidden>
+      <span class="wh-closer__count-star" aria-hidden="true">★</span>
+      <span data-wh-live="stars">—</span> and counting — counted live by WaveHouse
+    </span>
   </div>
 </div>
+
+<HomepageCtaTracking />

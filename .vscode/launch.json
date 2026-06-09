@@ -2,11 +2,18 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Docs: Astro dev server",
+      "name": "Docs: dev loop (rebuild-on-save + wrangler, :4321)",
       "type": "node-terminal",
       "request": "launch",
       "cwd": "${workspaceFolder}/docs",
       "command": "pnpm dev"
+    },
+    {
+      "name": "Docs: Astro HMR dev server (no Worker/search/md twins)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/docs",
+      "command": "pnpm start"
     }
   ]
 }

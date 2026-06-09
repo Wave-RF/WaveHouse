@@ -364,7 +364,7 @@ describe("Ingest", () => {
     });
 
     // Even if we ask for 10 rows via the SDK, the policy should cap it at 2 at the backend
-    const result = await wh.from(T.clicks).select("*").limit(10).fetch();
+    const result = await wh.from(T.clicks).selectAll().limit(10).fetch();
     expect(result.error).toBeNull();
     expect(result.data).toHaveLength(2);
 

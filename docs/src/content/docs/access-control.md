@@ -40,7 +40,7 @@ A role is an opaque string. Matching is **exact and case-sensitive** — `Viewer
 
 The role is read from a single JWT claim — the dot-path `auth.role_claim` (default `role`; e.g. `app_metadata.role` for a nested claim). The token plumbing around it — HMAC vs. JWKS validation, accepted signing algorithms, the `?token=` query fallback for streams — is covered in [API Reference — Authentication](/api#authentication), and the knobs that configure it in [Configuration — Authentication](/configuration#authentication).
 
-For authorization, the behavior that matters is what happens with **no** role: the request falls back to `default_role`. A request is roleless when there is no token, when the token is invalid/expired/malformed (the reason is remembered, so a later denial is a `401`, not a bare `403`), or when a valid token simply carries no `role_claim`. A deployment configured with no secret or JWKS at all validates no token, so every request is the `default_role` — a pure public deployment.
+For authorization, the behavior that matters is what happens with **no** role: the request falls back to `default_role`. A request is roleless when there is no token, when the token is invalid/expired/malformed (the reason is remembered, so a later denial is a `401`, not a bare `403`), or when a valid token simply carries no `role_claim`.
 
 ### `default_role` — public (unauthenticated) access
 
@@ -106,7 +106,7 @@ The rules, in order:
 2. **An empty (or `["*"]`) `allow_columns` means "all columns"** — every column not in `deny_columns` is permitted. Use this with `deny_columns` for a blocklist posture: see everything *except* a few sensitive columns.
 3. **A non-empty `allow_columns` is an allowlist** — only the named columns (and never the denied ones) are permitted.
 
-On a structured query (`POST /v1/query?table={table}`) a request that names a disallowed column is rejected with `403 column "x" not allowed`; on insert (`POST /v1/ingest?table={table}`) the body is `403 column "x" not allowed for insert`. On live streams, denied columns are silently **stripped** from each event rather than rejecting the connection.
+On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard cap on every column the query references — in any clause**: the projection, an aggregation argument, `filters`, `group_by`, `order_by`, and `time_range`. Naming a disallowed column anywhere is rejected with `403 column "x" not allowed`. A full-row read is requested explicitly with `"select_all": true`, which expands to exactly the columns the role may read — never a raw `SELECT *` that could include a denied column; if the role is allowed *no* columns, the read is rejected (`403`) rather than returning empty rows. **Omitting `columns` (or sending `[]` / `""`) returns nothing** — a request for no data — so a hidden column can't leak by being left out, grouped on, or filtered on to infer its values. (Note: in a query, `["*"]` is the *literal column named `*`*, not a wildcard — use `select_all` for all columns. In `allow_columns`, `["*"]` is still the all-columns wildcard.) On insert (`POST /v1/ingest?table={table}`) the body is `403 column "x" not allowed for insert`. On live streams, denied columns are silently **stripped** from each event rather than rejecting the connection. The structured-query and live-stream paths defer to the **same** per-column decision (`IsColumnAllowed`), so the two read surfaces enforce identical column visibility and can't drift apart.
 
 ## Row-level security
 

@@ -26,14 +26,16 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Eleven internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
+Thirteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
-- **`api/`** — Chi HTTP router, JWT/JWKS middleware, ingest/query/structured-query/SSE/schema/DLQ/policy/pipes handlers, Hub
+- **`api/`** — Chi HTTP router, JWT/JWKS middleware (from `auth/`), ingest/query/structured-query/SSE/schema/DLQ/policy/pipes handlers, Hub
+- **`auth/`** — JWT auth middleware: HMAC **or** JWKS verification with `alg` pinned to the active verifier, role extraction from a configurable claim path; always runs, never rejects (bad token → empty role + stashed reason)
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
+- **`chsql/`** — dependency-free ClickHouse SQL helpers shared by `query`/`policy` (avoids an import cycle): `QuoteIdent` (backtick-quote every identifier) + `BindUnsafe` (reject names with a literal `?`)
 - **`config/`** — YAML + env var config loading (cleanenv)
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) — optional, controlled by `dedupe.enabled`
 - **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
-- **`ingest/`** — Ingest worker pipeline (`worker.go`: JetStream input → per-table batch INSERT with DLQ output). The pipeline is **insert-only**. The wire format `EventMessage` (`types.go`) carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker validates the table name and the payload's presence, then bulk-INSERTs. In the embedded-NATS deployment (the default), the server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (the same `RequireAdmin` gate as the rest of `/v1/admin/*`), so non-admin callers never reach the proxy. A request with no token (or an invalid one) resolves to the `default_role`, which in a production config is not the admin role (setting them equal is a loudly-warned dev-only setting), so it can't reach this endpoint. Plus `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
+- **`ingest/`** — Ingest worker pipeline (`worker.go`: JetStream input → per-table batch INSERT with DLQ output). The pipeline is **insert-only**. The wire format `EventMessage` (`types.go`) carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker accepts whatever table name the envelope carries (table existence was already checked by the HTTP ingest handler, which `404`s an unknown table before publish; the worker doesn't re-validate), then bulk-INSERTs. In the embedded-NATS deployment (the default), the server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (the same `RequireAdmin` gate as the rest of `/v1/admin/*`), so non-admin callers never reach the proxy. A request with no token (or an invalid one) resolves to the `default_role`, which in a production config is not the admin role (setting them equal is a loudly-warned dev-only setting), so it can't reach this endpoint. Plus `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
 - **`observability/`** — OpenTelemetry pipeline: `InitProvider` wires trace/metric/log providers via OTLP gRPC (each signal independently gated). A top-level `Prometheus` config block drives an optional `/metrics` scrape endpoint that runs independently of OTLP push — standalone (Alloy/Mimir scrape, no collector), alongside OTLP, or off. `NewLogger` produces a slog handler that fans out to stdout AND OTLP (stdout always 100%, OTLP sample-rate-aware). `TraceHandler` injects trace_id/span_id from active spans. `tracer.go` provides W3C trace context propagation over NATS headers.
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
@@ -55,7 +57,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 9. **Singleflight** — `TieredCache` coalesces concurrent misses (`x/sync/singleflight`) to prevent cache stampede.
 10. **Active Sweeper** — purges NATS messages that are both ACKed (written to CH) and older than the gap window; SSE gap-fill uses `DeliverByStartTime`, no in-process ring buffer.
 11. **Hasura-style access control: fail-closed (security)** — `policy.IsAdmin` (role == `admin_role`, **exact case-sensitive**, default `"admin"`) is the single admin check, shared by `Evaluate`/`ResolveRole`/`Validate`/the `/v1/admin` gate/`RoleAllowed`. Empty/absent role matches nothing (no `"*"` wildcard); `Validate` rejects empty role keys; a `nil` policy (deleted) denies **everyone incl. admin** — a total lockout, so bootstrap from the policy file, never an implicit admin grant. `default_role` is the one sanctioned roleless exception (`ResolveRole` maps empty → it pre-eval); `default_role == admin_role` is permitted but dev-only and loudly warned (`policy.DefaultRoleGrantsAdmin`). Preserve when touching `internal/policy` (policy twin of #13; see #159). Detail: architecture.md § `policy/`.
-12. **Structured queries** — `POST /v1/query?table={table}`: typed AST validated against schema, permission-enforced, timestamp-bucketed for cache, `DefaultMaxRows` (10,000) cap.
+12. **Structured queries: column authz fail-closed (security)** — `POST /v1/query?table={table}`: typed AST validated against schema, permission-enforced, timestamp-bucketed for cache, `DefaultMaxRows` (10,000) cap. Every column reference — projection, aggregation args, `filters`, `group_by`, `order_by`, `time_range` — is authorized inside `query.Build` (the single chokepoint that enumerates them all), so no clause can skip the role's `allow_columns`/`deny_columns` check (#223). A `select_all` read by a *column-restricted* role expands to its allowed columns via `policy.AllowedProjection`, never a bare `SELECT *`; *unrestricted*/admin roles keep `SELECT *` (`policy.RestrictsColumns` decides). Omitting `columns` selects nothing (`ErrEmptyProjection` → `200 []`); `["*"]` is the literal column `*` (schema-gated, not a wildcard); a table-granted role with no readable columns fails closed (`ErrNoReadableColumns` → `403`). Structured and live-stream (`filterEventColumns`) reads share the one per-column decision `policy.IsColumnAllowed`, so column visibility can't drift. Preserve when touching `internal/query` or the structured-query handler. Detail: architecture.md § `query/`.
 13. **Named query pipes: fail-closed (security)** — pre-defined SQL templates (Tinybird-style) with param binding + caching; `GET/POST /v1/pipes/{name}` sit outside `RequireAdmin`, so per-pipe `allowed_roles` is the *only* execute-path gate, via `policy.RoleAllowed`: exact allowlist membership (no `"*"`), admin always passes, empty/absent role and empty-string entries authorize nobody, and no `allowed_roles` → admin-only. Preserve and exercise via `testutil.RunRoleMatrix` / `StandardRoleMatrix` (see #159). Detail: architecture.md § `pipes/`.
 14. **TypeScript SDK** — `@wavehouse/sdk`: zero-dep client, typed query builder, real-time SSE, live queries (incrementable/decomposable/poll aggregation), codegen CLI. The canonical client (see §SDK Sync).
 15. **Observability invariants** — stdout always 100% (sampling is OTLP-push-only); WARN+ERROR always export at 100% (a non-configurable floor — don't expose it); gRPC OTel exporters dial lazily so an unreachable collector never blocks startup; the OTel Prometheus exporter uses a **private** `prometheus.Registry`. Preserve when touching the logger/sampler/provider. Detail: architecture.md § `observability/`.
@@ -95,7 +97,10 @@ make ci                # Full pre-push pipeline — run it the documented way (�
 make build             # Compile → bin/wavehouse
 make dev               # ClickHouse + hot-reload server on :8080 (Docker)
 make deps-up           # Start ClickHouse alone — for `make dev`; NOT needed by `make ci`
-make build-docs        # Production docs build → docs/dist/
+make dev-docs          # Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
+make build-docs        # Production build → docs/dist/
+make preview-docs      # Wrangler preview of the production build (auto-builds if dist/ missing)
+make branding-docs     # Regenerate logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 ```
 
 Verbose: `V=1 make test`. Extra args: `make test ARGS="-run TestFoo"`. Build tags: `make build TAGS="foo"`.
@@ -287,7 +292,7 @@ Then run the reviewers relevant to the PR's diff (the same set from `scripts/pre
 
 Documentation *prose* — accuracy against the code, runnable examples, clarity, completeness — **and code↔docs sync** (code that changed but whose docs didn't) are reviewed by the **`docs-reviewer`** subagent, not the code-focused `pre-push-reviewer`. The canonical rubric is `.github/prompts/docs-review.md`. It complements the deterministic prose tools — misspell, markdownlint, starlight-links-validator — reviewing only what they can't, and it never edits docs or posts PR comments.
 
-**Scope** is the canonical docs-prose set from `scripts/docs-prose.sh` — a *denylist*: every tracked `.md`/`.mdx` EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`/`*.old.md`, `PERF-CLAIMS-REVIEW.md`. So it covers the Starlight site under `docs/src/content/` **and** the governance docs (`README.md`, the SDK readme `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — new docs are picked up automatically. `CODE_OF_CONDUCT.md`/`SUPPORT.md` are deep-reviewed only on change or material suspicion.
+**Scope** is the canonical docs-prose set from `scripts/docs-prose.sh` — a *denylist*: every tracked `.md`/`.mdx` EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`/`*.old.md`, `PERF-CLAIMS-REVIEW.md`, `docs/posthog-setup-report.md`. So it covers the Starlight site under `docs/src/content/` **and** the governance docs (`README.md`, the SDK readme `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — new docs are picked up automatically. `CODE_OF_CONDUCT.md`/`SUPPORT.md` are deep-reviewed only on change or material suspicion.
 
 **It is a hard pre-push gate**, run in parallel with the other pre-push reviewers (see §Pre-push self-review). Invoked with the **default (branch) scope** it emits a `VERDICT:` line; on `ship_it` the `review-marker.sh` SubagentStop hook writes `tmp/docs-reviewer-passed-<HEAD-sha>`, which the push gate requires — unconditionally, on every PR-branch push (even code-only ones). Run it via **`/docs-review`**; with **no arg** that's the gating review (branch scope), while an explicit **path/glob** or **`all`** is **advisory** (no `VERDICT:`, no marker) for ad-hoc audits. The whole dev team runs Claude Code and this command is tracked in-repo, so everyone runs it themselves; there is intentionally **no PR/cloud path** for docs review.
 
@@ -313,6 +318,15 @@ Source-of-truth pairs that must agree:
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
 
 Before finishing a task, grep for the identifiers you touched (field names, env var names, endpoint paths) across docs to catch staleness.
+
+### Authoring Mermaid diagrams
+
+Diagrams render inside the Starlight content column (~46–58rem wide) as build-time SVG via `astro-themed-mermaid`, themed by `docs/src/config/mermaid-theme.mjs`. **Author them vertically so they fit the page at a legible size** — the single most common diagram mistake here is a wide left-to-right flowchart that gets scaled down to fit the column until its labels are unreadable.
+
+- **Default to top-down**: `flowchart TB`/`TD`, and `direction TB` inside subgraphs — not `LR`/`RL`. A tall diagram keeps full-size nodes and just costs page height (cheap); a wide one shrinks to illegibility. Reserve `LR` for genuinely short chains (≤3–4 nodes) that read naturally as a single line.
+- **Never sit two large diagrams side-by-side.** Wrap comparisons in `<div class="diagram-pair">…</div>`, which stacks them vertically so each gets the full column width. (Two detailed diagrams in a row each shrink to ~half width and stop being readable.)
+- **Keep node labels short.** Labels are measured at build time to size the box; use `<br/>` for a second line rather than one long line. Lean on the `:::` semantic node classes (`wh`, `win`, `pain`, `fail`, `infra`, `neutral`, `store`, `client`) and the `--wh-mermaid-*` vars rather than inline colors.
+- Diagrams are **click-to-zoom** on the site (`docs/src/components/MermaidZoom.astro`), so fine detail is always recoverable — but that's a fallback, not a license to ship an illegible inline diagram.
 
 ## SDK Sync
 
@@ -373,7 +387,9 @@ Internal-only backend changes (middleware refactors, observability internals, de
 ```text
 cmd/                    → Binary entry points (thin — just wiring)
 internal/api/           → HTTP layer (handlers, router, middleware, Hub, schema/DLQ/policy/pipes endpoints)
+internal/auth/          → JWT/JWKS authentication middleware (HMAC or JWKS, role extraction from claims)
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)
+internal/chsql/         → Shared ClickHouse SQL helpers (identifier quoting + bind-safety)
 internal/config/        → Configuration structs + loader
 internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
 internal/discovery/     → ClickHouse schema introspection + ingest validation
@@ -400,6 +416,7 @@ docs/                   → Project documentation
 - JWT secret (or JWKS endpoint) must be cryptographically strong in production — the JWT middleware always runs (no enable flag), so token validation is the sole gate on elevated access
 - All `/v1/*` routes run the JWT auth middleware (always on); a request with no/invalid token falls back to the policy `default_role`
 - Input JSON is validated against ClickHouse schemas before processing
+- **Column-level access control is a hard cap on every read path.** A role's `allow_columns`/`deny_columns` is enforced against *every* column a structured query references (projection, aggregations, `filters`, `group_by`, `order_by`, `time_range`) inside `query.Build`, and a `select_all` request expands to the role's allowed columns rather than `SELECT *` (an omitted projection selects nothing; `["*"]` is a literal column, not a wildcard — see Key Design Decision #12). The structured-query and live-stream paths share one decision function (`policy.IsColumnAllowed`). Don't move column checks out of the builder or special-case `SELECT *` — that reintroduces the #223 fail-open.
 - ClickHouse queries are passed through directly — use appropriate access controls on ClickHouse itself
 - **Dependency vulnerability scanning**: `govulncheck ./...` runs in CI on every push/PR. Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for outdated Go modules and GitHub Actions.
 - **GitHub Actions supply chain**: Third-party actions are pinned to full commit SHAs with version comments (see `.github/workflows/ci.yml`, `release.yml`). New workflows must follow the same pattern — never `@main` or floating tags on third-party actions. Prefer inline bash or official `actions/*` / `github/*` actions when feasible (e.g. the PR-title check in `housekeeping.yml` is inline bash calling `scripts/lint-pr-title.sh`, not a third-party action).

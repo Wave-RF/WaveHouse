@@ -240,7 +240,16 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           marker='<!-- docs-preview-comment -->'
-          body="$(printf '%s\n📚 **Docs preview** is live: %s\n\n_Updated for commit %s_' "$marker" "$URL" "${SHA:0:7}")"
+          # Surface what the preview is actually built on: the commit subject
+          # and the upload time, so a stale preview is obvious at a glance.
+          # %s args (not the format string) carry the subject so a `%` in a
+          # commit message can't be read as a printf directive.
+          subject="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '.commit.message' 2>/dev/null | head -1 || true)"
+          [ -z "$subject" ] && subject='(commit message unavailable)'
+          updated="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          commit_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/commit/${SHA}"
+          body="$(printf '%s\n📚 **Docs preview** is live: %s\n\nLive on [`%s`](%s) — %s\n_Updated %s_' \
+            "$marker" "$URL" "${SHA:0:7}" "$commit_url" "$subject" "$updated")"
           cid="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
             --jq 'map(select(.body | startswith("<!-- docs-preview-comment -->"))) | .[0].id // empty' | head -1 || true)"
           if [ -n "$cid" ]; then

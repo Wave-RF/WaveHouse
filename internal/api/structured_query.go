@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -82,28 +82,33 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check column permissions.
-	for _, col := range sq.Columns {
-		if !perms.IsColumnAllowed(col) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("column %q not allowed", col))
-			return
-		}
-	}
-	for _, agg := range sq.Aggregations {
-		if agg.Column != "*" && !perms.IsColumnAllowed(agg.Column) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("column %q not allowed", agg.Column))
-			return
-		}
-		if !perms.IsAggregationAllowed(agg.Fn) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("aggregation %q not allowed", agg.Fn))
-			return
-		}
-	}
-
-	// Build SQL.
-	result, err := query.Build(table, &sq, schema, h.BucketSecs)
+	// Build SQL. The builder is the single chokepoint that validates every column
+	// reference against the schema AND authorizes it against perms — per-column
+	// allow/deny, aggregation policy, and the SELECT * → allowed-columns expansion
+	// that closes the omitted/"*" column bypass (#223) all live there, so no
+	// clause (columns, aggregations, filters, group_by, order_by, time_range) can
+	// skip the check. A policy denial returns a typed error we map to 403; a
+	// malformed query maps to 400.
+	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
+		// A query that selects nothing — no columns, no aggregations, no
+		// select_all — is a request for no data, not an error: return an empty
+		// result. Authorization already passed above, so this leaks nothing.
+		if errors.Is(err, query.ErrEmptyProjection) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		var forbiddenCol *query.ForbiddenColumnError
+		var forbiddenAgg *query.ForbiddenAggregationError
+		switch {
+		case errors.As(err, &forbiddenCol), errors.As(err, &forbiddenAgg), errors.Is(err, query.ErrNoReadableColumns):
+			writeJSONError(w, http.StatusForbidden, err.Error())
+		default:
+			// Malformed query — unknown column, bad operator, columns+select_all,
+			// '?' in an identifier, etc.
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 

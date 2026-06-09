@@ -13,6 +13,24 @@ sidebar:
 npm install @wavehouse/sdk
 ```
 
+This works in any bundler-based framework — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — via `import { createClient } from '@wavehouse/sdk'`.
+
+### No build step (CDN)
+
+No bundler or `npm` required — drop the SDK into a static HTML file you deploy over FTP, object storage, or any static host. The ES module loads natively in modern browsers:
+
+```html
+<script type="module">
+  import { createClient } from 'https://esm.sh/@wavehouse/sdk';
+
+  const wh = createClient({ baseURL: 'https://your-wavehouse.example.com' });
+  const { data } = await wh.from('clicks').select('page').limit(10);
+  console.log(data);
+</script>
+```
+
+Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`); jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For pages that can't use ES modules, the bundled IIFE build at `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag. Streaming uses the browser's native `EventSource`, so it needs no polyfill either way. A bare CDN URL tracks the latest published release; use a range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag for unreleased builds from `main` (see [Releasing the SDK](/development#releasing-the-sdk)).
+
 ## Quick Start
 
 ```ts
@@ -121,7 +139,9 @@ const clicks = wh.from('clicks');
 
 ### `.fetch(opts?)`
 
-Shortcut for `SELECT *` with a default limit of 1000.
+Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
+
+To paginate, chain an explicit `.orderBy()` — a bare `.fetch()` sends no default order (see [Pagination](#pagination)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
 
 ```ts
 const { data, error, hasMore, next } = await clicks.fetch();
@@ -181,6 +201,14 @@ Start a query builder chain. See [Query Builder](#query-builder).
 const { data } = await clicks.select('page', 'button').where('page', '=', '/home').limit(10);
 ```
 
+### `.selectAll()`
+
+Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+
+```ts
+const { data } = await clicks.selectAll().where('country', '=', 'US').limit(10);
+```
+
 ### `.stream(opts?)`
 
 Open a real-time event subscription. See [Streaming](#streaming).
@@ -207,10 +235,18 @@ All methods return a new `QueryBuilder` — the original is unchanged.
 
 #### `.select(...columns)`
 
-Append columns to the SELECT clause.
+Append columns to the SELECT clause. A literal `'*'` is the column *named* `*`, not a wildcard — use `.selectAll()` for all columns.
 
 ```ts
 const q = clicks.select('page').select('button'); // SELECT page, button
+```
+
+#### `.selectAll()`
+
+Select every column your role may read (the all-columns wildcard, expanded server-side to your allowed columns). Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.).
+
+```ts
+const q = clicks.selectAll().where('country', '=', 'US');
 ```
 
 #### `.where(column, op, value)`
@@ -273,7 +309,7 @@ If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automat
 
 #### `.timeRange(column, since, until?)`
 
-Filter by a time window. `since` accepts RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`).
+Filter by a time window. `since` and `until` accept RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`, `'2w'` — day and week suffixes expand to hours, so `'7d'` is `'168h'`).
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
@@ -436,7 +472,7 @@ const { data } = await wh.policy.validate(policyDraft);
 
 ## DLQ — `wh.dlq`
 
-Dead Letter Queue operations.
+Dead Letter Queue operations. Requires the admin role (`policy.admin_role`).
 
 ```ts
 // Get DLQ statistics
@@ -445,10 +481,9 @@ const { data } = await wh.dlq.list();
 
 // Stats for a specific table
 const { data } = await wh.dlq.table('clicks');
-
-// Stream DLQ events
-const stream = wh.dlq.stream();
 ```
+
+`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events — live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---
 
@@ -476,7 +511,7 @@ Streams use SSE (Server-Sent Events) for both unauthenticated connections and fo
 
 ### `StreamController`
 
-Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace`. It is **NOT thenable**.
+Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace` (the DLQ variant is not yet functional server-side — [#197](https://github.com/Wave-RF/WaveHouse/issues/197)). It is **NOT thenable**.
 
 ```ts
 const stream = wh.from('clicks').stream({ since: '2026-01-01T00:00:00Z' });
@@ -659,12 +694,13 @@ createClient<DB>(config) → WaveHouseClient
 ├── .from(table) → TableRef (NOT thenable)
 │   ├── .fetch(opts?) → Promise<Result<Row[]>>
 │   ├── .select(...cols?) → QueryBuilder (PromiseLike)
-│   │   ├── .select() .where() .count() .sum() .avg() .min() .max()
+│   │   ├── .select() .selectAll() .where() .count() .sum() .avg() .min() .max()
 │   │   │   .countDistinct() .aggregate() .groupBy() .orderBy()
 │   │   │   .limit() .timeRange() .cacheTTL()
 │   │   ├── .fetch(opts?) → Promise<Result<Row[]>>
 │   │   ├── .stream(opts?) → StreamController
 │   │   └── .liveQuery(subscriber, opts?) → LiveQuery
+│   ├── .selectAll() → QueryBuilder (PromiseLike)
 │   ├── .insert(data) → Promise<Result<InsertResult>>
 │   ├── .insertNDJSON(source) → Promise<Result<InsertResult>>
 │   ├── .schema() → Promise<Result<TableSchema>>
@@ -688,7 +724,7 @@ createClient<DB>(config) → WaveHouseClient
 ├── .dlq
 │   ├── .list() → Promise<Result<DLQStats>>
 │   ├── .table(name) → Promise<Result<DLQStats>>
-│   └── .stream() → StreamController
+│   └── .stream() → StreamController  // not yet functional server-side — #197
 └── .sys
     └── .health() → Promise<Result<void>>
 
@@ -701,13 +737,13 @@ StreamController (NOT thenable)
 
 ## Codegen CLI
 
-Generate TypeScript types from a running WaveHouse instance:
+Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin, so after `npm install @wavehouse/sdk` you can run it with `npx`:
 
 ```bash
-# From the SDK package (clients/ts/):
+npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
+
+# Or, working inside this repo (clients/ts/):
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
-# or directly:
-npx tsx src/cli/codegen.ts --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
 Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
@@ -758,6 +794,6 @@ The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` e
 make test-e2e          # Run all E2E tests (the orchestrator boots a ClickHouse testcontainer + the wavehouse-cov binary, then runs the SDK suite)
 ```
 
-Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `query`, `streaming`, `stress` (each `*.test.ts`).
+Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress` (each `*.test.ts`).
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

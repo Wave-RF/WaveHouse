@@ -244,8 +244,14 @@ dev: deps-up $(AIR) $(CONFIG_FILES) ## Hot-reload dev server: ClickHouse + WaveH
 dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 	@$(PNPM) --filter $(SDK_NAME) run dev
 
+# dev-docs runs docs/scripts/dev.mjs: a full `astro build` on every save,
+# synced into docs/dist/ and served through `wrangler dev --live-reload` —
+# so the Worker (md twins, pagefind search, llm outputs) behaves exactly like
+# production while you edit, and the browser refreshes itself per build.
+# Slower per change than Astro HMR; the raw dev server remains available as
+# `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
 .PHONY: dev-docs
-dev-docs: install-playwright-docs ## Hot-reload Astro dev server on :4321
+dev-docs: install-playwright-docs build-ts ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
 	@$(PNPM) --filter $(DOCS_FILTER) run dev
 
 # preview-docs serves the production build through wrangler (Cloudflare Workers
@@ -520,14 +526,17 @@ build-ts: pnpm-install ## Build TypeScript SDK → clients/ts/dist/
 # `build-docs`, so make runs it once and serializes it before the build — Astro's
 # content-sync writes docs/.astro/, so check and build must not run concurrently.
 # (Link validation is separate: owned by starlight-links-validator at build.)
+# build-ts prereq: the landing page imports @wavehouse/sdk (workspace package),
+# which resolves to clients/ts/dist/ for both types and the browser bundle.
 .PHONY: check-docs
-check-docs: pnpm-install ## Type-check the docs (astro check — types + content schemas)
+check-docs: pnpm-install build-ts ## Type-check the docs (astro check — types + content schemas)
 	$(call run,check-docs (astro check),NODE_OPTIONS=--no-deprecation $(PNPM) -s --filter $(DOCS_FILTER) run check,)
 
 # build-docs: Astro site → docs/dist/. Pulls in Chromium (install-playwright-docs)
-# because rehype-mermaid renders diagrams via headless Chrome at build time and
-# starlight-links-validator needs it too. Depends on check-docs so a type/content
-# error fails fast before the (heavier) build, and the two never race on .astro.
+# because rehype-mermaid renders diagrams via headless Chrome at build time
+# (starlight-links-validator runs here too, but needs no browser). Depends on
+# check-docs so a type/content error fails fast before the (heavier) build,
+# and the two never race on .astro.
 .PHONY: build-docs
 build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
@@ -539,7 +548,7 @@ build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
 # iterating on the mark does). The script self-locates via git, so it runs the
 # same from the repo root.
 .PHONY: branding-docs
-branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/scripts/branding/mark.svg
+branding-docs: ## Regenerate docs logo/favicon/OG assets from docs/src/assets/branding/mark.svg
 	@docs/scripts/branding/generate.sh
 
 # --- Node workspace: SDK + docs ----------------------------------------------
@@ -581,7 +590,8 @@ pnpm-install:
 	@$(PNPM) install --frozen-lockfile --reporter=silent
 
 # install-playwright-docs: hidden helper — fetch the Chromium build the docs
-# site needs (rehype-mermaid build-time SSR + starlight-links-validator). It's
+# site needs (rehype-mermaid build-time SSR is the build's only browser use;
+# the manual docs/scripts/screenshot.mjs helper drives the same install). It's
 # ~130 MB, so it's lazy: only the docs build/dev/preview targets pull it in,
 # never plain pnpm-install, so Go-only contributors don't pay for it. The
 # --with-deps apt step needs sudo and only helps on CI's minimal images, so
@@ -780,9 +790,9 @@ binary-analysis: size audit-cgo deadcode ## Combined: size + audit-cgo + deadcod
 #   clean-all    everything above + data/ + docker volumes (full reset)
 
 .PHONY: clean
-clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/)
+clean: ## Remove build artifacts (bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/)
 	@echo "$(YELLOW)==> Cleaning build artifacts...$(RESET)"
-	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/
+	@rm -rf bin/ dist/ clients/ts/dist/ docs/dist/ docs/.dev-dist/
 
 .PHONY: clean-ts
 clean-ts: ## Remove SDK build artifacts only (clients/ts/dist/)
@@ -790,9 +800,9 @@ clean-ts: ## Remove SDK build artifacts only (clients/ts/dist/)
 	@rm -rf clients/ts/dist/
 
 .PHONY: clean-docs
-clean-docs: ## Remove docs build artifacts only (docs/dist/)
+clean-docs: ## Remove docs build artifacts only (docs/dist/, docs/.dev-dist/)
 	@echo "$(YELLOW)==> Cleaning docs dist/...$(RESET)"
-	@rm -rf $(DOCS_DIR)/dist/
+	@rm -rf $(DOCS_DIR)/dist/ $(DOCS_DIR)/.dev-dist/
 
 .PHONY: clean-test
 clean-test: ## Remove test artifacts (tmp/ — coverage data, logs, NATS state)

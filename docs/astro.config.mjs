@@ -5,7 +5,6 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
 import { themedMermaid } from "astro-themed-mermaid";
 import rehypeKatex from "rehype-katex";
-import rehypeMermaid from "rehype-mermaid";
 import remarkMath from "remark-math";
 import starlightImageZoom from "starlight-image-zoom";
 import starlightLinksValidator from "starlight-links-validator";
@@ -28,7 +27,10 @@ export default defineConfig({
   markdown: {
     syntaxHighlight: { excludeLangs: ["mermaid"] },
     remarkPlugins: [remarkMath, mermaid.remarkInjectClassdefs],
-    rehypePlugins: [[rehypeMermaid, mermaid.rehypeMermaidOptions], rehypeKatex],
+    // mermaid.rehypeMermaid = rehype-mermaid behind the package's per-diagram
+    // render cache (node_modules/.cache/astro-themed-mermaid/) — rebuilds that
+    // don't change a diagram skip Chromium entirely (~6.5s → ~3.7s per build).
+    rehypePlugins: [mermaid.rehypeMermaid, rehypeKatex],
   },
   integrations: [
     starlight({
@@ -36,17 +38,6 @@ export default defineConfig({
       description:
         "The open-source real-time API gateway for ClickHouse — schema-aware ingest, async batching, real-time streaming, and tiered query caching in a single binary.",
       head: [
-        // PostHog
-        {
-          tag: "script",
-          content: `!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
-posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https://us.i.posthog.com',defaults:'2026-01-30'});`,
-        },
-        // The primary SVG favicon is set via Starlight's `favicon` option below
-        // (→ /branding/favicon.svg). Here we add the .ico fallback (legacy /
-        // non-SVG browsers; also auto-probed at the site root) and the
-        // apple-touch icon. The whole brand kit is generated into /branding/ by
-        // docs/scripts/branding/generate.sh.
         {
           tag: "link",
           attrs: {
@@ -54,6 +45,15 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
             type: "image/x-icon",
             sizes: "16x16 32x32 48x48",
             href: "/favicon.ico",
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            type: "image/svg+xml",
+            sizes: "any",
+            href: "/branding/favicon.svg",
           },
         },
         {
@@ -100,7 +100,7 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
       // mark via the shared <WaveMark/> component (currentColor, theme-aware),
       // so Starlight's logo config would never render. The brand mark lives in
       // exactly one place — src/components/WaveMark.astro.
-      // Primary favicon (the .ico fallback + apple-touch are added via head above).
+      // Same SVG as the head[] icon entry — see the icon-set comment there.
       favicon: "/branding/favicon.svg",
       customCss: ["./src/styles/global.css", "katex/dist/katex.min.css"],
       social: [
@@ -117,7 +117,12 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
       expressiveCode: {
         themes: ["github-dark", "github-light"],
         styleOverrides: {
-          borderRadius: "0.5rem",
+          // 0.75rem − 1px so the frame's OUTER corner lands at exactly 12px
+          // (--radius-md, matching cards): EC adds the 1px border width to the
+          // configured radius for the frame, and derives the inner header/tab/
+          // <pre> corners from the same base, so frame and inner stay in sync
+          // (a manual `.frame` radius in global.css used to desync them).
+          borderRadius: "calc(0.75rem - 1px)",
           codeFontFamily: "'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace",
           uiFontFamily: "'Inter Variable', ui-sans-serif, system-ui, sans-serif",
           frames: {
@@ -142,10 +147,18 @@ posthog.init('phc_xFG2NGQa7bFg4QjBp3MAn8kr8bAPJxM7GvKzfoNEwZwj',{api_host:'https
         starlightImageZoom(),
         // @ts-expect-error — plugin types target an older Starlight; runtime is fine.
         starlightLlmTools(),
-        starlightLinksValidator({
-          errorOnInvalidHashes: true,
-          errorOnRelativeLinks: true,
-        }),
+        // The validator fails the whole build on a broken link. Right for CI
+        // and `make build-docs`; wrong for the rebuild-on-save dev loop
+        // (scripts/dev.mjs sets WAVEHOUSE_DOCS_WATCH=1), where a mid-edit
+        // dangling link would block every rebuild. Output is identical.
+        ...(process.env.WAVEHOUSE_DOCS_WATCH
+          ? []
+          : [
+              starlightLinksValidator({
+                errorOnInvalidHashes: true,
+                errorOnRelativeLinks: true,
+              }),
+            ]),
       ],
     }),
     mermaid.integration,

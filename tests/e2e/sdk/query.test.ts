@@ -278,6 +278,147 @@ describe("Query", () => {
     await admin.policy.set(currentPolicyRes.data!);
   });
 
+  // ── #223: the column allowlist is a hard cap on EVERY read shape ────────────
+  //
+  // The original bug only checked the columns a caller *explicitly* listed, so
+  // omitting `columns` (SELECT *), sending `["*"]`, or referencing a denied
+  // column via group_by / filter / order_by all bypassed the allowlist. These
+  // tests drive the real pipeline (SDK → WaveHouse → ClickHouse) under a
+  // restricted `viewer` policy and assert denied columns never come back, and
+  // that the inference-leak clauses are rejected outright.
+
+  // Snapshot the policy, restrict viewer's clicks SELECT to `perms`, run body,
+  // then always restore — a failed assertion must not leak a restricted policy
+  // into later tests. The suite runs sequentially (tables.ts), so this is
+  // race-free.
+  async function withViewerSelect(
+    perms: Record<string, unknown>,
+    body: () => Promise<void>,
+  ): Promise<void> {
+    const admin = adminClient();
+    const snapshot = await admin.policy.get();
+    const tables = (snapshot.data as any).tables;
+    await admin.policy.set({
+      tables: {
+        ...tables,
+        [T.clicks]: { ...(tables[T.clicks] || {}), select: { viewer: perms } },
+      },
+    });
+    try {
+      await body();
+    } finally {
+      await admin.policy.set(snapshot.data!);
+    }
+  }
+
+  it("omitting columns returns only the allowed columns, never SELECT * (#223)", async () => {
+    // The point under test is the *projection*: a bare .fetch() with no .select()
+    // must not silently widen to SELECT *. received_timestamp is just a third
+    // allowed column here — since #270 a bare .fetch() emits no implicit order, so
+    // it carries no special weight; the returned keys must equal the allow-list.
+    await withViewerSelect(
+      { allow_columns: ["page", "duration_ms", "received_timestamp"] },
+      async () => {
+        const result = await wh.from(T.clicks).fetch();
+        expect(result.error).toBeNull();
+        expect(result.data!.length).toBeGreaterThan(0);
+        for (const row of result.data!) {
+          // Exactly the allowed columns — the sensitive ones (user_id, country,
+          // session_id, event_id) never leak through the omitted-columns path.
+          expect(Object.keys(row as object).sort()).toEqual([
+            "duration_ms",
+            "page",
+            "received_timestamp",
+          ]);
+        }
+      },
+    );
+  });
+
+  it("selectAll() expands to allowed columns under a deny-list, not raw SELECT *", async () => {
+    await withViewerSelect({ deny_columns: ["user_id", "session_id"] }, async () => {
+      const result = await wh.from(T.clicks).selectAll().fetch();
+      expect(result.error).toBeNull();
+      expect(result.data!.length).toBeGreaterThan(0);
+      for (const row of result.data!) {
+        expect(row).not.toHaveProperty("user_id");
+        expect(row).not.toHaveProperty("session_id");
+        expect(row).toHaveProperty("page"); // non-denied columns still come back
+      }
+    });
+  });
+
+  it("group_by on a denied column is rejected (403), not leaked", async () => {
+    await withViewerSelect({ allow_columns: ["page", "duration_ms"] }, async () => {
+      // GROUP BY user_id would otherwise enumerate every distinct user_id.
+      const result = await wh
+        .from(T.clicks)
+        .select("page")
+        .count("page", "n")
+        .groupBy("user_id")
+        .fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(403);
+    });
+  });
+
+  it("filtering on a denied column is rejected (403), not an inference oracle", async () => {
+    await withViewerSelect({ allow_columns: ["page", "duration_ms"] }, async () => {
+      // WHERE user_id = ? would let a caller probe values they can't read.
+      const result = await wh
+        .from(T.clicks)
+        .select("page")
+        .where("user_id", "=", "u-query-1")
+        .fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(403);
+    });
+  });
+
+  it("order_by on a denied column is rejected (403)", async () => {
+    await withViewerSelect({ allow_columns: ["page", "duration_ms"] }, async () => {
+      const result = await wh.from(T.clicks).select("page").orderBy("user_id", "desc").fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(403);
+    });
+  });
+
+  it("a role with no readable columns gets 403 from a fetch, never a fail-open SELECT *", async () => {
+    // allow_columns names only a non-existent column, so the role can read nothing
+    // on this table. The read fails closed (403) rather than degrading to SELECT *.
+    await withViewerSelect({ allow_columns: ["does_not_exist"] }, async () => {
+      const result = await wh.from(T.clicks).fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(403);
+    });
+  });
+
+  it("a column-restricted bare .fetch() succeeds, returning only allowed columns (#270 × #223)", async () => {
+    // Cross-PR regression guard. Before #270 a bare .fetch() emitted an implicit
+    // ORDER BY received_timestamp DESC; once #223 authorizes order_by, that implicit
+    // order would make a bare .fetch() by a role that can't read received_timestamp
+    // a 403. #270 removed the implicit order, so a bare .fetch() carries no denied-
+    // column reference and succeeds — returning exactly the role's allowed columns.
+    // received_timestamp is intentionally NOT in the allow-list here: pre-#270 this
+    // very call 403'd; it must now pass. Ordering by a denied column is still
+    // rejected when the caller asks for it explicitly (see the order_by test above).
+    await withViewerSelect({ allow_columns: ["page", "duration_ms"] }, async () => {
+      const result = await wh.from(T.clicks).fetch(); // no implicit order since #270
+      expect(result.error).toBeNull();
+      expect(result.data!.length).toBeGreaterThan(0);
+      for (const row of result.data!) {
+        expect(Object.keys(row as object).sort()).toEqual(["duration_ms", "page"]);
+      }
+
+      // An explicit .orderBy() over a readable column still paginates fine.
+      const ok = await wh.from(T.clicks).select().orderBy("page", "asc").fetch();
+      expect(ok.error).toBeNull();
+      for (const row of ok.data!) {
+        expect(Object.keys(row as object).sort()).toEqual(["duration_ms", "page"]);
+      }
+    });
+  });
+
   it("enforces max_execution_time_ms policy limit", async () => {
     const admin = adminClient();
     const currentPolicyRes = await admin.policy.get();
@@ -311,7 +452,7 @@ describe("Query", () => {
         async () => {
           const result = await wh
             .from(T.clicks)
-            .select("*")
+            .selectAll()
             .where("event_id", "=", testId())
             .limit(999)
             .fetch();

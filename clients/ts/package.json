@@ -6,6 +6,8 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "unpkg": "./dist/index.global.js",
+  "jsdelivr": "./dist/index.global.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -13,18 +15,21 @@
       "require": "./dist/index.cjs"
     }
   },
+  "bin": {
+    "wavehouse-codegen": "./dist/cli/codegen.js"
+  },
   "sideEffects": false,
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=18"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "pnpm run clean && tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

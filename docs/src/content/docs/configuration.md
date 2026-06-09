@@ -51,7 +51,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `schema.refresh_interval` | `WH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh`. |
+| `schema.refresh_interval` | `WH_SCHEMA_REFRESH_INTERVAL` | `60` | How often (in seconds) to re-discover ClickHouse table schemas. Also refreshable on-demand via `POST /v1/schema/refresh` (admin-only). |
 
 ### Message Queue (NATS)
 
@@ -78,7 +78,7 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
-| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. With neither this nor `jwks_url` set, no token can validate, so every request is the policy `default_role`. |
+| `auth.jwt_secret` | `WH_AUTH_JWT_SECRET` | *(empty)* | HMAC secret for JWT validation. Set this (or `jwks_url`) so presented tokens are verified; see [Access Control](/access-control). |
 | `auth.jwks_url` | `WH_AUTH_JWKS_URL` | *(empty)* | JWKS endpoint URL for public key validation (e.g., `https://auth.example.com/.well-known/jwks.json`). When set, JWKS is the **sole** verifier and `jwt_secret` is ignored (not a per-token fallback); the endpoint must be reachable at startup or the server fails to boot. |
 | `auth.role_claim` | `WH_AUTH_ROLE_CLAIM` | `role` | Dot-separated JWT claim path for role extraction (e.g., `app_metadata.role`). |
 
@@ -134,7 +134,7 @@ Prometheus exposition is its own top-level config block, independent of `otel.*`
 | YAML Key | Env Var | Default | Description |
 | -------- | ------- | ------- | ----------- |
 | `prometheus.enabled` | `WH_PROMETHEUS_ENABLED` | `false` | Expose a Prometheus-format `/metrics` endpoint. Works standalone (no OTel push) or alongside `otel.metrics.enabled`. |
-| `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`. |
+| `prometheus.path` | `WH_PROMETHEUS_PATH` | `/metrics` | URL path. Must start with `/`, and may not collide with a reserved probe path (`/livez`, `/readyz`, `/healthz`, `/health`, `/ready`). When `port` is `0` (mounted on the main server) it also may not be `/v1` or sit under `/v1/`, which would shadow the authenticated API. An invalid path fails validation at startup. |
 | `prometheus.port` | `WH_PROMETHEUS_PORT` | `0` | Listener port. `0` mounts the endpoint on the main API server (`server.port`) — simplest, no extra port to expose. Non-zero spins up a dedicated HTTP listener, which lets you firewall metrics off the public API surface (common production posture). Must not equal `server.port` when non-zero. |
 
 ### Logging
@@ -151,6 +151,8 @@ data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 server:
   port: 8080
   shutdown_timeout: 10
+  cors_allowed_origins:
+    - "*"
 
 clickhouse:
   addr: localhost:9000
@@ -159,6 +161,7 @@ clickhouse:
   database: default
   username: default
   password: ""
+  query_timeout: 30s
 
 mq:
   gap_window_minutes: 15

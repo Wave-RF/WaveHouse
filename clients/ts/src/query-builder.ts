@@ -33,6 +33,7 @@ const OP_MAP: Record<FilterOp, string> = {
 interface QueryState {
   table: string;
   columns: string[];
+  selectAll?: boolean;
   aggregations: Aggregation[];
   filters: QueryFilter[];
   groupBy: string[];
@@ -66,6 +67,16 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
   select(...columns: string[]): QueryBuilder<Row> {
     return this._clone({ columns: [...this._state.columns, ...columns] });
+  }
+
+  /**
+   * Select every column the caller's role is allowed to read (the all-columns
+   * wildcard). Use this instead of `.select(...)` when you want a full-row read;
+   * a bare `.fetch()` with no `.select()` does this implicitly. Mutually
+   * exclusive with `.select(...)`.
+   */
+  selectAll(): QueryBuilder<Row> {
+    return this._clone({ selectAll: true });
   }
 
   where(column: string, op: FilterOp, value: unknown): QueryBuilder<Row> {
@@ -123,7 +134,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
   // --- Execution ---
 
-  /** Default row limit when none is specified. Matches backend DefaultMaxRows. */
+  /** Default row limit when none is specified — deliberately tighter than the backend's DefaultMaxRows (10000) safety cap. */
   static readonly DEFAULT_LIMIT = 1000;
 
   async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
@@ -203,8 +214,20 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
 
   private _buildAST(effectiveLimit?: number): StructuredQuery {
     const ast: StructuredQuery = {};
-    if (this._state.columns.length > 0) ast.columns = this._state.columns;
-    if (this._state.aggregations.length > 0) ast.aggregations = this._state.aggregations;
+    const hasColumns = this._state.columns.length > 0;
+    const hasAggs = this._state.aggregations.length > 0;
+    // Projection: an explicit select_all, then explicit columns, else — for a
+    // bare query with no projection intent and no aggregations — default to
+    // select_all so `from(t).fetch()` returns rows. (The wire default for omitted
+    // columns is "nothing"; the SDK opts into select_all on the caller's behalf.)
+    if (this._state.selectAll) {
+      ast.select_all = true;
+    } else if (hasColumns) {
+      ast.columns = this._state.columns;
+    } else if (!hasAggs) {
+      ast.select_all = true;
+    }
+    if (hasAggs) ast.aggregations = this._state.aggregations;
     if (this._state.filters.length > 0) ast.filters = this._state.filters;
     if (this._state.groupBy.length > 0) ast.group_by = this._state.groupBy;
     if (this._state.orderBy.length > 0) ast.order_by = this._state.orderBy;
