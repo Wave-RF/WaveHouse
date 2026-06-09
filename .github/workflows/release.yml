@@ -6,8 +6,10 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  packages: write
+  contents: write # create the GitHub Release (goreleaser)
+  packages: write # push the image to GHCR
+  id-token: write # OIDC for build-provenance attestations (Sigstore)
+  attestations: write # write the build-provenance attestations
 
 jobs:
   release:
@@ -47,3 +49,30 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build-provenance attestations — free for public repos via Sigstore's
+      # public-good infra. Binaries: one attestation over every artifact listed
+      # in goreleaser's checksums.txt. Image: attest the multi-arch
+      # manifest-list digest and store the attestation alongside it in GHCR.
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Resolve pushed image digest
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/wave-rf/wavehouse:${GITHUB_REF_NAME}"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
+          [ -n "$digest" ] || { echo "::error::empty digest for $ref"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Resolved $ref -> $digest"
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/wave-rf/wavehouse
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

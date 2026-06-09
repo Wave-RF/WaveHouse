@@ -24,6 +24,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write # OIDC for the build-provenance attestation (Sigstore)
+  attestations: write # write the build-provenance attestation
 
 concurrency:
   # The :dev tag should track HEAD, so cancel any in-flight build
@@ -84,3 +86,25 @@ jobs:
           # goreleaser version a real release will.
           version: "~> v2"
           args: release --clean
+
+      # Attest the rolling dev image (multi-arch manifest-list digest) and store
+      # the attestation alongside it in GHCR. Free for public repos via Sigstore.
+      # Dev binaries aren't distributed (the GitHub Release is suppressed), so
+      # only the image is attested. Mirrors release.yml.
+      - name: Resolve pushed dev image digest
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/wave-rf/wavehouse:dev-${GITHUB_SHA}"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
+          [ -n "$digest" ] || { echo "::error::empty digest for $ref"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Resolved $ref -> $digest"
+
+      - name: Attest dev image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/wave-rf/wavehouse
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

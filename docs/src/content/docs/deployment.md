@@ -79,9 +79,15 @@ Production images are published to GitHub Container Registry via GoReleaser:
 ghcr.io/wave-rf/wavehouse:<tag>
 ```
 
+Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying:
+
+```bash
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:<tag> --repo Wave-RF/WaveHouse
+```
+
 ## Releases
 
-Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`.
+Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
 
 ### Supported Platforms
 
