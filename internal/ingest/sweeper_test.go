@@ -269,10 +269,7 @@ func TestFindGapSequence(t *testing.T) {
 			seq, err := s.findGapSequence(context.Background(), ms)
 
 			if tt.wantErrSub != "" {
-				assert.Error(t, err)
-				if err != nil {
-					assert.Contains(t, err.Error(), tt.wantErrSub)
-				}
+				assert.ErrorContains(t, err, tt.wantErrSub)
 				return
 			}
 			assert.NoError(t, err)
