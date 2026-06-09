@@ -4,17 +4,16 @@
 // any diagram opens it in a lightbox — small diagrams scale up to fill the
 // viewport, wide ones show at natural size with pan-scroll for full detail.
 //
-// Rendered once (from Footer.astro, which is on every page). The script uses
-// event delegation on `document` so it survives Astro view-transition
-// navigations without re-binding, and a window flag makes init idempotent.
+// Rendered once (from Footer.astro, which is on every page). Uses event
+// delegation on `document` so a single listener covers every diagram, and a
+// window flag keeps init idempotent within a page.
 ---
 
 <script is:inline>
   // is:inline (not a bundled module) to match the codebase's DOM-script
-  // convention (see Footer.astro) and stay out of `astro check`. With view
-  // transitions this re-executes per navigation, so the window flag guards
-  // against re-binding the document-level listeners; per-page work runs from
-  // the persistent `astro:page-load` handler.
+  // convention (see Footer.astro) and stay out of `astro check`. The window
+  // flag guards against re-binding the document-level listeners if the script
+  // runs twice in one document; per-page enhancement runs on load.
   (() => {
     if (window.__whMermaidZoomInit) return;
     window.__whMermaidZoomInit = true;
@@ -118,7 +117,7 @@
     });
 
     // Make diagrams keyboard-focusable + hint the interaction (idempotent;
-    // re-run after every view-transition navigation for the new page's DOM).
+    // runs on each page load for that page's diagrams).
     function enhance() {
       document.querySelectorAll(DIAGRAM).forEach((svg) => {
         if (svg.dataset.whZoom) return;
@@ -127,7 +126,6 @@
         svg.setAttribute("aria-keyshortcuts", "Enter");
       });
     }
-    document.addEventListener("astro:page-load", enhance);
     if (document.readyState !== "loading") enhance();
     else document.addEventListener("DOMContentLoaded", enhance);
   })();

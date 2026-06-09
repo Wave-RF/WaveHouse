@@ -1,7 +1,6 @@
 ---
-// PostHog analytics snippet with View Transitions support.
-// Uses is:inline to prevent Astro from processing the script.
-// Includes initialization guard to prevent stack overflow with ClientRouter.
+// PostHog analytics snippet. is:inline so Astro doesn't process/bundle the
+// script; the __posthog_initialized guard keeps init to once per document.
 //
 // The committed fallbacks keep prod working: CI (make ci → astro build) has no
 // PUBLIC_POSTHOG_* env and docs/.env is gitignored. phc_ project tokens are

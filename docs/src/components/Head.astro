@@ -1,6 +1,5 @@
 ---
 import Default from "@astrojs/starlight/components/Head.astro";
-import { ClientRouter } from "astro:transitions";
 import PostHog from "./PostHog.astro";
 ---
 
@@ -15,7 +14,26 @@ import PostHog from "./PostHog.astro";
 */}
 <meta name="theme-color" content="#FAFAF9" media="(prefers-color-scheme: light)" />
 <meta name="theme-color" content="#0A0B0E" media="(prefers-color-scheme: dark)" />
-<ClientRouter fallback="swap" />
+{/*
+  No <ClientRouter/> here on purpose. Starlight's built-in search and mobile
+  menu assume real (cross-document) navigations; the SPA router detached their
+  custom elements and broke search (showModal on a removed dialog). We use
+  browser-native cross-document view transitions instead — the @view-transition
+  rule in global.css — which animates navigation without the SPA pitfalls.
+*/}
+<script is:inline>
+  // A cross-document view transition is skipped by the browser — per the View
+  // Transitions spec — when the next page can't paint within its budget (e.g. a
+  // cold load on a slow connection). The skip rejects the transition's promise
+  // with an AbortError ("Transition was skipped"); that's graceful degradation,
+  // not a fault, so swallow exactly that rejection to keep it out of the console
+  // and error tracking. Any other unhandled rejection still propagates.
+  addEventListener("unhandledrejection", (e) => {
+    if (e.reason?.name === "AbortError" && /Transition was skipped/.test(e.reason?.message || "")) {
+      e.preventDefault();
+    }
+  });
+</script>
 
 <script is:inline>
   (() => {
@@ -47,9 +65,8 @@ import PostHog from "./PostHog.astro";
     };
     resolve();
 
-    // `is:inline` scripts re-run on every Astro View Transition, so
-    // sentinel-guard the listener/observer registration to avoid stacking
-    // MutationObservers and astro:after-swap listeners across navigations.
+    // This is:inline script re-runs on every full page load; the window flag
+    // guards the observer/matchMedia registration against a double-run.
     if (window.__whThemeColorBound) return;
     window.__whThemeColorBound = true;
     new MutationObserver(resolve).observe(document.documentElement, {
@@ -57,7 +74,6 @@ import PostHog from "./PostHog.astro";
       attributeFilter: ["data-theme"],
     });
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", resolve);
-    document.addEventListener("astro:after-swap", resolve);
   })();
 </script>
 
@@ -100,11 +116,10 @@ import PostHog from "./PostHog.astro";
       document.head.append(link);
     };
     repaint();
-    // View transitions restore the plain SSR links (and this script re-runs);
-    // sentinel-guard the listeners only, like the theme-color script above.
+    // Re-runs on every full page load; the window flag guards the listener
+    // registration against a double-run.
     if (window.__whFaviconBound) return;
     window.__whFaviconBound = true;
     mq.addEventListener("change", repaint);
-    document.addEventListener("astro:after-swap", repaint);
   })();
 </script>

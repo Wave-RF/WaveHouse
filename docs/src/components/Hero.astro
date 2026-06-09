@@ -50,41 +50,43 @@ if (import.meta.env.DEV && !heroTitle) {
 
 {/*
   The hero's entrance animations (staggered fade-up on text, the live demo
-  panel rising in) should play once per tab session. Astro View Transitions
-  re-mount the DOM on every navigation, so without this guard a user who
-  nav'd /getting-started → / would see the whole opening sequence again.
+  panel rising in) play once per tab session, not on every visit to `/`.
 
-  The inline script below runs synchronously during HTML parse — including
-  on view-transition swaps (`data-astro-rerun`) — and stamps `data-hero-played`
-  on <html> before the section paints when the in-memory flag is already set.
-  CSS in this file's "style" block reads that attribute and short-circuits
-  the entrance animations to their final state. Looping background animations
-  (orb drift, the live panel's stream pulse, etc.) are not affected.
+  The inline script below runs synchronously during HTML parse and, when the
+  session flag is already set, stamps `data-hero-played` on <html> before the
+  section paints; CSS in this file's "style" block reads that attribute and
+  short-circuits the entrance animations to their final state. Looping
+  background animations (orb drift, the live panel's stream pulse, etc.) are
+  not affected.
 
-  `window.__whHeroPlayed` survives view transitions (same JS context) but is
-  wiped by a hard page refresh — so a refresh of `/` still replays the hero.
+  Scope is `sessionStorage`: it survives same-tab navigations and reloads but
+  resets when the tab closes — exactly "once per tab session". (It replaced an
+  in-memory `window` flag that persisted only because the old SPA router kept
+  one JS context across navigations; under full-document navigation that flag
+  reset on every load, so the guard never tripped and the hero replayed.)
 */}
-<script is:inline data-astro-rerun>
-  // Order matters: stamp the attribute BEFORE setting the flag, so the
-  // current mount (the first one in this tab session) still gets the full
-  // animation. Subsequent mounts — i.e. view-transition returns — find the
-  // flag already set and stamp the attribute synchronously, before paint,
-  // which suppresses the entrance animations via the [data-hero-played]
-  // rules in this file's "style" block.
+<script is:inline>
+  // First paint of the session gets the full animation; a later same-tab visit
+  // finds the flag set and stamps `data-hero-played` synchronously, before
+  // paint, suppressing the entrance via the [data-hero-played] rules in this
+  // file's "style" block.
   //
-  // Also stamps `[data-screenshot-ready]` on <html> for the
-  // scripts/screenshot.mjs Playwright wait — on first mount the bottom-of-
-  // file animationend listener stamps it once the visual column's entrance
-  // finishes; on subsequent mounts the animations are suppressed, so there's
-  // no animationend event and we set the ready marker here.
-  if (typeof window !== "undefined") {
-    if (window.__whHeroPlayed) {
+  // Also stamps `[data-screenshot-ready]` for the scripts/screenshot.mjs wait:
+  // on the session's first paint the bottom-of-file animationend listener
+  // stamps it when the entrance finishes; on a suppressed replay there is no
+  // animationend, so we set it here. A fresh Playwright context has empty
+  // sessionStorage, so screenshots always capture the full entrance. Storage
+  // access is wrapped — if it throws (disabled), we simply animate every time.
+  (() => {
+    let played = false;
+    try { played = sessionStorage.getItem("whHeroPlayed") === "1"; } catch {}
+    if (played) {
       document.documentElement.setAttribute("data-hero-played", "");
       document.documentElement.setAttribute("data-screenshot-ready", "");
     } else {
-      window.__whHeroPlayed = true;
+      try { sessionStorage.setItem("whHeroPlayed", "1"); } catch {}
     }
-  }
+  })();
 </script>
 
 <section class="wh-hero">
@@ -205,7 +207,7 @@ if (import.meta.env.DEV && !heroTitle) {
   </div>
 </section>
 
-<script is:inline data-astro-rerun>
+<script is:inline>
   // Stamp `[data-screenshot-ready]` on <html> when the visual column finishes
   // its entrance animation, so scripts/screenshot.mjs can wait on a real
   // signal rather than a magic timeout that drifts whenever the entrance
@@ -239,7 +241,6 @@ if (import.meta.env.DEV && !heroTitle) {
     });
   }
   document.addEventListener('DOMContentLoaded', setupHeroCTATracking);
-  document.addEventListener('astro:page-load', setupHeroCTATracking);
 
   // Click-to-copy install command — devs expect it, and it makes the SDK the
   // one-line "try it now". Falls back to a manual selection range when the
@@ -270,7 +271,6 @@ if (import.meta.env.DEV && !heroTitle) {
     });
   }
   document.addEventListener('DOMContentLoaded', setupHeroInstallCopy);
-  document.addEventListener('astro:page-load', setupHeroInstallCopy);
 </script>
 
 <style>
