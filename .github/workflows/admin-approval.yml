@@ -62,7 +62,7 @@ jobs:
     # entries — the posted commit status is the merge gate; this
     # job name just advertises the workflow.
     name: Evaluate admin reviews
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # Fetch Dependabot's update-type so the bypass below can scope
