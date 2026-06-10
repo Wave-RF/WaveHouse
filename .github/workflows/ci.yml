@@ -6,17 +6,19 @@ name: CI
 #
 # READ FIRST: .github/workflows/README.md — the architecture doc. It has
 # the DAG diagram, the design invariants (sole required check, the
-# coverage-gate fold, cache key policy, trust domains), and the
+# coverage job, cache key policy, trust domains), and the
 # how-to-add-a-job recipe. Comments in this file explain only what's
 # local to a step.
 #
 # The short version:
 #   - `changes` classifies the change set once; the test/docs jobs hang
 #     off it and skip when their inputs didn't change.
-#   - e2e (the long pole) builds its own inputs, runs the suite exactly
-#     like local `make test-e2e`, then applies the merged coverage gate
-#     at its tail (polling the sibling suites' fragments via
-#     scripts/ci/wait-artifact.sh instead of paying a separate runner).
+#   - e2e (the long pole) builds its own inputs and runs the suite
+#     exactly like local `make test-e2e`; each suite uploads a raw
+#     coverage fragment.
+#   - the `coverage` job merges those fragments and applies every
+#     threshold gate once (`make cov`) after all suites finish — exactly
+#     like local `make ci`'s final step.
 #   - the aggregator job NAMED "CI" is the ruleset's sole required check
 #     (skipped jobs pass).
 
@@ -108,27 +110,19 @@ jobs:
       - name: Check Conventional Commits format
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Logic lives in scripts/ci/check-pr-title.sh (shellcheck-gated),
+        # resolved from this trusted-main checkout like scripts/lint-pr-title.sh.
+        # Transition guard: until this PR merges, main doesn't have the
+        # script yet — skip with a notice (housekeeping.yml's advisory
+        # mirror still reds a bad title, and this PR's own title is valid).
+        # Drop the guard once it's on main. See README "Transition notes".
         run: |
-          # Read the CURRENT title + author from the API, not the event
-          # payload: re-runs reuse the original payload, so the "fix the
-          # title, re-run failed jobs" flow (automated by housekeeping.yml)
-          # would otherwise keep judging the stale title.
-          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}")"
-          title="$(jq -r '.title' <<<"$pr_json")"
-          author="$(jq -r '.user.login' <<<"$pr_json")"
-          # Dependabot's grouped-update titles routinely exceed the 72-char
-          # subject cap and the format isn't configurable, so Dependabot PRs
-          # are exempt from the length check (the format check still applies).
-          if [[ "$author" == "dependabot[bot]" || "$author" == "app/dependabot" ]]; then
-            export PR_TITLE_SKIP_LENGTH=1
+          if [ ! -f scripts/ci/check-pr-title.sh ]; then
+            echo "::notice::scripts/ci/check-pr-title.sh is not on the default branch yet — title checked by PR housekeeping during transition."
+            exit 0
           fi
-          if reason=$(bash scripts/lint-pr-title.sh "$title" 2>&1); then
-            echo "PR title OK: $title"
-          else
-            printf '%s\n' "$reason"
-            echo "::error::$(printf '%s' "$reason" | head -1)"
-            exit 1
-          fi
+          scripts/ci/check-pr-title.sh
 
   # ── Static checks ──────────────────────────────────────────────────
   lint:
@@ -202,9 +196,9 @@ jobs:
         run: pnpm store prune
 
   # ── Test suites ────────────────────────────────────────────────────
-  # COV_DEFER=1: collect coverage, skip the per-suite render + gate — the
-  # e2e job's coverage tail applies every gate once, exactly like local
-  # `make ci`.
+  # COV_DEFER=1: collect coverage, skip the per-suite render + gate —
+  # each suite just uploads its raw fragment and the `coverage` job
+  # applies every gate once, exactly like local `make ci`.
   unit:
     name: Unit tests
     needs: changes
@@ -262,22 +256,17 @@ jobs:
           retention-days: 3
           overwrite: true
 
-  # The run's long pole. It builds its own inputs (SDK dist + cover
-  # binary, in parallel, on a warm cache) instead of waiting on a builder
-  # job, runs the suite exactly like local `make test-e2e` (one
-  # orchestrator, sequential files), and absorbs the consolidated-coverage
-  # gate at its tail: the unit/integration fragments upload well before
-  # the suite ends, so the merge + gate costs seconds here vs. a whole
-  # runner spin-up as its own job.
+  # The run's long pole. Builds its own inputs (SDK dist + cover binary,
+  # in parallel, on a warm cache) instead of waiting on a builder job,
+  # runs the suite exactly like local `make test-e2e` (one orchestrator,
+  # sequential files), and uploads its coverage fragment for the
+  # `coverage` job to merge + gate — symmetric with unit/integration.
   e2e:
     name: E2E tests
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    permissions:
-      contents: read
-      actions: read # poll + download the sibling suites' coverage fragments mid-run
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -302,27 +291,49 @@ jobs:
       # binary + the SDK vitest suite.
       - name: Build SDK dist + cover binary, run E2E suite
         run: make -j "$(nproc)" test-e2e COV_DEFER=1
-      # ── Consolidated coverage report + gates ──────────────────────────
-      # The local tmp/coverage already holds this job's e2e + ts-e2e data;
-      # the unit/integration fragments arrive as artifacts, almost always
-      # uploaded long before the suite above ends. The wait fails fast
-      # when a sibling suite already concluded without producing. Producer
-      # names must match the jobs' `name:` fields above.
-      - name: Wait for sibling coverage fragments
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          scripts/ci/wait-artifact.sh
-          --artifacts coverage-unit,coverage-integration
-          --producers "Unit tests,Integration tests"
-      - name: Download sibling coverage fragments
+      - name: Upload coverage fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-e2e
+          path: tmp/coverage
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+
+  # ── Consolidated coverage report + gates ───────────────────────────
+  # Merges the three suites' coverage fragments and applies every
+  # threshold gate once (`make cov`) — exactly like local `make ci`'s
+  # final step. A dedicated job (rather than folded into e2e's tail) so
+  # the gate is decoupled from the e2e suite's own pass/fail and waits on
+  # whichever suite finishes last through the DAG — no in-run polling,
+  # and correct even when integration outlasts e2e.
+  coverage:
+    name: Coverage
+    needs: [changes, unit, integration, e2e]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # download the suites' coverage fragments from this run
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go-cache-suffix: "-cov"
+      # `go run ./scripts/cov report` (make cov) shells `pnpm exec nyc`
+      # for the TS coverage merge, so node_modules must be present.
+      - name: Install workspace deps
+        run: make pnpm-install
+      - name: Download coverage fragments
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: coverage-*
           merge-multiple: true
           path: tmp/coverage
-      # `cov report` shells `pnpm exec nyc` for the TS merge — node_modules
-      # are already installed (build-ts's pnpm-install prereq above).
       - name: Render consolidated report + gate thresholds
         run: make cov
       # Coverage in the job-summary panel. See #133 for post-launch
@@ -471,13 +482,15 @@ jobs:
 
   # Production: push (or manual dispatch) on main → publish the active
   # version served on wavehouse.dev. Gated on the full pipeline (lint +
-  # docs build + every suite, with the merged coverage gate inside e2e) —
-  # not best-effort: a failure here surfaces as a red CI run.
-  # `title`/`docs-preview` are deliberately NOT in `needs`: they skip on
-  # push events, and a skipped need would skip this job too.
+  # docs build + every suite + the merged coverage gate) — not
+  # best-effort: a failure here surfaces as a red CI run. `title`/
+  # `docs-preview` are deliberately NOT in `needs`: they skip on push
+  # events, and a failed need would skip this job; a skipped need
+  # (coverage/suites on a docs-only push) is treated as success, so the
+  # deploy still runs.
   docs-deploy:
     name: Docs deploy
-    needs: [changes, lint, docs-build, unit, integration, e2e]
+    needs: [changes, lint, docs-build, unit, integration, e2e, coverage]
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main' &&
@@ -539,6 +552,7 @@ jobs:
         unit,
         integration,
         e2e,
+        coverage,
         docs-preview,
         docs-deploy,
       ]
@@ -576,6 +590,7 @@ jobs:
         unit,
         integration,
         e2e,
+        coverage,
         docs-preview,
         docs-deploy,
       ]

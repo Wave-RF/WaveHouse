@@ -23,7 +23,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 
 | Layer | Lives in | Applies to | Purpose |
 | ----- | -------- | ---------- | ------- |
-| **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
+| **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit; before push, `make ci` for a code change or `make verify` for a docs-only one (classifier-gated) |
 | **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main`; PR title linted via `scripts/lint-pr-title.sh` on `gh pr create` / `gh pr edit --title` |
 | **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: on a reviewer's `VERDICT: ship_it`, writes that reviewer's `tmp/<name>-passed-<HEAD-sha>` marker |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
@@ -37,11 +37,11 @@ Two scripts, both committed to the repo:
 | Hook | Behavior |
 | ---- | -------- |
 | `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). |
-| `pre-push` | Checks for `tmp/ci-passed-tree-<TREE-sha>` written by `make ci`. **Blocks** if absent — run `make ci`, fix failures, retry push. |
+| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI skips the Go/SDK suites for those too. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. |
 
 `--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
 
-Tree-keyed so commit-then-push works without a re-run when the tree is unchanged. `make ci` skips the marker write when `$CI` is set (CI runners don't push). Shared logic lives in `scripts/ci-marker.sh`.
+Both markers are tree-keyed so commit-then-push works without a re-run when the tree is unchanged. `make ci` / `make verify` skip the marker write when `$CI` is set (CI runners don't push). Shared logic lives in `scripts/ci-marker.sh`.
 
 ## What's in `.claude/` and `.config/`
 
@@ -210,7 +210,7 @@ Not committed at project level. Personal preference — put in `.claude/settings
 
 1. Write code (gofumpt-on-save formats Go files as you go).
 2. `git commit` → pre-commit hook runs `make verify` (or skips if `make ci` already validated this tree). Fix anything that fails.
-3. `git push` → the pre-push hook blocks until `make ci` passed for the current tree (run `make ci`, fix, retry). For agents, the agent-bash-gate hook also requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh` on any push of a branch with commits ahead of `main` — including the first push, before the PR exists. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
+3. `git push` → the pre-push hook blocks until the tree is validated for what changed — `make ci` for a code change, `make verify` for a docs/prose-only one (run it, fix, retry). For agents, the agent-bash-gate hook also requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh` on any push of a branch with commits ahead of `main` — including the first push, before the PR exists. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
 4. Open the PR with `gh pr create --draft` (agents required to use `--draft`; humans flip to ready when ready).
 5. CI workflows fire on the new HEAD. Address review comments per AGENTS.md §Review Response.
 

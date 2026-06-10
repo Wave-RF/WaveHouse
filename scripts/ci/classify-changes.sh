@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
-# Classify a CI run's change set for job gating — the single source of
-# truth behind ci.yml's `changes` job, whose outputs gate the test/docs
-# jobs.
+# CI change-set classifier for ci.yml's `changes` job. Fetches the run's
+# changed-file list from the GitHub API (CI checkouts are shallow, so the
+# list can't come from `git diff`) and pipes it through the shared pure
+# classifier, scripts/classify-paths.sh — the single source of truth for
+# the code/docs allowlists, also usable from the local git hooks.
 #
-# Prints two `key=value` lines for $GITHUB_OUTPUT:
-#   code=true|false  false only when EVERY changed file is prose/repo-meta
-#                    (docs/, *.md, labels, templates) — then the Go/SDK
-#                    test work skips. Fail-closed: push events, manual
-#                    dispatches, API hiccups, and empty file lists all
-#                    count as code changes.
-#   docs=true|false  true when a docs-affecting file changed (docs site
-#                    build inputs, including clients/ts — the landing
-#                    page bundles @wavehouse/sdk).
+# This wrapper owns only the CI-specific policy on top of that:
+#   - manual dispatch ⇒ run + deploy everything;
+#   - an empty / errored file list (API hiccup, brand-new branch) ⇒ fail
+#     closed and run everything;
+#   - pushes to main and merge-group runs never skip code work — they're
+#     the last gate before main and they warm the caches every PR inherits.
 #
-# Computed from the GitHub API (CI checkouts are shallow, so `git diff`
-# against the base can't see the change set). Env in: GITHUB_EVENT_NAME,
-# GITHUB_REPOSITORY, GH_TOKEN, PR_NUMBER (pull_request), PUSH_BEFORE +
-# PUSH_SHA (push: before/after; merge_group: the group's base/head).
+# Prints `code=…` / `docs=…` to stdout (the step redirects to
+# $GITHUB_OUTPUT) and a one-line summary to stderr. Env in:
+# GITHUB_EVENT_NAME, GITHUB_REPOSITORY, GH_TOKEN, PR_NUMBER (pull_request),
+# PUSH_BEFORE + PUSH_SHA (push: before/after; merge_group: group base/head).
 
-# -e/-pipefail: an unexpected failure aborts (and the job reds) instead
-# of misclassifying; the two `gh api … || true` calls stay soft because
-# their empty-output case already fails closed below.
+# -e/-pipefail: an unexpected failure aborts (and the job reds) instead of
+# misclassifying; the two `gh api … || true` calls stay soft because their
+# empty-output case already fails closed below.
 set -euo pipefail
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+emit() { echo "code=$1"; echo "docs=$2"; echo "classified: code=$1 docs=$2" >&2; }
+
 if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-  echo "code=true" # manual → run + deploy everything
-  echo "docs=true"
+  emit true true # manual → run + deploy everything
   exit 0
 fi
+
 if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
   files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
     --paginate --jq '.[].filename' || true)"
@@ -35,28 +38,23 @@ else
   files="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PUSH_BEFORE}...${PUSH_SHA}" \
     --jq '.files[].filename' || true)"
 fi
+
 # Empty (API hiccup / new branch) → fail closed: run everything.
 if [ -z "$files" ]; then
-  echo "code=true"
-  echo "docs=true"
+  emit true true
   exit 0
 fi
-# Pushes to main always run the full suite (they also save the caches
-# every PR inherits), and so do merge-group runs — the queue is the last
-# gate before main, so it never skips. For PRs, `code` flips false only
-# if no file falls outside the prose/meta allowlist.
+
+# Pure classification of the file list, then the push/merge-group override.
+code=""; docs=""
+while IFS='=' read -r key value; do
+  case "$key" in
+    code) code="$value" ;;
+    docs) docs="$value" ;;
+  esac
+done < <(printf '%s\n' "$files" | "$here/../classify-paths.sh")
+
 if [ "${GITHUB_EVENT_NAME}" = "push" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
   code=true
-elif printf '%s\n' "$files" | grep -qvE '^(docs/|.*\.md$|LICENSE|NOTICE|\.gitignore$|\.gitattributes$|\.github/labeler\.yml$|\.github/ISSUE_TEMPLATE/|\.github/pull_request_template|\.claude/|\.vscode/)'; then
-  code=true
-else
-  code=false
 fi
-if printf '%s\n' "$files" | grep -qE '^(docs/|clients/ts/|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/ci\.yml|\.github/actions/setup-env/)'; then
-  docs=true
-else
-  docs=false
-fi
-echo "code=$code"
-echo "docs=$docs"
-echo "classified: code=$code docs=$docs" >&2
+emit "$code" "$docs"
