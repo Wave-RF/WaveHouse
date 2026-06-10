@@ -84,7 +84,7 @@ Bound values are **inlined directly into the SQL string** (not sent as positiona
 | Supplied value | Rendered as | Note |
 | -------------- | ----------- | ---- |
 | string | `'escaped'` | single-quoted; `'` and `\` are escaped |
-| numeric string (e.g. `"100"`) | `100` | emitted bare, so `?limit=100` from a query string works as a number |
+| numeric string (e.g. `"100"`) | `100` | emitted bare, so `?limit=100` from a query string works as a number (a parameter declared `type: string` is quoted as `'100'` instead) |
 | number | `42` / `42.5` | whole floats render as integers |
 | boolean | `1` / `0` | ClickHouse-style |
 | array | `('a', 'b')` | parenthesized list of escaped elements — for `IN` clauses (see below) |
@@ -107,7 +107,7 @@ curl -X POST http://localhost:8080/v1/pipes/by_pages \
 # binds to: … WHERE page IN ('/home', '/pricing', '/docs')
 ```
 
-Array values must come from a **JSON body** (`POST`) — query-string parameters are always scalar strings, so `GET …?pages=a&pages=b` binds only the first value as a string. Declare the parameter as `"type": "array"` to require a list (a scalar value is then a `400`); leave the type off to accept either a scalar or a list at the same placeholder.
+Array values must come from a **JSON body** (`POST`) — query-string parameters are always scalar strings, so `GET …?pages=a&pages=b` binds only the first occurrence (`a`) as a string, ignoring the rest. Declare the parameter as `"type": "array"` to require a list (a scalar value is then a `400`); leave the type off to accept either a scalar or a list at the same placeholder.
 
 ## Authorizing a pipe
 

@@ -189,15 +189,21 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 
 		// Enforce the declared type (if any) before formatting, so a parameter
 		// declared scalar rejects a non-scalar value rather than silently
-		// rendering it as a list.
-		if p, ok := formal[name]; ok && p.Type != "" {
-			if err := validateParamType(p.Type, val); err != nil {
+		// rendering it as a list. The declared type also reaches the formatter,
+		// so a declared string always renders as a quoted literal rather than
+		// taking the bare numeric shortcut.
+		declaredType := ""
+		if p, ok := formal[name]; ok {
+			declaredType = p.Type
+		}
+		if declaredType != "" {
+			if err := validateParamType(declaredType, val); err != nil {
 				bindErr = fmt.Errorf("parameter %q: %w", name, err)
 				return match
 			}
 		}
 
-		lit, err := formatParamValue(val)
+		lit, err := formatParamValue(val, declaredType)
 		if err != nil {
 			bindErr = fmt.Errorf("parameter %q: %w", name, err)
 			return match
@@ -222,15 +228,25 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 // Values with no scalar SQL representation are refused rather than emitted as
 // Go's `%v` text: a JSON object has no meaning here, and an empty array would
 // render as `IN ()`, a ClickHouse syntax error.
-func formatParamValue(v any) (string, error) {
+//
+// declaredType is the parameter's declared ParamDef.Type ("" for inline or
+// untyped parameters). When it is "string", a numeric-looking value is quoted
+// rather than emitted bare, so a parameter declared a string always renders as
+// a string literal. Array elements carry no declared element type and are
+// formatted with an empty declaredType.
+func formatParamValue(v any, declaredType string) (string, error) {
 	if v == nil {
 		return "NULL", nil
 	}
 	switch val := v.(type) {
 	case string:
-		// If the string looks like a number (common with inline defaults), return it bare.
-		if _, err := strconv.ParseFloat(val, 64); err == nil {
-			return val, nil
+		// A numeric-looking string renders bare (so `?limit=100` from a query
+		// string works as a number), unless the parameter is declared a string —
+		// then it is always quoted, honoring the declared type.
+		if declaredType != "string" {
+			if _, err := strconv.ParseFloat(val, 64); err == nil {
+				return val, nil
+			}
 		}
 		escaped := strings.ReplaceAll(val, `\`, `\\`)
 		escaped = strings.ReplaceAll(escaped, `'`, `''`)
@@ -261,7 +277,7 @@ func formatParamValue(v any) (string, error) {
 		}
 		parts := make([]string, len(val))
 		for i, elem := range val {
-			s, err := formatParamValue(elem)
+			s, err := formatParamValue(elem, "")
 			if err != nil {
 				return "", err
 			}
@@ -285,8 +301,10 @@ func validateParamType(declared string, v any) error {
 	}
 	switch declared {
 	case "string":
-		if k := jsonKind(v); k == "array" || k == "object" {
-			return fmt.Errorf("expected a scalar string, got %s", k)
+		// Query-string and JSON-string values both arrive as Go strings; a JSON
+		// number/boolean/array/object is a declared-type violation.
+		if _, ok := v.(string); !ok {
+			return fmt.Errorf("expected string, got %s", jsonKind(v))
 		}
 		return nil
 	case "number":
