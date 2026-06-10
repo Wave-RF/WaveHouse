@@ -113,16 +113,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         # Logic lives in scripts/ci/check-pr-title.sh (shellcheck-gated),
         # resolved from this trusted-main checkout like scripts/lint-pr-title.sh.
-        # Transition guard: until this PR merges, main doesn't have the
-        # script yet — skip with a notice (housekeeping.yml's advisory
-        # mirror still reds a bad title, and this PR's own title is valid).
-        # Drop the guard once it's on main. See README "Transition notes".
-        run: |
-          if [ ! -f scripts/ci/check-pr-title.sh ]; then
-            echo "::notice::scripts/ci/check-pr-title.sh is not on the default branch yet — title checked by PR housekeeping during transition."
-            exit 0
-          fi
-          scripts/ci/check-pr-title.sh
+        run: scripts/ci/check-pr-title.sh
 
   # ── Static checks ──────────────────────────────────────────────────
   lint:
@@ -497,10 +488,6 @@ jobs:
       # would skip after the upload step's exit 1 — so a failed deploy is
       # noted rather than leaving a stale "live" comment. Skipped only when
       # no upload was attempted (outcome == 'skipped').
-      #
-      # Transition guard: until this PR merges, main doesn't have the script
-      # yet — skip with a notice instead of failing (the preview URL is still
-      # in the step summary). Drop the guard once it's on main.
       - name: Comment docs preview status
         if: ${{ !cancelled() && (steps.preview.outcome == 'success' || steps.preview.outcome == 'failure') }}
         continue-on-error: true
@@ -510,12 +497,7 @@ jobs:
           URL: ${{ steps.preview.outputs.url }}
           SHA: ${{ github.event.pull_request.head.sha }}
           PREVIEW_OUTCOME: ${{ steps.preview.outcome }}
-        run: |
-          if [ ! -f scripts/ci/docs-preview-comment.sh ]; then
-            echo "::notice::scripts/ci/docs-preview-comment.sh is not on the default branch yet — skipping the sticky comment."
-            exit 0
-          fi
-          scripts/ci/docs-preview-comment.sh
+        run: scripts/ci/docs-preview-comment.sh
 
   # Production: push (or manual dispatch) on main → publish the active
   # version served on wavehouse.dev. Gated on the full pipeline (lint +

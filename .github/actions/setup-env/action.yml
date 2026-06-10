@@ -91,14 +91,10 @@ runs:
         # Same-suffix prefix first (this job's flavor across go.sum bumps),
         # then the bare prefix as a cold-start fallback — it matches any
         # other job's suffixed entry, which still carries the shared module
-        # cache even if its build objects don't apply. The unversioned (v1)
-        # prefixes are transitional warm-start fallbacks; drop them once a
-        # v2 entry has been saved on main.
+        # cache even if its build objects don't apply.
         restore-keys: |
           gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
           gobuild-v2-${{ runner.os }}-go-
-          gobuild-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
-          gobuild-${{ runner.os }}-go-
 
     - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.golangci == 'true' }}
