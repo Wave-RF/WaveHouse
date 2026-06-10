@@ -79,8 +79,24 @@ const (
 	// < 1 KiB); the bound exists to keep a misbehaving admin script from
 	// forcing the handler to buffer arbitrarily large input before the
 	// upstream forward. Symmetry with maxCHResponseBytes on the response
-	// side.
+	// side. This is the data-plane cap, shared with /v1/ingest (see
+	// ingest.go) — both legitimately carry larger bodies than the
+	// control-plane read endpoints below.
 	maxRequestBodyBytes = 16 << 20 // 16 MiB
+
+	// maxControlBodyBytes caps the inbound body on the control-plane read
+	// endpoints — POST /v1/query (structured) and GET/POST /v1/pipes (the
+	// parameter body and, for the admin CRUD path, a pipe definition). These
+	// decode a bounded query/parameter *description*, not data: a real
+	// structured query or pipe-parameter map is far under 1 MiB even with a
+	// large `in`-list, so 1 MiB is generous headroom while keeping the
+	// worst-case heap per request small. The cap matters because a JSON array
+	// of many tiny elements amplifies ~13× bytes→live-heap when decoded into
+	// Go (interface boxing + slice growth + GC headroom), so an *uncapped*
+	// decoder on these public endpoints is a single-request OOM vector (#315).
+	// This is the in-code backstop; operators set their own (tighter or
+	// looser) outer limit at the reverse proxy — see the deployment docs.
+	maxControlBodyBytes = 1 << 20 // 1 MiB
 )
 
 // NewQueryHandler builds a handler that proxies to ClickHouse over HTTP.
