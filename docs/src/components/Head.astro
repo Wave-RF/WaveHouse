@@ -5,16 +5,12 @@ import PostHog from "./PostHog.astro";
 ---
 
 {/*
-  astro-vtbot's Starlight <Base> wraps our head content with Astro's
-  <ClientRouter/> to restore SPA-style view transitions (instant nav, preserved
-  sidebar scroll). Crucially, its bundled <ReplacementSwap/> + <StarlightConnector/>
-  keep Starlight's built-in search dialog and mobile menu working across
-  navigation: ReplacementSwap swaps only the main frame and preserves the rest of
-  the header, so the search <dialog> and its ⌘K listener are never detached — the
-  exact failure a bare <ClientRouter/> caused (showModal on a removed dialog).
-  `viewTransitionsFallback="swap"` keeps our prior behavior — an instant swap where
-  the browser lacks the View Transition API. See Starlight discussion #2823, the
-  supported path for SPA transitions on Starlight.
+  astro-vtbot's Starlight <Base> wraps our head in <ClientRouter/> to keep SPA
+  view transitions, while its <ReplacementSwap/> preserves the header so
+  Starlight's search <dialog> + ⌘K listener survive navigation — a bare
+  <ClientRouter/> detached them (showModal on a removed dialog). fallback="swap"
+  = instant swap where the View Transition API is absent. See Starlight #2823;
+  full rationale in CHANGELOG.
 */}
 <VtbotStarlight viewTransitionsFallback="swap">
   <Default><slot /></Default>
