@@ -59,6 +59,8 @@ github.com/blacktop/go-macho v1.1.271 h1:KpC13blu4m1LVUv3WPU3a73u1xNFapDeA4UJp/J
 github.com/blacktop/go-macho v1.1.271/go.mod h1:Hc5E2Lvt/U1VT+jOxr1O5l/LNFJeMYK4eAmDfazTiGc=
 github.com/bluele/gcache v0.0.2 h1:WcbfdXICg7G/DGBh1PFfcirkWOQV+v077yF1pSy3DGw=
 github.com/bluele/gcache v0.0.2/go.mod h1:m15KV+ECjptwSPxKhOhQoAFQVtUFjTVkc3H8o0t/fp0=
+github.com/boumenot/gocover-cobertura v1.5.0 h1:S2eXZ5snlTl+IGLXiM0litlpy9gf8AU8NagMaxX3nZM=
+github.com/boumenot/gocover-cobertura v1.5.0/go.mod h1:iB1/+oDwfRlsDzABskkid0cNdQ1A+u3O91XUJZWqgtg=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
