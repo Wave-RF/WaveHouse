@@ -2,25 +2,29 @@ name: CI
 
 # Job DAG over the same Makefile targets `make ci` runs locally — local
 # `make ci` stays the dev mirror; CI just spreads the phases across free
-# 4-core public-repo runners instead of one process:
+# 4-core public-repo runners instead of one process. The graph is shaped
+# for wall-clock: every job hangs directly off `changes` (~8s) so nothing
+# waits on another runner's build, and the e2e job — always the long pole —
+# builds its own inputs and absorbs the merged-coverage gate at its tail:
 #
-#   changes ─┬→ unit ────────────┐
-#            ├→ integration ─────┼→ coverage ──────────────┐
-#   build ───┴→ e2e ─────────────┘                         │
-#   changes + build ──→ docs-preview (same-repo PRs) ──────┼→ CI (aggregator)
-#   changes + lint + build + coverage ──→ docs-deploy (main)
-#   title (PRs) · lint ────────────────────────────────────┘
+#   changes ─┬→ unit ─────────(fragment)──┐
+#            ├→ integration ──(fragment)──┼→ e2e (build → suite → cov gate) ─┐
+#            ├→ e2e ───────────────────────┘                                  │
+#            └→ docs-build ──→ docs-preview (same-repo PRs) ──────────────────┼→ CI (aggregator)
+#   changes + lint + docs-build + suites ──→ docs-deploy (main)               │
+#   title (PRs) · lint ────────────────────────────────────────────────────────┘
 #
 # The aggregator job is NAMED "CI" — it is the sole check the
 # `main branch protection` ruleset needs (skipped jobs pass, so
 # path-filtered/event-filtered jobs never orphan the required check, and
 # the ruleset never needs re-touching when jobs are added or renamed).
 #
-# Build artifacts (cover binary, SDK dist, docs dist, coverage fragments)
-# travel between jobs as workflow artifacts — free on public repos and
-# outside the org's private-repo storage pool. The warm Go build cache is
-# shared per-job via setup-env instead (go test recompiles per package, so
-# a prebuilt binary can't be handed to the test jobs).
+# Cross-job artifacts (docs dist, coverage fragments) are workflow
+# artifacts — free on public repos and outside the org's private-repo
+# storage pool. The warm Go build cache is shared per-job via setup-env
+# (go test recompiles per package, so a prebuilt binary can't be handed
+# to the test jobs; e2e compiles its own cover binary for the same
+# reason — waiting on a builder job costs more than compiling warm).
 
 on:
   push:
@@ -181,7 +185,7 @@ jobs:
       # same-key re-push is a no-op. PRs inherit main's cache scope, so a
       # main-push save warms every PR. Keys come from setup-env outputs so
       # save and restore can't drift. (Same pattern in every job below;
-      # the astro/pnpm/playwright saves belong to the build job.)
+      # the astro/pnpm/playwright saves belong to the docs-build job.)
       - name: Save Go module + build cache
         if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -199,13 +203,18 @@ jobs:
             ~/.cache/golangci-lint
           key: ${{ steps.setup.outputs.golangci-cache-key }}
 
-  # ── Build all artifacts ────────────────────────────────────────────
-  # Go binaries (debug + cover-instrumented), SDK dist, docs site. The
-  # uploads feed e2e (cover binary + SDK dist) and the docs deploy jobs
-  # (docs dist) — downstream consumers test/ship exactly what was built
-  # here instead of rebuilding.
-  build:
-    name: Build
+  # ── Docs site build ────────────────────────────────────────────────
+  # Astro site → docs-dist artifact, feeding the two deploy jobs. Pure
+  # pnpm (build-docs → check-docs → build-ts needs no Go toolchain), and
+  # only runs when a docs-affecting file changed — Go binaries are no
+  # longer built here: compile breakage is already caught by lint
+  # (golangci type-checks every package), the test suites, and the e2e
+  # job linking the cover binary; release builds by goreleaser-validate /
+  # publish-dev.
+  docs-build:
+    name: Docs build
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -220,27 +229,11 @@ jobs:
       - id: setup
         uses: ./.github/actions/setup-env
         with:
-          go-cache-suffix: "-build"
+          go: "false"
           playwright: "true" # rehype-mermaid renders diagrams via Chromium
           astro: "true"
-      - name: Build all artifacts
-        run: make build-all build-cover
-      - name: Upload cover-instrumented binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cover-binary
-          path: bin/wavehouse-cov
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true # re-runs of this job re-upload
-      - name: Upload SDK dist
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sdk-dist
-          path: clients/ts/dist
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
+      - name: Build docs site
+        run: make build-docs
       - name: Upload docs site
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -248,15 +241,12 @@ jobs:
           path: docs/dist
           if-no-files-found: error
           retention-days: 7
-          overwrite: true
-      - name: Save Go module + build cache
-        if: steps.setup.outputs.gobuild-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ steps.setup.outputs.gobuild-cache-key }}
+          overwrite: true # re-runs of this job re-upload
+      # The pnpm/playwright/astro cache saves live here (not in lint, which
+      # also restores them) — all three are keyed on the lockfile, and any
+      # lockfile change flips changes.docs=true, so this job always runs
+      # when the keys rotate. Gated on `*-cache-hit != 'true'` so a
+      # same-key re-push is a no-op; PRs inherit main's cache scope.
       # Drop store entries unreferenced by any workspace project before
       # save, so the cache doesn't grow unboundedly as deps churn.
       - name: Prune pnpm store before save
@@ -283,7 +273,8 @@ jobs:
 
   # ── Test suites ────────────────────────────────────────────────────
   # COV_DEFER=1: collect coverage, skip the per-suite render + gate — the
-  # coverage job applies every gate once, exactly like local `make ci`.
+  # e2e job's coverage tail applies every gate once, exactly like local
+  # `make ci`.
   unit:
     name: Unit tests
     needs: changes
@@ -327,6 +318,12 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      # Background pull overlaps the ~25s of cache restores below, so
+      # testcontainers finds the image already local (a concurrent pull of
+      # the same tag is safe — dockerd dedupes layer downloads). Image tag
+      # must match tests/integration/setup_test.go.
+      - name: Prefetch ClickHouse image (background)
+        run: docker pull -q clickhouse/clickhouse-server:latest >/tmp/clickhouse-pull.log 2>&1 &
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -351,45 +348,47 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.setup.outputs.gobuild-cache-key }}
 
+  # The run's long pole. It builds its own inputs (SDK dist + cover binary,
+  # in parallel, on a warm cache) instead of waiting ~95s for a builder job,
+  # and absorbs the consolidated-coverage gate at its tail: by the time the
+  # suite finishes, the unit/integration fragments uploaded ~60s ago, so the
+  # merge + gate costs seconds here vs. a whole runner spin-up as its own job.
   e2e:
     name: E2E tests
-    needs: [changes, build]
+    needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read # poll + download the sibling suites' coverage fragments mid-run
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      # Background pull overlaps the ~35s of setup + build below, so the
+      # orchestrator finds the image already local (a concurrent pull of
+      # the same tag is safe — dockerd dedupes layer downloads). Image tag
+      # must match scripts/orchestrator/main.go.
+      - name: Prefetch ClickHouse image (background)
+        run: docker pull -q clickhouse/clickhouse-server:latest >/tmp/clickhouse-pull.log 2>&1 &
+      # Suffix is -e2e-cov, not -e2e: this cache must carry the
+      # cover-instrumented server objects build-cover compiles below, but
+      # saves are gated on an exact-key miss — the pre-existing -e2e entry
+      # (orchestrator objects only) would exact-hit forever and never
+      # absorb them, leaving build-cover cold on every run.
       - id: setup
         uses: ./.github/actions/setup-env
         with:
-          go-cache-suffix: "-e2e" # `go run` of the orchestrator (testcontainers)
-      - name: Download cover-instrumented binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: cover-binary
-          path: bin
-      - name: Download SDK dist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: sdk-dist
-          path: clients/ts/dist
-      # Artifact zips drop the executable bit.
-      - name: Restore binary permissions
-        run: chmod +x bin/wavehouse-cov
-      # E2E_PREBUILT=1: skip the build-ts/build-cover prereqs — the
-      # artifacts above are the exact outputs the build job produced.
-      - name: Run E2E SDK suite
-        run: make test-e2e COV_DEFER=1 E2E_PREBUILT=1
-      - name: Upload coverage fragment
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-e2e
-          path: tmp/coverage
-          if-no-files-found: error
-          retention-days: 3
-          overwrite: true
+          go-cache-suffix: "-e2e-cov"
+      # `-j` builds the prereqs (build-ts ∥ build-cover) concurrently,
+      # then runs the orchestrator: ClickHouse testcontainer + the cover
+      # binary + the SDK vitest suite.
+      - name: Build SDK dist + cover binary, run E2E suite
+        run: make -j "$(nproc)" test-e2e COV_DEFER=1
+      # Saved before the coverage tail so a failed sibling suite (which
+      # fails the wait step below) can't cost next run the warm build cache.
+      # No-op on the common exact-key hit.
       - name: Save Go module + build cache
         if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -398,32 +397,48 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.setup.outputs.gobuild-cache-key }}
-
-  # ── Consolidated coverage report + gates ───────────────────────────
-  # Default `needs` semantics: runs only when all three suites succeeded;
-  # skips (and the aggregator passes) when they were path-filtered out.
-  coverage:
-    name: Coverage
-    needs: [unit, integration, e2e]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - id: setup
-        uses: ./.github/actions/setup-env
-        with:
-          go-cache-suffix: "-cov" # tiny compile (scripts/cov); restore-keys fall back
-      # `cov report` shells `pnpm exec nyc` for the TS merge.
-      - name: Install workspace deps
-        run: make pnpm-install
-      - name: Download coverage fragments
+      # ── Consolidated coverage report + gates ──────────────────────────
+      # The local tmp/coverage already holds this job's e2e + ts-e2e data;
+      # the unit/integration fragments arrive as artifacts. They're almost
+      # always uploaded long before the suite above ends — the poll covers
+      # an unusually slow sibling, and fails fast when a sibling suite
+      # already failed (the aggregator is red either way; no point waiting
+      # out the timeout). Job names in the --jq filter must match the
+      # `name:` fields of the unit/integration jobs above.
+      - name: Wait for sibling coverage fragments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          deadline=$(( $(date +%s) + 600 ))
+          while :; do
+            names="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq '[.artifacts[].name]')"
+            if jq -e 'index("coverage-unit") and index("coverage-integration")' >/dev/null <<<"$names"; then
+              echo "Both sibling coverage fragments are available."
+              break
+            fi
+            bad="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "Unit tests" or .name == "Integration tests")
+                     | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | join(", ")')"
+            if [ -n "$bad" ]; then
+              echo "::error::Sibling suite(s) failed before uploading coverage ($bad) — cannot run the merged gate."
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for the sibling coverage fragments."
+              exit 1
+            fi
+            echo "Fragments not ready yet ($names) — retrying in 5s."
+            sleep 5
+          done
+      - name: Download sibling coverage fragments
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: coverage-*
           merge-multiple: true
           path: tmp/coverage
+      # `cov report` shells `pnpm exec nyc` for the TS merge — node_modules
+      # are already installed (build-ts's pnpm-install prereq above).
       - name: Render consolidated report + gate thresholds
         run: make cov
       # Coverage in the job-summary panel. See #133 for post-launch
@@ -436,13 +451,6 @@ jobs:
               echo '## Test Coverage (merged unit + integration + e2e)'
               echo '```'
               go tool cover -func=tmp/coverage/total/coverage.txt | tail -n 30
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f tmp/coverage/unit/coverage.txt ]; then
-            {
-              echo '## Test Coverage (unit only — full pipeline did not complete)'
-              echo '```'
-              go tool cover -func=tmp/coverage/unit/coverage.txt | tail -n 30
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -467,7 +475,7 @@ jobs:
   # Fork PRs skip: no secrets there, and the job would have nothing to do.
   docs-preview:
     name: Docs preview
-    needs: [changes, build]
+    needs: [changes, docs-build]
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -666,13 +674,13 @@ jobs:
 
   # Production: push (or manual dispatch) on main → publish the active
   # version served on wavehouse.dev. Gated on the full pipeline (lint +
-  # build + every suite via coverage) — not best-effort: a failure here
-  # surfaces as a red CI run. `title`/`docs-preview` are deliberately NOT
-  # in `needs`: they skip on push events, and a skipped need would skip
-  # this job too.
+  # docs build + every suite, with the merged coverage gate inside e2e) —
+  # not best-effort: a failure here surfaces as a red CI run.
+  # `title`/`docs-preview` are deliberately NOT in `needs`: they skip on
+  # push events, and a skipped need would skip this job too.
   docs-deploy:
     name: Docs deploy
-    needs: [changes, lint, build, coverage]
+    needs: [changes, lint, docs-build, unit, integration, e2e]
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main' &&
@@ -730,11 +738,10 @@ jobs:
         changes,
         title,
         lint,
-        build,
+        docs-build,
         unit,
         integration,
         e2e,
-        coverage,
         docs-preview,
         docs-deploy,
       ]
