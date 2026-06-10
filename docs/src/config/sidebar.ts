@@ -24,7 +24,21 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     label: "Reference",
     items: [
       { label: "API Reference", slug: "api" },
-      { label: "TypeScript SDK", slug: "sdk" },
+      {
+        // Topic-first SDK pages: when a second SDK language lands, these
+        // shared usage pages grow <Tabs syncKey="lang"> code tabs and each
+        // language gets its own setup/caveats page — the topic URLs never
+        // churn (decision in PR #313).
+        label: "TypeScript SDK",
+        items: [
+          { label: "Overview", slug: "sdk" },
+          { label: "Queries", slug: "sdk/queries" },
+          { label: "Streaming & Live Queries", slug: "sdk/streaming" },
+          { label: "Pipes", slug: "sdk/pipes" },
+          { label: "Admin & System", slug: "sdk/admin" },
+          { label: "Reference & CLI", slug: "sdk/reference" },
+        ],
+      },
     ],
   },
   {

@@ -129,12 +129,21 @@
     // columns inside a scroller, but applied unconditionally they FORCED
     // tables that would fit by wrapping into scrollers. Measure with floors
     // off (remove all attrs first so a single reflow covers every table),
-    // then stamp the ones that still can't fit.
+    // then stamp the ones that still can't fit — plus the ones that "fit"
+    // only by CROWDING: a many-column table squeezed to a sliver per column
+    // wraps every other word and reads worse than a clean sideways pan, so
+    // below ~8.5rem of average column width it scrolls instead.
     function classifyTables() {
+      const CROWD_PX = 136;
       const wraps = document.querySelectorAll(".wh-table-wrap");
       wraps.forEach((el) => el.removeAttribute("data-wh-scrolls"));
       wraps.forEach((el) => {
-        if (el.scrollWidth - el.clientWidth > 1) el.setAttribute("data-wh-scrolls", "");
+        const row = el.querySelector("tr");
+        const cols = row ? row.cells.length : 0;
+        const crowded = cols >= 4 && el.clientWidth / cols < CROWD_PX;
+        if (crowded || el.scrollWidth - el.clientWidth > 1) {
+          el.setAttribute("data-wh-scrolls", "");
+        }
       });
     }
     function init() {

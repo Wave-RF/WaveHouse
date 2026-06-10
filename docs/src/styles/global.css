@@ -878,6 +878,53 @@ a.sl-link-button.minimal:hover {
    content centered between sidebar and TOC by the leftover-split formula) is
    the consistent behavior at every width. */
 
+/* ---------- Opportunistic breakout for wide content ----------
+   Prose keeps the 45rem reading measure, but tables, code blocks, and
+   diagrams may grow past it — centered — when the viewport leaves the pane
+   wider than the prose track, instead of wrapping/shrinking next to a field
+   of blank space. The classic full-bleed grid: the markdown container spans
+   the whole main pane, a 3-track grid re-imposes the prose cap on the middle
+   track, and breakout blocks span all three tracks sized to their content.
+   The pane width is a function of the viewport alone, so the right-rail TOC
+   never moves, and breakouts cap at 100% of the pane, so the page itself can
+   never scroll sideways. Scoped to the 3-column layout (≥72rem); below that
+   the pane is never meaningfully wider than the prose track. */
+@media (min-width: 72rem) {
+  /* Center the title/content columns in the pane (stock hugs the TOC edge
+     via `auto 0` margins). The grid's 1fr side tracks center its prose track
+     identically, keeping the page title and prose on the same left edge. */
+  [data-has-sidebar][data-has-toc] .main-pane {
+    --sl-content-margin-inline: auto;
+  }
+  /* Un-cap only the markdown body's container — the grid below re-imposes
+     the cap. The title panel's own .sl-container keeps the stock cap. */
+  .main-pane .sl-container:has(> .sl-markdown-content) {
+    max-width: none;
+  }
+  .sl-markdown-content {
+    display: grid;
+    grid-template-columns:
+      minmax(0, 1fr) minmax(0, var(--sl-content-width)) minmax(0, 1fr);
+  }
+  .sl-markdown-content > * {
+    grid-column: 2;
+  }
+  /* The breakout set: scroller-wrapped tables/diagrams, code frames, and
+     paired diagrams. fit-content sizes each to what its content actually
+     needs — a short code block or narrow table stays at the prose width
+     (min-width keeps its edges aligned with the text), a wide one grows up
+     to the pane. Centered growth, symmetric margins. */
+  /* `table` covers the no-JS fallback (before ScrollHints wraps tables, they
+     are direct children using the display:block scroll pattern). */
+  .sl-markdown-content > :is(.wh-scroll-x, .expressive-code, .diagram-pair, table) {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: fit-content;
+    min-width: min(var(--sl-content-width), 100%);
+    max-width: 100%;
+  }
+}
+
 /* Prev/next pagination — mirror the link-card treatment (was a flat bordered
    box with an 8px radius and a border-only hover). */
 .pagination-links a {
@@ -933,11 +980,13 @@ a.sl-link-button.minimal:hover {
 }
 .sl-markdown-content thead th {
   background: var(--wh-surface-elevated);
+  border-bottom-color: var(--wh-border-strong);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--wh-ink-muted);
+  letter-spacing: 0.05em;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  color: var(--wh-ink);
+  padding-block: 0.7rem;
 }
 /* Don't uppercase case-sensitive literals in header cells (/livez, Content-Type). */
 .sl-markdown-content thead th code {

@@ -1,0 +1,200 @@
+---
+title: "TypeScript SDK"
+description: "Zero-dependency client SDK — query builder, real-time streaming, codegen."
+---
+
+import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
+
+`@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
+
+## Installation
+
+<Tabs syncKey="pkg">
+  <TabItem label="pnpm">
+    ```bash
+    pnpm add @wavehouse/sdk
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```bash
+    npm install @wavehouse/sdk
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```bash
+    yarn add @wavehouse/sdk
+    ```
+  </TabItem>
+  <TabItem label="bun">
+    ```bash
+    bun add @wavehouse/sdk
+    ```
+  </TabItem>
+  <TabItem label="deno">
+    ```bash
+    deno add npm:@wavehouse/sdk
+    ```
+  </TabItem>
+  <TabItem label="CDN">
+    No bundler or package manager required — the ES module loads natively in
+    modern browsers:
+
+    ```html
+    <script type="module">
+      import { createClient } from 'https://esm.sh/@wavehouse/sdk';
+
+      const wh = createClient({ baseURL: 'https://your-wavehouse.example.com' });
+      const { data } = await wh.from('clicks').select('page').limit(10);
+      console.log(data);
+    </script>
+    ```
+
+    Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`);
+    jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For
+    pages that can't use ES modules, the bundled IIFE build at
+    `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global
+    (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag.
+    Streaming uses the browser's native `EventSource`, so it needs no polyfill
+    either way. A bare CDN URL tracks the latest published release; use a
+    range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag
+    for unreleased builds from `main` (see
+    [Releasing the SDK](/development#releasing-the-sdk)).
+  </TabItem>
+</Tabs>
+
+The package works in any bundler-based framework — React, Vue, Svelte,
+Angular, Astro, SolidJS, or plain Vite — via
+`import { createClient } from '@wavehouse/sdk'`, and with no build step at
+all via the CDN tab above.
+
+## Quick Start
+
+```ts
+import { createClient } from '@wavehouse/sdk';
+
+const wh = createClient({
+  baseURL: 'http://localhost:8080',
+  auth: async () => getAccessToken(), // omit for public/unauthenticated
+});
+
+// Query
+const { data, error } = await wh.from('clicks').select('page').limit(10);
+
+// Insert
+await wh.from('clicks').insert({ page: '/home', button: 'signup' });
+
+// Stream
+const stream = wh.from('clicks').stream();
+const unsub = stream.subscribe({
+  next: (event) => console.log(event.data),
+  status: (s) => console.log('Stream:', s),
+});
+```
+
+## Creating a Client
+
+```ts
+import { createClient } from '@wavehouse/sdk';
+import type { Database } from './my-types'; // optional hand-written types
+
+const wh = createClient<Database>({
+  baseURL: 'https://wavehouse.example.com',
+  auth: async () => myAuthProvider.getToken(),
+  options: {
+    maxRetries: 2,
+  },
+});
+```
+
+### `ClientConfig<DB>`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `baseURL` | `string` | — | WaveHouse server URL (required) |
+| `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
+| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
+
+:::note[How the token is transmitted]
+The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+:::
+
+### Type-Safe Tables
+
+Pass a `Database` type to get autocomplete on table names and row types:
+
+```ts
+interface Database {
+  clicks: { page: string; button: string; score: number; received_timestamp: string };
+  users: { id: string; name: string; email: string };
+}
+
+const wh = createClient<Database>({ baseURL: '...' });
+const clicks = wh.from('clicks'); // ✅ autocomplete
+const { data } = await clicks.select('page', 'button').limit(10);
+// data is Array<{ page: string; button: string; score: number; received_timestamp: string }> | null
+```
+
+Generate the `Database` interface from a running server with the
+[codegen CLI](/sdk/reference#codegen-cli).
+
+## Result Type
+
+Every async SDK operation returns `Result<T>` — a discriminated union that never throws:
+
+```ts
+type Result<T> =
+  | { ok: true;  data: T;    error: null; hasMore?: boolean; next?: () => Promise<Result<T>> }
+  | { ok: false; data: null; error: WaveHouseError }
+
+interface WaveHouseError {
+  status: number;     // HTTP status (0 for network errors)
+  code: string;       // e.g. 'HTTP_400', 'NETWORK_ERROR', 'ABORTED'
+  message: string;    // Human-readable error message
+  details?: unknown;  // Raw response body
+  retryable: boolean; // Whether SDK would retry this error
+}
+```
+
+Usage pattern — branch on `result.ok` (or destructure `{ data, error }` if you prefer):
+
+```ts
+const result = await wh.from('clicks').select('page').limit(10);
+if (result.ok) {
+  console.log(result.data); // Row[] — TypeScript knows data is non-null here
+} else {
+  console.error(result.error.message); // never throws
+}
+```
+
+The full error-code table lives in
+[Error Handling](/sdk/reference#error-handling).
+
+## Explore the SDK
+
+<CardGrid>
+  <LinkCard
+    title="Queries"
+    description="Tables, the chainable query builder, pagination, and raw SQL."
+    href="/sdk/queries"
+  />
+  <LinkCard
+    title="Streaming & Live Queries"
+    description="Real-time SSE streams, client-side filtering, and backfill-then-live queries."
+    href="/sdk/streaming"
+  />
+  <LinkCard
+    title="Pipes"
+    description="Execute and manage named query pipes."
+    href="/sdk/pipes"
+  />
+  <LinkCard
+    title="Admin & System"
+    description="Schema introspection, access-control policy, DLQ stats, and health checks."
+    href="/sdk/admin"
+  />
+  <LinkCard
+    title="Reference & CLI"
+    description="Error codes, AbortController, the full API tree, codegen, and E2E testing."
+    href="/sdk/reference"
+  />
+</CardGrid>
