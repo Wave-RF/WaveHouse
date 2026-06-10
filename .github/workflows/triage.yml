@@ -27,7 +27,7 @@ concurrency:
 jobs:
   classify:
     name: Classify and label
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # Skip re-triggering on our own label edits.
     if: github.actor != 'github-actions[bot]' && github.event.issue.pull_request == null
@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
 
       - name: Load board config
-        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
+        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> "$GITHUB_ENV"
 
       - name: Fetch current area labels
         id: areas
@@ -112,6 +112,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          # shellcheck disable=SC2016  # the sed program legitimately contains backticks in single quotes
           # Strip any code fences the model may have added despite instructions.
           json=$(printf '%s' "$RESPONSE" | sed -E 's/^\s*```(json)?\s*$//g; s/^\s*```\s*$//g')
           echo "Parsed model output:"
@@ -151,6 +152,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          # shellcheck disable=SC2016  # the sed program legitimately contains backticks in single quotes
           json=$(printf '%s' "$RESPONSE" | sed -E 's/^\s*```(json)?\s*$//g; s/^\s*```\s*$//g')
           priority=$(echo "$json" | jq -r '.priority // empty' 2>/dev/null || echo "")
 

@@ -5,6 +5,8 @@ sidebar:
   order: 6
 ---
 
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
 A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator, expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
 
 Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
@@ -33,7 +35,9 @@ A pipe is defined by five fields:
 }
 ```
 
-> **Pipe SQL is operator-authored and admin-only to write.** Anyone who can create or edit a pipe can run arbitrary SQL, so pipe management lives entirely behind the admin gate. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
+:::caution[Pipe SQL is operator-authored and admin-only to write]
+Anyone who can create or edit a pipe can run arbitrary SQL, so pipe management lives entirely behind the admin gate. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
+:::
 
 ## Parameters
 
@@ -177,20 +181,30 @@ The response is a JSON array of rows. Results flow through the shared in-process
 
 ## Bootstrapping from `.sql` files
 
-For version-controlled, deploy-time pipe definitions, point `pipes.dir` at a directory of `.sql` files:
+For version-controlled, deploy-time pipe definitions, point `pipes.dir` (in `config.yaml`, or its environment twin) at a directory of `.sql` files:
 
+<Tabs syncKey="cfg">
+<TabItem label="YAML">
 ```yaml
-# config.yaml
 pipes:
   dir: /app/pipes        # seed .sql files into KV on startup
 ```
+</TabItem>
+<TabItem label="Environment">
+```ini
+WH_PIPES_DIR=/app/pipes
+```
+</TabItem>
+</Tabs>
 
 On startup, each top-level `*.sql` file is loaded as a pipe whose **name is the filename** (without the extension) and whose **SQL is the file contents**. So `pipes/top_pages.sql` becomes the pipe `top_pages`. The directory is a one-time **seed**, not authoritative storage:
 
 - It will **not overwrite** a pipe that already exists in KV — once a pipe is in the store (seeded earlier, or created via the API), the file is skipped.
 - After bootstrap, the API and KV are the source of truth; the directory is read-only at runtime. Mount it read-only in containers (e.g. `./my-pipes:/app/pipes:ro`).
 
-> **Bootstrapped pipes are admin-only until you grant roles.** A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/admin/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
+:::caution[Bootstrapped pipes are admin-only until you grant roles]
+A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/admin/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
+:::
 
 ## End-to-end example
 

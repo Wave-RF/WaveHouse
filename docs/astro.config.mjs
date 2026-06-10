@@ -2,13 +2,13 @@
 
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
+import { themedMermaid } from "@wave-rf/astro-themed-mermaid";
+import starlightLlmTools from "@wave-rf/starlight-llm-tools";
 import { defineConfig } from "astro/config";
-import { themedMermaid } from "astro-themed-mermaid";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import starlightImageZoom from "starlight-image-zoom";
 import starlightLinksValidator from "starlight-links-validator";
-import starlightLlmTools from "starlight-llm-tools";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
 import { sidebar } from "./src/config/sidebar.ts";
 
@@ -116,6 +116,14 @@ export default defineConfig({
       lastUpdated: true,
       expressiveCode: {
         themes: ["github-dark", "github-light"],
+        // Long lines wrap with a hanging indent instead of growing a
+        // horizontal scrollbar — in a 45rem column, scroll-to-read code was
+        // the docs' biggest readability complaint. Authors can still opt a
+        // block out with ```lang wrap=false where alignment matters.
+        defaultProps: {
+          wrap: true,
+          preserveIndent: true,
+        },
         styleOverrides: {
           // 0.75rem − 1px so the frame's OUTER corner lands at exactly 12px
           // (--radius-md, matching cards): EC adds the 1px border width to the

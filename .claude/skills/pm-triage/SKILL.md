@@ -1,6 +1,6 @@
 ---
 name: pm-triage
-description: Project-manager review for WaveHouse issues — triage dogfooding feedback logs, re-classify the backlog P0–P3 (launch-gated), sweep code TODOs, and reconcile issue/PR status into well-scoped, tracked GitHub issues on the Task Board (project #7). Use when the user wants to triage feedback or the backlog, file/update issues from a feedback doc or TODOs, re-prioritize, edit titles/bodies or add follow-up comments, or check that work is actually tracked. Invoke as `/pm-triage [feedback-doc <url|path> | backlog | todos | status]`. Propose-first by default; add `auto` to run end-to-end.
+description: Project-manager review for WaveHouse issues — triage dogfooding feedback logs, re-classify the backlog P0–P3 (launch-gated), sweep code TODOs, and reconcile issue/PR status into well-scoped, tracked GitHub issues on the Task Board (project #7). Use when the user wants to triage feedback or the backlog, file/update issues from a feedback doc or TODOs, re-prioritize, edit titles/bodies or add follow-up comments, or check that work is actually tracked. Invoke as `/pm-triage [feedback-doc <url|path> | backlog | todos | status | all]`. **safe-auto by default** (auto-apply low-risk changes; for risky ones — ask when you're watching, queue to `pending.md` when unattended); add `auto` (apply everything), `report-only` (write nothing), or `propose` (review even safe changes). `all` is the daily local routine (status+backlog+todos, incremental); state on a local-only orphan branch `pm-triage-state`. See `references/routine.md`.
 ---
 
 # PM triage for WaveHouse
@@ -9,9 +9,10 @@ Turn raw inputs — dogfooding logs, the open-issue backlog, code TODOs, PR/issu
 
 **Run modes:**
 
-- **propose-first** (default) — validate, present the plan (new issues, edits, reclassifications, comments) for approval, then execute.
-- **`auto`** — run end-to-end and report at the end (the behavior this skill was distilled from). For when you're watching and want it to just go.
-- **`report-only`** — validate and emit the full plan as the output, **write nothing**. This is the right mode for an **unattended/scheduled** run: there's no one to approve mid-run, so produce the triage report (and post it as a comment on the launch tracker if asked) for a human to action later.
+- **`safe-auto`** (default) — auto-apply the **safe tier** (set *missing* priorities, fix board Status to reality, file clearly-new issues with provenance, tick epic boxes for closed issues). For the **risky tier** (teammate priority changes, security/disclosure, closes/dupes, body edits, cross-repo writes): **ask** when a human's in the session, **queue** to the state branch's `pending.md` when unattended. Never apply risky changes unattended. Reads/writes the local state branch (`## Mode: all`).
+- **`auto`** — apply everything, including the risky tier, without asking. For when you're watching and fully trust it.
+- **`report-only`** — emit the full plan as output, **write nothing** (no GitHub writes, no state commit). The **dry-run / preview** mode.
+- **`propose`** — fully interactive: present *everything* (even safe-tier changes) for approval before doing it. Use when you want eyes on every change.
 
 ## Modes (the argument)
 
@@ -19,6 +20,7 @@ Turn raw inputs — dogfooding logs, the open-issue backlog, code TODOs, PR/issu
 - **`backlog`** — re-classify every open issue P0–P3 (launch-gated) on the board.
 - **`todos`** — sweep code `TODO/FIXME/HACK/XXX` for untracked-worth-tracking items.
 - **`status`** — reconcile open issues **and PRs**: stale items, untracked work, un-updated threads.
+- **`all`** — `status` + `backlog` + `todos` in one **incremental** pass (the routine scope), diffed against the state branch's last run. Excludes `feedback-doc` (needs an explicit doc); point the routine at known feedback logs separately if wanted. See `## Mode: all (the routine)`.
 - No arg → ask which, or infer from what the user just referenced.
 
 ## Operating conventions (every mode)
@@ -59,7 +61,29 @@ Turn raw inputs — dogfooding logs, the open-issue backlog, code TODOs, PR/issu
 
 1. `gh pr list --state open` + `gh issue list --state open`; cross-check against the board.
 2. Flag: open PRs with no tracking issue / stale (no update in N days) / out-of-date-with-main; issues with open PRs that should be linked; epic checkboxes whose issues closed (tick them); board items whose Status drifted from reality (closed issue not Done, etc.).
-3. Propose the reconciling edits (comments, board status, checkbox ticks). Don't mass-comment.
+3. **Reconcile MERGED PRs against open tracking issues.** For each PR merged since `last_sha` (`git log --oneline <last_sha>..origin/main`, map commit→PR), check whether it completes a checklist item / precondition in an issue that is **still open** (#149, #268, the epics #194/#228/#294/#326/#327, …) and tick that box (SAFE tier). **Match by content, not `Closes #`:** many PRs — especially `ci:`/`docs:`/`chore:` — finish a tracked deliverable without a closing reference and without closing the issue, so there is *no* closed-issue or reference-graph signal (e.g. #308 provenance → #268's box; #283 runner-migration → #149 L25). Never dismiss the CI/docs/chore commits wholesale — they are often the tracked deliverable. Leave *partial-progress* boxes unticked (a single NO_LCP fix doesn't complete #248's "Lighthouse pass").
+4. Propose the reconciling edits (comments, board status, checkbox ticks). Don't mass-comment.
+
+## Mode: all (the routine)
+
+`status` + `backlog` + `todos` in one pass, **incremental** against the local state branch, with the default `safe-auto` policy. This is the daily local routine (Claude desktop app, runs on your Mac — not cloud). Full procedure + the paste-ready routine prompt: `references/routine.md`.
+
+**Durable state — a local-only orphan branch (not an issue, not a cache dir).** `scripts/state.sh` keeps state on an orphan branch `pm-triage-state` (shares no history with main; never pushed by default → private), in its own worktree at `<main>/.worktrees/pm-triage-state` (path is stable across all your worktrees). **Never switch branches in a working tree — navigate by path:**
+
+- `state.sh ensure` → create-if-needed, echoes the worktree path `S`.
+- `state.sh read` → `state.json` (`{ schema, last_run_at, last_sha, filed }`, `filed` = fingerprint→issue#); `{}` on first run = full sweep.
+- Write `S/state.json` via `state.sh write` (preserve `schema`); write `S/pending.md` (risky items) and `S/runs.log` directly — `state.sh commit` stages all three.
+- `state.sh commit "<summary>"` after a meaningful run → a versioned audit trail you can `git -C S log`.
+
+**Read code without disturbing any tree.** `git fetch origin`, then do TODO sweeps / code-read validation against **`origin/main`** by ref (`git grep`, `git show`, `git diff <last_sha>..origin/main`) — don't assume or mutate a working tree, don't checkout.
+
+**Write tiers (`safe-auto`).** Apply the SAFE tier; for the RISKY tier — **ask** if a human's in the session, else **queue** to `S/pending.md`. Never apply risky unattended:
+
+| SAFE (auto) | RISKY (ask if watching · else queue to pending.md) |
+|---|---|
+| set a *missing* Priority; fix Status to reality; file a clearly-new issue (dedupe first, provenance, ≤8/run); tick epic boxes for closed issues | change a teammate-set priority; security/disclosure; close/dupe/merge-into-epic; edit a body or comment on a teammate's issue; any cross-repo write |
+
+**Rails.** Dedupe before filing (conv. #9); `state.json.filed` (fingerprint→issue#) also stops re-filing across runs. Cap new issues at **8/run** (the rest are re-found next run). At start, surface any open `pending.md` items. The routine creates real GitHub issues + sets board fields as always — only its **own bookkeeping** moved to the local branch. Inherit the `.claude/settings.json` deny-list (never merge PRs, never `gh pr ready`).
 
 ## Scripts
 
@@ -67,6 +91,7 @@ Turn raw inputs — dogfooding logs, the open-issue backlog, code TODOs, PR/issu
   - `file <P0|P1|P2|P3> <Backlog|Ready|InProgress|InReview|Done> "<labels>" "<title>"` (body on stdin) → creates the issue, waits out the auto-add workflow, sets Priority + Status, echoes the number.
   - `set-priority <issue#> <P0..P3>` · `set-status <issue#> <Status>` · `item-id <issue#>` · `open-by-priority`.
   - Field/option IDs are baked in (verified) and overridable by env (`WH_PROJECT_ID`, `WH_PRIORITY_FIELD`, …) if the board changes.
+- **`scripts/state.sh`** — local-only routine state on the orphan branch `pm-triage-state` in its own worktree (private, never pushed, stable across worktrees, versioned audit trail; see `## Mode: all`). `ensure` (create-if-needed, echoes worktree path) · `path` · `read`/`write` (state.json) · `commit "<msg>"`.
 
 When filing many issues at once, prefer: create them all (capture numbers), **then** one board pass that looks up item ids and sets fields — fewer auto-add races than per-issue.
 

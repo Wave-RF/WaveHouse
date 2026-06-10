@@ -24,6 +24,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write # OIDC for the build-provenance attestation (Sigstore)
+  attestations: write # write the build-provenance attestation
 
 concurrency:
   # The :dev tag should track HEAD, so cancel any in-flight build
@@ -36,7 +38,7 @@ concurrency:
 jobs:
   publish:
     name: Build + push :dev image
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -48,6 +50,14 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: "go.mod"
+
+      # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
+      # the GitHub-hosted runner's default docker driver can't build
+      # multi-platform images, so create a docker-container builder. No QEMU
+      # needed — Dockerfile.goreleaser stages are $BUILDPLATFORM-pinned /
+      # COPY-only by design.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -76,3 +86,25 @@ jobs:
           # goreleaser version a real release will.
           version: "~> v2"
           args: release --clean
+
+      # Attest the rolling dev image (multi-arch manifest-list digest) and store
+      # the attestation alongside it in GHCR. Free for public repos via Sigstore.
+      # Dev binaries aren't distributed (the GitHub Release is suppressed), so
+      # only the image is attested. Mirrors release.yml.
+      - name: Resolve pushed dev image digest
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/wave-rf/wavehouse:dev-${GITHUB_SHA}"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
+          [ -n "$digest" ] || { echo "::error::empty digest for $ref"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Resolved $ref -> $digest"
+
+      - name: Attest dev image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/wave-rf/wavehouse
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

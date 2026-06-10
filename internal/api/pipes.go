@@ -12,7 +12,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
@@ -137,16 +136,14 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: scope impl
-	scope := ""
-	safePipeName := query.SafeEncodeNATS(name)
-
-	// TODO: current pipe impl doesn't have a list of tables/scopes, so ingest worker cannot invalidate it
-
-	// Cache.
+	// Cache. A pipe can read several tables, but the current pipe impl doesn't
+	// expose its table/scope dependencies, so we pass no deps: the result is keyed
+	// by sha alone (TTL-only) and the ingest worker cannot version-invalidate it.
+	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
+	// invalidate cached pipe results.
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safePipeName, scope); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, nil); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -177,7 +174,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, nil, data, ttl)
 		}
 		return data, nil
 	})

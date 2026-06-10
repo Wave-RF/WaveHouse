@@ -37,7 +37,7 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
    make ci         # full local pipeline: verify + builds + all test suites (Docker required)
    ```
 
-   The pre-push hook (installed by `make tools`) blocks any push until `make ci` has passed for the current tree. `make lint` / `make test` / `make build` are fast inner-loop subsets.
+   The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
 2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag.
 
@@ -76,7 +76,7 @@ Types:
 - `revert` — Reverting a previous commit
 - `style` — Formatting changes with no functional effect
 
-The PR title is enforced by the `PR housekeeping` required check (`.github/workflows/housekeeping.yml`): Conventional Commits format, ≤ 72 characters, lowercase-first subject with no trailing period — it becomes the squash-merge commit message on `main`, so keep it parseable. Check a title locally with `scripts/lint-pr-title.sh "<title>"` before opening the PR.
+The PR title is enforced by the required `CI` check's `PR title` job (`.github/workflows/ci.yml`): Conventional Commits format, ≤ 72 characters, lowercase-first subject with no trailing period — it becomes the squash-merge commit message on `main`, so keep it parseable. Check a title locally with `scripts/lint-pr-title.sh "<title>"` before opening the PR.
 
 Examples:
 

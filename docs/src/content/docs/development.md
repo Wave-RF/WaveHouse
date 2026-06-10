@@ -285,18 +285,33 @@ All tests run with Go's **race detector** (`-race`) enabled by default. WaveHous
 ### Quick Reference
 
 ```bash
-make test                              # Unit tests (compact output) — alias for `test-unit`
-V=1 make test                          # Unit tests (verbose output)
-make test ARGS="-run TestValidate"     # Run specific test(s)
-V=1 make test ARGS="-run TestValidate" # Specific test, verbose
-make test-integration                  # Go integration tests (requires Docker)
-V=1 make test-integration              # Integration tests, verbose
-make test-ts                           # SDK vitest unit tests + coverage + gate against suites.ts-unit
-                                       # (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
-make test-e2e                          # E2E SDK suite against bin/wavehouse-cov
-make test-all                          # All four suites sequentially + merged coverage
-make ci                                # Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts, then test-integration + test-e2e + cov
-make cov                               # Merge available covdata + gate against total threshold
+# Prefix any test target with V=1 for verbose output, e.g. `V=1 make test`
+
+# Unit tests (compact output) — alias for `test-unit`
+make test
+
+# Run specific test(s)
+make test ARGS="-run TestValidate"
+
+# Go integration tests (requires Docker)
+make test-integration
+
+# SDK vitest unit tests + coverage + gate against suites.ts-unit
+# (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
+make test-ts
+
+# E2E SDK suite against bin/wavehouse-cov
+make test-e2e
+
+# All four suites sequentially + merged coverage
+make test-all
+
+# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts,
+# then test-integration + test-e2e + cov
+make ci
+
+# Merge available covdata + gate against total threshold
+make cov
 ```
 
 Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total.
@@ -334,15 +349,15 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
 
 ```bash
-make test-e2e                    # Build the cover binary, install deps, run all E2E tests
-KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
+# Build the cover binary, install deps, run all E2E tests
+make test-e2e
 ```
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
@@ -514,7 +529,7 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 
 PRs are grouped by ecosystem to reduce noise.
 
-**Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Dependabot PRs bypass the `Admin approval` required check entirely (see `admin-approval.yml`), so **all** patch/minor bumps — including workflow-touching ones — merge without human intervention; the trust model for that is CI passing + `dependabot/fetch-metadata` classification.
+**No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
 ## Releasing the SDK
 
@@ -532,7 +547,9 @@ git tag sdk-v0.1.0
 git push origin sdk-v0.1.0
 ```
 
-> **The first tagged release promotes `latest`.** npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+:::caution[The first tagged release promotes `latest`]
+npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+:::
 
 ## CI & review automation
 
@@ -540,7 +557,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the required `PR housekeeping` check (`.github/workflows/housekeeping.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
+PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the `PR title` job under the required `CI` check (`.github/workflows/ci.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -550,19 +567,21 @@ Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`,
 
 The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
-If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
+If the title doesn't match, a sticky comment posts on the PR explaining the format (from the `PR housekeeping` workflow, which mirrors the same script); it auto-removes once the title is fixed. Fixing the title needs no new push — the edit triggers housekeeping, which re-runs the failed `PR title` job (the job re-reads the title from the API, not the stale event payload).
 
 ### Required status checks
 
-The `main branch protection` ruleset requires three status checks to pass before any PR can merge:
+The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
-- `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
-- `Admin approval` — at least one `APPROVED` review from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
 
-The ruleset also enforces 1 approving review, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only.
+The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
+The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
+
+Approved, green PRs land through a **merge queue** ("Merge when ready"): the queue re-runs the required `CI` check against the PR merged with *current* main (a `merge_group` event — the CI workflow runs the full test suite for these) and fast-forwards only on green. That integration re-test replaces the old "branch is out-of-date with the base branch" requirement — queued PRs don't need manual branch updates, and the queue never pushes to the PR branch.
+
+Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 
 ### Merge behavior
 
@@ -579,17 +598,17 @@ Advisory PR review comes from marketplace apps configured at the org/repo level:
 - **CodeRabbit** — automated PR review; auto-reviews on open + push, re-trigger with `@coderabbitai review`.
 - **Copilot** — tied to individual reviewer subscriptions; shows up on PRs where a maintainer with Copilot Pro is listed as a reviewer.
 
-Both are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
+Both are **advisory** — the ruleset's `required_reviewers` rule (an `@Wave-RF/wavehouse-admins` approval) plus its thread-resolution / linear-history / required-check rules are the actual merge-gate.
 
 ### Reviewer assignment and the Task Board
 
-Reviewer assignment is automated; the board itself is GitHub-native, not a workflow state machine:
+Reviewer assignment is GitHub-native, and so is the board:
 
-- **Reviewer assignment**: on PR open / ready-for-review, the `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) requests review from the non-author admin and sets them as assignee. It does **not** re-request on every push — after addressing feedback, use GitHub's "Re-request review" button (the trigger, if `dismiss_stale_reviews_on_push` cleared the request).
-- **Merge gate**: the `Admin approval` status check (`.github/workflows/admin-approval.yml`) fails until an admin has an `APPROVED` review; the ruleset adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
+- **Reviewer assignment**: the `main branch protection` ruleset's `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team on every PR, and the team's **code-review assignment** (configured on the team) auto-assigns and load-balances a specific member. No workflow is involved; `dismiss_stale_reviews_on_push` clears approvals on new commits, and GitHub re-requests per its own rules.
+- **Merge gate**: the ruleset's `required_reviewers` rule requires an `APPROVED` review from the `@Wave-RF/wavehouse-admins` team; it also adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
 - **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
+Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 
 ### Invoking bots manually
 

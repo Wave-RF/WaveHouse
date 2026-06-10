@@ -241,6 +241,38 @@ if (import.meta.env.DEV && !heroTitle) {
   document.addEventListener('DOMContentLoaded', setupHeroCTATracking);
   document.addEventListener('astro:page-load', setupHeroCTATracking);
 
+  // The install chip follows the reader's package-manager choice from the
+  // docs' synced install tabs (Starlight persists the selected tab LABEL in
+  // localStorage under its syncKey — see /sdk's <Tabs syncKey="pkg">). The
+  // keys here must match those tab labels exactly. "CDN" (and anything
+  // unknown) keeps the pnpm default — there's no one-liner shell command for
+  // a script tag.
+  function syncHeroInstallCmd() {
+    var PKG_PREFIX = {
+      pnpm: 'pnpm add ',
+      npm: 'npm install ',
+      yarn: 'yarn add ',
+      bun: 'bun add ',
+      deno: 'deno add npm:'
+    };
+    var label = null;
+    try { label = localStorage.getItem('starlight-synced-tabs__pkg'); } catch (e) {}
+    var prefix = label && PKG_PREFIX[label];
+    if (!prefix) return;
+    document.querySelectorAll('.wh-hero__install').forEach(function(btn) {
+      var cmd = prefix + '@wavehouse/sdk';
+      btn.setAttribute('data-copy', cmd);
+      btn.setAttribute('aria-label', 'Copy: ' + cmd);
+      var span = btn.querySelector('.wh-hero__install-cmd');
+      // The command span is "<prefix text node><span.pkg>@wavehouse/sdk</span>".
+      if (span && span.firstChild && span.firstChild.nodeType === Node.TEXT_NODE) {
+        span.firstChild.nodeValue = prefix;
+      }
+    });
+  }
+  document.addEventListener('DOMContentLoaded', syncHeroInstallCmd);
+  document.addEventListener('astro:page-load', syncHeroInstallCmd);
+
   // Click-to-copy install command — devs expect it, and it makes the SDK the
   // one-line "try it now". Falls back to a manual selection range when the
   // async clipboard API isn't available (http / older browsers).
@@ -309,8 +341,18 @@ if (import.meta.env.DEV && !heroTitle) {
     gap: 1.5rem;
     align-items: flex-start;
   }
+  /* Entrance fades + rises, but the opacity floor is a small NON-ZERO value,
+     never 0. Chrome ignores an element painted at opacity:0 as an LCP
+     candidate, and the hero is the only above-the-fold content — so a
+     fade-from-0 disqualified its h1/tagline/panel and pushed LCP onto a tiny
+     late element (a poor LCP, plus intermittent "NO_LCP" in PageSpeed on mobile
+     when the live-demo number it landed on hadn't loaded). 0.01 is visually
+     indistinguishable from 0 but keeps the element LCP-eligible from first
+     paint; the translate carries the motion. Verified with Lighthouse mobile:
+     LCP lands on the hero tagline, not the late live-demo number. The
+     reduced-motion / replay-guard blocks below force opacity:1 (no fade). */
   .wh-hero__text > [data-stagger] {
-    opacity: 0;
+    opacity: 0.01;
     transform: translateY(8px);
     animation: wh-fade-up 0.6s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
     animation-delay: calc(0.12s * var(--stagger, 0) + 0.05s);
@@ -364,6 +406,17 @@ if (import.meta.env.DEV && !heroTitle) {
     flex-wrap: wrap;
     gap: 0.75rem;
     margin-top: 0.5rem;
+  }
+  /* Stacked CTAs on small phones hug their labels at ragged widths — go
+     full-width and centered so the pair reads as a deliberate stack. */
+  @media (max-width: 30rem) {
+    .wh-hero__actions {
+      width: 100%;
+    }
+    .wh-hero__action {
+      flex: 1 1 100%;
+      justify-content: center;
+    }
   }
   .wh-hero__action {
     display: inline-flex;
@@ -471,7 +524,7 @@ if (import.meta.env.DEV && !heroTitle) {
     position: relative;
     display: flex;
     min-width: 0; /* flex child default min-width:auto would re-floor the panel at min-content */
-    opacity: 0;
+    opacity: 0.01;
     transform: translateY(8px);
     animation: wh-fade-up 0.8s 0.3s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
   }

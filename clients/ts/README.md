@@ -10,6 +10,8 @@ npm install @wavehouse/sdk
 
 This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
 
+The package is published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) — npm shows a verified provenance badge on the [package page](https://www.npmjs.com/package/@wavehouse/sdk), and `npm audit signatures` checks the attestation against this repository's signed build.
+
 ## Use without a build step (CDN)
 
 No bundler, no `npm`, no framework required — drop the SDK straight into an HTML file you deploy over FTP, object storage, or any static host.

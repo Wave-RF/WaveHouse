@@ -230,7 +230,9 @@
   --sl-color-black: var(--wh-bg);
 
   --sl-color-bg: var(--wh-bg);
-  --sl-color-bg-nav: color-mix(in oklab, var(--wh-bg) 78%, transparent);
+  /* 88%, was 78% — scrolled body text stayed legible through the glass and
+     collided visually with the search trigger (fresh-eyes audit). */
+  --sl-color-bg-nav: color-mix(in oklab, var(--wh-bg) 88%, transparent);
   --sl-color-bg-sidebar: var(--wh-bg);
   --sl-color-bg-inline-code: var(--wh-code-bg);
   --sl-color-hairline: var(--wh-border);
@@ -247,14 +249,14 @@
   --sl-text-h4: 1.125rem;
   --sl-text-h5: 1rem;
 
-  --sl-sidebar-width: 18.5rem;
-  /* Mobile/tablet default — fits a 768px iPad without clipping (the old 50rem
-     slightly overflowed there). Widened to 58rem only at the `lg` breakpoint
-     below, where the 3-column layout has room: code/tables/wide Mermaid then
-     use the space on large monitors while prose line length stays held by the
-     .sl-markdown-content text-block cap. The shell is also capped + centered
-     on ultrawide via .main-frame so content+TOC don't strand dead space. */
-  --sl-content-width: 45rem;
+  /* Layout geometry stays at Starlight's stock values (18.75rem sidebar,
+     ONE 45rem content width at every breakpoint). A previous pass widened
+     the content track in steps (50rem @72rem, 58rem @100rem) and sub-capped
+     prose at 46rem — which left text, tables, and code all ending at
+     different right edges and shifted the column at each breakpoint. One
+     width keeps every block aligned and preserves the TOC's designed share
+     of the leftover space. Wide tables/diagrams scroll or scale inside
+     their own wrappers. */
   --sl-nav-height: 4rem;
 
   --sl-shadow-sm: var(--wh-shadow-sm);
@@ -272,24 +274,6 @@
   --sl-color-gray-7: var(--wh-surface-elevated);
 }
 
-/* Content track widens in two steps so it never starves the right-rail TOC
-   (content does NOT shrink below --sl-content-width in this layout, so an
-   over-wide track squeezes the TOC into ellipsis). 50rem through the laptop
-   range is exactly the pre-sweep width — no TOC regression there. The full
-   58rem engages only ≥100rem, the same breakpoint where .main-frame caps +
-   centers the shell: at ≥1600px there's unambiguous room for sidebar + 58rem
-   content + a comfortable TOC, and the two changes reinforce each other. */
-@media (min-width: 72rem) {
-  :root {
-    --sl-content-width: 50rem;
-  }
-}
-@media (min-width: 100rem) {
-  :root {
-    --sl-content-width: 58rem;
-  }
-}
-
 /* ---------- Mermaid diagram polish ----------
    These rules live at the document level (not in each SVG's inline
    <style>) because SVG-internal CSS rules don't reach the HTML content
@@ -301,12 +285,15 @@
    anything else. */
 
 /* Size handling for mermaid diagrams:
-   - Desktop: let each diagram render at its NATURAL viewBox size so
-     small diagrams (e.g. query path with 3 nodes) don't get blown up
-     and wide diagrams (e.g. DIY vs WaveHouse comparison) get full
-     reach. No min-width here.
-   - Mobile (viewport <= 768px): force min-width so labels stay
-     readable, and the parent wrapper allows horizontal scroll.
+   - Desktop: scale-to-fit. Mermaid stamps `width="100%"` + an inline
+     natural max-width on every SVG, so diagrams fill the column up to
+     their natural size and SCALE DOWN when wider — never a horizontal
+     scrollbar in the doc flow. Click-to-zoom (MermaidZoom) is the
+     full-detail path for dense diagrams.
+   - Phones (<= 768px): scale-to-fit of a 2000px-wide diagram means 3px
+     labels, so diagrams pin to natural width (--wh-natural-w, stamped
+     from Mermaid's max-width by ScrollHints) and PAN inside their
+     scroller instead. 540px is the no-JS fallback floor.
    Margin-inline: auto centers the SVG horizontally on the page. */
 svg[aria-roledescription^="flowchart"],
 svg[aria-roledescription^="sequence"],
@@ -321,10 +308,12 @@ svg[aria-roledescription^="state"] {
   svg[aria-roledescription^="sequence"],
   svg[aria-roledescription^="class"],
   svg[aria-roledescription^="state"] {
-    min-width: 540px;
+    min-width: var(--wh-natural-w, 540px);
   }
   .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="flowchart"]),
-  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]) {
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]),
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="class"]),
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="state"]) {
     overflow-x: auto;
     overflow-y: visible;
     scroll-padding-inline: 1rem;
@@ -359,9 +348,17 @@ svg[aria-roledescription^="state"] {
   margin-block: 1.5rem;
   align-items: center;
 }
-.sl-markdown-content .diagram-pair > p {
+/* Pair children are <p>s in authored markdown, or the runtime div scrollers
+   ScrollHints wraps direct-child svgs in — both must span the pair (a
+   content-sized flex item would overflow the page on phones, where the
+   diagram floor exceeds the viewport and only a full-width scroller can
+   absorb it). The <p> centers its inline svg via flex; the div scroller's
+   svg centers itself (margin-inline: auto) and pans when oversized. */
+.sl-markdown-content .diagram-pair > :is(p, div) {
   margin: 0;
   width: 100%;
+}
+.sl-markdown-content .diagram-pair > p {
   display: flex;
   justify-content: center;
 }
@@ -582,37 +579,59 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 /* ---------- Starlight tweaks ---------- */
 
 /* Generous heading spacing — keeps the deck-style rhythm from the
- * previous design but with crisper headings. */
-.sl-markdown-content :is(h2, h3, h4) {
+ * previous design but with crisper headings.
+ *
+ * Starlight wraps every content heading in .sl-heading-wrapper and renders
+ * the H tag itself display:INLINE (so the anchor link flows after the text).
+ * Inline boxes fragment per line: backgrounds/borders/padding repeat on each
+ * wrapped line (the mobile "strikethrough through wrapped headings" bug —
+ * which the old border-bottom had too), and block margins no-op entirely.
+ * So rhythm, padding, and the section rule live on the WRAPPER block; only
+ * type styles stay on the heading element. */
+.sl-markdown-content :is(h2, h3, h4),
+.sl-markdown-content .sl-heading-wrapper {
   scroll-margin-top: 5rem;
 }
 .sl-markdown-content h1 {
   font-weight: 700;
   letter-spacing: -0.03em;
 }
-.sl-markdown-content h2 {
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
   margin-top: 4rem; /* one clean section step (was 3.5rem off-scale) */
+  padding-bottom: 0.5rem;
+  /* Section rule, but fading out to the right — a full-width border-bottom
+     slammed into the content edge and boxed every section; the fade keeps
+     the scannability without the grid-paper feel. */
+  background: linear-gradient(90deg, var(--wh-border-strong), transparent 82%)
+    bottom left / 100% 1px no-repeat;
+}
+.sl-markdown-content h2 {
   font-weight: 650;
   letter-spacing: -0.025em;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--wh-border);
+}
+.sl-markdown-content .sl-heading-wrapper.level-h3 {
+  margin-top: 2.5rem;
 }
 .sl-markdown-content h3 {
-  margin-top: 2.5rem;
   font-weight: 600;
 }
-.sl-markdown-content h4 {
+.sl-markdown-content .sl-heading-wrapper.level-h4 {
   margin-top: 2rem;
+}
+.sl-markdown-content h4 {
   font-weight: 600;
 }
 .sl-markdown-content p {
   line-height: 1.7;
 }
-/* Hold prose line length to a comfortable ~70–75ch even as the content track
-   widened to 58rem — text blocks cap, while code/tables/diagrams/headings
-   keep the full width so they breathe on large monitors. */
-.sl-markdown-content :is(p, li, blockquote) {
-  max-width: 46rem;
+
+/* Starlight sets overflow-wrap: ANYWHERE on list items (so long URLs never
+   overflow) — which also shreds short code chips mid-token at phone widths
+   (`users_<suite>` rendered as "use" + "rs_<suite>"). break-word keeps the
+   no-overflow guarantee but only splits a token that can't fit on a whole
+   line of its own. */
+.sl-markdown-content li {
+  overflow-wrap: break-word;
 }
 
 /* Anchor links in body text — underline-on-hover with accent glow */
@@ -627,6 +646,22 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   text-decoration-color: var(--wh-accent-text);
 }
 
+/* External links announce themselves everywhere, not just the sidebar —
+   absolute http(s) hrefs are off-site by construction (internal links are
+   root-relative). Exclusions: buttons/cards carry their own affordances,
+   prev/next pagination cards already have a directional arrow (and a second
+   floating glyph inside the card read as broken), and the footer's
+   brand-sentence link ("A Wave RF open-source project") is prose identity,
+   not navigation — a mid-phrase arrow just splits the sentence. */
+.sl-markdown-content a[href^="http"]:not(:where(.sl-link-button, .sl-link-card, .not-content a))::after,
+footer a[href^="http"]:not(:where(.pagination-links a, .wh-footer__sub a))::after {
+  content: "↗";
+  display: inline-block;
+  margin-inline-start: 0.2em;
+  font-size: 0.65em;
+  opacity: 0.6;
+}
+
 /* Inline code — denser, branded surface */
 .sl-markdown-content :not(pre) > code {
   background: var(--wh-code-bg);
@@ -635,6 +670,16 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   padding: 0.1em 0.4em;
   font-size: 0.9em;
   color: var(--wh-ink);
+}
+
+/* No ligatures anywhere code is rendered: JetBrains Mono rewrites `!=` as ≠,
+   `>=` as ≥, `<=` as ≤ — in reference tables documenting the EXACT characters
+   an API accepts, that's misinformation. */
+code,
+kbd,
+samp,
+.expressive-code {
+  font-variant-ligatures: none;
 }
 
 /* macOS-style colored dots for terminal code blocks — kept from prior design */
@@ -660,6 +705,48 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 }
 .expressive-code .copy button:hover {
   border-color: var(--wh-accent);
+}
+
+/* Language badge — EVERY code frame names its language at its top-right
+   (ScrollHints copies Expressive Code's pre[data-language] up to the frame,
+   where the badge can sit inside the title bar). Quiet by design: readers
+   who need it find it, everyone else reads past it. Placement varies with
+   the frame anatomy — in the header band for terminal/titled frames, in
+   the code area's corner for plain frames (where it yields to the hover
+   copy button). Plain-text-family blocks skip it (no information). */
+.expressive-code .frame[data-wh-lang] {
+  position: relative;
+}
+.expressive-code .frame[data-wh-lang]::after {
+  content: attr(data-wh-lang);
+  position: absolute;
+  z-index: 2;
+  top: 0.85rem;
+  right: 0.85rem;
+  font-family: var(--sl-font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--wh-ink-subtle);
+  opacity: 0.8;
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 0.15s ease;
+}
+/* Headerless frames: the badge shares the corner with the hover-revealed
+   copy button — step aside when the pointer is on the frame. */
+.expressive-code .frame[data-wh-lang]:not(.has-title):not(.is-terminal):hover::after {
+  opacity: 0;
+}
+.expressive-code .frame:is(
+    [data-wh-lang="text"],
+    [data-wh-lang="plaintext"],
+    [data-wh-lang="txt"],
+    [data-wh-lang="ansi"]
+  )::after {
+  content: none;
 }
 
 /* Sidebar: group-header eyebrows, branded hover, accent current item.
@@ -692,15 +779,50 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   padding-left: calc(var(--sl-sidebar-item-padding-inline) - 2px);
 }
+/* External sidebar links (GitHub guide/discussions/etc.) declare themselves —
+   sidebar.ts stamps target="_blank" on every off-site entry. */
+.sidebar-content a[target="_blank"]::after {
+  content: "↗";
+  margin-inline-start: 0.35em;
+  font-size: 0.75em;
+  opacity: 0.55;
+}
 
 /* Top nav — translucent glass over content (only when scrolled past 0).
    Inherits the same opacity as --sl-color-bg-nav so the design-system token
-   stays the single source of truth (avoids the prior 72%/78% drift). */
+   stays the single source of truth (avoids the prior 72%/78% drift).
+   Standard property ONLY — a hand-written -webkit- twin makes LightningCSS
+   treat prefixing as author-managed and DROP the standard declaration from
+   the build (Firefox then loses the blur entirely). */
 header.header {
   backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
   background: var(--sl-color-bg-nav);
   border-bottom: 1px solid var(--wh-border);
+}
+/* Mobile: glass off. A translucent fixed bar over a small screen reads as a
+   double exposure while scrolling, and Starlight's sticky "On this page" bar
+   shares the translucent token with no blur at all — both go opaque. */
+@media (max-width: 50rem) {
+  header.header {
+    background: var(--wh-bg);
+    backdrop-filter: none;
+  }
+  mobile-starlight-toc nav {
+    background-color: var(--wh-bg);
+    border-bottom: 1px solid var(--wh-border);
+  }
+  /* Icon-only search trigger: the desktop rule's bordered SQUARE surface has
+     no radius at this size — join the menu button's circular control family
+     (same surface, same hairline ring). */
+  site-search > button {
+    border: 0;
+    border-radius: 999px;
+    background-color: var(--wh-surface);
+    box-shadow: 0 0 0 1px var(--wh-border);
+  }
+  site-search > button:hover {
+    box-shadow: 0 0 0 1px var(--wh-accent);
+  }
 }
 
 /* Right-rail TOC — quieter and monospace-y */
@@ -835,16 +957,108 @@ a.sl-link-button.minimal:hover {
    Starlight (token colors only, no treatment) and dragged the whole site back
    to "default docs theme" next to the polished landing. */
 
-/* Cap + center the doc shell on ultrawide. The sidebar glues to viewport-left
-   while content+TOC center in the leftover, so ≥1680px stranded ~590px of dead
-   space on the right (audit). Scoped to ≥100rem: `.main-frame` is a flex child
-   of `.page`, and `margin-inline:auto` on a flex item makes it size to
-   max-content (breaking the responsive shrink below the cap) — so only apply
-   it where the cap is actually doing something. The fixed glass header stays
-   full-bleed by design. */
-@media (min-width: 100rem) {
-  .main-frame {
-    max-width: 100rem;
+/* No ultrawide frame cap: an earlier ≥100rem `max-width + margin-inline:auto`
+   on .main-frame looked right at first glance but broke two ways — auto
+   margins on a flex item size it to fit-content (the content column measured
+   544px instead of 720px at 1680px), and the LEFT sidebar is position:fixed,
+   so it stayed glued to the viewport edge while the frame centered, opening a
+   gap between sidebar and content. Stock Starlight geometry (sidebar left,
+   content centered between sidebar and TOC by the leftover-split formula) is
+   the consistent behavior at every width. */
+
+/* ---------- Opportunistic breakout for wide content ----------
+   Prose keeps the 45rem reading measure, but tables, code blocks, and
+   diagrams may grow past it — centered — when the viewport leaves the pane
+   wider than the prose track, instead of wrapping/shrinking next to a field
+   of blank space. The classic full-bleed grid: the markdown container spans
+   the whole main pane, a 3-track grid re-imposes the prose cap on the middle
+   track, and breakout blocks span all three tracks sized to their content.
+   The pane width is a function of the viewport alone, so the right-rail TOC
+   never moves, and breakouts cap at 100% of the pane, so the page itself can
+   never scroll sideways. Scoped to the 3-column layout (≥72rem); below that
+   the pane is never meaningfully wider than the prose track. */
+@media (min-width: 72rem) {
+  /* Center the title/content columns in the pane (stock hugs the TOC edge
+     via `auto 0` margins). The grid's 1fr side tracks center its prose track
+     identically, keeping the page title and prose on the same left edge. */
+  [data-has-sidebar][data-has-toc] .main-pane {
+    --sl-content-margin-inline: auto;
+  }
+  /* Un-cap only the markdown body's container — the grid below re-imposes
+     the cap. The title panel's own .sl-container keeps the stock cap. */
+  .main-pane .sl-container:has(> .sl-markdown-content) {
+    max-width: none;
+  }
+  .sl-markdown-content {
+    display: grid;
+    grid-template-columns:
+      minmax(0, 1fr) minmax(0, var(--sl-content-width)) minmax(0, 1fr);
+  }
+  .sl-markdown-content > * {
+    grid-column: 2;
+  }
+  /* Code frames EARN breakout like tables do (data-wh-wide from
+     ScrollHints): only when widening actually eliminates wrapping (or the
+     block is wrap=false and scrolls). A block whose longest line would wrap
+     even at the full pane keeps the prose width — stretching it just
+     strands a few words on the continuation line. fit-content sizes a wide
+     block to exactly its longest line; min-width keeps short blocks' edges
+     aligned with the text. */
+  .sl-markdown-content > .diagram-pair,
+  .sl-markdown-content > .expressive-code[data-wh-wide] {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: fit-content;
+    min-width: min(var(--sl-content-width), 100%);
+    max-width: 100%;
+  }
+  /* Code-only tab groups breakout as a unit (data-wh-wide + --wh-natural-w
+     both stamped by ScrollHints). fit-content tracks the visible panel; the
+     min-width pin at the widest panel's natural width keeps the frame from
+     resizing on tab switches. */
+  .sl-markdown-content > starlight-tabs[data-wh-wide] {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: fit-content;
+    min-width: min(var(--wh-natural-w, var(--sl-content-width)), 100%);
+    max-width: 100%;
+  }
+  /* Diagram scrollers need an EXPLICIT width: fit-content can't measure a
+     `width:100%` SVG child (it resolved to the min-width floor and pinned
+     2000px-natural diagrams at prose width). min(natural, pane) is the
+     intelligent default — a small diagram stays its natural size, a wide
+     one takes the full pane before scale-down kicks in. */
+  .sl-markdown-content > .wh-scroll-x:not(.wh-table-wrap) {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: min(var(--wh-natural-w, 100%), 100%);
+    max-width: 100%;
+  }
+  /* Same sizing for nested diagram wrappers (the .diagram-pair children).
+     The pair CONTAINER is excluded: it can host multiple diagrams, so a
+     single child's natural width doesn't describe it — it keeps the
+     fit-content sizing from the generic rule above. */
+  .sl-markdown-content .wh-scroll-x:not(.wh-table-wrap):not(.diagram-pair) {
+    width: min(var(--wh-natural-w, 100%), 100%);
+    margin-inline: auto;
+  }
+  /* Tables EARN their breakout (data-wh-wide, stamped by ScrollHints only
+     when the table overflows or crowds at prose width): a table whose prose
+     wraps fine at 45rem gains nothing from stretching its sentences to
+     unreadable line lengths, so it stays put. Wide tables cap below the
+     pane so they keep breathing room from the sidebar/TOC rails. */
+  .sl-markdown-content > .wh-table-wrap[data-wh-wide] {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: fit-content;
+    min-width: min(var(--sl-content-width), 100%);
+    max-width: min(calc(100% - 2.5rem), 68rem);
+  }
+  /* Everything else in the un-capped container but outside the grid (the
+     page footer: edit link, last-updated, prev/next) keeps the prose width,
+     centered on the same axis as the grid's middle track. */
+  .main-pane .sl-container:has(> .sl-markdown-content) > :not(.sl-markdown-content) {
+    max-width: var(--sl-content-width);
     margin-inline: auto;
   }
 }
@@ -865,54 +1079,67 @@ a.sl-link-button.minimal:hover {
 }
 
 /* Tables — card container + branded header (was a bare HTML table: no
-   container, no header fill, hairline rows). */
+   container, no header fill, hairline rows).
+   Layout = GitHub's scroll-don't-crush pattern: the table sizes its columns
+   naturally (auto layout), caps at the content column, and becomes its own
+   horizontal scroller when the columns genuinely can't fit. The previous
+   fixed-layout + overflow-wrap:anywhere treatment kept tables inside the
+   column by SHREDDING content instead — at 390px a 4-column reference table
+   wrapped every identifier 4 characters at a time ("WH_P/ROME/THEU/S_PO/RT"),
+   and even at 1440px fixed equal columns split tokens mid-word. */
 .sl-markdown-content table {
-  display: table;
-  width: 100%;
-  /* Fixed layout + cell wrapping (below) guarantees the table fits its column
-     instead of growing to min-content and overflowing the page on dense
-     tables (e.g. configuration's 4-column env-var table). */
-  table-layout: fixed;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
   border: 1px solid var(--wh-border);
   border-radius: var(--radius-md);
   border-collapse: separate;
   border-spacing: 0;
-  overflow: hidden;
 }
 .sl-markdown-content :is(th, td) {
   border: 0;
   border-bottom: 1px solid var(--wh-border);
-  padding: 0.55rem 0.85rem;
-  /* Let long unbreakable tokens (env-var names like WH_SERVER_CORS_ALLOWED_
-     ORIGINS, defaults) wrap so a dense table can't force itself wider than the
-     content column and overflow the page — width:100% + overflow:hidden alone
-     can't shrink non-wrapping cells. */
-  overflow-wrap: anywhere;
+  padding: 0.6rem 0.9rem;
+  /* Prose wraps at spaces when the table is width-capped; unbreakable code
+     tokens set the column's min width and trigger the scroll instead of
+     splitting mid-token. */
+  overflow-wrap: normal;
+}
+.sl-markdown-content td {
+  /* Reference-table measure: 14px body in cells (the 1rem prose size made
+     dense tables read as walls), with the line-height pulled in to match. */
+  font-size: 0.875rem;
+  line-height: 1.55;
+  vertical-align: top;
 }
 .sl-markdown-content thead th {
   background: var(--wh-surface-elevated);
+  border-bottom-color: var(--wh-border-strong);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--wh-ink-muted);
+  letter-spacing: 0.05em;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  color: var(--wh-ink);
+  padding-block: 0.7rem;
 }
 /* Don't uppercase case-sensitive literals in header cells (/livez, Content-Type). */
 .sl-markdown-content thead th code {
   text-transform: none;
 }
-/* Fixed layout distributes columns equally; give the last column (the prose
-   "description / meaning" in the docs' reference tables) extra room so the
-   content-heavy column isn't squeezed into a tall ribbon next to half-empty
-   key/default columns. */
-.sl-markdown-content table :is(th, td):last-child {
-  width: 42%;
-}
 .sl-markdown-content tbody tr:last-child :is(th, td) {
   border-bottom: 0;
 }
+/* Zebra stripes carry the eye across wide rows (hover-only highlighting
+   helped pointers, not reading); hover stays, a step stronger. */
+.sl-markdown-content tbody tr:nth-child(even) :is(th, td) {
+  background: color-mix(in oklab, var(--wh-surface-elevated) 45%, transparent);
+}
 .sl-markdown-content tbody tr:hover :is(th, td) {
-  background: color-mix(in oklab, var(--wh-surface-elevated) 60%, transparent);
+  background: color-mix(in oklab, var(--wh-surface-elevated) 80%, transparent);
 }
 
 /* Blockquotes — accent rail + faint tint (was a near-invisible gray rule). */
@@ -925,18 +1152,369 @@ a.sl-link-button.minimal:hover {
 }
 
 /* Search trigger — brand the most-visible header control to match the nav. */
-site-search button {
+site-search > button {
   background: var(--wh-surface);
   border-color: var(--wh-border);
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-site-search button:hover {
+site-search > button:hover {
   border-color: var(--wh-accent);
   background: var(--wh-surface-elevated);
 }
-site-search button kbd {
+site-search > button kbd {
   background: var(--wh-surface-overlay);
   color: var(--wh-ink-muted);
+}
+
+/* ---------- Search dialog (Pagefind) ----------
+   The modal itself shipped stock: near-black frame, pill input, gray result
+   list — the one overlay every visitor opens, unbranded. Starlight renders
+   Pagefind's default UI inside <site-search><dialog>, so everything here
+   hangs off Pagefind's stable `pagefind-ui__*` hooks plus the dialog frame. */
+site-search dialog {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border-strong);
+  box-shadow: var(--wh-shadow-lg);
+}
+/* Starlight's dialog is an edge-to-edge sheet below `md` (50rem) — only round
+   the corners where it actually floats. */
+@media (min-width: 50rem) {
+  site-search dialog {
+    border-radius: var(--radius-lg);
+  }
+}
+/* Standard property only — a hand-written -webkit- twin makes LightningCSS
+   drop the unprefixed declaration (see the header.header note above). */
+site-search dialog::backdrop {
+  background: color-mix(in oklab, var(--wh-bg) 55%, transparent);
+  backdrop-filter: blur(8px) saturate(120%);
+}
+/* The results list scrolls inside .dialog-frame — the stock chunky UA
+   scrollbar ran hard against the dialog's rounded corner. */
+site-search dialog,
+site-search .dialog-frame {
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
+}
+/* Bottom scrim on the scroller: rows used to hard-clip mid-glyph against the
+   dialog's rounded bottom edge; the fade makes the cut read as intentional.
+   Bottom-only, so the pinned input at the top of the frame is unaffected.
+   (Standard property only — the build pipeline emits the -webkit- twin.) */
+site-search .dialog-frame {
+  mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent);
+}
+/* The input: code-surface + square radius to match the header trigger (the
+   stock pill was the lone fully-round control on the site). Pagefind paints
+   its own magnifier via a CSS mask on ::before. */
+site-search .pagefind-ui__search-input {
+  background: var(--wh-code-bg);
+  border: 1px solid var(--wh-border-strong);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  color: var(--wh-ink);
+}
+site-search .pagefind-ui__search-input:focus {
+  border-color: var(--wh-accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--wh-accent-glow);
+}
+site-search .pagefind-ui__search-input::placeholder {
+  color: var(--wh-ink-subtle);
+  opacity: 1;
+}
+site-search .pagefind-ui__message {
+  color: var(--wh-ink-subtle);
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+/* Result groups read as cards — same primitive as link cards everywhere
+   else. Starlight paints the group-title row and each nested row with
+   --sl-color-black (the page bg), which left the groups reading as stripes
+   on the card: instead, the title row gets a header band, nested rows sit on
+   the card surface, and the row hover trades Starlight's bare bright-accent
+   outline for a surface tint + quiet accent ring. --sl-search-corners keeps
+   Starlight's inner row rounding in sync with the card radius. */
+site-search {
+  --sl-search-corners: calc(var(--radius-md) - 1px);
+}
+site-search .pagefind-ui__result {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+site-search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)) {
+  background-color: var(--wh-surface-elevated);
+}
+site-search .pagefind-ui__result-nested {
+  background-color: transparent;
+}
+site-search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):hover,
+site-search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):focus-within,
+site-search .pagefind-ui__result-nested:hover,
+site-search .pagefind-ui__result-nested:focus-within {
+  outline: 1px solid var(--wh-accent);
+  background-color: var(--wh-surface-overlay);
+}
+site-search .pagefind-ui__result-link {
+  color: var(--wh-ink);
+}
+site-search .pagefind-ui__result-link:hover {
+  color: var(--wh-accent-text);
+}
+site-search .pagefind-ui__result-excerpt {
+  color: var(--wh-ink-muted);
+}
+/* Query highlight inside excerpts — accent wash instead of UA yellow. */
+site-search .pagefind-ui__result mark {
+  background: var(--wh-accent-glow-strong);
+  color: var(--wh-ink);
+  border-radius: 2px;
+  padding-inline: 1px;
+}
+/* The × clear control inside the input (Starlight masks it to an icon). */
+site-search .pagefind-ui__search-clear {
+  color: var(--wh-ink-subtle);
+}
+site-search .pagefind-ui__search-clear:hover {
+  color: var(--wh-accent-text);
+}
+/* "Load more results" — the secondary-button language. */
+site-search .pagefind-ui__button {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--wh-ink);
+  font-weight: 600;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+site-search .pagefind-ui__button:hover {
+  border-color: var(--wh-accent);
+  background: var(--wh-surface-elevated);
+}
+/* Gentle pop on open; skipped for reduced-motion users. */
+@media (prefers-reduced-motion: no-preference) {
+  site-search dialog[open] {
+    animation: wh-search-pop 0.18s cubic-bezier(0.21, 0.61, 0.35, 1);
+  }
+}
+@keyframes wh-search-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+}
+
+/* ---------- Asides — brand the four variants ----------
+   Starlight's defaults run on its stock blue/purple/orange/red tokens, which
+   this design system never remapped — the first `:::note` written would land
+   in off-palette colors. Mirror the blockquote treatment (thin rail, faint
+   tint, rounded outer corners) on brand hues. The --wh-amber/emerald/rose
+   roles are already AA-adjusted per theme in the token blocks above. */
+.starlight-aside {
+  border-inline-start-width: 3px;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+/* Starlight lays the title out as flex (icon · text), which turns an inline
+   code chip in the title into its own flex item — on narrow screens it
+   detached from the sentence and floated right across both wrapped lines.
+   Block flow with an inline icon wraps the title naturally. */
+.starlight-aside__title {
+  display: block;
+}
+.starlight-aside__title .starlight-aside__icon {
+  display: inline-block;
+  vertical-align: -0.18em;
+  margin-inline-end: 0.45rem;
+}
+.starlight-aside--note {
+  --sl-color-asides-text-accent: var(--wh-accent-text);
+  --sl-color-asides-border: var(--wh-accent);
+
+  background-color: color-mix(in oklab, var(--wh-accent) 8%, transparent);
+}
+.starlight-aside--tip {
+  --sl-color-asides-text-accent: var(--wh-emerald);
+  --sl-color-asides-border: var(--wh-emerald);
+
+  background-color: color-mix(in oklab, var(--wh-emerald) 8%, transparent);
+}
+.starlight-aside--caution {
+  --sl-color-asides-text-accent: var(--wh-amber);
+  --sl-color-asides-border: var(--wh-amber);
+
+  background-color: color-mix(in oklab, var(--wh-amber) 8%, transparent);
+}
+.starlight-aside--danger {
+  --sl-color-asides-text-accent: var(--wh-rose);
+  --sl-color-asides-border: var(--wh-rose);
+
+  background-color: color-mix(in oklab, var(--wh-rose) 8%, transparent);
+}
+
+/* ---------- Tabs — segmented control ----------
+   Starlight's default is an underlined tab row (full-width hairline, accent
+   border on the active tab) — the one chrome piece that still read as stock
+   once the landing adopted <Tabs>. Restyle as a segmented control on the
+   card surface; panels are untouched (EC code frames carry them). */
+starlight-tabs .tablist-wrapper ul[role="tablist"] {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
+}
+starlight-tabs .tab > [role="tab"] {
+  border: 0;
+  /* Starlight's stock underline is a `box-shadow: 0 2px` on every tab —
+     with the border gone it survives as a floating arc under each pill. */
+  box-shadow: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  padding: 0.35rem 0.9rem;
+  line-height: 1.4;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--wh-ink-muted);
+  white-space: nowrap;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+starlight-tabs .tab [role="tab"][aria-selected="true"] {
+  background: var(--wh-surface-elevated);
+  color: var(--wh-accent-text);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--wh-border-strong), var(--wh-shadow-sm);
+}
+starlight-tabs .tab [role="tab"]:not([aria-selected="true"]):hover {
+  color: var(--wh-ink);
+  background: color-mix(in oklab, var(--wh-surface-elevated) 60%, transparent);
+}
+
+/* Code-format tab groups (YAML/JSON, YAML/Environment, the pkg install
+   switcher) — when a panel leads with a code frame, the segmented control
+   DOCKS onto it (flush bottom edge, shared corner) so the pair reads as one
+   unit instead of a floating control above an unrelated box. */
+.sl-markdown-content
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  .tablist-wrapper
+  ul[role="tablist"] {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+  position: relative;
+  z-index: 1;
+}
+.sl-markdown-content
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  > [role="tabpanel"] {
+  margin-top: 0;
+}
+.sl-markdown-content
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  > [role="tabpanel"]
+  > .expressive-code:first-child
+  :is(.frame, figcaption.header, pre) {
+  border-top-left-radius: 0;
+}
+/* Inside a docked group the active tab already names the block (YAML / JSON
+   / a package manager) — the corner badge would just echo it. */
+.sl-markdown-content
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  .frame[data-wh-lang]::after {
+  content: none;
+}
+
+/* ---------- Small chrome the design system hadn't reached ---------- */
+
+/* Heading anchor links — quiet by default, accent on hover (stock gray). */
+.sl-anchor-link {
+  color: var(--wh-ink-subtle);
+  transition: color 0.12s ease;
+}
+.sl-heading-wrapper:hover .sl-anchor-link,
+.sl-anchor-link:hover {
+  color: var(--wh-accent-text);
+}
+
+/* <kbd> in prose — chip treatment matching the search trigger's shortcut. */
+.sl-markdown-content kbd {
+  font-family: var(--sl-font-mono);
+  font-size: 0.8em;
+  padding: 0.15em 0.45em;
+  background: var(--wh-surface-elevated);
+  border: 1px solid var(--wh-border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  color: var(--wh-ink);
+}
+
+/* Highlighted text in prose — same accent wash as search hits. */
+.sl-markdown-content mark {
+  background: var(--wh-accent-glow-strong);
+  color: var(--wh-ink);
+  border-radius: 2px;
+  padding-inline: 2px;
+}
+
+/* Inner scroll surfaces (sidebar, code frames, table/diagram wrappers) get a
+   thin brand-colored scrollbar instead of the chunky UA default on Windows/
+   Linux. Deliberately not on :root — a thin PAGE scrollbar is hostile. */
+.sidebar-pane,
+.right-sidebar,
+.expressive-code pre,
+.sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="flowchart"]),
+.sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
+}
+
+/* Mobile menu button — stock is a heavy filled circle next to the bordered
+   search trigger (mismatched control family), inverting to white when open.
+   Put both states on the surface scale so the two header controls match. */
+starlight-menu-button button {
+  background-color: var(--wh-surface);
+  color: var(--wh-ink-muted);
+  box-shadow: 0 0 0 1px var(--wh-border);
+}
+starlight-menu-button button[aria-expanded="true"] {
+  background-color: var(--wh-surface-overlay);
+  color: var(--wh-ink);
+  box-shadow: 0 0 0 1px var(--wh-border-strong);
+}
+
+/* ---------- View transitions (astro-vtbot SPA mode) ---------- */
+
+/* Navigation progress bar (src/components/ProgressBar.astro drives width/
+   opacity inline; everything visual lives here). Accent line over the glass
+   header; only slow loads ever see it. */
+#wh-progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 0;
+  opacity: 0;
+  z-index: 100; /* above header.header (the fixed glass nav) */
+  background: linear-gradient(90deg, var(--wh-accent), var(--wh-accent-hi));
+  box-shadow: 0 0 8px var(--wh-accent-glow-strong);
+  pointer-events: none;
+}
+
+/* Belt-and-braces: no transition choreography for reduced-motion users, even
+   if a future router/browser change stops handling it upstream. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }
 
 /* ---------- Utility classes for landing page ---------- */
@@ -959,12 +1537,14 @@ site-search button kbd {
    Unlayered (Starlight's rule is in @layer starlight.reset, so this wins on
    origin regardless of specificity) and scoped to :has(.wh-hero) so only the
    landing is affected — doc-page bodies keep their opaque --wh-bg fill. */
-body:has(.wh-hero) {
+body:has(.wh-hero),
+body:has(.wh-404) {
   background: transparent;
 }
 
 /* Layer 1 — the signal-field grid: full-viewport, continuous, soft-cornered. */
-body:has(.wh-hero)::before {
+body:has(.wh-hero)::before,
+body:has(.wh-404)::before {
   content: "";
   position: fixed;
   inset: 0;
@@ -982,7 +1562,8 @@ body:has(.wh-hero)::before {
 }
 
 /* Layer 2 — the hero glow: soft teal energy anchored to the top, breathing. */
-body:has(.wh-hero)::after {
+body:has(.wh-hero)::after,
+body:has(.wh-404)::after {
   content: "";
   position: fixed;
   inset: 0;
@@ -998,7 +1579,169 @@ body:has(.wh-hero)::after {
   to   { opacity: 1.06; transform: translateY(-1.5%); }
 }
 @media (prefers-reduced-motion: reduce) {
-  body:has(.wh-hero)::after { animation: none; }
+  body:has(.wh-hero)::after,
+  body:has(.wh-404)::after { animation: none; }
+}
+
+/* ---------- 404 — "signal lost" ----------
+   The default 404 was a bare title + bullet list on a flat page: the one page
+   confused visitors land on carried the least design. This reuses the landing
+   atmosphere (grid + glow, the body:has additions above) under a mono 404,
+   a waveform that flatlines, and the card-primitive quick links. */
+
+/* Hide Starlight's title panel on this page only — the custom markup carries
+   the visible (and accessible) h1. display:none removes the stock h1 from the
+   a11y tree, so the page still has exactly one heading. */
+body:has(.wh-404) .content-panel:has(> .sl-container > h1) {
+  display: none;
+}
+
+.wh-404 {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 1rem;
+  max-width: 46rem;
+  margin: clamp(1.5rem, 7vh, 4.5rem) auto 2rem;
+}
+.wh-404__code {
+  margin: 0;
+  font-family: var(--sl-font-mono);
+  font-size: clamp(5rem, 3.5rem + 7vw, 8rem);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(
+    180deg,
+    var(--wh-ink) 0%,
+    color-mix(in oklab, var(--wh-ink) 45%, var(--wh-ink-muted)) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.wh-404__signal {
+  width: min(380px, 86%);
+  height: auto;
+  margin-block: 0.25rem;
+  overflow: visible; /* the trace's glow shouldn't clip at the viewBox edge */
+}
+/* The trace: one path, heartbeat → dying blips → flatline, colored by a
+   left-to-right gradient (live accent fading into dead border-gray). A dim
+   static ghost of the full trace sits underneath so the shape always reads;
+   the bright copy on top is redrawn like a monitor scan: pathLength="1"
+   normalizes the dash units, and sliding a full-length dash from +1 to -1
+   draws the line in from the left, then erases it behind itself — seamless
+   loop. The declared dashoffset: 0 is the no-animation state (full static
+   trace), which is exactly what reduced-motion users get when the animation
+   is removed (the redundant ghost is hidden there). */
+.wh-404__signal-ghost {
+  opacity: 0.22;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wh-404__signal-ghost { display: none; }
+}
+.wh-404__signal-path {
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 0;
+  animation: wh-404-sweep 3.4s linear infinite;
+  filter: drop-shadow(0 0 6px var(--wh-accent-glow-strong));
+}
+@keyframes wh-404-sweep {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: -1; }
+}
+.wh-404__stop-live { stop-color: var(--wh-accent-hi); }
+.wh-404__stop-mid { stop-color: var(--wh-accent); }
+.wh-404__stop-dead { stop-color: var(--wh-border-strong); }
+/* The monitor's "current sample" dot at the end of the flatline, blinking
+   out of phase with the sweep so the page never looks fully still. */
+.wh-404__signal-dot {
+  color: var(--wh-rose);
+  animation: wh-404-pulse 1.7s ease-in-out infinite;
+  filter: drop-shadow(0 0 5px currentcolor);
+}
+@keyframes wh-404-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.2; transform: scale(0.7); }
+}
+.wh-404__signal-dot { transform-origin: 306px 24px; }
+@media (prefers-reduced-motion: reduce) {
+  .wh-404__signal-path,
+  .wh-404__signal-dot { animation: none; }
+}
+.wh-404__title {
+  margin: 0;
+  font-size: clamp(1.75rem, 1.4rem + 1.2vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+/* Center the accent underline the global `.content-panel > .sl-container
+   h1::after` rule paints — same specificity (0,2,2), later in the file wins. */
+.wh-404 h1.wh-404__title::after {
+  margin-inline: auto;
+}
+.wh-404__sub {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--wh-ink-muted);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+.wh-404__links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.875rem;
+  width: 100%;
+  margin-top: 1rem;
+}
+@media (max-width: 34rem) {
+  .wh-404__links { grid-template-columns: 1fr; }
+}
+.wh-404__links a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 1rem 1.15rem;
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  text-align: left;
+  transition: border-color 0.15s ease, transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.wh-404__links a:hover {
+  border-color: var(--wh-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--wh-shadow-glow);
+}
+.wh-404__links strong {
+  color: var(--wh-ink);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.wh-404__links span {
+  color: var(--wh-ink-muted);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+.wh-404__report {
+  margin: 0.75rem 0 0;
+  color: var(--wh-ink-subtle);
+  font-size: 0.875rem;
+}
+/* .not-content opts out of the markdown link styling — restate it here. */
+.wh-404__report a {
+  color: var(--wh-accent-text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--wh-accent-text) 35%, transparent);
+  text-underline-offset: 3px;
+}
+.wh-404__report a:hover {
+  text-decoration-color: var(--wh-accent-text);
 }
 
 .wh-pill {

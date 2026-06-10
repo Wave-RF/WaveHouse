@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" 2>/dev/null || exit 1
 
 usage() {
-  echo "usage: $0 {write|write-verify|has-verify-marker|path-for-commit <sha>}" >&2
+  echo "usage: $0 {write|write-verify|has-verify-marker|path-for-commit <sha>|verify-path-for-commit <sha>}" >&2
   exit 2
 }
 
@@ -19,6 +19,7 @@ usage() {
 tree_of_working_dir() {
   local tmp_idx
   tmp_idx=$(mktemp); rm -f "$tmp_idx"
+  # shellcheck disable=SC2064  # expand NOW on purpose: $tmp_idx is function-local, gone at EXIT-trap time
   trap "rm -f '$tmp_idx'" EXIT
   export GIT_INDEX_FILE="$tmp_idx"
   git read-tree HEAD
@@ -46,6 +47,12 @@ case "${1:-}" in
   path-for-commit)
     [ -n "${2:-}" ] || usage
     echo "tmp/ci-passed-tree-$(git rev-parse "$2^{tree}")"
+    ;;
+  verify-path-for-commit)
+    # The verify (not full-ci) marker for a commit's tree — the pre-push
+    # hook requires only this when the push is docs/prose-only.
+    [ -n "${2:-}" ] || usage
+    echo "tmp/verify-passed-tree-$(git rev-parse "$2^{tree}")"
     ;;
   *) usage ;;
 esac
