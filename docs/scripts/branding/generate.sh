@@ -63,6 +63,13 @@ OG_INK_MUTED=$(brand_color brand-ink-muted)  # OG tagline / footer text
 WORDMARK_LIGHT=$(brand_color brand-charcoal) # lockup wordmark on light bg (dark ink)
 COLOR_TOUCH_BG=$OG_BG
 COLOR_TOUCH_FG=$COLOR_DARK
+# The avatar tile (GitHub org/team, Slack, …) sits on a white tile rather than
+# the dark site bg, so it reads as a distinct profile picture instead of a black
+# square in those light UIs. Pure white is a plain neutral, not a brand hue —
+# nothing on the live site to drift from — so it's the one literal color here;
+# the mark stays the brand-blue accent.
+COLOR_AVATAR_BG="#FFFFFF"
+COLOR_AVATAR_FG=$COLOR_DARK
 
 # --- Source + output paths ----------------------------------------------------
 SRC="$ROOT/docs/src/assets/branding"
@@ -211,12 +218,13 @@ rsvg-convert -w 180 -h 180 "$TMP/touch.svg" -o "$OUT_KIT/apple-touch-icon.png"
 # avatar and render it big: GitHub org/team avatars, Slack, social profiles.
 # apple-touch-icon is only 180px and looks soft when blown up to a team avatar;
 # this renders the same solid-bg + centered-mark composition at 512px (vector
-# source → crisp at any size). The mark's stroked content bbox is x 3..96 (the
-# leftmost round-capped wave's stroke reaches ~x3), y 11..89 — center (49.5,50).
-# scale 0.7416 maps it to ~69% of the canvas; tx=50-49.5*0.7416=13.29,
-# ty=50-50*0.7416=12.92 center it exactly, leaving even padding so the mark
-# clears GitHub's rounded-square crop. Same colors as the touch tile.
-solid_tile_svg 100 "$COLOR_TOUCH_BG" "$COLOR_TOUCH_FG" "translate(13.29 12.92) scale(0.7416)" > "$TMP/avatar.svg"
+# source → crisp at any size), but on a white tile + brand-blue mark (see the
+# COLOR_AVATAR_* note above) so it reads as a profile picture in light UIs. The
+# mark's stroked content bbox is x 3..96 (the leftmost round-capped wave's
+# stroke reaches ~x3), y 11..89 — center (49.5,50). scale 0.7416 maps it to ~69%
+# of the canvas; tx=50-49.5*0.7416=13.29, ty=50-50*0.7416=12.92 center it
+# exactly, leaving even padding so the mark clears GitHub's rounded-square crop.
+solid_tile_svg 100 "$COLOR_AVATAR_BG" "$COLOR_AVATAR_FG" "translate(13.29 12.92) scale(0.7416)" > "$TMP/avatar.svg"
 rsvg-convert -w 512 -h 512 "$TMP/avatar.svg" -o "$OUT_KIT/avatar.png"
 
 # --- 6. og.png (1200x630 social card) -----------------------------------------
