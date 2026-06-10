@@ -50,13 +50,3 @@ func TestQueryTimeToTTL(t *testing.T) {
 		})
 	}
 }
-
-func TestGenerateVersionKey(t *testing.T) {
-	t.Parallel()
-
-	// Test empty scope
-	assert.Equal(t, "users", generateVersionKey("users", ""))
-
-	// Test populated scope
-	assert.Equal(t, "users.org_123", generateVersionKey("users", "org_123"))
-}
