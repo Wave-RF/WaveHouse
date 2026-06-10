@@ -1,110 +1,119 @@
 ---
 import Default from "@astrojs/starlight/components/Head.astro";
-import { ClientRouter } from "astro:transitions";
+import VtbotStarlight from "astro-vtbot/components/starlight/Base.astro";
 import PostHog from "./PostHog.astro";
 ---
 
-<Default><slot /></Default>
-<PostHog />
 {/*
-  Two media-scoped theme-color tags so the browser chrome (mobile address bar,
-  PWA splash) matches the OS preference at first paint — no JS needed. The
-  script below adds an unconditional override tag only when Starlight's manual
-  light/dark toggle disagrees with the OS, so the no-JS first-paint case stays
-  correct for everyone who hasn't explicitly toggled.
+  astro-vtbot's Starlight <Base> wraps our head in <ClientRouter/> to keep SPA
+  view transitions, while its <ReplacementSwap/> preserves the header so
+  Starlight's search <dialog> + ⌘K listener survive navigation — a bare
+  <ClientRouter/> detached them (showModal on a removed dialog). fallback="swap"
+  = instant swap where the View Transition API is absent. See Starlight #2823;
+  full rationale in CHANGELOG.
 */}
-<meta name="theme-color" content="#FAFAF9" media="(prefers-color-scheme: light)" />
-<meta name="theme-color" content="#0A0B0E" media="(prefers-color-scheme: dark)" />
-<ClientRouter fallback="swap" />
+<VtbotStarlight viewTransitionsFallback="swap">
+  <Default><slot /></Default>
+  <PostHog />
+  {/*
+    Two media-scoped theme-color tags so the browser chrome (mobile address bar,
+    PWA splash) matches the OS preference at first paint — no JS needed. The
+    script below adds an unconditional override tag only when Starlight's manual
+    light/dark toggle disagrees with the OS, so the no-JS first-paint case stays
+    correct for everyone who hasn't explicitly toggled.
+  */}
+  <meta name="theme-color" content="#FAFAF9" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0A0B0E" media="(prefers-color-scheme: dark)" />
 
-<script is:inline>
-  (() => {
-    const DARK = "#0A0B0E";
-    const LIGHT = "#FAFAF9";
-    const OVERRIDE_ATTR = "data-wh-theme-color-override";
-    const head = document.head;
-    if (!head) return;
+  <script is:inline>
+    (() => {
+      const DARK = "#0A0B0E";
+      const LIGHT = "#FAFAF9";
+      const OVERRIDE_ATTR = "data-wh-theme-color-override";
+      const head = document.head;
+      if (!head) return;
 
-    const resolve = () => {
-      const t = document.documentElement.dataset.theme;
-      const osDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      const osTheme = osDark ? "dark" : "light";
-      let override = document.querySelector(`meta[${OVERRIDE_ATTR}]`);
-      if (t && t !== osTheme) {
-        // User toggled away from OS default — inject an unscoped override
-        // tag, which (lacking `media`) wins over the OS-preference pair.
-        if (!override) {
-          override = document.createElement("meta");
-          override.setAttribute("name", "theme-color");
-          override.setAttribute(OVERRIDE_ATTR, "");
-          head.appendChild(override);
+      const resolve = () => {
+        const t = document.documentElement.dataset.theme;
+        const osDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const osTheme = osDark ? "dark" : "light";
+        let override = document.querySelector(`meta[${OVERRIDE_ATTR}]`);
+        if (t && t !== osTheme) {
+          // User toggled away from OS default — inject an unscoped override
+          // tag, which (lacking `media`) wins over the OS-preference pair.
+          if (!override) {
+            override = document.createElement("meta");
+            override.setAttribute("name", "theme-color");
+            override.setAttribute(OVERRIDE_ATTR, "");
+            head.appendChild(override);
+          }
+          override.setAttribute("content", t === "light" ? LIGHT : DARK);
+        } else if (override) {
+          // Back on OS default — drop the override so media-scoped tags resume.
+          override.remove();
         }
-        override.setAttribute("content", t === "light" ? LIGHT : DARK);
-      } else if (override) {
-        // Back on OS default — drop the override so media-scoped tags resume.
-        override.remove();
-      }
-    };
-    resolve();
+      };
+      resolve();
 
-    // `is:inline` scripts re-run on every Astro View Transition, so
-    // sentinel-guard the listener/observer registration to avoid stacking
-    // MutationObservers and astro:after-swap listeners across navigations.
-    if (window.__whThemeColorBound) return;
-    window.__whThemeColorBound = true;
-    new MutationObserver(resolve).observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", resolve);
-    document.addEventListener("astro:after-swap", resolve);
-  })();
-</script>
+      // `is:inline` scripts re-run on every Astro View Transition, so
+      // sentinel-guard the listener/observer registration to avoid stacking
+      // MutationObservers and astro:after-swap listeners across navigations.
+      if (window.__whThemeColorBound) return;
+      window.__whThemeColorBound = true;
+      new MutationObserver(resolve).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
+      });
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", resolve);
+      document.addEventListener("astro:after-swap", resolve);
+    })();
+  </script>
 
-{/*
-  Live theme-flip for the tab icon, the GitHub way (favicon.svg/favicon-dark
-  .svg + matchMedia): Chromium rasterizes an SVG favicon once, under the
-  scheme active at fetch time, and never re-renders it on a theme flip
-  (crbug.com/1208277) — so swap the SVG icon links between statically-colored
-  per-scheme files. A distinct URL per scheme defeats the per-URL favicon
-  cache, and the fetched file carries no media query for the favicon
-  rasterizer to mis-evaluate. The self-styling favicon.svg stays as the SSR
-  default for no-JS contexts (bookmarks, unloaded tabs, crawlers — where a
-  JS-only swap is known to fail). Tracks the OS/browser theme (what the tab
-  strip uses), deliberately not Starlight's page toggle.
-*/}
-<script is:inline>
-  (() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const repaint = () => {
-      const variant = mq.matches ? "dark" : "light";
-      // Chromium re-evaluates icon candidates reliably only on link node
-      // insertion/removal — an in-place href mutation is honored briefly,
-      // then the stale candidate set wins again. And whenever the .ico is
-      // among the live candidates, Chromium's scorer commits it over a
-      // sizes="any" SVG (verified via the profile Favicons DB: exact 16/32
-      // bitmap matches outscore "scalable"). So: remove ALL icon links
-      // (rel~=icon spares apple-touch-icon) and append one fresh SVG node —
-      // the sole candidate must win, and last-in-head also satisfies
-      // Firefox. No-JS UAs keep the full SSR markup; Safari ≤18 (no SVG
-      // favicons) loses the .ico link here but falls back to auto-probing
-      // /favicon.ico at the site root, which generate.sh keeps in place.
-      for (const link of document.querySelectorAll('link[rel~="icon"]')) {
-        link.remove();
-      }
-      const link = document.createElement("link");
-      link.rel = "icon";
-      link.type = "image/svg+xml";
-      link.setAttribute("sizes", "any");
-      link.href = `/branding/favicon-${variant}.svg`;
-      document.head.append(link);
-    };
-    repaint();
-    // View transitions restore the plain SSR links (and this script re-runs);
-    // sentinel-guard the listeners only, like the theme-color script above.
-    if (window.__whFaviconBound) return;
-    window.__whFaviconBound = true;
-    mq.addEventListener("change", repaint);
-    document.addEventListener("astro:after-swap", repaint);
-  })();
-</script>
+  {/*
+    Live theme-flip for the tab icon, the GitHub way (favicon.svg/favicon-dark
+    .svg + matchMedia): Chromium rasterizes an SVG favicon once, under the
+    scheme active at fetch time, and never re-renders it on a theme flip
+    (crbug.com/1208277) — so swap the SVG icon links between statically-colored
+    per-scheme files. A distinct URL per scheme defeats the per-URL favicon
+    cache, and the fetched file carries no media query for the favicon
+    rasterizer to mis-evaluate. The self-styling favicon.svg stays as the SSR
+    default for no-JS contexts (bookmarks, unloaded tabs, crawlers — where a
+    JS-only swap is known to fail). Tracks the OS/browser theme (what the tab
+    strip uses), deliberately not Starlight's page toggle.
+  */}
+  <script is:inline>
+    (() => {
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+      const repaint = () => {
+        const variant = mq.matches ? "dark" : "light";
+        // Chromium re-evaluates icon candidates reliably only on link node
+        // insertion/removal — an in-place href mutation is honored briefly,
+        // then the stale candidate set wins again. And whenever the .ico is
+        // among the live candidates, Chromium's scorer commits it over a
+        // sizes="any" SVG (verified via the profile Favicons DB: exact 16/32
+        // bitmap matches outscore "scalable"). So: remove ALL icon links
+        // (rel~=icon spares apple-touch-icon) and append one fresh SVG node —
+        // the sole candidate must win, and last-in-head also satisfies
+        // Firefox. No-JS UAs keep the full SSR markup; Safari ≤18 (no SVG
+        // favicons) loses the .ico link here but falls back to auto-probing
+        // /favicon.ico at the site root, which generate.sh keeps in place.
+        for (const link of document.querySelectorAll('link[rel~="icon"]')) {
+          link.remove();
+        }
+        const link = document.createElement("link");
+        link.rel = "icon";
+        link.type = "image/svg+xml";
+        link.setAttribute("sizes", "any");
+        link.href = `/branding/favicon-${variant}.svg`;
+        document.head.append(link);
+      };
+      repaint();
+      // View transitions restore the plain SSR links (and this script re-runs);
+      // sentinel-guard the listeners only, like the theme-color script above.
+      if (window.__whFaviconBound) return;
+      window.__whFaviconBound = true;
+      mq.addEventListener("change", repaint);
+      document.addEventListener("astro:after-swap", repaint);
+    })();
+  </script>
+</VtbotStarlight>
