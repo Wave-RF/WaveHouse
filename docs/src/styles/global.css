@@ -346,9 +346,17 @@ svg[aria-roledescription^="state"] {
   margin-block: 1.5rem;
   align-items: center;
 }
-.sl-markdown-content .diagram-pair > p {
+/* Pair children are <p>s in authored markdown, or the runtime div scrollers
+   ScrollHints wraps direct-child svgs in — both must span the pair (a
+   content-sized flex item would overflow the page on phones, where the
+   diagram floor exceeds the viewport and only a full-width scroller can
+   absorb it). The <p> centers its inline svg via flex; the div scroller's
+   svg centers itself (margin-inline: auto) and pans when oversized. */
+.sl-markdown-content .diagram-pair > :is(p, div) {
   margin: 0;
   width: 100%;
+}
+.sl-markdown-content .diagram-pair > p {
   display: flex;
   justify-content: center;
 }
@@ -636,6 +644,18 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   text-decoration-color: var(--wh-accent-text);
 }
 
+/* External links announce themselves everywhere, not just the sidebar —
+   absolute http(s) hrefs are off-site by construction (internal links are
+   root-relative). Buttons and cards carry their own affordances. */
+.sl-markdown-content a[href^="http"]:not(:where(.sl-link-button, .sl-link-card, .not-content a))::after,
+footer a[href^="http"]::after {
+  content: "↗";
+  display: inline-block;
+  margin-inline-start: 0.25em;
+  font-size: 0.7em;
+  opacity: 0.6;
+}
+
 /* Inline code — denser, branded surface */
 .sl-markdown-content :not(pre) > code {
   background: var(--wh-code-bg);
@@ -681,19 +701,22 @@ samp,
   border-color: var(--wh-accent);
 }
 
-/* Language badge — every code frame names its language in the bottom-right
-   corner (Expressive Code stamps data-language on the <pre>). Quiet by
-   design: readers who need it find it, everyone else reads past it.
-   Terminal frames skip it (the title bar already says "shell"), as do
-   plain-text-family blocks where a label would be noise. */
-.expressive-code pre {
+/* Language badge — EVERY code frame names its language at its top-right
+   (ScrollHints copies Expressive Code's pre[data-language] up to the frame,
+   where the badge can sit inside the title bar). Quiet by design: readers
+   who need it find it, everyone else reads past it. Placement varies with
+   the frame anatomy — in the header band for terminal/titled frames, in
+   the code area's corner for plain frames (where it yields to the hover
+   copy button). Plain-text-family blocks skip it (no information). */
+.expressive-code .frame[data-wh-lang] {
   position: relative;
 }
-.expressive-code pre::after {
-  content: attr(data-language);
+.expressive-code .frame[data-wh-lang]::after {
+  content: attr(data-wh-lang);
   position: absolute;
-  bottom: 0.45rem;
-  right: 0.65rem;
+  z-index: 2;
+  top: 0.85rem;
+  right: 0.85rem;
   font-family: var(--sl-font-mono);
   font-size: 0.65rem;
   font-weight: 600;
@@ -701,16 +724,21 @@ samp,
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--wh-ink-subtle);
-  opacity: 0.75;
+  opacity: 0.8;
   pointer-events: none;
   user-select: none;
+  transition: opacity 0.15s ease;
 }
-.expressive-code .frame.is-terminal pre::after,
-.expressive-code pre:is(
-    [data-language="text"],
-    [data-language="plaintext"],
-    [data-language="txt"],
-    [data-language="ansi"]
+/* Headerless frames: the badge shares the corner with the hover-revealed
+   copy button — step aside when the pointer is on the frame. */
+.expressive-code .frame[data-wh-lang]:not(.has-title):not(.is-terminal):hover::after {
+  opacity: 0;
+}
+.expressive-code .frame:is(
+    [data-wh-lang="text"],
+    [data-wh-lang="plaintext"],
+    [data-wh-lang="txt"],
+    [data-wh-lang="ansi"]
   )::after {
   content: none;
 }
@@ -1344,6 +1372,34 @@ starlight-tabs .tab [role="tab"][aria-selected="true"] {
 starlight-tabs .tab [role="tab"]:not([aria-selected="true"]):hover {
   color: var(--wh-ink);
   background: color-mix(in oklab, var(--wh-surface-elevated) 60%, transparent);
+}
+
+/* Code-format tab groups (YAML/JSON, YAML/Environment, the pkg install
+   switcher) — when a panel leads with a code frame, the segmented control
+   DOCKS onto it (flush bottom edge, shared corner) so the pair reads as one
+   unit instead of a floating control above an unrelated box. */
+.sl-markdown-content
+  starlight-tabs:has(> section[role="tabpanel"] > .expressive-code:first-child)
+  .tablist-wrapper
+  ul[role="tablist"] {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+  position: relative;
+  z-index: 1;
+}
+.sl-markdown-content
+  starlight-tabs:has(> section[role="tabpanel"] > .expressive-code:first-child)
+  > section[role="tabpanel"] {
+  margin-top: 0;
+}
+.sl-markdown-content
+  starlight-tabs:has(> section[role="tabpanel"] > .expressive-code:first-child)
+  > section[role="tabpanel"]
+  > .expressive-code:first-child
+  :is(.frame, figcaption.header, pre) {
+  border-top-left-radius: 0;
 }
 
 /* ---------- Small chrome the design system hadn't reached ---------- */

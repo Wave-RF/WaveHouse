@@ -23,8 +23,12 @@
       ".expressive-code pre, .sl-markdown-content table, .wh-scroll-x, .wh-zoom__stage";
 
     function wrapScrollables() {
+      // Bare svgs in the content flow AND direct svg children of a
+      // .diagram-pair (rehype-mermaid sometimes unwraps the <p>) each get
+      // their OWN scroller — classing the pair container itself gave two
+      // diagrams one shared zoom chip and one shared natural width.
       const bare = document.querySelectorAll(
-        ".sl-markdown-content > svg[aria-roledescription]",
+        ".sl-markdown-content > svg[aria-roledescription], .diagram-pair > svg[aria-roledescription]",
       );
       for (const svg of bare) {
         const div = document.createElement("div");
@@ -56,8 +60,22 @@
       );
       for (const svg of wrapped) {
         const parent = svg.parentElement;
-        if (parent && !parent.classList.contains("wh-scroll-x")) {
+        if (
+          parent &&
+          !parent.classList.contains("wh-scroll-x") &&
+          !parent.classList.contains("diagram-pair")
+        ) {
           parent.classList.add("wh-scroll-x");
+        }
+      }
+      // Surface each code frame's language for the corner badge — CSS attr()
+      // can only read from the element it styles, and EC stamps the language
+      // on the <pre> while the badge needs to live on the frame (inside the
+      // title bar for terminal/titled frames).
+      for (const pre of document.querySelectorAll(".expressive-code pre[data-language]")) {
+        const frame = pre.closest(".frame");
+        if (frame && !frame.hasAttribute("data-wh-lang")) {
+          frame.setAttribute("data-wh-lang", pre.dataset.language);
         }
       }
       // Tables: a scroll WRAPPER lets the table itself use true auto layout
@@ -120,12 +138,13 @@
       }
     }
 
-    // 8px threshold, not ~0: fit-content widths and devicePixelRatio rounding
-    // leave a few phantom pixels of "overflow" on blocks with nothing real to
-    // scroll to — fading those reads as cut-off content that isn't there.
+    // 12px threshold, not ~0: fit-content widths and devicePixelRatio
+    // rounding leave phantom pixels of "overflow" on blocks with nothing
+    // real to scroll to — fading those reads as cut-off content that isn't
+    // there. Anything under ~a character width isn't worth hinting anyway.
     function updateOne(el) {
-      const end = el.scrollWidth - el.clientWidth - el.scrollLeft > 8;
-      const start = el.scrollLeft > 8;
+      const end = el.scrollWidth - el.clientWidth - el.scrollLeft > 12;
+      const start = el.scrollLeft > 12;
       el.toggleAttribute("data-wh-more", end);
       el.toggleAttribute("data-wh-more-start", start);
     }
@@ -147,21 +166,62 @@
     // auto layout crushing off-screen columns, but applied to a fitting
     // table they would CREATE the scroll).
     function classifyTables() {
-      const CROWD_PX = 136;
-      const overOrCrowded = (el) => {
+      const CROWD_PX = 136; // below this avg column width, scroll beats wrapping
+      const TIGHT_PX = 200; // below this, a ≥4-col table is worth widening
+      const colsOf = (el) => {
         const row = el.querySelector("tr");
-        const cols = row ? row.cells.length : 0;
-        const crowded = cols >= 4 && el.clientWidth / cols < CROWD_PX;
-        return crowded || el.scrollWidth - el.clientWidth > 1;
+        return row ? row.cells.length : 0;
       };
-      const wraps = document.querySelectorAll(".wh-table-wrap");
+      const overflowing = (el, slack) => el.scrollWidth - el.clientWidth > slack;
+      const wraps = [...document.querySelectorAll(".wh-table-wrap")];
       wraps.forEach((el) => {
         el.removeAttribute("data-wh-scrolls");
         el.removeAttribute("data-wh-wide");
       });
-      const wide = [...wraps].filter(overOrCrowded);
+      // Natural (max-content) width per table, measured in one batched
+      // reflow: a table whose natural width fits the breakout track widens
+      // to EXACTLY that width and stops wrapping entirely (feature matrices)
+      // — while prose-heavy tables (whose natural width is a full unwrapped
+      // sentence) don't widen just to stretch their line lengths.
+      const naturals = new Map();
+      wraps.forEach((el) => {
+        const t = el.querySelector("table");
+        if (t) t.style.width = "max-content";
+      });
+      wraps.forEach((el) => {
+        const t = el.querySelector("table");
+        if (t) naturals.set(el, t.getBoundingClientRect().width);
+      });
+      wraps.forEach((el) => {
+        const t = el.querySelector("table");
+        if (t) t.style.width = "";
+      });
+      const md = document.querySelector(".sl-markdown-content");
+      // Mirror the CSS cap: min(calc(100% - 2.5rem), 68rem).
+      const avail = md ? Math.min(md.clientWidth - 40, 1088) : 0;
+      const wide = wraps.filter((el) => {
+        const cols = colsOf(el);
+        const natural = naturals.get(el) ?? 0;
+        // The 1.3 factor: a table whose natural width is CLOSE to the
+        // breakout track still wins from widening (a touch of wrapping at
+        // full width beats heavy wrapping at prose width) — while genuinely
+        // prose-heavy tables (natural = whole unwrapped sentences, several
+        // times the track) stay at the reading measure.
+        return (
+          overflowing(el, 1) ||
+          (cols >= 4 && el.clientWidth / cols < TIGHT_PX) ||
+          (natural > el.clientWidth + 8 && natural <= avail * 1.3)
+        );
+      });
       wide.forEach((el) => el.setAttribute("data-wh-wide", ""));
-      wide.filter(overOrCrowded).forEach((el) => el.setAttribute("data-wh-scrolls", ""));
+      // Re-measure at the granted width: still overflowing or crowded →
+      // scroller + column floors.
+      wide
+        .filter((el) => {
+          const cols = colsOf(el);
+          return overflowing(el, 8) || (cols >= 4 && el.clientWidth / cols < CROWD_PX);
+        })
+        .forEach((el) => el.setAttribute("data-wh-scrolls", ""));
     }
     function init() {
       wrapScrollables();
@@ -204,6 +264,9 @@
     scrollbar-color: var(--wh-border-strong) transparent;
     margin-block: 1rem;
     position: relative;
+    /* Mermaid draws cluster borders ON the viewBox edge; overflow-y:hidden
+       was slicing the stroke's outer half at the top/bottom. */
+    padding-block: 2px;
   }
   /* Edge fades: content hidden past an edge reads as scrollable instead of
      amputated — on BOTH sides (a right-scrolled view fades its left edge so
@@ -274,29 +337,47 @@
   }
   /* Every diagram carries a quiet zoom affordance — cursor: zoom-in only
      speaks to a pointer that happens to hover, so the corner chip is always
-     present (dimmed) and brightens on hover. */
+     present (dimmed) and brightens on hover. Two pseudo layers: ::after is
+     the chip surface, ::before the icon (a stroke "expand" glyph applied as
+     a mask so it takes theme colors — a data-URI background can't use
+     var()). The semi-translucent surface keeps whatever diagram edge it
+     overlaps readable underneath. */
   .wh-scroll-x:not(.wh-table-wrap)::after {
-    content: "⤢";
+    content: "";
     position: absolute;
-    top: 0.4rem;
-    right: 0.4rem;
-    display: grid;
-    place-items: center;
-    width: 1.6rem;
-    height: 1.6rem;
+    top: 0.45rem;
+    right: 0.45rem;
+    width: 1.75rem;
+    height: 1.75rem;
     border-radius: var(--radius-xs);
-    background: var(--wh-surface-overlay);
+    background: color-mix(in oklab, var(--wh-surface-overlay) 80%, transparent);
+    backdrop-filter: blur(3px);
     border: 1px solid var(--wh-border-strong);
-    color: var(--wh-ink-muted);
-    font-size: 0.95rem;
-    line-height: 1;
     pointer-events: none;
-    opacity: 0.6;
-    transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    opacity: 0.65;
+    transition: opacity 0.15s ease, border-color 0.15s ease;
+  }
+  .wh-scroll-x:not(.wh-table-wrap)::before {
+    content: "";
+    position: absolute;
+    top: calc(0.45rem + 7px);
+    right: calc(0.45rem + 7px);
+    width: 14px;
+    height: 14px;
+    z-index: 1;
+    background-color: var(--wh-ink-muted);
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='15 3 21 3 21 9'/%3E%3Cpolyline points='9 21 3 21 3 15'/%3E%3Cline x1='21' y1='3' x2='14' y2='10'/%3E%3Cline x1='3' y1='21' x2='10' y2='14'/%3E%3C/svg%3E");
+    mask-size: 100% 100%;
+    pointer-events: none;
+    opacity: 0.85;
+    transition: background-color 0.15s ease;
   }
   .wh-scroll-x:not(.wh-table-wrap):hover::after {
     opacity: 1;
     border-color: var(--wh-accent);
-    color: var(--wh-accent-text);
+  }
+  .wh-scroll-x:not(.wh-table-wrap):hover::before {
+    background-color: var(--wh-accent-text);
+    opacity: 1;
   }
 </style>

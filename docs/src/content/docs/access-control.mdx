@@ -82,6 +82,8 @@ A policy is a YAML or JSON document with three top-level fields:
 
 Each table entry holds permissions for two operations — `select` (reads) and `insert` (writes) — and each operation maps **role → permissions**:
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 tables:
   events:                 # ClickHouse table name
@@ -92,6 +94,28 @@ tables:
       writer:             # role → what "writer" may insert
         allow_columns: ["page", "score", "user_id"]
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "tables": {
+    "events": {
+      "select": {
+        "viewer": {
+          "allow_columns": ["page", "score"]
+        }
+      },
+      "insert": {
+        "writer": {
+          "allow_columns": ["page", "score", "user_id"]
+        }
+      }
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 A role with no entry under the operation it is attempting is denied. The set of permission fields below applies to both `select` and `insert` entries, though some (row `filter`, aggregations, limits) only take effect on the read path and some (`check`) only on the write path — the [enforcement table](#where-each-rule-is-enforced) maps which is which.
 
@@ -99,12 +123,28 @@ A role with no entry under the operation it is attempting is denied. The set of 
 
 `allow_columns` and `deny_columns` control which columns a role can read (on `select`) or write (on `insert`).
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
     allow_columns: ["page", "button", "received_timestamp"]
     deny_columns: ["user_email", "ip_address"]
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "allow_columns": ["page", "button", "received_timestamp"],
+      "deny_columns": ["user_email", "ip_address"]
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 The rules, in order:
 
@@ -118,6 +158,8 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 
 `filter` restricts *which rows* a role can read by injecting a `WHERE` clause into the generated SQL. Each entry maps a column to a comparison whose value is usually a **JWT claim template**:
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
@@ -125,6 +167,23 @@ select:
       tenant_id:
         _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "filter": {
+        "tenant_id": {
+          "_eq": "{{ jwt.app_metadata.tenant_id }}"
+        }
+      }
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 This produces `WHERE (tenant_id = ?)` with the caller's `app_metadata.tenant_id` claim bound as the parameter — so a `viewer` only ever sees rows for their own tenant, and the value comes from the signed token, not from anything the client sends.
 
@@ -154,6 +213,8 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 `check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It only supports `_eq`.
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 insert:
   writer:
@@ -164,6 +225,27 @@ insert:
       tenant_id:
         _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "insert": {
+    "writer": {
+      "allow_columns": ["page", "score", "user_id", "tenant_id"],
+      "check": {
+        "user_id": {
+          "_eq": "{{ jwt.sub }}"
+        },
+        "tenant_id": {
+          "_eq": "{{ jwt.app_metadata.tenant_id }}"
+        }
+      }
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 For each checked column, on `POST /v1/ingest?table={table}`:
 
@@ -176,6 +258,8 @@ This pairs naturally with a matching `filter` on the `select` side: `check` stam
 
 `allowed_aggregations` and `denied_aggregations` restrict which aggregation functions a role may use in a structured query (`count`, `sum`, `avg`, `quantile`, …). Matching is case-insensitive and follows the same precedence as columns:
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
@@ -183,6 +267,22 @@ select:
   analyst:
     allowed_aggregations: ["count", "sum", "avg"]  # allowlist: only these three
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "denied_aggregations": ["quantile", "median"]
+    },
+    "analyst": {
+      "allowed_aggregations": ["count", "sum", "avg"]
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 - `denied_aggregations` always wins.
 - An empty `allowed_aggregations` means all non-denied functions are allowed; a non-empty list is an allowlist.
@@ -198,12 +298,28 @@ Two fields cap the cost of a single structured query. Both must be non-negative;
 | `max_rows` | Caps the query's `LIMIT`. If the caller asks for more (or omits a limit), the result is clamped to `max_rows`. |
 | `max_execution_time_ms` | Caps the ClickHouse execution timeout for the query, applied as the *minimum* of this value and the server's `clickhouse.query_timeout`. |
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
     max_rows: 1000
     max_execution_time_ms: 5000
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "max_rows": 1000,
+      "max_execution_time_ms": 5000
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 These bound a role's blast radius on the cached read path. They do not apply to raw admin SQL, which is unbounded by design (other than the 64 MiB response cap noted in the [API reference](/api)).
 
