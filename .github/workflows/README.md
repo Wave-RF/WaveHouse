@@ -3,9 +3,10 @@
 How `ci.yml` is shaped and why. This is the canonical reference — the
 workflow file's comments only explain what's local to a step, and
 [development.md](../../docs/src/content/docs/development.md) carries the
-contributor-facing summary. Wall-clock for a full PR run: **~3m45s push →
-all green** (e2e ~165s + the `coverage` job's ~50s tail; was 5m54s before
-the 2026-06 reshape).
+contributor-facing summary. Wall-clock for a full PR run: **~4m push →
+all green** (measured 4m11s on the first run with the coverage job: e2e
+~170s + the `coverage` job's ~62s tail + the ~4s aggregator; was 5m54s
+before the 2026-06 reshape).
 
 ## The graph
 
@@ -154,8 +155,8 @@ to every run's Summary page. Reference shape:
 
 | Job | Starts | Duration |
 |---|---:|---:|
-| e2e (long pole) | +8s | ~165s — ~25 setup, ~120 suite (15 builds ∥ image prefetch, ~100 vitest, ~10 cover-binary OTel exit [#288](https://github.com/Wave-RF/WaveHouse/issues/288)), ~5 fragment upload |
-| coverage (critical path tail) | after e2e | ~45–60s — setup + pnpm install, ~3s merge + gate |
+| e2e (long pole) | +8s | ~170s — ~25 setup, ~120 suite (15 builds ∥ image prefetch, ~100 vitest, ~10 cover-binary OTel exit [#288](https://github.com/Wave-RF/WaveHouse/issues/288)), ~5 fragment upload |
+| coverage (critical path tail) | after e2e | ~62s — setup + pnpm install, ~3s merge + gate |
 | integration | +8s | ~85s |
 | docs-build → docs-preview | +8s | preview ends ~+150s |
 | lint / unit | +2s / +8s | ~65s / ~50s |
