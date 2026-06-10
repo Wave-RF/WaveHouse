@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Classify a CI run's change set for job gating. Single source of truth —
-# used by ci.yml's `changes` job AND inlined into the e2e job (which
-# classifies for itself so it can start without waiting on another job;
-# the aggregator cross-checks the two classifications).
+# Classify a CI run's change set for job gating — the single source of
+# truth behind ci.yml's `changes` job, whose outputs gate the test/docs
+# jobs.
 #
 # Prints two `key=value` lines for $GITHUB_OUTPUT:
 #   code=true|false  false only when EVERY changed file is prose/repo-meta
@@ -19,7 +18,10 @@
 # GITHUB_REPOSITORY, GH_TOKEN, PR_NUMBER (pull_request), PUSH_BEFORE +
 # PUSH_SHA (push).
 
-set -u
+# -e/-pipefail: an unexpected failure aborts (and the job reds) instead
+# of misclassifying; the two `gh api … || true` calls stay soft because
+# their empty-output case already fails closed below.
+set -euo pipefail
 
 if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
   echo "code=true" # manual → run + deploy everything

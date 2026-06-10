@@ -101,11 +101,15 @@ case "$PREVIEW_OUTCOME/${URL:+url}" in
   *)           headline="⚠️ **Docs preview failed to upload** (3 attempts) — any earlier preview is now stale. See the run log."; last="- **Upload failed** — $deployed" ;;
 esac
 body="$(printf '%s\n%s\n\n%s\n%s' "$marker" "$headline" "$bullets" "$last")"
+# $marker interpolated into the jq program (gh api --jq takes no --arg);
+# it's a constant HTML comment, so the double-quoting is safe.
 cid="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-  --jq 'map(select(.body | startswith("<!-- docs-preview-comment -->"))) | .[0].id // empty' | head -1 || true)"
+  --jq "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty" | head -1 || true)"
 if [ -n "$cid" ]; then
-  gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${cid}" -f body="$body" >/dev/null
+  gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${cid}" -f body="$body" >/dev/null \
+    || { echo "::error::Failed to update docs-preview comment ${cid} on PR #${PR}." >&2; exit 1; }
 else
-  gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body" >/dev/null
+  gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body" >/dev/null \
+    || { echo "::error::Failed to create the docs-preview comment on PR #${PR}." >&2; exit 1; }
 fi
 echo "Updated docs-preview comment on PR #${PR} (outcome=${PREVIEW_OUTCOME}, url=${URL:-none})"

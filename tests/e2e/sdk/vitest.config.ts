@@ -27,10 +27,6 @@ const quietConsole = !!process.env.COV_DEFER;
 
 export default defineConfig({
   root: repoRoot,
-  // Per-shard Vite cache (scripts/e2e-shards.sh sets VITEST_CACHE_DIR) so
-  // concurrent vitest processes don't race on node_modules/.vite writes.
-  // Unset (single-run default) keeps Vite's standard location.
-  ...(process.env.VITEST_CACHE_DIR ? { cacheDir: process.env.VITEST_CACHE_DIR } : {}),
   resolve: {
     alias: {
       // Resolve @wavehouse/sdk to the source so coverage instruments the SDK
