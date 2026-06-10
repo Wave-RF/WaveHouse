@@ -241,6 +241,38 @@ if (import.meta.env.DEV && !heroTitle) {
   document.addEventListener('DOMContentLoaded', setupHeroCTATracking);
   document.addEventListener('astro:page-load', setupHeroCTATracking);
 
+  // The install chip follows the reader's package-manager choice from the
+  // docs' synced install tabs (Starlight persists the selected tab LABEL in
+  // localStorage under its syncKey — see /sdk's <Tabs syncKey="pkg">). The
+  // keys here must match those tab labels exactly. "CDN" (and anything
+  // unknown) keeps the pnpm default — there's no one-liner shell command for
+  // a script tag.
+  function syncHeroInstallCmd() {
+    var PKG_PREFIX = {
+      pnpm: 'pnpm add ',
+      npm: 'npm install ',
+      yarn: 'yarn add ',
+      bun: 'bun add ',
+      deno: 'deno add npm:'
+    };
+    var label = null;
+    try { label = localStorage.getItem('starlight-synced-tabs__pkg'); } catch (e) {}
+    var prefix = label && PKG_PREFIX[label];
+    if (!prefix) return;
+    document.querySelectorAll('.wh-hero__install').forEach(function(btn) {
+      var cmd = prefix + '@wavehouse/sdk';
+      btn.setAttribute('data-copy', cmd);
+      btn.setAttribute('aria-label', 'Copy: ' + cmd);
+      var span = btn.querySelector('.wh-hero__install-cmd');
+      // The command span is "<prefix text node><span.pkg>@wavehouse/sdk</span>".
+      if (span && span.firstChild && span.firstChild.nodeType === Node.TEXT_NODE) {
+        span.firstChild.nodeValue = prefix;
+      }
+    });
+  }
+  document.addEventListener('DOMContentLoaded', syncHeroInstallCmd);
+  document.addEventListener('astro:page-load', syncHeroInstallCmd);
+
   // Click-to-copy install command — devs expect it, and it makes the SDK the
   // one-line "try it now". Falls back to a manual selection range when the
   // async clipboard API isn't available (http / older browsers).
@@ -374,6 +406,17 @@ if (import.meta.env.DEV && !heroTitle) {
     flex-wrap: wrap;
     gap: 0.75rem;
     margin-top: 0.5rem;
+  }
+  /* Stacked CTAs on small phones hug their labels at ragged widths — go
+     full-width and centered so the pair reads as a deliberate stack. */
+  @media (max-width: 30rem) {
+    .wh-hero__actions {
+      width: 100%;
+    }
+    .wh-hero__action {
+      flex: 1 1 100%;
+      justify-content: center;
+    }
   }
   .wh-hero__action {
     display: inline-flex;

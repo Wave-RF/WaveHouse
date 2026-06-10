@@ -29,8 +29,10 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
     ORDER BY (page)
   "
 
-# Ingest data (the standalone stack ships a permissive trial policy; WaveHouse is fail-closed otherwise — see Getting Started)
-# A 404 "unknown table" right after creating the table means schema discovery hasn't picked it up yet — retry (worst case 60s)
+# Ingest data (the standalone stack ships a permissive trial policy;
+# WaveHouse is fail-closed otherwise — see Getting Started)
+# A 404 "unknown table" right after creating the table means schema
+# discovery hasn't picked it up yet — retry (worst case 60s)
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
@@ -116,7 +118,8 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-WH_CH_HTTP_PORT=8123                # Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+# Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+WH_CH_HTTP_PORT=8123
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
 # Schema discovery
@@ -150,7 +153,8 @@ WH_DEDUPE_ID_FIELD=event_id
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
-WH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers backpressure)
+# Max NATS JetStream disk usage (triggers backpressure)
+WH_MQ_MAX_BYTES_GB=50
 
 # DLQ
 WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
@@ -169,8 +173,10 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
 
-```text
-WARN  data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.
+```text wrap=false
+WARN  data directory does not exist — starting with no prior state.
+      If this is a redeploy, your persistent volume is not actually
+      persisting; verify your mount.
 ```
 
 On a first-ever run this is expected. On every subsequent run it should be silent — so when this warning *does* fire after a redeploy, that's the most direct signal that the persistent volume isn't actually persisting.
@@ -197,8 +203,10 @@ volumes:
 
 Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
 
-```text
-ERROR  mq init failed  error="..."  path=/app/data/nats  hint="if running in a container with a host bind mount, the host directory must be owned by UID 65532..."
+```text wrap=false
+ERROR  mq init failed  error="..."  path=/app/data/nats
+       hint="if running in a container with a host bind mount, the host
+       directory must be owned by UID 65532..."
 ```
 
 The fix is one host-side command before first start:
@@ -306,7 +314,8 @@ K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside th
 ```yaml
 startupProbe:
   httpGet: { path: /livez, port: 8080 }
-  failureThreshold: 30    # allow up to 5 min for first schema discovery (30 × periodSeconds)
+  # allow up to 5 min for first schema discovery (30 × periodSeconds)
+  failureThreshold: 30
   periodSeconds: 10
 livenessProbe:
   httpGet: { path: /livez, port: 8080 }
@@ -373,7 +382,8 @@ The underlying Docker run scripts live in `scripts/otel/` and are invoked via Ma
 ```bash
 make obs-aspire   # Simplest, in-memory, no login
 make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
-make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
+# Simple OTeL Frontend like aspire, with more control over dashboards
+make obs-front
 ```
 
 All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the default environment variable `WH_OTEL_ADDR=127.0.0.1:4317` will route telemetry to these containers automatically.
@@ -412,7 +422,9 @@ docker compose -f deployments/compose/standalone.yaml up -d
 ### Option 3: Reset for Local Binary Development
 
 ```bash
-rm -rf data/         # Removes embedded NATS + Pebble data (run `make clean-all` to also drop docker volumes)
-make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
+rm -rf data/         # Removes embedded NATS + Pebble data
+                     # (run `make clean-all` to also drop docker volumes)
+make clean           # Removes build artifacts:
+                     # bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
 make build && ./bin/wavehouse
 ```

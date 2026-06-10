@@ -135,15 +135,15 @@ the moment the slot frees.
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Accumulating: add first row (arm timer)
-    Accumulating --> Accumulating: add (batch under maxBatch)
-    Accumulating --> Flushing: size hit or timer fires (start flush)
-    Flushing --> Flushing: add (accumulate a fresh batch)
-    Flushing --> FlushingQueued: size hit or timer fires (latch flushQueued)
+    Idle --> Accumulating: first row (arm timer)
+    Accumulating --> Accumulating: add (under maxBatch)
+    Accumulating --> Flushing: size or timer — flush
+    Flushing --> Flushing: add (fresh batch)
+    Flushing --> FlushingQueued: size or timer — latch
     FlushingQueued --> FlushingQueued: add
-    Flushing --> Accumulating: flush done, rows remain (wait for own trigger)
-    Flushing --> Idle: flush done, batch empty
-    FlushingQueued --> Flushing: flush done, start the deferred flush
+    Flushing --> Accumulating: done — rows remain
+    Flushing --> Idle: done — empty
+    FlushingQueued --> Flushing: done — deferred flush
 ```
 
 Two consequences worth internalizing:
