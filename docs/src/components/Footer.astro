@@ -8,6 +8,7 @@ import LastUpdated from "virtual:starlight/components/LastUpdated";
 import Pagination from "virtual:starlight/components/Pagination";
 import MermaidZoom from "./MermaidZoom.astro";
 import ReadingProgress from "./ReadingProgress.astro";
+import ScrollHints from "./ScrollHints.astro";
 import WaveMark from "./WaveMark.astro";
 
 const year = new Date().getFullYear();
@@ -126,9 +127,11 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
   )
 }
 
-{/* Click-to-zoom for Mermaid diagrams — rendered once per page from here
-    (Footer is on every page); self-contained script + styles, no markup. */}
+{/* Click-to-zoom for Mermaid diagrams + horizontal-scroll affordances —
+    rendered once per page from here (Footer is on every page);
+    self-contained scripts + styles, no markup. */}
 <MermaidZoom />
+<ScrollHints />
 
 <script is:inline>
   function setupFooterLinkTracking() {
@@ -344,7 +347,9 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     border-top: 1px solid var(--wh-border);
   }
 
-  @media (max-width: 50rem) {
+  /* 40rem (not 50): at tablet widths three narrow columns fit comfortably —
+     the 2-col fallback stranded PROJECT alone on a second row at 768px. */
+  @media (max-width: 40rem) {
     .wh-footer__cols {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }

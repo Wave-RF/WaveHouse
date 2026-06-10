@@ -1,0 +1,147 @@
+---
+// Horizontal-scroll affordances for code blocks, tables, and Mermaid
+// diagrams. Two jobs:
+//
+// 1. Wrap each bare Mermaid <svg> (rehype-mermaid emits them as direct
+//    children of .sl-markdown-content) in a .wh-scroll-x scroller, so on
+//    mobile the diagram keeps a readable size and pans instead of shrinking
+//    to a 3px-label thumbnail. No-JS keeps the old scale-to-fit CSS — the
+//    `> svg` carve-out in global.css stops matching once the svg is wrapped,
+//    which re-enables the readable min-width inside the scroller.
+//
+// 2. Stamp [data-wh-more] on any of these scrollers that has content hidden
+//    to the right; CSS fades the right edge so cut-off content reads as
+//    "scrollable", not "clipped". The attribute clears as you reach the end.
+//
+// Rendered once from Footer.astro (every page). Same is:inline + window-flag
+// convention as MermaidZoom for view-transition safety.
+---
+
+<script is:inline>
+  (() => {
+    const SCROLLERS =
+      ".expressive-code pre, .sl-markdown-content table, .wh-scroll-x";
+
+    function wrapScrollables() {
+      const bare = document.querySelectorAll(
+        ".sl-markdown-content > svg[aria-roledescription]",
+      );
+      for (const svg of bare) {
+        const div = document.createElement("div");
+        div.className = "wh-scroll-x";
+        svg.replaceWith(div);
+        div.append(svg);
+      }
+      // Paired diagrams already live in a <p>/<div> wrapper that global.css
+      // makes scrollable; give those the same class so they share the scrim
+      // and the touch zoom hint.
+      const wrapped = document.querySelectorAll(
+        ".sl-markdown-content :is(p, div) > svg[aria-roledescription]",
+      );
+      for (const svg of wrapped) {
+        const parent = svg.parentElement;
+        if (parent && !parent.classList.contains("wh-scroll-x")) {
+          parent.classList.add("wh-scroll-x");
+        }
+      }
+      // Tables: a scroll WRAPPER lets the table itself use true auto layout
+      // (prose wraps first; the wrapper scrolls only when unbreakable columns
+      // genuinely can't fit). Without JS, the table's own display:block
+      // fallback in global.css still scrolls — it just doesn't wrap prose.
+      const tables = document.querySelectorAll(".sl-markdown-content table");
+      for (const t of tables) {
+        if (t.parentElement && t.parentElement.classList.contains("wh-table-wrap")) continue;
+        const div = document.createElement("div");
+        div.className = "wh-scroll-x wh-table-wrap";
+        t.replaceWith(div);
+        div.append(t);
+      }
+    }
+
+    function updateOne(el) {
+      const more = el.scrollWidth - el.clientWidth - el.scrollLeft > 3;
+      el.toggleAttribute("data-wh-more", more);
+    }
+    function updateAll() {
+      document.querySelectorAll(SCROLLERS).forEach(updateOne);
+    }
+    function init() {
+      wrapScrollables();
+      updateAll();
+    }
+
+    init();
+    if (window.__whScrollHintsBound) return;
+    window.__whScrollHintsBound = true;
+    document.addEventListener("astro:page-load", init);
+    window.addEventListener(
+      "resize",
+      () => requestAnimationFrame(updateAll),
+      { passive: true },
+    );
+    // Element scroll events don't bubble, but they do capture.
+    document.addEventListener(
+      "scroll",
+      (e) => {
+        const t = e.target;
+        if (t instanceof Element && t.matches && t.matches(SCROLLERS)) {
+          updateOne(t);
+        }
+      },
+      { capture: true, passive: true },
+    );
+  })();
+</script>
+
+<style is:global>
+  .wh-scroll-x {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: var(--wh-border-strong) transparent;
+    margin-block: 1rem;
+    position: relative;
+  }
+  /* The right-edge fade: content hidden past the edge reads as scrollable
+     instead of amputated. Cleared by the script at scroll end. */
+  [data-wh-more] {
+    mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  }
+  /* Wrapped tables: the wrapper carries the card frame so the border doesn't
+     scroll away with the content; the table inside reverts to true auto
+     layout at full wrapper width (overriding the no-JS block fallback). */
+  .wh-table-wrap {
+    border: 1px solid var(--wh-border);
+    border-radius: var(--radius-md);
+  }
+  .wh-table-wrap > table,
+  .sl-markdown-content .wh-table-wrap > table {
+    display: table;
+    width: 100%;
+    max-width: none;
+    overflow: visible;
+    border: 0;
+    margin: 0;
+  }
+  /* Touch screens get an explicit zoom affordance on diagrams — cursor:
+     zoom-in means nothing without a pointer. */
+  @media (pointer: coarse) {
+    .wh-scroll-x:not(.wh-table-wrap)::after {
+      content: "⤢";
+      position: absolute;
+      top: 0.4rem;
+      right: 0.4rem;
+      display: grid;
+      place-items: center;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: var(--radius-xs);
+      background: var(--wh-surface-overlay);
+      border: 1px solid var(--wh-border-strong);
+      color: var(--wh-ink-muted);
+      font-size: 0.95rem;
+      line-height: 1;
+      pointer-events: none;
+    }
+  }
+</style>

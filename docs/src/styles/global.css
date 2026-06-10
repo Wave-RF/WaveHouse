@@ -584,32 +584,46 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 /* ---------- Starlight tweaks ---------- */
 
 /* Generous heading spacing — keeps the deck-style rhythm from the
- * previous design but with crisper headings. */
-.sl-markdown-content :is(h2, h3, h4) {
+ * previous design but with crisper headings.
+ *
+ * Starlight wraps every content heading in .sl-heading-wrapper and renders
+ * the H tag itself display:INLINE (so the anchor link flows after the text).
+ * Inline boxes fragment per line: backgrounds/borders/padding repeat on each
+ * wrapped line (the mobile "strikethrough through wrapped headings" bug —
+ * which the old border-bottom had too), and block margins no-op entirely.
+ * So rhythm, padding, and the section rule live on the WRAPPER block; only
+ * type styles stay on the heading element. */
+.sl-markdown-content :is(h2, h3, h4),
+.sl-markdown-content .sl-heading-wrapper {
   scroll-margin-top: 5rem;
 }
 .sl-markdown-content h1 {
   font-weight: 700;
   letter-spacing: -0.03em;
 }
-.sl-markdown-content h2 {
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
   margin-top: 4rem; /* one clean section step (was 3.5rem off-scale) */
-  font-weight: 650;
-  letter-spacing: -0.025em;
   padding-bottom: 0.5rem;
-  /* Section rule, but fading out to the right — the old full-width
-     border-bottom slammed into the content edge and boxed every section;
-     the fade keeps the scannability without the grid-paper feel. */
-  border-bottom: 0;
+  /* Section rule, but fading out to the right — a full-width border-bottom
+     slammed into the content edge and boxed every section; the fade keeps
+     the scannability without the grid-paper feel. */
   background: linear-gradient(90deg, var(--wh-border-strong), transparent 82%)
     bottom left / 100% 1px no-repeat;
 }
-.sl-markdown-content h3 {
+.sl-markdown-content h2 {
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+.sl-markdown-content .sl-heading-wrapper.level-h3 {
   margin-top: 2.5rem;
+}
+.sl-markdown-content h3 {
   font-weight: 600;
 }
-.sl-markdown-content h4 {
+.sl-markdown-content .sl-heading-wrapper.level-h4 {
   margin-top: 2rem;
+}
+.sl-markdown-content h4 {
   font-weight: 600;
 }
 .sl-markdown-content p {
@@ -642,6 +656,16 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   padding: 0.1em 0.4em;
   font-size: 0.9em;
   color: var(--wh-ink);
+}
+
+/* No ligatures anywhere code is rendered: JetBrains Mono rewrites `!=` as ≠,
+   `>=` as ≥, `<=` as ≤ — in reference tables documenting the EXACT characters
+   an API accepts, that's misinformation. */
+code,
+kbd,
+samp,
+.expressive-code {
+  font-variant-ligatures: none;
 }
 
 /* macOS-style colored dots for terminal code blocks — kept from prior design */
@@ -702,12 +726,27 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 
 /* Top nav — translucent glass over content (only when scrolled past 0).
    Inherits the same opacity as --sl-color-bg-nav so the design-system token
-   stays the single source of truth (avoids the prior 72%/78% drift). */
+   stays the single source of truth (avoids the prior 72%/78% drift).
+   Standard property ONLY — a hand-written -webkit- twin makes LightningCSS
+   treat prefixing as author-managed and DROP the standard declaration from
+   the build (Firefox then loses the blur entirely). */
 header.header {
   backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
   background: var(--sl-color-bg-nav);
   border-bottom: 1px solid var(--wh-border);
+}
+/* Mobile: glass off. A translucent fixed bar over a small screen reads as a
+   double exposure while scrolling, and Starlight's sticky "On this page" bar
+   shares the translucent token with no blur at all — both go opaque. */
+@media (max-width: 50rem) {
+  header.header {
+    background: var(--wh-bg);
+    backdrop-filter: none;
+  }
+  mobile-starlight-toc nav {
+    background-color: var(--wh-bg);
+    border-bottom: 1px solid var(--wh-border);
+  }
 }
 
 /* Right-rail TOC — quieter and monospace-y */
@@ -872,29 +911,35 @@ a.sl-link-button.minimal:hover {
 }
 
 /* Tables — card container + branded header (was a bare HTML table: no
-   container, no header fill, hairline rows). */
+   container, no header fill, hairline rows).
+   Layout = GitHub's scroll-don't-crush pattern: the table sizes its columns
+   naturally (auto layout), caps at the content column, and becomes its own
+   horizontal scroller when the columns genuinely can't fit. The previous
+   fixed-layout + overflow-wrap:anywhere treatment kept tables inside the
+   column by SHREDDING content instead — at 390px a 4-column reference table
+   wrapped every identifier 4 characters at a time ("WH_P/ROME/THEU/S_PO/RT"),
+   and even at 1440px fixed equal columns split tokens mid-word. */
 .sl-markdown-content table {
-  display: table;
-  width: 100%;
-  /* Fixed layout + cell wrapping (below) guarantees the table fits its column
-     instead of growing to min-content and overflowing the page on dense
-     tables (e.g. configuration's 4-column env-var table). */
-  table-layout: fixed;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
   border: 1px solid var(--wh-border);
   border-radius: var(--radius-md);
   border-collapse: separate;
   border-spacing: 0;
-  overflow: hidden;
 }
 .sl-markdown-content :is(th, td) {
   border: 0;
   border-bottom: 1px solid var(--wh-border);
   padding: 0.55rem 0.85rem;
-  /* Let long unbreakable tokens (env-var names like WH_SERVER_CORS_ALLOWED_
-     ORIGINS, defaults) wrap so a dense table can't force itself wider than the
-     content column and overflow the page — width:100% + overflow:hidden alone
-     can't shrink non-wrapping cells. */
-  overflow-wrap: anywhere;
+  /* Prose wraps at spaces when the table is width-capped; unbreakable code
+     tokens set the column's min width and trigger the scroll instead of
+     splitting mid-token. */
+  overflow-wrap: normal;
 }
 .sl-markdown-content thead th {
   background: var(--wh-surface-elevated);
@@ -907,13 +952,6 @@ a.sl-link-button.minimal:hover {
 /* Don't uppercase case-sensitive literals in header cells (/livez, Content-Type). */
 .sl-markdown-content thead th code {
   text-transform: none;
-}
-/* Fixed layout distributes columns equally; give the last column (the prose
-   "description / meaning" in the docs' reference tables) extra room so the
-   content-heavy column isn't squeezed into a tall ribbon next to half-empty
-   key/default columns. */
-.sl-markdown-content table :is(th, td):last-child {
-  width: 42%;
 }
 .sl-markdown-content tbody tr:last-child :is(th, td) {
   border-bottom: 0;
@@ -977,10 +1015,10 @@ site-search .dialog-frame {
 }
 /* Bottom scrim on the scroller: rows used to hard-clip mid-glyph against the
    dialog's rounded bottom edge; the fade makes the cut read as intentional.
-   Bottom-only, so the pinned input at the top of the frame is unaffected. */
+   Bottom-only, so the pinned input at the top of the frame is unaffected.
+   (Standard property only — the build pipeline emits the -webkit- twin.) */
 site-search .dialog-frame {
-  mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
-  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent);
 }
 /* The input: code-surface + square radius to match the header trigger (the
    stock pill was the lone fully-round control on the site). Pagefind paints

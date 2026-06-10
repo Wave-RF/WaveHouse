@@ -168,7 +168,10 @@
     max-height: 90vh;
     overflow: auto;
     display: grid;
-    place-items: center;
+    /* `safe`: plain centering makes the overflow START side unreachable when
+       a natural-size diagram exceeds the stage (phones could never scroll to
+       the diagram's left/top edge); safe centering falls back to start. */
+    place-items: safe center;
     border-radius: var(--radius-md, 12px);
     /* The cloned SVG's themed fills use --wh-mermaid-* vars resolved on
        :root, so the diagram keeps its colors inside the overlay. A surface
