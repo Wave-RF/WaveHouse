@@ -334,7 +334,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. With `E2E_SHARDED=1` (what CI uses), `scripts/e2e-shards.sh` runs several orchestrators concurrently — each with its own ClickHouse + server — so the suite's wall-clock is the slowest shard instead of the file sum; the shard map (and why files can't parallelize within one server — shared global policy state, [#214](https://github.com/Wave-RF/WaveHouse/issues/214)) lives in that script.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
@@ -556,7 +556,7 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite, then runs `make cov` over the merged coverage fragments + threshold gates), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys.
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e E2E_SHARDED=1` — classifies the change set itself so it starts with no `needs`, builds its own SDK dist + cover binary on a warm cache, runs the suite as concurrent shards, then runs `make cov` over the merged coverage fragments + threshold gates), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact that `docs-preview` polls for), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled, treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys — and cross-checks the `changes` job's classification against `e2e`'s so classifier drift can't silently skip the suite.
 
 The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
 

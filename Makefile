@@ -537,8 +537,15 @@ check-docs: pnpm-install build-ts ## Type-check the docs (astro check — types 
 # (starlight-links-validator runs here too, but needs no browser). Depends on
 # check-docs so a type/content error fails fast before the (heavier) build,
 # and the two never race on .astro.
+#
+# DOCS_SKIP_CHECK=1 drops the check-docs prereq — for CI's docs-build job
+# ONLY, where the lint job runs `make verify` (which includes check-docs)
+# on the same tree in parallel, so the ~15s serial check here is pure
+# duplication. Don't use locally: a type/content error then surfaces as a
+# (murkier) astro build failure instead of the check's pointed one.
+DOCS_SKIP_CHECK ?=
 .PHONY: build-docs
-build-docs: check-docs install-playwright-docs ## Build docs site → docs/dist/
+build-docs: $(if $(DOCS_SKIP_CHECK),,check-docs) install-playwright-docs ## Build docs site → docs/dist/
 	@echo "$(CYAN)==> Building docs site...$(RESET)"
 	@$(PNPM) --filter $(DOCS_FILTER) run build
 
@@ -652,18 +659,32 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 # the SDK source → tmp/coverage/ts-e2e/) — same "always coverage" pattern
 # as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
 #
-# E2E_PREBUILT=1 (CI's e2e job): bin/wavehouse-cov and clients/ts/dist arrive
-# as artifacts from the build job, so skip rebuilding them — but keep
-# pnpm-install for the vitest harness. The orchestrator fails fast with a
-# clear message if the binary is missing.
+# E2E_PREBUILT=1: bin/wavehouse-cov and clients/ts/dist already exist (built
+# locally or restored), so skip rebuilding them — but keep pnpm-install for
+# the vitest harness. The orchestrator fails fast with a clear message if the
+# binary is missing.
+#
+# E2E_SHARDED=1 fans the suite out over concurrent orchestrators (own
+# ClickHouse + server each; the shard map and the why live in
+# scripts/e2e-shards.sh). Unset (default) runs the single orchestrator —
+# the local dev path. CI sets E2E_SHARDED=1, plus E2E_KEEP_CH=1 to skip
+# ClickHouse teardown there (the testcontainers reaper collects it).
 E2E_PREBUILT ?=
+E2E_SHARDED ?=
+# Read from env by the orchestrator (os.Getenv), so export it — a bare
+# `make test-e2e E2E_KEEP_CH=1` is a make var, not env, without this.
+E2E_KEEP_CH ?=
+export E2E_KEEP_CH
 .PHONY: test-e2e
 test-e2e: $(if $(E2E_PREBUILT),pnpm-install,build-ts build-cover) ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
-	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
+	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e tmp/coverage/ts-e2e-shard-*
 	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp
-	@TS_E2E_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-e2e" \
-		go run ./scripts/orchestrator
+	@if [ -n "$(E2E_SHARDED)" ]; then \
+		TS_E2E_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-e2e" scripts/e2e-shards.sh; \
+	else \
+		TS_E2E_COVERAGE_DIR="$(CURDIR)/tmp/coverage/ts-e2e" go run ./scripts/orchestrator; \
+	fi
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render e2e; fi
 
 # test-ts: vitest unit tests for the SDK, always with v8 coverage. Standalone

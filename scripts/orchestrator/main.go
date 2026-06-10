@@ -20,6 +20,24 @@
 // surfaced to stderr with a banner so a CI failure is debuggable
 // without grepping. Set V=1 to stream live for interactive debugging.
 //
+// Sharding (scripts/e2e-shards.sh): several orchestrators can run
+// concurrently, each with its own ClickHouse + WaveHouse — file-level
+// test parallelism lives HERE, across isolated stacks, because within
+// one server the suite must stay sequential (shared global policy
+// state, #214). Per-shard env:
+//
+//	E2E_SHARD        shard name — suffixes the scratch paths that would
+//	                 otherwise collide (tmp/data, tmp/wavehouse-cov.log)
+//	E2E_VITEST_FILES space-separated test-file args passed to vitest
+//	                 (empty = whole suite)
+//	E2E_KEEP_CH=1    skip ClickHouse termination on exit (CI: the
+//	                 testcontainers reaper + runner teardown collect it;
+//	                 saves a few seconds per run)
+//
+// GOCOVERDIR is shared across shards by design: covcounters files are
+// pid-stamped so concurrent cover binaries never collide, and covmeta
+// is content-identical for the same binary.
+//
 // Invoked by the Makefile's `test-e2e` recipe via:
 //
 //	go run ./scripts/orchestrator
@@ -38,12 +56,22 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+// Sanitizers for the shard-driver env vars (scripts/e2e-shards.sh): a
+// shard name is a short token, a vitest filter is a plain file name —
+// no path separators escaping tmp/, no leading dash becoming a flag.
+var (
+	shardNameRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+	vitestFileRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 )
 
 func main() {
@@ -70,18 +98,31 @@ func run() error {
 	if err := os.MkdirAll(coverDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir coverdir: %w", err)
 	}
-	dataDir := filepath.Join(repoRoot, "tmp", "data")
-	_ = os.RemoveAll(dataDir)
+	// Per-shard suffix so concurrent orchestrators don't share (or worse,
+	// RemoveAll) each other's scratch paths. Empty (the default, single
+	// orchestrator) keeps the historical paths. Validated to a short
+	// alphanumeric token so the env var (set only by our own shard driver)
+	// can't smuggle path separators into the scratch paths below.
+	shard := os.Getenv("E2E_SHARD")
+	if shard != "" && !shardNameRE.MatchString(shard) {
+		return fmt.Errorf("E2E_SHARD %q: must match %s", shard, shardNameRE)
+	}
+	suffix := ""
+	if shard != "" {
+		suffix = "-" + shard
+	}
+	dataDir := filepath.Join(repoRoot, "tmp", "data"+suffix)
+	_ = os.RemoveAll(dataDir) // #nosec G703 — suffix is regexp-validated above; the rest is constant.
 
 	// Capture WH output to a file rather than the orchestrator's console.
 	// V=1 reverts to streaming for interactive debugging.
 	verbose := os.Getenv("V") == "1"
-	whLogPath := filepath.Join(repoRoot, "tmp", "wavehouse-cov.log")
-	if err := os.MkdirAll(filepath.Dir(whLogPath), 0o750); err != nil {
+	whLogPath := filepath.Join(repoRoot, "tmp", "wavehouse-cov"+suffix+".log")
+	if err := os.MkdirAll(filepath.Dir(whLogPath), 0o750); err != nil { // #nosec G703 — suffix regexp-validated above.
 		return fmt.Errorf("mkdir tmp: %w", err)
 	}
-	// #nosec G304 — whLogPath is filepath.Join(repoRoot, "tmp",
-	// "wavehouse-cov.log") with constant components, not user input.
+	// #nosec G304 G703 — whLogPath is filepath.Join(repoRoot, "tmp", ...)
+	// with constant components plus the regexp-validated shard suffix.
 	whLog, err := os.Create(whLogPath)
 	if err != nil {
 		return fmt.Errorf("open wh log: %w", err)
@@ -105,6 +146,13 @@ func run() error {
 		return fmt.Errorf("clickhouse start: %w", err)
 	}
 	defer func() {
+		// E2E_KEEP_CH=1 (CI): leave the container to the testcontainers
+		// reaper / runner-VM teardown instead of waiting out a graceful
+		// ClickHouse stop nobody benefits from.
+		if os.Getenv("E2E_KEEP_CH") == "1" {
+			log.Println("→ leaving ClickHouse testcontainer to the reaper (E2E_KEEP_CH=1)")
+			return
+		}
 		log.Println("→ terminating ClickHouse testcontainer...")
 		if err := ch.Terminate(context.Background()); err != nil {
 			log.Printf("  clickhouse terminate: %v", err)
@@ -132,7 +180,7 @@ func run() error {
 		return fmt.Errorf("pick free port: %w", err)
 	}
 	whURL := fmt.Sprintf("http://127.0.0.1:%d", whPort)
-	log.Printf("→ starting wavehouse-cov on %s (logs: %s)", whURL, whLogPath)
+	log.Printf("→ starting wavehouse-cov on %s (logs: %s)", whURL, whLogPath) // #nosec G706 — whLogPath's only variable part is the regexp-validated shard suffix.
 
 	// #nosec G204 — binPath is filepath.Join(repoRoot, "bin", "wavehouse-cov"),
 	// not user-controlled. The test harness must launch the cover binary.
@@ -197,8 +245,23 @@ func run() error {
 	// straight to `pnpm exec vitest run --coverage` skips the script-arg
 	// forwarding layer entirely, matching how scripts/cov invokes `pnpm exec
 	// nyc`.
-	// #nosec G204 — args are a fixed string slice, not user input.
-	vitest := exec.CommandContext(ctx, "pnpm", "exec", "vitest", "run", "--coverage")
+	//
+	// E2E_VITEST_FILES (sharding): space-separated test-file names appended
+	// as vitest filter args, restricting this orchestrator's run to its
+	// shard. Empty = the whole suite. Each name is validated to a plain
+	// file name (no leading dash, no path separators) so the env var can't
+	// inject flags or paths into the vitest invocation.
+	vitestArgs := []string{"exec", "vitest", "run", "--coverage"}
+	for f := range strings.FieldsSeq(os.Getenv("E2E_VITEST_FILES")) {
+		if !vitestFileRE.MatchString(f) {
+			return fmt.Errorf("E2E_VITEST_FILES entry %q: must match %s", f, vitestFileRE)
+		}
+		vitestArgs = append(vitestArgs, f)
+	}
+	// #nosec G204 G702 — args are the fixed slice above plus the
+	// regexp-validated E2E_VITEST_FILES names, set only by our own
+	// Makefile/shard driver (test harness, not user input).
+	vitest := exec.CommandContext(ctx, "pnpm", vitestArgs...)
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")
 	vitest.Env = append(os.Environ(),
 		"WAVEHOUSE_URL="+whURL,
@@ -274,7 +337,7 @@ func pickFreePort(ctx context.Context) (int, error) {
 // failure is debuggable without re-running with V=1.
 func dumpLogHeadTail(path, banner string) {
 	const lines = 40
-	f, err := os.Open(path) // #nosec G304 — path is the orchestrator's own log file.
+	f, err := os.Open(path) // #nosec G304 G703 — path is the orchestrator's own log file (constant components + regexp-validated shard suffix).
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  (could not read %s: %v)\n", path, err)
 		return
