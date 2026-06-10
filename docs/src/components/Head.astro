@@ -1,7 +1,11 @@
 ---
 import Default from "@astrojs/starlight/components/Head.astro";
+import PageOffset from "astro-vtbot/components/PageOffset.astro";
 import VtbotStarlight from "astro-vtbot/components/starlight/Base.astro";
+import PageOrder from "astro-vtbot/components/starlight/PageOrder.astro";
+import { slide } from "astro:transitions";
 import PostHog from "./PostHog.astro";
+import ProgressBar from "./ProgressBar.astro";
 ---
 
 {/*
@@ -11,9 +15,29 @@ import PostHog from "./PostHog.astro";
   <ClientRouter/> detached them (showModal on a removed dialog). fallback="swap"
   = instant swap where the View Transition API is absent. See Starlight #2823;
   full rationale in CHANGELOG.
+
+  The transition:* directives don't act on this head component — vtbot's
+  StarlightConnector teleports them onto Starlight's <main>, the element its
+  <ReplacementSwap/> actually swaps (Markdown pages can't carry directives).
+  Around that one animated element:
+    - <PageOrder/> flips the slide direction by sidebar order, so "next page"
+      slides forward and "previous page" slides back, like paging a book.
+    - <PageOffset name="main"/> cancels the fake-scroll artifact when
+      navigating away from a scrolled-down page (the old content would
+      visibly scroll to align with the new page's scroll position).
+    - <ProgressBar/> (ours, not vtbot's — see the component) is a top
+      loading bar for slow fetches; a grace delay keeps fast cached
+      navigations from ever seeing it.
 */}
-<VtbotStarlight viewTransitionsFallback="swap">
+<VtbotStarlight
+  viewTransitionsFallback="swap"
+  transition:name="main"
+  transition:animate={slide({ duration: 150 })}
+>
   <Default><slot /></Default>
+  <PageOrder />
+  <PageOffset name="main" />
+  <ProgressBar />
   <PostHog />
   {/*
     Two media-scoped theme-color tags so the browser chrome (mobile address bar,

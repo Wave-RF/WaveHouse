@@ -28,7 +28,10 @@ const apiHost =
       api_host: apiHost,
       ui_host: 'https://us.posthog.com',
       defaults: '2026-01-30',
-      capture_pageview: 'history_change'
+      capture_pageview: 'history_change',
+      // Surface broken docs JS (LiveDemo SSE, copy buttons, theme scripts) in
+      // PostHog error tracking — volume on a docs site is negligible.
+      capture_exceptions: true
     })
   }
 </script>

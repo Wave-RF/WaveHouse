@@ -925,18 +925,216 @@ a.sl-link-button.minimal:hover {
 }
 
 /* Search trigger — brand the most-visible header control to match the nav. */
-site-search button {
+site-search > button {
   background: var(--wh-surface);
   border-color: var(--wh-border);
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-site-search button:hover {
+site-search > button:hover {
   border-color: var(--wh-accent);
   background: var(--wh-surface-elevated);
 }
-site-search button kbd {
+site-search > button kbd {
   background: var(--wh-surface-overlay);
   color: var(--wh-ink-muted);
+}
+
+/* ---------- Search dialog (Pagefind) ----------
+   The modal itself shipped stock: near-black frame, pill input, gray result
+   list — the one overlay every visitor opens, unbranded. Starlight renders
+   Pagefind's default UI inside <site-search><dialog>, so everything here
+   hangs off Pagefind's stable `pagefind-ui__*` hooks plus the dialog frame. */
+site-search dialog {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border-strong);
+  box-shadow: var(--wh-shadow-lg);
+}
+/* Starlight's dialog is an edge-to-edge sheet below `md` (50rem) — only round
+   the corners where it actually floats. */
+@media (min-width: 50rem) {
+  site-search dialog {
+    border-radius: var(--radius-lg);
+  }
+}
+site-search dialog::backdrop {
+  background: color-mix(in oklab, var(--wh-bg) 55%, transparent);
+  backdrop-filter: blur(8px) saturate(120%);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+}
+/* The input: code-surface + square radius to match the header trigger (the
+   stock pill was the lone fully-round control on the site). Pagefind paints
+   its own magnifier via a CSS mask on ::before. */
+site-search .pagefind-ui__search-input {
+  background: var(--wh-code-bg);
+  border: 1px solid var(--wh-border-strong);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  color: var(--wh-ink);
+}
+site-search .pagefind-ui__search-input:focus {
+  border-color: var(--wh-accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--wh-accent-glow);
+}
+site-search .pagefind-ui__search-input::placeholder {
+  color: var(--wh-ink-subtle);
+  opacity: 1;
+}
+site-search .pagefind-ui__message {
+  color: var(--wh-ink-subtle);
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+/* Result groups read as cards — same primitive as link cards everywhere else. */
+site-search .pagefind-ui__result {
+  background: var(--wh-surface-elevated);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-md);
+}
+site-search .pagefind-ui__result-link {
+  color: var(--wh-ink);
+}
+site-search .pagefind-ui__result-link:hover {
+  color: var(--wh-accent-text);
+}
+site-search .pagefind-ui__result-excerpt {
+  color: var(--wh-ink-muted);
+}
+/* Query highlight inside excerpts — accent wash instead of UA yellow. */
+site-search .pagefind-ui__result mark {
+  background: var(--wh-accent-glow-strong);
+  color: var(--wh-ink);
+  border-radius: 2px;
+  padding-inline: 1px;
+}
+
+/* ---------- Asides — brand the four variants ----------
+   Starlight's defaults run on its stock blue/purple/orange/red tokens, which
+   this design system never remapped — the first `:::note` written would land
+   in off-palette colors. Mirror the blockquote treatment (thin rail, faint
+   tint, rounded outer corners) on brand hues. The --wh-amber/emerald/rose
+   roles are already AA-adjusted per theme in the token blocks above. */
+.starlight-aside {
+  border-inline-start-width: 3px;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.starlight-aside--note {
+  --sl-color-asides-text-accent: var(--wh-accent-text);
+  --sl-color-asides-border: var(--wh-accent);
+  background-color: color-mix(in oklab, var(--wh-accent) 8%, transparent);
+}
+.starlight-aside--tip {
+  --sl-color-asides-text-accent: var(--wh-emerald);
+  --sl-color-asides-border: var(--wh-emerald);
+  background-color: color-mix(in oklab, var(--wh-emerald) 8%, transparent);
+}
+.starlight-aside--caution {
+  --sl-color-asides-text-accent: var(--wh-amber);
+  --sl-color-asides-border: var(--wh-amber);
+  background-color: color-mix(in oklab, var(--wh-amber) 8%, transparent);
+}
+.starlight-aside--danger {
+  --sl-color-asides-text-accent: var(--wh-rose);
+  --sl-color-asides-border: var(--wh-rose);
+  background-color: color-mix(in oklab, var(--wh-rose) 8%, transparent);
+}
+
+/* ---------- Small chrome the design system hadn't reached ---------- */
+
+/* Heading anchor links — quiet by default, accent on hover (stock gray). */
+.sl-anchor-link {
+  color: var(--wh-ink-subtle);
+  transition: color 0.12s ease;
+}
+.sl-heading-wrapper:hover .sl-anchor-link,
+.sl-anchor-link:hover {
+  color: var(--wh-accent-text);
+}
+
+/* <kbd> in prose — chip treatment matching the search trigger's shortcut. */
+.sl-markdown-content kbd {
+  font-family: var(--sl-font-mono);
+  font-size: 0.8em;
+  padding: 0.15em 0.45em;
+  background: var(--wh-surface-elevated);
+  border: 1px solid var(--wh-border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  color: var(--wh-ink);
+}
+
+/* Highlighted text in prose — same accent wash as search hits. */
+.sl-markdown-content mark {
+  background: var(--wh-accent-glow-strong);
+  color: var(--wh-ink);
+  border-radius: 2px;
+  padding-inline: 2px;
+}
+
+/* Inner scroll surfaces (sidebar, code frames, table/diagram wrappers) get a
+   thin brand-colored scrollbar instead of the chunky UA default on Windows/
+   Linux. Deliberately not on :root — a thin PAGE scrollbar is hostile. */
+.sidebar-pane,
+.right-sidebar,
+.expressive-code pre,
+.sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="flowchart"]),
+.sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
+}
+
+/* Mobile menu button — stock inverts to a white circle when open, the
+   harshest element on a dark screen. Keep it on the surface scale. */
+starlight-menu-button button[aria-expanded="true"] {
+  background-color: var(--wh-surface-overlay);
+  color: var(--wh-ink);
+  box-shadow: 0 0 0 1px var(--wh-border-strong);
+}
+
+/* ---------- View transitions (astro-vtbot SPA mode) ----------
+   The animated element is Starlight's <main> — Head.astro's directives are
+   teleported onto it (transition:name="main" + a 150ms slide, direction-aware
+   via <PageOrder/>). Everything here styles the supporting cast. */
+
+/* Navigation progress bar (src/components/ProgressBar.astro drives width/
+   opacity inline; everything visual lives here). Accent line over the glass
+   header; only slow loads ever see it. */
+#wh-progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 0;
+  opacity: 0;
+  z-index: 100; /* above header.header (the fixed glass nav) */
+  background: linear-gradient(90deg, var(--wh-accent), var(--wh-accent-hi));
+  box-shadow: 0 0 8px var(--wh-accent-glow-strong);
+  pointer-events: none;
+}
+
+/* Page-title morph: doc titles cross-fade/glide into each other instead of
+   sliding away with the content — the one element a reader visually tracks
+   between pages. The direct-child chain targets ONLY Starlight's title panel
+   (one per page); a markdown `# h1` or the 404's custom title must never
+   match, since a duplicated view-transition-name voids the whole transition.
+   The landing hero title deliberately stays inside the main slide.
+   width:fit-content keeps the morph snapshot hugging the text (vtbag's tip) —
+   a full-width snapshot stretches the short→long title morph. */
+.content-panel > .sl-container > h1 {
+  view-transition-name: page-title;
+  width: fit-content;
+}
+
+/* Belt-and-braces: no transition choreography for reduced-motion users, even
+   if a future router/browser change stops handling it upstream. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }
 
 /* ---------- Utility classes for landing page ---------- */
@@ -959,12 +1157,14 @@ site-search button kbd {
    Unlayered (Starlight's rule is in @layer starlight.reset, so this wins on
    origin regardless of specificity) and scoped to :has(.wh-hero) so only the
    landing is affected — doc-page bodies keep their opaque --wh-bg fill. */
-body:has(.wh-hero) {
+body:has(.wh-hero),
+body:has(.wh-404) {
   background: transparent;
 }
 
 /* Layer 1 — the signal-field grid: full-viewport, continuous, soft-cornered. */
-body:has(.wh-hero)::before {
+body:has(.wh-hero)::before,
+body:has(.wh-404)::before {
   content: "";
   position: fixed;
   inset: 0;
@@ -982,7 +1182,8 @@ body:has(.wh-hero)::before {
 }
 
 /* Layer 2 — the hero glow: soft teal energy anchored to the top, breathing. */
-body:has(.wh-hero)::after {
+body:has(.wh-hero)::after,
+body:has(.wh-404)::after {
   content: "";
   position: fixed;
   inset: 0;
@@ -998,7 +1199,137 @@ body:has(.wh-hero)::after {
   to   { opacity: 1.06; transform: translateY(-1.5%); }
 }
 @media (prefers-reduced-motion: reduce) {
-  body:has(.wh-hero)::after { animation: none; }
+  body:has(.wh-hero)::after,
+  body:has(.wh-404)::after { animation: none; }
+}
+
+/* ---------- 404 — "signal lost" ----------
+   The default 404 was a bare title + bullet list on a flat page: the one page
+   confused visitors land on carried the least design. This reuses the landing
+   atmosphere (grid + glow, the body:has additions above) under a mono 404,
+   a waveform that flatlines, and the card-primitive quick links. */
+
+/* Hide Starlight's title panel on this page only — the custom markup carries
+   the visible (and accessible) h1. display:none removes the stock h1 from the
+   a11y tree, so the page still has exactly one heading. */
+body:has(.wh-404) .content-panel:has(> .sl-container > h1) {
+  display: none;
+}
+
+.wh-404 {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 1rem;
+  max-width: 46rem;
+  margin: clamp(1.5rem, 7vh, 4.5rem) auto 2rem;
+}
+.wh-404__code {
+  margin: 0;
+  font-family: var(--sl-font-mono);
+  font-size: clamp(5rem, 3.5rem + 7vw, 8rem);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(
+    180deg,
+    var(--wh-ink) 0%,
+    color-mix(in oklab, var(--wh-ink) 45%, var(--wh-ink-muted)) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.wh-404__signal {
+  width: min(320px, 82%);
+  height: auto;
+  margin-block: 0.25rem;
+}
+.wh-404__signal-live { color: var(--wh-accent-hi); }
+.wh-404__signal-flat { color: var(--wh-border-strong); }
+.wh-404__signal-dot {
+  color: var(--wh-rose);
+  animation: wh-404-pulse 1.6s ease-in-out infinite;
+}
+@keyframes wh-404-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wh-404__signal-dot { animation: none; }
+}
+.wh-404__title {
+  margin: 0;
+  font-size: clamp(1.75rem, 1.4rem + 1.2vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+/* Center the accent underline the global `.content-panel > .sl-container
+   h1::after` rule paints — same specificity (0,2,2), later in the file wins. */
+.wh-404 h1.wh-404__title::after {
+  margin-inline: auto;
+}
+.wh-404__sub {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--wh-ink-muted);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+.wh-404__links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.875rem;
+  width: 100%;
+  margin-top: 1rem;
+}
+@media (max-width: 34rem) {
+  .wh-404__links { grid-template-columns: 1fr; }
+}
+.wh-404__links a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 1rem 1.15rem;
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  text-align: left;
+  transition: border-color 0.15s ease, transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.wh-404__links a:hover {
+  border-color: var(--wh-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--wh-shadow-glow);
+}
+.wh-404__links strong {
+  color: var(--wh-ink);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.wh-404__links span {
+  color: var(--wh-ink-muted);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+.wh-404__report {
+  margin: 0.75rem 0 0;
+  color: var(--wh-ink-subtle);
+  font-size: 0.875rem;
+}
+/* .not-content opts out of the markdown link styling — restate it here. */
+.wh-404__report a {
+  color: var(--wh-accent-text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--wh-accent-text) 35%, transparent);
+  text-underline-offset: 3px;
+}
+.wh-404__report a:hover {
+  text-decoration-color: var(--wh-accent-text);
 }
 
 .wh-pill {
