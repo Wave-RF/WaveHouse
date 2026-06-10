@@ -1,0 +1,90 @@
+---
+// Reading-progress bar for doc pages: a thin accent line pinned under the
+// header that fills as you scroll through the article — "how far through
+// this page am I", which the right-rail TOC answers on desktop but nothing
+// answers on mobile. Rendered from Footer.astro's sidebar branch, so it
+// exists exactly on doc pages (and is swapped out with the main frame on
+// splash-page navigations).
+//
+// Progress is scrolled-past fraction of the article body itself
+// (.sl-markdown-content), not the document — the footer and closing chrome
+// shouldn't count as unread content. 0 at the article top, 1 when its
+// bottom edge reaches the viewport bottom. Articles shorter than the
+// viewport never show a bar.
+---
+
+<div class="wh-read-progress" aria-hidden="true">
+  <div class="wh-read-progress__fill"></div>
+</div>
+
+<script>
+  let fill: HTMLElement | null;
+  let article: HTMLElement | null;
+  let raf = 0;
+
+  function measureTargets() {
+    fill = document.querySelector(".wh-read-progress__fill");
+    article = document.querySelector(".sl-markdown-content");
+    update();
+  }
+
+  function update() {
+    raf = 0;
+    if (!fill || !article) return;
+    const rect = article.getBoundingClientRect();
+    const total = rect.height - window.innerHeight;
+    if (total <= 0) {
+      fill.style.transform = "scaleX(0)";
+      return;
+    }
+    const p = Math.min(1, Math.max(0, -rect.top / total));
+    fill.style.transform = `scaleX(${p})`;
+  }
+
+  function schedule() {
+    if (!raf) raf = requestAnimationFrame(update);
+  }
+
+  measureTargets();
+  // This bundled module runs once per hard load and survives soft navs
+  // (ReplacementSwap keeps the JS context), so listeners go on the
+  // persistent window/document exactly once; only the element refs are
+  // re-resolved per page.
+  if (!(window as any).__whReadProgressBound) {
+    (window as any).__whReadProgressBound = true;
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule, { passive: true });
+    document.addEventListener("astro:page-load", measureTargets);
+  }
+</script>
+
+<style>
+  .wh-read-progress {
+    position: fixed;
+    top: var(--sl-nav-height);
+    left: 0;
+    right: 0;
+    height: 2.5px;
+    z-index: 9; /* under the header (--sl-z-index-navbar: 10), above content */
+    pointer-events: none;
+  }
+  .wh-read-progress__fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--wh-accent), var(--wh-accent-hi));
+    box-shadow: 0 0 6px var(--wh-accent-glow);
+    transform: scaleX(0);
+    transform-origin: left;
+    /* smooths the coarse scroll events of mobile momentum scrolling */
+    transition: transform 80ms linear;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wh-read-progress__fill {
+      transition: none;
+    }
+  }
+  /* The mobile menu drawer slides under the header — a progress line floating
+     over the menu reads as a glitch. */
+  :global(body[data-mobile-menu-expanded]) .wh-read-progress {
+    display: none;
+  }
+</style>

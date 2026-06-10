@@ -7,6 +7,7 @@ import EditLink from "virtual:starlight/components/EditLink";
 import LastUpdated from "virtual:starlight/components/LastUpdated";
 import Pagination from "virtual:starlight/components/Pagination";
 import MermaidZoom from "./MermaidZoom.astro";
+import ReadingProgress from "./ReadingProgress.astro";
 import WaveMark from "./WaveMark.astro";
 
 const year = new Date().getFullYear();
@@ -24,6 +25,7 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
 {
   hasSidebar ? (
     <footer class="wh-footer wh-footer--compact not-content">
+      <ReadingProgress />
       <div class="wh-footer__meta">
         <EditLink />
         <LastUpdated />

@@ -987,11 +987,34 @@ site-search .pagefind-ui__message {
   letter-spacing: 0.08em;
   font-weight: 600;
 }
-/* Result groups read as cards — same primitive as link cards everywhere else. */
+/* Result groups read as cards — same primitive as link cards everywhere
+   else. Starlight paints the group-title row and each nested row with
+   --sl-color-black (the page bg), which left the groups reading as stripes
+   on the card: instead, the title row gets a header band, nested rows sit on
+   the card surface, and the row hover trades Starlight's bare bright-accent
+   outline for a surface tint + quiet accent ring. --sl-search-corners keeps
+   Starlight's inner row rounding in sync with the card radius. */
+site-search {
+  --sl-search-corners: calc(var(--radius-md) - 1px);
+}
 site-search .pagefind-ui__result {
-  background: var(--wh-surface-elevated);
+  background: var(--wh-surface);
   border: 1px solid var(--wh-border);
   border-radius: var(--radius-md);
+  overflow: hidden;
+}
+site-search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)) {
+  background-color: var(--wh-surface-elevated);
+}
+site-search .pagefind-ui__result-nested {
+  background-color: transparent;
+}
+site-search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):hover,
+site-search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):focus-within,
+site-search .pagefind-ui__result-nested:hover,
+site-search .pagefind-ui__result-nested:focus-within {
+  outline: 1px solid var(--wh-accent);
+  background-color: var(--wh-surface-overlay);
 }
 site-search .pagefind-ui__result-link {
   color: var(--wh-ink);
@@ -1008,6 +1031,38 @@ site-search .pagefind-ui__result mark {
   color: var(--wh-ink);
   border-radius: 2px;
   padding-inline: 1px;
+}
+/* The × clear control inside the input (Starlight masks it to an icon). */
+site-search .pagefind-ui__search-clear {
+  color: var(--wh-ink-subtle);
+}
+site-search .pagefind-ui__search-clear:hover {
+  color: var(--wh-accent-text);
+}
+/* "Load more results" — the secondary-button language. */
+site-search .pagefind-ui__button {
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--wh-ink);
+  font-weight: 600;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+site-search .pagefind-ui__button:hover {
+  border-color: var(--wh-accent);
+  background: var(--wh-surface-elevated);
+}
+/* Gentle pop on open; skipped for reduced-motion users. */
+@media (prefers-reduced-motion: no-preference) {
+  site-search dialog[open] {
+    animation: wh-search-pop 0.18s cubic-bezier(0.21, 0.61, 0.35, 1);
+  }
+}
+@keyframes wh-search-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
 }
 
 /* ---------- Asides — brand the four variants ----------
@@ -1093,10 +1148,7 @@ starlight-menu-button button[aria-expanded="true"] {
   box-shadow: 0 0 0 1px var(--wh-border-strong);
 }
 
-/* ---------- View transitions (astro-vtbot SPA mode) ----------
-   The animated element is Starlight's <main> — Head.astro's directives are
-   teleported onto it (transition:name="main" + a 150ms slide, direction-aware
-   via <PageOrder/>). Everything here styles the supporting cast. */
+/* ---------- View transitions (astro-vtbot SPA mode) ---------- */
 
 /* Navigation progress bar (src/components/ProgressBar.astro drives width/
    opacity inline; everything visual lives here). Accent line over the glass
@@ -1112,19 +1164,6 @@ starlight-menu-button button[aria-expanded="true"] {
   background: linear-gradient(90deg, var(--wh-accent), var(--wh-accent-hi));
   box-shadow: 0 0 8px var(--wh-accent-glow-strong);
   pointer-events: none;
-}
-
-/* Page-title morph: doc titles cross-fade/glide into each other instead of
-   sliding away with the content — the one element a reader visually tracks
-   between pages. The direct-child chain targets ONLY Starlight's title panel
-   (one per page); a markdown `# h1` or the 404's custom title must never
-   match, since a duplicated view-transition-name voids the whole transition.
-   The landing hero title deliberately stays inside the main slide.
-   width:fit-content keeps the morph snapshot hugging the text (vtbag's tip) —
-   a full-width snapshot stretches the short→long title morph. */
-.content-panel > .sl-container > h1 {
-  view-transition-name: page-title;
-  width: fit-content;
 }
 
 /* Belt-and-braces: no transition choreography for reduced-motion users, even
@@ -1243,21 +1282,53 @@ body:has(.wh-404) .content-panel:has(> .sl-container > h1) {
   color: transparent;
 }
 .wh-404__signal {
-  width: min(320px, 82%);
+  width: min(380px, 86%);
   height: auto;
   margin-block: 0.25rem;
+  overflow: visible; /* the trace's glow shouldn't clip at the viewBox edge */
 }
-.wh-404__signal-live { color: var(--wh-accent-hi); }
-.wh-404__signal-flat { color: var(--wh-border-strong); }
-.wh-404__signal-dot {
-  color: var(--wh-rose);
-  animation: wh-404-pulse 1.6s ease-in-out infinite;
-}
-@keyframes wh-404-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.15; }
+/* The trace: one path, heartbeat → dying blips → flatline, colored by a
+   left-to-right gradient (live accent fading into dead border-gray). A dim
+   static ghost of the full trace sits underneath so the shape always reads;
+   the bright copy on top is redrawn like a monitor scan: pathLength="1"
+   normalizes the dash units, and sliding a full-length dash from +1 to -1
+   draws the line in from the left, then erases it behind itself — seamless
+   loop. The declared dashoffset: 0 is the no-animation state (full static
+   trace), which is exactly what reduced-motion users get when the animation
+   is removed (the redundant ghost is hidden there). */
+.wh-404__signal-ghost {
+  opacity: 0.22;
 }
 @media (prefers-reduced-motion: reduce) {
+  .wh-404__signal-ghost { display: none; }
+}
+.wh-404__signal-path {
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 0;
+  animation: wh-404-sweep 3.4s linear infinite;
+  filter: drop-shadow(0 0 6px var(--wh-accent-glow-strong));
+}
+@keyframes wh-404-sweep {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: -1; }
+}
+.wh-404__stop-live { stop-color: var(--wh-accent-hi); }
+.wh-404__stop-mid { stop-color: var(--wh-accent); }
+.wh-404__stop-dead { stop-color: var(--wh-border-strong); }
+/* The monitor's "current sample" dot at the end of the flatline, blinking
+   out of phase with the sweep so the page never looks fully still. */
+.wh-404__signal-dot {
+  color: var(--wh-rose);
+  animation: wh-404-pulse 1.7s ease-in-out infinite;
+  filter: drop-shadow(0 0 5px currentColor);
+}
+@keyframes wh-404-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.2; transform: scale(0.7); }
+}
+.wh-404__signal-dot { transform-origin: 306px 24px; }
+@media (prefers-reduced-motion: reduce) {
+  .wh-404__signal-path,
   .wh-404__signal-dot { animation: none; }
 }
 .wh-404__title {
