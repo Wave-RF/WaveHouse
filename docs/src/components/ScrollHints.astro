@@ -20,7 +20,7 @@
 <script is:inline>
   (() => {
     const SCROLLERS =
-      ".expressive-code pre, .sl-markdown-content table, .wh-scroll-x";
+      ".expressive-code pre, .sl-markdown-content table, .wh-scroll-x, .wh-zoom__stage";
 
     function wrapScrollables() {
       const bare = document.querySelectorAll(
@@ -31,6 +31,17 @@
         div.className = "wh-scroll-x";
         svg.replaceWith(div);
         div.append(svg);
+      }
+      // Inside a pan scroller a diagram should never render below its natural
+      // size — Mermaid stamps that as an inline max-width; mirroring it as the
+      // min-width pins the scale (a 540px CSS floor still let the widest
+      // diagrams shrink ~33%, leaving 5px labels).
+      for (const svg of document.querySelectorAll(
+        ".wh-scroll-x > svg[aria-roledescription], .sl-markdown-content :is(p, div) > svg[aria-roledescription]",
+      )) {
+        if (svg.style.maxWidth && !svg.style.minWidth) {
+          svg.style.minWidth = svg.style.maxWidth;
+        }
       }
       // Paired diagrams already live in a <p>/<div> wrapper that global.css
       // makes scrollable; give those the same class so they share the scrim
@@ -122,6 +133,22 @@
     overflow: visible;
     border: 0;
     margin: 0;
+  }
+  /* Horizontal room is free inside a scroller — never let a column crush.
+     Without floors, auto layout squeezed off-screen prose columns to ~100px,
+     whose 10-20 wrapped lines drove the row height and left near-blank
+     viewport-tall rows on phones. The last column (the docs' description
+     column by convention) gets a real reading measure. */
+  .wh-table-wrap :is(th, td) {
+    min-width: 6rem;
+  }
+  .wh-table-wrap :is(th, td):last-child {
+    min-width: min(26rem, 75vw);
+  }
+  /* Code chips in cells never break mid-token (`--url` was splitting at its
+     hyphens into what read as separate flags) — the scroller absorbs width. */
+  .wh-table-wrap code {
+    white-space: nowrap;
   }
   /* Touch screens get an explicit zoom affordance on diagrams — cursor:
      zoom-in means nothing without a pointer. */

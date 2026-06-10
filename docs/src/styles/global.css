@@ -1134,6 +1134,18 @@ site-search .pagefind-ui__button:hover {
   border-inline-start-width: 3px;
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
 }
+/* Starlight lays the title out as flex (icon · text), which turns an inline
+   code chip in the title into its own flex item — on narrow screens it
+   detached from the sentence and floated right across both wrapped lines.
+   Block flow with an inline icon wraps the title naturally. */
+.starlight-aside__title {
+  display: block;
+}
+.starlight-aside__title .starlight-aside__icon {
+  display: inline-block;
+  vertical-align: -0.18em;
+  margin-inline-end: 0.45rem;
+}
 .starlight-aside--note {
   --sl-color-asides-text-accent: var(--wh-accent-text);
   --sl-color-asides-border: var(--wh-accent);

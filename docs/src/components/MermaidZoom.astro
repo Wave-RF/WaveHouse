@@ -87,6 +87,14 @@
       stage.appendChild(clone);
 
       overlay.removeAttribute("hidden");
+      // Same right-edge fade contract as the inline scrollers (ScrollHints
+      // owns the [data-wh-more] CSS + the capture-phase scroll listener that
+      // clears/re-stamps it as the user pans) — without it the pannable stage
+      // hard-clipped nodes at its edge with no hint that it scrolls.
+      requestAnimationFrame(() => {
+        const more = stage.scrollWidth - stage.clientWidth - stage.scrollLeft > 3;
+        stage.toggleAttribute("data-wh-more", more);
+      });
       // Next frame so the un-hide paints before the open transition.
       requestAnimationFrame(() => overlay.classList.add("is-open"));
       document.documentElement.style.overflow = "hidden";
