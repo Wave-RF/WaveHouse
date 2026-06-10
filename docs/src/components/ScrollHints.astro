@@ -32,15 +32,17 @@
         svg.replaceWith(div);
         div.append(svg);
       }
-      // Inside a pan scroller a diagram should never render below its natural
-      // size — Mermaid stamps that as an inline max-width; mirroring it as the
-      // min-width pins the scale (a 540px CSS floor still let the widest
-      // diagrams shrink ~33%, leaving 5px labels).
+      // Surface each diagram's natural width (Mermaid stamps it as an inline
+      // max-width) as a custom property. global.css uses it as the min-width
+      // pin on phones only — pan at natural size beats 5px labels there —
+      // while desktop keeps scale-to-fit (an unconditional inline min-width
+      // here once forced wide diagrams into horizontal scrollers at every
+      // viewport).
       for (const svg of document.querySelectorAll(
         ".wh-scroll-x > svg[aria-roledescription], .sl-markdown-content :is(p, div) > svg[aria-roledescription]",
       )) {
-        if (svg.style.maxWidth && !svg.style.minWidth) {
-          svg.style.minWidth = svg.style.maxWidth;
+        if (svg.style.maxWidth) {
+          svg.style.setProperty("--wh-natural-w", svg.style.maxWidth);
         }
       }
       // Paired diagrams already live in a <p>/<div> wrapper that global.css
@@ -67,6 +69,52 @@
         t.replaceWith(div);
         div.append(t);
       }
+      tokenizeTableCode();
+    }
+
+    // Code in table cells must never split MID-token (`--url` reading as two
+    // flags) — but blanket nowrap also stopped multi-word code (JSON bodies,
+    // shell commands) from wrapping at its SPACES, which forced whole tables
+    // into scrollers. Split each plain-text code span into per-token nowrap
+    // <span>s: wrapping happens between tokens only. Tokens with interior
+    // slashes (paths, endpoints) additionally get a <wbr> after each slash —
+    // the conventional URL break points (a <wbr> copies as nothing, so
+    // clipboard text is unchanged). The data attribute flips the CSS from the
+    // no-JS nowrap fallback to normal wrapping, and keeps this idempotent
+    // across view-transition reruns.
+    function tokenizeTableCode() {
+      for (const code of document.querySelectorAll(".wh-table-wrap code")) {
+        if (code.dataset.whTok || code.children.length) continue;
+        code.dataset.whTok = "1";
+        const frag = document.createDocumentFragment();
+        for (const part of code.textContent.split(/(\s+)/)) {
+          if (!part) continue;
+          if (/^\s/.test(part)) {
+            frag.append(part);
+            continue;
+          }
+          // Slash-segments each get their OWN nowrap span with the <wbr>s
+          // between them in normal white-space — a <wbr> inside nowrap is
+          // suppressed, and a bare normal-flow token could still break at
+          // interior hyphens (the exact mid-token shred this prevents).
+          const bits = part.split(/(?<=\/)(?=.)/);
+          const host = document.createElement("span");
+          host.className = bits.length > 1 ? "wh-tok-path" : "wh-tok";
+          bits.forEach((b, i) => {
+            if (bits.length > 1) {
+              const seg = document.createElement("span");
+              seg.className = "wh-tok";
+              seg.textContent = b;
+              host.append(seg);
+            } else {
+              host.append(b);
+            }
+            if (i < bits.length - 1) host.append(document.createElement("wbr"));
+          });
+          frag.append(host);
+        }
+        code.replaceChildren(frag);
+      }
     }
 
     function updateOne(el) {
@@ -76,8 +124,22 @@
     function updateAll() {
       document.querySelectorAll(SCROLLERS).forEach(updateOne);
     }
+    // Tables get their per-column min-width floors ONLY once they genuinely
+    // overflow (data-wh-scrolls): floors stop auto layout crushing off-screen
+    // columns inside a scroller, but applied unconditionally they FORCED
+    // tables that would fit by wrapping into scrollers. Measure with floors
+    // off (remove all attrs first so a single reflow covers every table),
+    // then stamp the ones that still can't fit.
+    function classifyTables() {
+      const wraps = document.querySelectorAll(".wh-table-wrap");
+      wraps.forEach((el) => el.removeAttribute("data-wh-scrolls"));
+      wraps.forEach((el) => {
+        if (el.scrollWidth - el.clientWidth > 1) el.setAttribute("data-wh-scrolls", "");
+      });
+    }
     function init() {
       wrapScrollables();
+      classifyTables();
       updateAll();
     }
 
@@ -87,7 +149,11 @@
     document.addEventListener("astro:page-load", init);
     window.addEventListener(
       "resize",
-      () => requestAnimationFrame(updateAll),
+      () =>
+        requestAnimationFrame(() => {
+          classifyTables();
+          updateAll();
+        }),
       { passive: true },
     );
     // Element scroll events don't bubble, but they do capture.
@@ -138,17 +204,32 @@
      Without floors, auto layout squeezed off-screen prose columns to ~100px,
      whose 10-20 wrapped lines drove the row height and left near-blank
      viewport-tall rows on phones. The last column (the docs' description
-     column by convention) gets a real reading measure. */
-  .wh-table-wrap :is(th, td) {
+     column by convention) gets a real reading measure. Scoped to tables the
+     script has measured as genuinely overflowing — on fitting tables the
+     floors themselves would create the scroll. */
+  .wh-table-wrap[data-wh-scrolls] :is(th, td) {
     min-width: 6rem;
   }
-  .wh-table-wrap :is(th, td):last-child {
+  .wh-table-wrap[data-wh-scrolls] :is(th, td):last-child {
     min-width: min(26rem, 75vw);
   }
   /* Code chips in cells never break mid-token (`--url` was splitting at its
-     hyphens into what read as separate flags) — the scroller absorbs width. */
+     hyphens into what read as separate flags). The nowrap here is the no-JS
+     fallback (the scroller absorbs the width); once the script tokenizes a
+     span ([data-wh-tok]) wrapping happens BETWEEN tokens — at spaces, and
+     after slashes in paths — while each token stays atomic in its own
+     nowrap span. */
   .wh-table-wrap code {
     white-space: nowrap;
+  }
+  .wh-table-wrap code[data-wh-tok] {
+    white-space: normal;
+  }
+  .wh-table-wrap .wh-tok {
+    white-space: nowrap;
+  }
+  .wh-table-wrap .wh-tok-path {
+    white-space: normal;
   }
   /* Touch screens get an explicit zoom affordance on diagrams — cursor:
      zoom-in means nothing without a pointer. */

@@ -249,14 +249,14 @@
   --sl-text-h4: 1.125rem;
   --sl-text-h5: 1rem;
 
-  --sl-sidebar-width: 18.5rem;
-  /* Mobile/tablet default — fits a 768px iPad without clipping (the old 50rem
-     slightly overflowed there). Widened to 58rem only at the `lg` breakpoint
-     below, where the 3-column layout has room: code/tables/wide Mermaid then
-     use the space on large monitors while prose line length stays held by the
-     .sl-markdown-content text-block cap. The shell is also capped + centered
-     on ultrawide via .main-frame so content+TOC don't strand dead space. */
-  --sl-content-width: 45rem;
+  /* Layout geometry stays at Starlight's stock values (18.75rem sidebar,
+     ONE 45rem content width at every breakpoint). A previous pass widened
+     the content track in steps (50rem @72rem, 58rem @100rem) and sub-capped
+     prose at 46rem — which left text, tables, and code all ending at
+     different right edges and shifted the column at each breakpoint. One
+     width keeps every block aligned and preserves the TOC's designed share
+     of the leftover space. Wide tables/diagrams scroll or scale inside
+     their own wrappers. */
   --sl-nav-height: 4rem;
 
   --sl-shadow-sm: var(--wh-shadow-sm);
@@ -274,24 +274,6 @@
   --sl-color-gray-7: var(--wh-surface-elevated);
 }
 
-/* Content track widens in two steps so it never starves the right-rail TOC
-   (content does NOT shrink below --sl-content-width in this layout, so an
-   over-wide track squeezes the TOC into ellipsis). 50rem through the laptop
-   range is exactly the pre-sweep width — no TOC regression there. The full
-   58rem engages only ≥100rem, the same breakpoint where .main-frame caps +
-   centers the shell: at ≥1600px there's unambiguous room for sidebar + 58rem
-   content + a comfortable TOC, and the two changes reinforce each other. */
-@media (min-width: 72rem) {
-  :root {
-    --sl-content-width: 50rem;
-  }
-}
-@media (min-width: 100rem) {
-  :root {
-    --sl-content-width: 58rem;
-  }
-}
-
 /* ---------- Mermaid diagram polish ----------
    These rules live at the document level (not in each SVG's inline
    <style>) because SVG-internal CSS rules don't reach the HTML content
@@ -303,12 +285,15 @@
    anything else. */
 
 /* Size handling for mermaid diagrams:
-   - Desktop: let each diagram render at its NATURAL viewBox size so
-     small diagrams (e.g. query path with 3 nodes) don't get blown up
-     and wide diagrams (e.g. DIY vs WaveHouse comparison) get full
-     reach. No min-width here.
-   - Mobile (viewport <= 768px): force min-width so labels stay
-     readable, and the parent wrapper allows horizontal scroll.
+   - Desktop: scale-to-fit. Mermaid stamps `width="100%"` + an inline
+     natural max-width on every SVG, so diagrams fill the column up to
+     their natural size and SCALE DOWN when wider — never a horizontal
+     scrollbar in the doc flow. Click-to-zoom (MermaidZoom) is the
+     full-detail path for dense diagrams.
+   - Phones (<= 768px): scale-to-fit of a 2000px-wide diagram means 3px
+     labels, so diagrams pin to natural width (--wh-natural-w, stamped
+     from Mermaid's max-width by ScrollHints) and PAN inside their
+     scroller instead. 540px is the no-JS fallback floor.
    Margin-inline: auto centers the SVG horizontally on the page. */
 svg[aria-roledescription^="flowchart"],
 svg[aria-roledescription^="sequence"],
@@ -323,7 +308,7 @@ svg[aria-roledescription^="state"] {
   svg[aria-roledescription^="sequence"],
   svg[aria-roledescription^="class"],
   svg[aria-roledescription^="state"] {
-    min-width: 540px;
+    min-width: var(--wh-natural-w, 540px);
   }
   .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="flowchart"]),
   .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]) {
@@ -629,12 +614,6 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 .sl-markdown-content p {
   line-height: 1.7;
 }
-/* Hold prose line length to a comfortable ~70–75ch even as the content track
-   widened to 58rem — text blocks cap, while code/tables/diagrams/headings
-   keep the full width so they breathe on large monitors. */
-.sl-markdown-content :is(p, li, blockquote) {
-  max-width: 46rem;
-}
 
 /* Starlight sets overflow-wrap: ANYWHERE on list items (so long URLs never
    overflow) — which also shreds short code chips mid-token at phone widths
@@ -890,19 +869,14 @@ a.sl-link-button.minimal:hover {
    Starlight (token colors only, no treatment) and dragged the whole site back
    to "default docs theme" next to the polished landing. */
 
-/* Cap + center the doc shell on ultrawide. The sidebar glues to viewport-left
-   while content+TOC center in the leftover, so ≥1680px stranded ~590px of dead
-   space on the right (audit). Scoped to ≥100rem: `.main-frame` is a flex child
-   of `.page`, and `margin-inline:auto` on a flex item makes it size to
-   max-content (breaking the responsive shrink below the cap) — so only apply
-   it where the cap is actually doing something. The fixed glass header stays
-   full-bleed by design. */
-@media (min-width: 100rem) {
-  .main-frame {
-    max-width: 100rem;
-    margin-inline: auto;
-  }
-}
+/* No ultrawide frame cap: an earlier ≥100rem `max-width + margin-inline:auto`
+   on .main-frame looked right at first glance but broke two ways — auto
+   margins on a flex item size it to fit-content (the content column measured
+   544px instead of 720px at 1680px), and the LEFT sidebar is position:fixed,
+   so it stayed glued to the viewport edge while the frame centered, opening a
+   gap between sidebar and content. Stock Starlight geometry (sidebar left,
+   content centered between sidebar and TOC by the leftover-split formula) is
+   the consistent behavior at every width. */
 
 /* Prev/next pagination — mirror the link-card treatment (was a flat bordered
    box with an 8px radius and a border-only hover). */
@@ -944,11 +918,18 @@ a.sl-link-button.minimal:hover {
 .sl-markdown-content :is(th, td) {
   border: 0;
   border-bottom: 1px solid var(--wh-border);
-  padding: 0.55rem 0.85rem;
+  padding: 0.6rem 0.9rem;
   /* Prose wraps at spaces when the table is width-capped; unbreakable code
      tokens set the column's min width and trigger the scroll instead of
      splitting mid-token. */
   overflow-wrap: normal;
+}
+.sl-markdown-content td {
+  /* Reference-table measure: 14px body in cells (the 1rem prose size made
+     dense tables read as walls), with the line-height pulled in to match. */
+  font-size: 0.875rem;
+  line-height: 1.55;
+  vertical-align: top;
 }
 .sl-markdown-content thead th {
   background: var(--wh-surface-elevated);
@@ -965,8 +946,13 @@ a.sl-link-button.minimal:hover {
 .sl-markdown-content tbody tr:last-child :is(th, td) {
   border-bottom: 0;
 }
+/* Zebra stripes carry the eye across wide rows (hover-only highlighting
+   helped pointers, not reading); hover stays, a step stronger. */
+.sl-markdown-content tbody tr:nth-child(even) :is(th, td) {
+  background: color-mix(in oklab, var(--wh-surface-elevated) 45%, transparent);
+}
 .sl-markdown-content tbody tr:hover :is(th, td) {
-  background: color-mix(in oklab, var(--wh-surface-elevated) 60%, transparent);
+  background: color-mix(in oklab, var(--wh-surface-elevated) 80%, transparent);
 }
 
 /* Blockquotes — accent rail + faint tint (was a near-invisible gray rule). */
@@ -1158,21 +1144,25 @@ site-search .pagefind-ui__button:hover {
 .starlight-aside--note {
   --sl-color-asides-text-accent: var(--wh-accent-text);
   --sl-color-asides-border: var(--wh-accent);
+
   background-color: color-mix(in oklab, var(--wh-accent) 8%, transparent);
 }
 .starlight-aside--tip {
   --sl-color-asides-text-accent: var(--wh-emerald);
   --sl-color-asides-border: var(--wh-emerald);
+
   background-color: color-mix(in oklab, var(--wh-emerald) 8%, transparent);
 }
 .starlight-aside--caution {
   --sl-color-asides-text-accent: var(--wh-amber);
   --sl-color-asides-border: var(--wh-amber);
+
   background-color: color-mix(in oklab, var(--wh-amber) 8%, transparent);
 }
 .starlight-aside--danger {
   --sl-color-asides-text-accent: var(--wh-rose);
   --sl-color-asides-border: var(--wh-rose);
+
   background-color: color-mix(in oklab, var(--wh-rose) 8%, transparent);
 }
 
@@ -1448,7 +1438,7 @@ body:has(.wh-404) .content-panel:has(> .sl-container > h1) {
 .wh-404__signal-dot {
   color: var(--wh-rose);
   animation: wh-404-pulse 1.7s ease-in-out infinite;
-  filter: drop-shadow(0 0 5px currentColor);
+  filter: drop-shadow(0 0 5px currentcolor);
 }
 @keyframes wh-404-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }

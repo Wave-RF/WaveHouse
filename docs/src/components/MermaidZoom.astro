@@ -76,12 +76,25 @@
       const vb = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
       const natW = vb.length === 4 && vb[2] ? vb[2] : svg.getBoundingClientRect().width;
       const natH = vb.length === 4 && vb[3] ? vb[3] : svg.getBoundingClientRect().height;
-      const fit = Math.min((window.innerWidth * 0.94) / natW, (window.innerHeight * 0.9) / natH);
+      // Fit inside the stage's CONTENT box: its max-width/height (94vw/90vh)
+      // include its own padding, so sizing against the raw viewport fractions
+      // overshot by the padding and the "fully zoomed" state always showed
+      // both scrollbars. Read the padding from computed style (clamp()
+      // resolves without layout) rather than duplicating the CSS values here.
+      const cs = getComputedStyle(stage);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const fit = Math.min(
+        (window.innerWidth * 0.94 - padX) / natW,
+        (window.innerHeight * 0.9 - padY) / natH,
+      );
       // Enlarge diagrams smaller than the viewport (cap 2.5×); show larger
-      // ones at natural size and let the stage scroll for pan.
+      // ones at natural size and let the stage scroll for pan. Floor the
+      // pixel sizes so fractional rounding can't tip a perfect fit into a
+      // 1px overflow (which renders as phantom scrollbars).
       const scale = fit > 1 ? Math.min(fit, 2.5) : 1;
-      clone.style.width = natW * scale + "px";
-      clone.style.height = natH * scale + "px";
+      clone.style.width = Math.floor(natW * scale) + "px";
+      clone.style.height = Math.floor(natH * scale) + "px";
       clone.style.maxWidth = "none";
       clone.style.minWidth = "0";
       stage.appendChild(clone);

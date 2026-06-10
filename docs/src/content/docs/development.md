@@ -285,18 +285,33 @@ All tests run with Go's **race detector** (`-race`) enabled by default. WaveHous
 ### Quick Reference
 
 ```bash
-make test                              # Unit tests (compact output) — alias for `test-unit`
-V=1 make test                          # Unit tests (verbose output)
-make test ARGS="-run TestValidate"     # Run specific test(s)
-V=1 make test ARGS="-run TestValidate" # Specific test, verbose
-make test-integration                  # Go integration tests (requires Docker)
-V=1 make test-integration              # Integration tests, verbose
-make test-ts                           # SDK vitest unit tests + coverage + gate against suites.ts-unit
-                                       # (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
-make test-e2e                          # E2E SDK suite against bin/wavehouse-cov
-make test-all                          # All four suites sequentially + merged coverage
-make ci                                # Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts, then test-integration + test-e2e + cov
-make cov                               # Merge available covdata + gate against total threshold
+# Prefix any test target with V=1 for verbose output, e.g. `V=1 make test`
+
+# Unit tests (compact output) — alias for `test-unit`
+make test
+
+# Run specific test(s)
+make test ARGS="-run TestValidate"
+
+# Go integration tests (requires Docker)
+make test-integration
+
+# SDK vitest unit tests + coverage + gate against suites.ts-unit
+# (`make cov` auto-merges ts-unit + ts-e2e — no separate command)
+make test-ts
+
+# E2E SDK suite against bin/wavehouse-cov
+make test-e2e
+
+# All four suites sequentially + merged coverage
+make test-all
+
+# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts,
+# then test-integration + test-e2e + cov
+make ci
+
+# Merge available covdata + gate against total threshold
+make cov
 ```
 
 Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total.
