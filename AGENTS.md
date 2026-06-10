@@ -200,7 +200,7 @@ Every review comment gets a substantive reply and is addressed — fixed, or tra
 | -------- | ----------- | ---------------------- | ------------ |
 | CodeRabbit | Marketplace App at repo level. Auto-reviews on open + push; re-trigger by commenting `@coderabbitai review` | Yes, on push | Inline findings post as review threads — `required_review_thread_resolution: true` blocks merge until each is resolved. Its own check is advisory |
 | Copilot | GitHub-native, requires a reviewer with Copilot Pro | Yes if enabled | No (advisory) |
-| Human admins | Review requested from a non-author admin by `housekeeping.yml` on PR open / ready-for-review (not on every push). Selection picks the other admin if the author is one, otherwise round-robins. The composite also sets `assignees`. | Not on synchronize. Manual re-request via the GitHub UI's "Re-request review" if `dismiss_stale_reviews_on_push` clears the request. | Yes — the `main branch protection` ruleset's `required_reviewers` rule requires an approval from the `@Wave-RF/wavehouse-admins` team before merge. Dependabot PRs need the same admin approval (no auto-merge). |
+| Human admins | The `required_reviewers` ruleset rule requests the `@Wave-RF/wavehouse-admins` team on every PR; the team's **code-review assignment** (configured on the team) auto-assigns + load-balances a specific member. No workflow involved. | GitHub re-requests per its own rules; `dismiss_stale_reviews_on_push` clears approvals on new commits. | Yes — the `required_reviewers` rule requires an approval from the `@Wave-RF/wavehouse-admins` team before merge. Dependabot PRs need the same admin approval (no auto-merge). |
 
 ## Branch Maintenance
 
@@ -234,7 +234,7 @@ Agents must create PRs with `gh pr create --draft`. Only humans transition draft
 
 ### Human reviewer assignment is humans-only
 
-Adding/removing human reviewers (`gh pr edit --add-reviewer <login>`, `gh pr edit --add-assignee <login>`, or `POST /repos/.../pulls/<N>/requested_reviewers`) is blocked for agents. The `housekeeping.yml` workflow auto-assigns the non-author admin on PR open / ready-for-review; humans handle anything else.
+Adding/removing human reviewers (`gh pr edit --add-reviewer <login>`, `gh pr edit --add-assignee <login>`, or `POST /repos/.../pulls/<N>/requested_reviewers`) is blocked for agents. Reviewer assignment is handled natively by GitHub — the `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team and the team's code-review assignment picks the member; humans handle anything else.
 
 ### Bot reviewer re-triggers go through PR comments
 
@@ -431,7 +431,7 @@ docs/                   → Project documentation
 ## Governance Files
 
 - **No `CODEOWNERS`**: admin approval is enforced natively by the `main branch protection` ruleset's `required_reviewers` rule — an approval from the `@Wave-RF/wavehouse-admins` team — rather than a CODEOWNERS file or a custom status-check workflow.
-  - `housekeeping.yml` — requests review from a non-author admin on PR open / ready-for-review via the `assign-and-request-review` composite (so the right admin is notified; the ruleset rule above is what actually gates merge). Task Board placement is handled by native Projects v2 workflows configured in the project UI.
+  - Reviewer *assignment* is native too: the `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team and the team's code-review assignment auto-assigns + load-balances the member (no workflow). `housekeeping.yml` now only applies path-labels + validates the PR title. Task Board placement is handled by native Projects v2 workflows configured in the project UI.
 - **`CLAUDE.md`**: a thin pointer file to AGENTS.md. Keep the pointer short; never duplicate content.
 - **`CONTRIBUTING.md`**: the Conventional Commits type list must stay in sync with the regex in `scripts/lint-pr-title.sh` (the single source of truth used by both the local gate and the required `PR housekeeping` check). The title linter validates squash-merge commit messages.
 - **`SUPPORT.md`** (alpha-stage public triage policy): the externally-promised cadence is **best-effort, 1–2 business days for an initial response** on bugs / features / usage questions; **security reports are prioritized** with the 48-hour acknowledge / 5-business-day initial-assessment targets in `SECURITY.md`. Usage questions ("how do I…") are routed to [GitHub Discussions → Q&A](https://github.com/Wave-RF/WaveHouse/discussions/categories/q-a) — do not file them as bug-report Issues; bug-reporters who use the wrong template get redirected. There is no Discord/Slack. Don't quietly let threads slip — if one sits longer than a week, that's a miss. **Out-of-scope items publicly stated in `SUPPORT.md` are only "Older releases" and "Non-ClickHouse backends"**. When tweaking the policy, update `SUPPORT.md` first and keep this paragraph in sync. The docs footer (`docs/src/components/Footer.astro`) and sidebar (`docs/src/config/sidebar.ts`) cross-link Discussions, `SUPPORT.md`, and `SECURITY.md` so they're one click from anywhere on `wavehouse.dev`; `README.md`, `CONTRIBUTING.md`, and both issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) also link out — change those together if the policy moves.
