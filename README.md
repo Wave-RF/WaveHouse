@@ -19,6 +19,9 @@
   <a href="https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml">
     <img src="https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
+  <a href="https://github.com/Wave-RF/WaveHouse/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Wave-RF/WaveHouse/badges/coverage-go.json" alt="Go Coverage">
+  </a>
   <a href="https://go.dev/">
     <img src="https://img.shields.io/github/go-mod/go-version/Wave-RF/WaveHouse" alt="Go Version">
   </a>

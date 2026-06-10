@@ -1,0 +1,13 @@
+# actionlint configuration.
+#
+# The `coverage` job in ci.yml declares the `code-quality: write` token scope
+# for GitHub Code Quality (the native PR coverage comment — #133). That scope
+# is in public preview (added by GitHub 2026-05) and isn't yet in actionlint's
+# built-in scope list, so actionlint v1.7.12 flags it as "unknown permission
+# scope". Suppress only that exact message — a genuine scope typo (e.g.
+# `contents` → `conten`) still produces a different message and fails. Drop
+# this once actionlint ships the scope.
+paths:
+  "**/*.yml":
+    ignore:
+      - 'unknown permission scope "code-quality"'
