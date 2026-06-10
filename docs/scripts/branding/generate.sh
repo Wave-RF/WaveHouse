@@ -11,6 +11,7 @@
 #   branding/favicon-{light,dark}.svg  static variants (Head.astro live swap)
 #   branding/favicon.ico            16/32/48 multi-resolution legacy fallback
 #   branding/apple-touch-icon.png   180x180 app-icon tile (iOS)
+#   branding/avatar.png             512x512 solid tile (GitHub org/team avatar, Slack, …)
 #   branding/og.png                 1200x630 social card
 #   branding/mark-light.svg         mark in the light-mode accent
 #   branding/mark-dark.svg          mark in the dark-mode accent
@@ -135,6 +136,15 @@ fi
 mark_with_color() { printf '%s' "$MARK_INNER" | sed "s|currentColor|$1|g"; }
 lockup_with_colors() { printf '%s' "$LOCKUP_INNER" | sed "s|currentColor|$1|g; s|__WM_FILL__|$2|g"; }
 
+# A solid square tile: a filled background with the mark placed on top via an
+# explicit transform — the shared composition behind both the apple-touch-icon
+# and the larger avatar.png. Vector source, so the caller rasterizes it to any
+# size and stays crisp. Args: <canvas-units> <bg> <fg> <mark-transform>.
+solid_tile_svg() {
+  printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s"><rect width="%s" height="%s" fill="%s"/><g transform="%s">%s</g></svg>' \
+    "$1" "$1" "$1" "$1" "$2" "$4" "$(mark_with_color "$3")"
+}
+
 printf '%s==> Generating brand kit from %s + %s%s\n' \
   "$CYAN" "${MARK_SRC#"$ROOT/"}" "${GLOBAL_CSS#"$ROOT/"}" "$RESET"
 
@@ -193,10 +203,21 @@ magick "$TMP/fav-16.png" "$TMP/fav-32.png" "$TMP/fav-48.png" "$OUT_KIT/favicon.i
 cp "$OUT_KIT/favicon.ico" "$OUT_ROOT/favicon.ico"
 
 # --- 5. apple-touch-icon.png (180x180 solid tile) -----------------------------
-cat > "$TMP/touch.svg" <<EOF
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect width="180" height="180" fill="$COLOR_TOUCH_BG"/><g transform="translate(28 28) scale(1.24)">$(mark_with_color "$COLOR_TOUCH_FG")</g></svg>
-EOF
+solid_tile_svg 180 "$COLOR_TOUCH_BG" "$COLOR_TOUCH_FG" "translate(28 28) scale(1.24)" > "$TMP/touch.svg"
 rsvg-convert -w 180 -h 180 "$TMP/touch.svg" -o "$OUT_KIT/apple-touch-icon.png"
+
+# --- 5b. avatar.png (512x512 solid tile) --------------------------------------
+# A larger sibling of the touch icon for places that crop a square/rounded
+# avatar and render it big: GitHub org/team avatars, Slack, social profiles.
+# apple-touch-icon is only 180px and looks soft when blown up to a team avatar;
+# this renders the same solid-bg + centered-mark composition at 512px (vector
+# source → crisp at any size). The mark's stroked content bbox is x 3..96 (the
+# leftmost round-capped wave's stroke reaches ~x3), y 11..89 — center (49.5,50).
+# scale 0.7416 maps it to ~69% of the canvas; tx=50-49.5*0.7416=13.29,
+# ty=50-50*0.7416=12.92 center it exactly, leaving even padding so the mark
+# clears GitHub's rounded-square crop. Same colors as the touch tile.
+solid_tile_svg 100 "$COLOR_TOUCH_BG" "$COLOR_TOUCH_FG" "translate(13.29 12.92) scale(0.7416)" > "$TMP/avatar.svg"
+rsvg-convert -w 512 -h 512 "$TMP/avatar.svg" -o "$OUT_KIT/avatar.png"
 
 # --- 6. og.png (1200x630 social card) -----------------------------------------
 # Fill the template's color placeholders from --brand-*, splice the lockup
@@ -226,7 +247,7 @@ render_text_png "$OUT_KIT/lockup-dark.svg"  "$OUT_KIT/lockup-dark.png"  1200 250
 printf '%s    colors%s light=%s dark=%s bg=%s ink=%s\n' \
   "$CYAN" "$RESET" "$COLOR_LIGHT" "$COLOR_DARK" "$OG_BG" "$OG_INK"
 for out in favicon.svg favicon-light.svg favicon-dark.svg favicon.ico \
-           apple-touch-icon.png og.png \
+           apple-touch-icon.png avatar.png og.png \
            mark-light.svg mark-dark.svg lockup-dark.svg lockup-light.svg \
            mark-light.png mark-dark.png lockup-light.png lockup-dark.png; do
   printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/branding/$out"
