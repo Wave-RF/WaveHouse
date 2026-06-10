@@ -254,7 +254,7 @@ API servers in standalone mode expose liveness and readiness endpoints under the
 
 Configure your load balancer or orchestrator to use these endpoints.
 
-**Exposure.** Probes share the API server's port (`:8080`) — kubelet probes the container internally, so there's no separate-port convention for them (metrics are the signal that optionally gets its own `prometheus.port`). If you forward `:8080` to the public internet the probe paths become reachable; they expose nothing sensitive (`/readyz`'s 503 surfaces a ClickHouse connection-error string at most), and restricting `/livez`/`/readyz`/`/healthz` to internal callers is a reverse-proxy/ingress concern rather than something WaveHouse enforces. The one health route meant to stay public is **`/v1/health`** — the SDK's content-free liveness ping — so don't filter that one out.
+**Exposure.** Probes share the API server's port (`:8080`) — kubelet probes the container internally, so there's no separate-port convention for them (metrics are the signal that optionally gets its own `prometheus.port`). If you forward `:8080` to the public internet the probe paths become reachable; they expose nothing sensitive (`/readyz`'s 503 surfaces a ClickHouse connection-error string at most), and restricting `/livez`/`/readyz`/`/healthz` to internal callers is a [reverse-proxy/ingress concern](/reverse-proxy#health-probes) rather than something WaveHouse enforces. The one health route meant to stay public is **`/v1/health`** — the SDK's content-free liveness ping — so don't filter that one out.
 
 ### Boot-time degraded mode
 
@@ -324,6 +324,10 @@ readinessProbe:
 ```
 
 Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readinessProbe` against the pod — so a slow or temporarily-unreachable ClickHouse can't restart-loop the pod via the liveness path. Size `failureThreshold` to your expected worst-case CH boot time; the default 30 × 10s = 5min is generous and works for compose-on-NAS-style deployments where CH and WaveHouse can race during a host reboot.
+
+## Behind a reverse proxy
+
+WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage certificates, or rate-limit — put a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) in front for any internet-facing deployment. A few behaviors only matter behind a proxy: TLS termination, the request-body size limits, Server-Sent Events buffering and idle timeouts (WaveHouse has no SSE heartbeat yet, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)), header/auth forwarding, and which health paths to expose. See **[Behind a reverse proxy](/reverse-proxy)** for the full guide and example nginx/Caddy/Cloudflare configs.
 
 ## ClickHouse Schema
 
