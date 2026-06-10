@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -261,6 +262,35 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
+// TestPipesHandler_Execute_RequestBodyCap pins the control-plane body cap on a
+// pipe's POST parameter body (#315). An oversized body returns 413 — the auth
+// gate (admin) and pipe lookup pass, so the cap is what fires. maxRequestBytes
+// is tiny so we don't allocate 1 MiB per run.
+func TestPipesHandler_Execute_RequestBodyCap(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name:       "by_page",
+			SQL:        "SELECT * FROM clicks WHERE page = {{page}}",
+			Parameters: []pipes.ParamDef{{Name: "page", Type: "string", Required: true}},
+		},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+	h.maxRequestBytes = 64
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", map[string]any{
+		"page": strings.Repeat("x", 200),
+	})
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	h.Execute(w, r)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized body must 413")
+	assert.Contains(t, w.Body.String(), "request body exceeded")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
@@ -276,6 +306,26 @@ func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+}
+
+// TestPipesHandler_Put_RequestBodyCap pins the control-plane body cap on the
+// admin pipe-definition decoder (#315). A valid-but-oversized definition
+// returns 413, not 400 "invalid json".
+func TestPipesHandler_Put_RequestBodyCap(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore()
+	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h.maxRequestBytes = 64
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPut, "/v1/pipes/big", "big", map[string]any{
+		"sql": "SELECT " + strings.Repeat("a", 200),
+	})
+	h.Put(w, r)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized body must 413")
+	assert.Contains(t, w.Body.String(), "request body exceeded")
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Put_Success(t *testing.T) {

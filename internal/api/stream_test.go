@@ -162,6 +162,9 @@ func TestSSE_AcceptsSafeTableName(t *testing.T) {
 	// 400-path application/json.
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/event-stream", w.Header().Get("Content-Type"))
+	// X-Accel-Buffering: no disables nginx-class proxy buffering so SSE events
+	// flush in real time (the client never sees it — nginx strips it).
+	assert.Equal(t, "no", w.Header().Get("X-Accel-Buffering"))
 }
 
 func TestExtractEventTimestamp(t *testing.T) {
