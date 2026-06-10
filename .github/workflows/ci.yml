@@ -1,20 +1,45 @@
 name: CI
 
+# Job DAG over the same Makefile targets `make ci` runs locally — local
+# `make ci` stays the dev mirror; CI just spreads the phases across free
+# 4-core public-repo runners instead of one process:
+#
+#   changes ─┬→ unit ────────────┐
+#            ├→ integration ─────┼→ coverage ──────────────┐
+#   build ───┴→ e2e ─────────────┘                         │
+#   changes + build ──→ docs-preview (same-repo PRs) ──────┼→ CI (aggregator)
+#   changes + lint + build + coverage ──→ docs-deploy (main)
+#   title (PRs) · lint ────────────────────────────────────┘
+#
+# The aggregator job is NAMED "CI" — it is the sole check the
+# `main branch protection` ruleset needs (skipped jobs pass, so
+# path-filtered/event-filtered jobs never orphan the required check, and
+# the ruleset never needs re-touching when jobs are added or renamed).
+#
+# Build artifacts (cover binary, SDK dist, docs dist, coverage fragments)
+# travel between jobs as workflow artifacts — free on public repos and
+# outside the org's private-repo storage pool. The warm Go build cache is
+# shared per-job via setup-env instead (go test recompiles per package, so
+# a prebuilt binary can't be handed to the test jobs).
+
 on:
   push:
     branches: [main]
   pull_request:
     # `ready_for_review` isn't in the default trigger set — without it,
-    # draft → ready transitions don't re-trigger CI.
+    # draft → ready transitions don't re-trigger CI. `edited` is left out
+    # deliberately: a title/description edit would cancel + restart a full
+    # in-flight run via the concurrency group. Title edits are instead
+    # nudged along by housekeeping.yml re-running the failed title job.
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   # Manual re-run escape hatch — `gh workflow run CI --ref <branch>`.
   workflow_dispatch:
 
+# Default-deny; each job below redeclares exactly what it needs. Only the
+# docs-preview job (sticky PR comment) holds a write scope.
 permissions:
-  contents: write
-  # The docs-deploy tail steps post a sticky preview-URL comment on PRs.
-  pull-requests: write
+  contents: read
 
 # PR pushes: cancel in-flight, only the latest commit matters. Main pushes:
 # queue serially so every commit gets its own run.
@@ -23,37 +48,138 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  ci:
-    # Single job: `make ci` runs every gate in one process so caches and
-    # build artifacts stay hot across phases. Parallelism lives in the
-    # Makefile.
-    name: CI
+  # ── Change detection ───────────────────────────────────────────────
+  # Classifies the changed files once so downstream jobs can skip work:
+  #   code: false only when EVERY changed file is prose/repo-meta
+  #         (docs/, *.md, labels, templates) — then the Go/SDK test jobs
+  #         skip. Fail-closed: push events, manual dispatches, API
+  #         hiccups, and empty file lists all count as code changes.
+  #   docs: true when a docs-affecting file changed (the docs site build
+  #         inputs, including clients/ts — the landing page bundles
+  #         @wavehouse/sdk) — gates the deploy jobs so unrelated Go-only
+  #         changes don't upload previews or redeploy prod.
+  # Computed from the GitHub API (checkouts elsewhere are shallow, so
+  # `git diff` against the base can't see the change set).
+  changes:
+    name: Detect changes
     runs-on: ubuntu-latest
-    # Public-repo ubuntu-latest (4-core). Warm: ~5-10 min. Cold: ~15.
-    # 45 leaves headroom + a hung-job cap.
-    timeout-minutes: 45
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+      docs: ${{ steps.detect.outputs.docs }}
     steps:
-      # Composite actions can't self-checkout — checkout first.
-      # fetch-depth: 0 (full history) so the docs build can read each page's
-      # real last-commit date from git: Starlight's `lastUpdated` footer
-      # silently falls back to the build time on the default shallow (depth-1)
-      # clone, making every page look freshly edited.
+      - name: Classify changed files
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"   # manual → run + deploy everything
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/files" \
+              --paginate --jq '.[].filename' || true)"
+          else
+            files="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${{ github.event.before }}...${{ github.sha }}" \
+              --jq '.files[].filename' || true)"
+          fi
+          # Empty (API hiccup / new branch) → fail closed: run everything.
+          if [ -z "$files" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Pushes to main always run the full suite (they also save the
+          # caches every PR inherits). For PRs, `code` flips false only if
+          # no file falls outside the prose/meta allowlist.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            code=true
+          elif printf '%s\n' "$files" | grep -qvE '^(docs/|.*\.md$|LICENSE|NOTICE|\.gitignore$|\.gitattributes$|\.github/labeler\.yml$|\.github/ISSUE_TEMPLATE/|\.github/pull_request_template|\.claude/|\.vscode/)'; then
+            code=true
+          else
+            code=false
+          fi
+          if printf '%s\n' "$files" | grep -qE '^(docs/|clients/ts/|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/ci\.yml|\.github/actions/setup-env/)'; then
+            docs=true
+          else
+            docs=false
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "docs=$docs" >> "$GITHUB_OUTPUT"
+          echo "code=$code docs=$docs"
+
+  # ── PR title (Conventional Commits) ────────────────────────────────
+  # The blocking half of the title gate (housekeeping.yml keeps the sticky
+  # explainer comment, which needs pull_request_target write perms on fork
+  # PRs). Lives under the CI aggregator so "CI" stays the only required
+  # check. The script runs from a checkout of the DEFAULT branch — never
+  # the PR tree — so a PR can't tamper with its own validator.
+  title:
+    name: PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check Conventional Commits format
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read the CURRENT title + author from the API, not the event
+          # payload: re-runs reuse the original payload, so the "fix the
+          # title, re-run failed jobs" flow (automated by housekeeping.yml)
+          # would otherwise keep judging the stale title.
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}")"
+          title="$(jq -r '.title' <<<"$pr_json")"
+          author="$(jq -r '.user.login' <<<"$pr_json")"
+          # Dependabot's grouped-update titles routinely exceed the 72-char
+          # subject cap and the format isn't configurable, so Dependabot PRs
+          # are exempt from the length check (the format check still applies).
+          if [[ "$author" == "dependabot[bot]" || "$author" == "app/dependabot" ]]; then
+            export PR_TITLE_SKIP_LENGTH=1
+          fi
+          if reason=$(bash scripts/lint-pr-title.sh "$title" 2>&1); then
+            echo "PR title OK: $title"
+          else
+            printf '%s\n' "$reason"
+            echo "::error::$(printf '%s' "$reason" | head -1)"
+            exit 1
+          fi
 
+  # ── Static checks ──────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - id: setup
         uses: ./.github/actions/setup-env
-
-      - name: Run CI pipeline
-        # Verify + builds + unit/SDK tests in parallel, then integration →
-        # e2e → cov sequentially. Mirrors local `make ci` exactly.
-        run: make ci
-
+        with:
+          go-cache-suffix: "-lint"
+          golangci: "true"
+          astro: "true" # check-docs (astro check) reuses the content cache
+      # tidy + gofumpt + golangci + vulncheck + Biome + markdownlint +
+      # misspell + astro check + tsc. No Docker, no browser.
+      - name: Run static checks
+        run: make verify
       # Saves run on every branch, gated on `*-cache-hit != 'true'` so a
       # same-key re-push is a no-op. PRs inherit main's cache scope, so a
-      # main-push save warms every PR. Saves mirror restores in setup-env
-      # — keep paths and keys in sync.
+      # main-push save warms every PR. Keys come from setup-env outputs so
+      # save and restore can't drift. (Same pattern in every job below;
+      # the astro/pnpm/playwright saves belong to the build job.)
       - name: Save Go module + build cache
         if: steps.setup.outputs.gobuild-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -61,8 +187,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: gobuild-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-
+          key: ${{ steps.setup.outputs.gobuild-cache-key }}
       - name: Save golangci-lint cache
         if: steps.setup.outputs.golangci-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -70,37 +195,226 @@ jobs:
           path: |
             .bin
             ~/.cache/golangci-lint
-          key: golangci-${{ runner.os }}-${{ hashFiles('Makefile', '.golangci.yml') }}
+          key: ${{ steps.setup.outputs.golangci-cache-key }}
 
+  # ── Build all artifacts ────────────────────────────────────────────
+  # Go binaries (debug + cover-instrumented), SDK dist, docs site. The
+  # uploads feed e2e (cover binary + SDK dist) and the docs deploy jobs
+  # (docs dist) — downstream consumers test/ship exactly what was built
+  # here instead of rebuilding.
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # fetch-depth: 0 (full history) so the docs build can read each page's
+      # real last-commit date from git: Starlight's `lastUpdated` footer
+      # silently falls back to the build time on the default shallow
+      # (depth-1) clone, making every page look freshly edited.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go-cache-suffix: "-build"
+          playwright: "true" # rehype-mermaid renders diagrams via Chromium
+          astro: "true"
+      - name: Build all artifacts
+        run: make build-all build-cover
+      - name: Upload cover-instrumented binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cover-binary
+          path: bin/wavehouse-cov
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true # re-runs of this job re-upload
+      - name: Upload SDK dist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-dist
+          path: clients/ts/dist
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+      - name: Upload docs site
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-dist
+          path: docs/dist
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+      - name: Save Go module + build cache
+        if: steps.setup.outputs.gobuild-cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.setup.outputs.gobuild-cache-key }}
       # Drop store entries unreferenced by any workspace project before
       # save, so the cache doesn't grow unboundedly as deps churn.
       - name: Prune pnpm store before save
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
-        shell: bash
         run: pnpm store prune
-
-      # Path resolved dynamically — see setup-env header.
       - name: Save pnpm store cache
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ${{ steps.setup.outputs.pnpm-store-path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-
+          key: ${{ steps.setup.outputs.pnpm-cache-key }}
       - name: Save Playwright browser cache
         if: steps.setup.outputs.playwright-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-
+          key: ${{ steps.setup.outputs.playwright-cache-key }}
       - name: Save Astro content cache
         if: steps.setup.outputs.astro-cache-hit != 'true'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: docs/.astro
-          key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'docs/astro.config.mjs') }}
+          key: ${{ steps.setup.outputs.astro-cache-key }}
 
+  # ── Test suites ────────────────────────────────────────────────────
+  # COV_DEFER=1: collect coverage, skip the per-suite render + gate — the
+  # coverage job applies every gate once, exactly like local `make ci`.
+  unit:
+    name: Unit tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go-cache-suffix: "-unit"
+      - name: Run Go unit tests + SDK vitest tests
+        run: make test-unit test-ts COV_DEFER=1
+      - name: Upload coverage fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-unit
+          path: tmp/coverage
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+      - name: Save Go module + build cache
+        if: steps.setup.outputs.gobuild-cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.setup.outputs.gobuild-cache-key }}
+
+  integration:
+    name: Integration tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go-cache-suffix: "-integration"
+          node: "false" # pure Go + testcontainers ClickHouse
+      - name: Run Go integration tests
+        run: make test-integration COV_DEFER=1
+      - name: Upload coverage fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-integration
+          path: tmp/coverage
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+      - name: Save Go module + build cache
+        if: steps.setup.outputs.gobuild-cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.setup.outputs.gobuild-cache-key }}
+
+  e2e:
+    name: E2E tests
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go-cache-suffix: "-e2e" # `go run` of the orchestrator (testcontainers)
+      - name: Download cover-instrumented binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cover-binary
+          path: bin
+      - name: Download SDK dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdk-dist
+          path: clients/ts/dist
+      # Artifact zips drop the executable bit.
+      - name: Restore binary permissions
+        run: chmod +x bin/wavehouse-cov
+      # E2E_PREBUILT=1: skip the build-ts/build-cover prereqs — the
+      # artifacts above are the exact outputs the build job produced.
+      - name: Run E2E SDK suite
+        run: make test-e2e COV_DEFER=1 E2E_PREBUILT=1
+      - name: Upload coverage fragment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-e2e
+          path: tmp/coverage
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+      - name: Save Go module + build cache
+        if: steps.setup.outputs.gobuild-cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.setup.outputs.gobuild-cache-key }}
+
+  # ── Consolidated coverage report + gates ───────────────────────────
+  # Default `needs` semantics: runs only when all three suites succeeded;
+  # skips (and the aggregator passes) when they were path-filtered out.
+  coverage:
+    name: Coverage
+    needs: [unit, integration, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go-cache-suffix: "-cov" # tiny compile (scripts/cov); restore-keys fall back
+      # `cov report` shells `pnpm exec nyc` for the TS merge.
+      - name: Install workspace deps
+        run: make pnpm-install
+      - name: Download coverage fragments
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+          path: tmp/coverage
+      - name: Render consolidated report + gate thresholds
+        run: make cov
       # Coverage in the job-summary panel. See #133 for post-launch
       # reporting decisions.
       - name: Coverage summary
@@ -122,53 +436,62 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # ── Docs deploy ──────────────────────────────────────────────────
-      # `make ci` already built the site (build-all → build-docs renders
-      # Mermaid via Chromium + validates links → docs/dist/). These tail
-      # steps reuse that artifact instead of rebuilding, and run only when
-      # the WHOLE pipeline above is green: this head step is gated on
-      # success() explicitly, and every step below chains off its outputs,
-      # so any earlier failure short-circuits the deploy. Cloudflare's own
-      # Workers Builds can't build this site (no headless browser at build
-      # time), so we ship from here. See docs/wrangler.jsonc.
+  # ── Docs deploys ─────────────────────────────────────────────────────
+  # Both deploy jobs check out the DEFAULT branch (or, on push, the pushed
+  # main commit itself) and install wrangler from that trusted lockfile —
+  # PR-authored code never executes in a job that can read the Cloudflare
+  # token (#305). The only PR-derived input is the static docs-dist
+  # artifact, uploaded as data. Consequence: a PR changing docs/worker/ or
+  # docs/wrangler.jsonc previews through MAIN's worker + config; those
+  # changes take effect when the PR merges.
+  #
+  # Cloudflare's own Workers Builds can't build this site (no headless
+  # browser at build time for rehype-mermaid), so we ship from here. See
+  # docs/wrangler.jsonc. Both jobs soft-gate on the secrets so a
+  # not-yet-configured repo warns and skips instead of failing CI.
 
-      # Only deploy when docs-affecting files actually changed, so unrelated
-      # Go-only PRs/merges don't upload previews or redeploy prod. Computed
-      # from the GitHub API (the checkout is shallow, so `git diff` against
-      # the base can't see it). Skipped on fork PRs — no secrets there.
-      - name: Detect docs changes
-        id: docs_changed
-        if: >-
-          success() &&
-          (github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "result=true" >> "$GITHUB_OUTPUT"; exit 0   # manual → always
-          fi
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/files" \
-              --paginate --jq '.[].filename' || true)"
-          else
-            files="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${{ github.event.before }}...${{ github.sha }}" \
-              --jq '.files[].filename' || true)"
-          fi
-          # Empty (API hiccup / new branch) → deploy to be safe.
-          if [ -z "$files" ] || printf '%s\n' "$files" | grep -qE '^(docs/|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/ci\.yml|\.github/actions/setup-env/)'; then
-            echo "result=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "result=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Soft-gate on the secrets so a not-yet-configured repo (or a run
-      # before they're added) warns and skips instead of failing CI.
+  # PRs: upload a non-active version and post its preview URL as a sticky
+  # comment. Needs only the build artifact — an unrelated test flake no
+  # longer blocks the preview (the merge gate still waits for everything).
+  # Fork PRs skip: no secrets there, and the job would have nothing to do.
+  docs-preview:
+    name: Docs preview
+    needs: [changes, build]
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # The sticky-comment endpoint (/repos/.../issues/{num}/comments)
+      # requires `issues: write`; `pull-requests: write` alone doesn't
+      # grant it.
+      issues: write
+      pull-requests: write
+    steps:
+      # Trusted tree: wrangler + worker source + config resolve from main,
+      # not the PR. Credentials stay persisted — the comment step fetches
+      # the PR head commit for its metadata. Note this also pins setup-env
+      # itself to main's copy in this job.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go: "false"
+      - name: Install workspace deps (trusted lockfile)
+        run: make pnpm-install
+      - name: Download docs site artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docs-dist
+          path: docs/dist
       - name: Check deploy secrets
         id: cfsecrets
-        if: steps.docs_changed.outputs.result == 'true'
-        shell: bash
         env:
           TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -177,35 +500,16 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — skipping docs deploy."
+            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — skipping docs preview."
           fi
-
-      # Production: push (or manual dispatch) on main → publish the active
-      # version served on wavehouse.dev. Not best-effort: a failure here
-      # should surface as a red CI run.
-      - name: Deploy docs (production)
-        if: >-
-          steps.cfsecrets.outputs.ok == 'true'
-          && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-          && github.ref == 'refs/heads/main'
-        working-directory: docs
-        shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler deploy
-
-      # PRs: upload a non-active version and capture its preview URL. A real
-      # upload failure (e.g. a misscoped CLOUDFLARE_API_TOKEN → "Authentication
-      # error [code: 10000]") reds the PR instead of hiding — the retry loop
-      # first absorbs transient Cloudflare API blips so a one-off hiccup
-      # doesn't. (Still gated behind the whole `make ci` above, so an unrelated
-      # test flake there can also block it.)
+      # A real upload failure (e.g. a misscoped CLOUDFLARE_API_TOKEN →
+      # "Authentication error [code: 10000]") reds the PR instead of hiding
+      # — the retry loop first absorbs transient Cloudflare API blips so a
+      # one-off hiccup doesn't.
       - name: Upload docs preview
         id: preview
-        if: steps.cfsecrets.outputs.ok == 'true' && github.event_name == 'pull_request'
+        if: steps.cfsecrets.outputs.ok == 'true'
         working-directory: docs
-        shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -242,7 +546,6 @@ jobs:
       - name: Comment docs preview status
         if: ${{ !cancelled() && (steps.preview.outcome == 'success' || steps.preview.outcome == 'failure') }}
         continue-on-error: true
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -258,10 +561,10 @@ jobs:
           # @-logins aren't in git, so author/committer logins come from one
           # commits-API call (GitHub matches them by verified email), used only
           # when the call succeeds, with a fallback that reads the login out of
-          # a github.com noreply address. fetch-depth: 0 guarantees the head
-          # commit is present. All user-controlled text (subject, names) is only
-          # ever a printf %s arg, never the format string, so a `%` can't act as
-          # a format directive.
+          # a github.com noreply address. The checkout above is main, so the
+          # PR head commit is fetched by SHA first. All user-controlled text
+          # (subject, names) is only ever a printf %s arg, never the format
+          # string, so a `%` can't act as a format directive.
           git cat-file -e "${SHA}^{commit}" 2>/dev/null || git fetch --quiet origin "$SHA" 2>/dev/null || true
           server="${GITHUB_SERVER_URL:-https://github.com}"
           # @-link a person when a login is known, else show their plain name;
@@ -347,3 +650,92 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body" >/dev/null
           fi
           echo "Updated docs-preview comment on PR #${PR} (outcome=${PREVIEW_OUTCOME}, url=${URL:-none})"
+
+  # Production: push (or manual dispatch) on main → publish the active
+  # version served on wavehouse.dev. Gated on the full pipeline (lint +
+  # build + every suite via coverage) — not best-effort: a failure here
+  # surfaces as a red CI run. `title`/`docs-preview` are deliberately NOT
+  # in `needs`: they skip on push events, and a skipped need would skip
+  # this job too.
+  docs-deploy:
+    name: Docs deploy
+    needs: [changes, lint, build, coverage]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # Push-to-main checkout IS the trusted tree at the pushed commit.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: setup
+        uses: ./.github/actions/setup-env
+        with:
+          go: "false"
+      - name: Install workspace deps
+        run: make pnpm-install
+      - name: Download docs site artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docs-dist
+          path: docs/dist
+      - name: Check deploy secrets
+        id: cfsecrets
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$TOKEN" ] && [ -n "$ACCT" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — skipping docs deploy."
+          fi
+      - name: Deploy docs (production)
+        if: steps.cfsecrets.outputs.ok == 'true'
+        working-directory: docs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler deploy
+
+  # ── Aggregator: the ruleset's sole required check ──────────────────
+  # Fails when any upstream job failed or was cancelled; treats `skipped`
+  # as a pass (path-filtered suites, event-filtered title/deploy jobs are
+  # intentional no-ops). `!cancelled()` rather than `always()` so a
+  # cancel-in-progress superseded run doesn't burn a runner just to report
+  # a failure nobody reads — the replacement run produces the fresh "CI".
+  ci:
+    name: CI
+    needs:
+      [
+        changes,
+        title,
+        lint,
+        build,
+        unit,
+        integration,
+        e2e,
+        coverage,
+        docs-preview,
+        docs-deploy,
+      ]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Gate on all jobs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<<"$NEEDS"
+          bad="$(jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key] | join(", ")' <<<"$NEEDS")"
+          if [ -n "$bad" ]; then
+            echo "::error::Jobs failed or were cancelled: $bad"
+            exit 1
+          fi
+          echo "All jobs succeeded (or were intentionally skipped)."

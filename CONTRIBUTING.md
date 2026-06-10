@@ -76,7 +76,7 @@ Types:
 - `revert` — Reverting a previous commit
 - `style` — Formatting changes with no functional effect
 
-The PR title is enforced by the `PR housekeeping` required check (`.github/workflows/housekeeping.yml`): Conventional Commits format, ≤ 72 characters, lowercase-first subject with no trailing period — it becomes the squash-merge commit message on `main`, so keep it parseable. Check a title locally with `scripts/lint-pr-title.sh "<title>"` before opening the PR.
+The PR title is enforced by the required `CI` check's `PR title` job (`.github/workflows/ci.yml`): Conventional Commits format, ≤ 72 characters, lowercase-first subject with no trailing period — it becomes the squash-merge commit message on `main`, so keep it parseable. Check a title locally with `scripts/lint-pr-title.sh "<title>"` before opening the PR.
 
 Examples:
 

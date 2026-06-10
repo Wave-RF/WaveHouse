@@ -651,8 +651,14 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 # from the cover binary → tmp/coverage/e2e/data/; vitest v8 coverage of
 # the SDK source → tmp/coverage/ts-e2e/) — same "always coverage" pattern
 # as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
+#
+# E2E_PREBUILT=1 (CI's e2e job): bin/wavehouse-cov and clients/ts/dist arrive
+# as artifacts from the build job, so skip rebuilding them — but keep
+# pnpm-install for the vitest harness. The orchestrator fails fast with a
+# clear message if the binary is missing.
+E2E_PREBUILT ?=
 .PHONY: test-e2e
-test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
+test-e2e: $(if $(E2E_PREBUILT),pnpm-install,build-ts build-cover) ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
 	@rm -rf $(COV_E2E)/data tmp/coverage/ts-e2e
 	@mkdir -p $(COV_E2E)/data tmp/coverage/ts-e2e tmp
