@@ -636,6 +636,15 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   max-width: 46rem;
 }
 
+/* Starlight sets overflow-wrap: ANYWHERE on list items (so long URLs never
+   overflow) — which also shreds short code chips mid-token at phone widths
+   (`users_<suite>` rendered as "use" + "rs_<suite>"). break-word keeps the
+   no-overflow guarantee but only splits a token that can't fit on a whole
+   line of its own. */
+.sl-markdown-content li {
+  overflow-wrap: break-word;
+}
+
 /* Anchor links in body text — underline-on-hover with accent glow */
 .sl-markdown-content a:not(.not-content a):not(.sl-link-button) {
   color: var(--wh-accent-text);
