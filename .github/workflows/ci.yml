@@ -165,6 +165,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -214,6 +216,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -289,6 +292,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -320,6 +325,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -352,6 +359,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -400,6 +409,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -472,13 +483,15 @@ jobs:
       pull-requests: write
     steps:
       # Trusted tree: wrangler + worker source + config resolve from main,
-      # not the PR. Credentials stay persisted — the comment step fetches
-      # the PR head commit for its metadata. Note this also pins setup-env
-      # itself to main's copy in this job.
+      # not the PR. No persisted credentials — the comment step's fallback
+      # `git fetch origin <sha>` works anonymously on a public repo (PR
+      # heads are advertised under refs/pull/*). Note this also pins
+      # setup-env itself to main's copy in this job.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
@@ -671,6 +684,8 @@ jobs:
     steps:
       # Push-to-main checkout IS the trusted tree at the pushed commit.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - id: setup
         uses: ./.github/actions/setup-env
         with:
