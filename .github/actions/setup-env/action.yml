@@ -9,9 +9,9 @@
 #   2. golangci-lint binary + analysis cache keyed on Makefile +
 #      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
 #
-#   3. pnpm store (path resolved at runtime) keyed on all three
-#      lockfiles. The three pnpm projects (clients/ts, tests/e2e/sdk,
-#      docs) share one store via hardlinks. Path is dynamic because
+#   3. pnpm store (path resolved at runtime) keyed on the root
+#      lockfile — the three pnpm projects (clients/ts, tests/e2e/sdk,
+#      docs) share one workspace lockfile + store. Path is dynamic because
 #      pnpm's documented default ~/.local/share/pnpm/store only
 #      applies when $HOME and the project tree share a mount; on some
 #      runners it falls back to a workspace-relative path. Hard-coding
@@ -19,10 +19,10 @@
 #      Error.
 #
 #   4. Playwright browser cache (~/.cache/ms-playwright) keyed on the
-#      docs lockfile. ~130 MB Chromium download otherwise re-fetched
+#      root lockfile. ~130 MB Chromium download otherwise re-fetched
 #      every run. See #132.
 #
-#   5. Astro content-collection cache (docs/.astro/) keyed on docs
+#   5. Astro content-collection cache (docs/.astro/) keyed on the root
 #      lockfile + astro.config.mjs. Speeds up warm `astro build` —
 #      unchanged content skips the parse + transform pipeline. See
 #      #132.
@@ -95,20 +95,20 @@ runs:
       id: pnpm-cache
       with:
         path: ${{ steps.pnpm-store.outputs.path }}
-        key: pnpm-${{ runner.os }}-${{ hashFiles('clients/ts/pnpm-lock.yaml', 'tests/e2e/sdk/pnpm-lock.yaml', 'docs/pnpm-lock.yaml') }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
         restore-keys: |
           pnpm-${{ runner.os }}-
 
     # Playwright Chromium binary (~130 MB) lives outside the pnpm store at
     # ~/.cache/ms-playwright. Without this cache, every CI run cold-pulls
     # Chromium during install-playwright-docs — adds 30-60s per run. Keyed
-    # on docs/pnpm-lock.yaml since that's where the Playwright version is
-    # locked. Closes the Playwright half of #132.
+    # on the root pnpm-lock.yaml since that's where the Playwright version
+    # is locked. Closes the Playwright half of #132.
     - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       id: playwright-cache
       with:
         path: ~/.cache/ms-playwright
-        key: playwright-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml') }}
+        key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
         restore-keys: |
           playwright-${{ runner.os }}-
 
@@ -123,7 +123,7 @@ runs:
       id: astro-cache
       with:
         path: docs/.astro
-        key: astro-${{ runner.os }}-${{ hashFiles('docs/pnpm-lock.yaml', 'docs/astro.config.mjs') }}
+        key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'docs/astro.config.mjs') }}
         restore-keys: |
           astro-${{ runner.os }}-
 

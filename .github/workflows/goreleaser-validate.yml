@@ -29,7 +29,7 @@ concurrency:
 jobs:
   validate:
     name: Validate snapshot build
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

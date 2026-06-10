@@ -27,7 +27,7 @@ concurrency:
 jobs:
   classify:
     name: Classify and label
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # Skip re-triggering on our own label edits.
     if: github.actor != 'github-actions[bot]' && github.event.issue.pull_request == null

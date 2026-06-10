@@ -111,6 +111,12 @@ docker pull ghcr.io/wave-rf/wavehouse:latest    # tagged release
 docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
 ```
 
+Both tags carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify before you deploy:
+
+```bash
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:latest --repo Wave-RF/WaveHouse
+```
+
 ### C. `go install` (binary, no Docker)
 
 ```bash

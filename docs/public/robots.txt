@@ -1,4 +1,8 @@
+# Content Signals (contentsignals.org) — WaveHouse is open source: we want
+# agents and models to read these docs, index them for search, answer from
+# them live, and train on them. So every signal is an explicit yes.
 User-agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
 Allow: /
 
 Sitemap: https://wavehouse.dev/sitemap-index.xml

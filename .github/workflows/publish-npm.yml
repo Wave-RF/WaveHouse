@@ -18,7 +18,8 @@ name: Publish SDK (npm)
 #
 # Auth: OIDC trusted publishing — no NPM_TOKEN. Configure ONE trusted
 # publisher on npmjs.com → repo Wave-RF/WaveHouse, workflow publish-npm.yml.
-# Add --provenance to both `npm publish` lines once the repo is public (#149).
+# Both publish steps pass --provenance for a signed build-provenance attestation
+# (the OIDC id-token above + public repo + npm >= 11.5.1 from Node 24).
 #
 # To cut a release: bump clients/ts/package.json, commit, then
 # `git tag sdk-vX.Y.Z[-pre] && git push origin sdk-vX.Y.Z[-pre]`.
@@ -42,7 +43,7 @@ jobs:
   dev:
     name: Dev snapshot (@dev)
     if: github.ref == 'refs/heads/main'
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -87,13 +88,13 @@ jobs:
           npm version "${version}" --no-git-tag-version --allow-same-version
           # --ignore-scripts publishes exactly the dist we just hashed (the
           # typecheck + build already ran above; this skips a redundant rebuild).
-          npm publish --access public --tag dev --ignore-scripts
-          # Add --provenance once Wave-RF/WaveHouse is public (#149).
+          # --provenance attaches a signed build-provenance attestation.
+          npm publish --access public --tag dev --ignore-scripts --provenance
 
   release:
     name: Release (sdk-v* tag)
     if: startsWith(github.ref, 'refs/tags/sdk-v')
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write # create the GitHub Release
@@ -140,8 +141,8 @@ jobs:
       - name: Publish to npm
         working-directory: clients/ts
         # `npm publish` typechecks + builds via the package's prepublishOnly.
-        # Add --provenance once Wave-RF/WaveHouse is public (#149).
-        run: npm publish --access public --tag "${{ steps.meta.outputs.dist_tag }}"
+        # --provenance attaches a signed build-provenance attestation.
+        run: npm publish --access public --tag "${{ steps.meta.outputs.dist_tag }}" --provenance
 
       - name: Create GitHub Release
         env:

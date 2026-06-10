@@ -18,7 +18,7 @@ permissions:
 jobs:
   cleanup:
     name: Prune dev-<sha> tags
-    runs-on: [wave-rf-runners]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Cleanup
