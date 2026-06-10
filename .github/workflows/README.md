@@ -6,7 +6,9 @@ workflow file's comments only explain what's local to a step, and
 contributor-facing summary. Wall-clock for a full PR run: **~3m15s push →
 all green** (e2e ~170s is the long pole; the `coverage` job overlaps its
 setup with the suites and merges within ~10s of e2e finishing, then the
-~4s aggregator; was 5m54s before the 2026-06 reshape, and ~4m when the
+~4s aggregator. Reliable now that the variable Cloudflare `docs-preview`
+deploy is non-gating — only `docs-build` gates. Was 5m54s before the
+2026-06 reshape, and ~4m when the
 coverage job still serialized its setup via `needs`).
 
 ## The graph
@@ -18,7 +20,7 @@ graph TB
     changes --> e2e["e2e — build SDK+cover → suite"]
     changes --> docsbuild["docs-build"]
     changes --> coverage["coverage — poll fragments → merge → gate"]
-    docsbuild --> preview["docs-preview (PRs)"]
+    docsbuild --> preview["docs-preview (PRs) — non-gating"]
     unit -. "coverage-unit (poll)" .-> coverage
     integration -. "coverage-integration (poll)" .-> coverage
     e2e -. "coverage-e2e (poll)" .-> coverage
@@ -29,7 +31,6 @@ graph TB
     unit --> ci
     integration --> ci
     docsbuild --> ci
-    preview --> ci
     deploy["docs-deploy (main)"] --> ci
     changes --> deploy
     lint --> deploy
@@ -53,8 +54,12 @@ Break one of these knowingly or not at all.
    Go suites) and event-filtered jobs (title on pushes, deploys on PRs)
    never orphan the required check, and adding/renaming jobs never
    requires a ruleset edit. Consequence: every job that must gate merges
-   **must be in the aggregator's `needs` list** (and `timing`, which is
-   deliberately non-gating, must not be).
+   **must be in the aggregator's `needs` list**. Two jobs are deliberately
+   non-gating and excluded: `timing` (advisory wall-clock table) and
+   `docs-preview` (the convenience Cloudflare preview deploy — `docs-build`
+   already validates the build and *is* a need, so only the build gates;
+   the preview deploy reports its own "Docs preview" check but, slow or
+   failed, never delays or reds `CI`).
 
 2. **A dedicated `coverage` job applies the consolidated gate, polling —
    not `needs`-ing — the suites.** Each suite (`unit`, `integration`,
@@ -170,9 +175,9 @@ to every run's Summary page. Reference shape:
 | e2e (long pole) | +8s | ~170s — ~25 setup, ~120 suite (15 builds ∥ image prefetch, ~100 vitest, ~10 cover-binary OTel exit [#288](https://github.com/Wave-RF/WaveHouse/issues/288)), ~5 fragment upload |
 | coverage | +18s | ~50s setup overlaps the suites, then idle-polls; ~10s critical-path tail (poll-detect + download + ~3s merge) after e2e |
 | integration | +8s | ~85s |
-| docs-build → docs-preview | +8s | preview ends ~+150s |
+| docs-build (gates) → docs-preview (non-gating) | +8s | build ~80s; the Cloudflare preview deploy is ~1.5–3min and varies, but doesn't gate — only `docs-build` does |
 | lint / unit | +2s / +8s | ~65s / ~50s |
-| CI aggregator | after coverage | ~4s |
+| CI aggregator | after coverage / docs-build | ~4s |
 
 ## Deferred optimizations
 

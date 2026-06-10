@@ -396,9 +396,15 @@ jobs:
   # not-yet-configured repo warns and skips instead of failing CI.
 
   # PRs: upload a non-active version and post its preview URL as a sticky
-  # comment. Needs only the build artifact — an unrelated test flake no
-  # longer blocks the preview (the merge gate still waits for everything).
-  # Fork PRs skip: no secrets there, and the job would have nothing to do.
+  # comment. Needs only the build artifact, so it publishes right after the
+  # build. NON-GATING: deliberately NOT in the `ci` aggregator's `needs`
+  # (it is in `timing`'s, for the table) — the preview is a convenience,
+  # not a merge gate. `docs-build` already validates the build (and is
+  # required); this only deploys MAIN's worker + the static dist to a
+  # preview URL, so a slow or failed Cloudflare deploy must not delay or
+  # red the required `CI` check. It still reports its own "Docs preview"
+  # check status (red on failure, with the URL on success). Fork PRs skip:
+  # no secrets there, and the job would have nothing to do.
   docs-preview:
     name: Docs preview
     needs: [changes, docs-build]
@@ -572,6 +578,12 @@ jobs:
   # intentional no-ops). `!cancelled()` rather than `always()` so a
   # cancel-in-progress superseded run doesn't burn a runner just to report
   # a failure nobody reads — the replacement run produces the fresh "CI".
+  #
+  # `docs-preview` is deliberately NOT a need: it's the convenience preview
+  # deploy (see its job), non-gating by design, so it neither delays nor
+  # reds the required check — its own "Docs preview" status reports it. The
+  # `docs-build` it depends on IS here, so a broken docs BUILD still gates.
+  # `timing` (non-gating) is the only other job excluded.
   ci:
     name: CI
     needs:
@@ -584,7 +596,6 @@ jobs:
         integration,
         e2e,
         coverage,
-        docs-preview,
         docs-deploy,
       ]
     if: ${{ !cancelled() }}
