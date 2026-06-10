@@ -23,8 +23,24 @@ PNUM="${WH_PROJECT_NUM:-7}"
 PROJ="${WH_PROJECT_ID:-PVT_kwDOCdKSOc4BUEKD}"
 PRIO_FIELD="${WH_PRIORITY_FIELD:-PVTSSF_lADOCdKSOc4BUEKDzhBO0vI}"
 STATUS_FIELD="${WH_STATUS_FIELD:-PVTSSF_lADOCdKSOc4BUEKDzhBO0l8}"
-declare -A PRIO=( [P0]=79628723 [P1]=0a877460 [P2]=da944a9c [P3]=e141a9e0 )
-declare -A STATUS=( [Backlog]=f75ad846 [Ready]=61e4505c [InProgress]=47fc9ee4 [InReview]=df73e18b [Done]=98236657 )
+# Priority/Status option-id maps as `case` lookups, not `declare -A`: associative
+# arrays need bash ≥4, but the routine invokes plain `bash` (= /bin/bash 3.2 on
+# macOS), which would die with "P0: unbound variable". `case` works under 3.2.
+# A bad key returns non-zero so callers can reject it.
+_prio_id() {
+  case "$1" in
+    P0) echo 79628723 ;; P1) echo 0a877460 ;;
+    P2) echo da944a9c ;; P3) echo e141a9e0 ;;
+    *) return 1 ;;
+  esac
+}
+_status_id() {
+  case "$1" in
+    Backlog) echo f75ad846 ;; Ready) echo 61e4505c ;;
+    InProgress) echo 47fc9ee4 ;; InReview) echo df73e18b ;;
+    Done) echo 98236657 ;; *) return 1 ;;
+  esac
+}
 
 _item_id() {
   gh project item-list "$PNUM" --owner "$OWNER" --format json --limit 400 2>/dev/null \
@@ -36,17 +52,18 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   file)
     prio="$1"; status="$2"; labels="$3"; title="$4"; body="$(cat)"
-    [[ -z "${PRIO[$prio]:-}" || -z "${STATUS[$status]:-}" ]] && { echo "bad priority/status" >&2; exit 2; }
+    prio_id=$(_prio_id "$prio")     || { echo "bad priority: $prio"  >&2; exit 2; }
+    status_id=$(_status_id "$status") || { echo "bad status: $status" >&2; exit 2; }
     url=$(gh issue create --repo "$REPO" --title "$title" --label "$labels" --body "$body") || { echo "create failed" >&2; exit 1; }
     num=$(echo "$url" | grep -oE '[0-9]+$')
     item=""; for _ in 1 2 3 4 5 6; do sleep 3; item=$(_item_id "$num"); [[ -n "$item" ]] && break; done
     [[ -z "$item" ]] && item=$(gh project item-add "$PNUM" --owner "$OWNER" --url "$url" --format json | jq -r '.id')
-    _set "$item" "$PRIO_FIELD" "${PRIO[$prio]}"
-    _set "$item" "$STATUS_FIELD" "${STATUS[$status]}"
+    _set "$item" "$PRIO_FIELD" "$prio_id"
+    _set "$item" "$STATUS_FIELD" "$status_id"
     echo "$num"
     ;;
-  set-priority) item=$(_item_id "$1"); [[ -z "$item" ]] && { echo "#$1 not on board" >&2; exit 1; }; _set "$item" "$PRIO_FIELD" "${PRIO[$2]}"; echo "#$1 -> $2" ;;
-  set-status)   item=$(_item_id "$1"); [[ -z "$item" ]] && { echo "#$1 not on board" >&2; exit 1; }; _set "$item" "$STATUS_FIELD" "${STATUS[$2]}"; echo "#$1 -> $2" ;;
+  set-priority) pid=$(_prio_id "$2")   || { echo "bad priority: $2" >&2; exit 2; }; item=$(_item_id "$1"); [[ -z "$item" ]] && { echo "#$1 not on board" >&2; exit 1; }; _set "$item" "$PRIO_FIELD" "$pid"; echo "#$1 -> $2" ;;
+  set-status)   sid=$(_status_id "$2") || { echo "bad status: $2"   >&2; exit 2; }; item=$(_item_id "$1"); [[ -z "$item" ]] && { echo "#$1 not on board" >&2; exit 1; }; _set "$item" "$STATUS_FIELD" "$sid"; echo "#$1 -> $2" ;;
   item-id)      _item_id "$1" ;;
   open-by-priority)
     tmp=$(mktemp)
