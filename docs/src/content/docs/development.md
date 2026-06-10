@@ -514,7 +514,7 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 
 PRs are grouped by ecosystem to reduce noise.
 
-**No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. `housekeeping.yml` requests a review from a non-author admin so the right person is notified. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
+**No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
 ## Releasing the SDK
 
@@ -582,9 +582,9 @@ Both are **advisory** — the ruleset's `required_reviewers` rule (an `@Wave-RF/
 
 ### Reviewer assignment and the Task Board
 
-Reviewer assignment is automated; the board itself is GitHub-native, not a workflow state machine:
+Reviewer assignment is GitHub-native, and so is the board:
 
-- **Reviewer assignment**: on PR open / ready-for-review, the `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) requests review from the non-author admin and sets them as assignee. It does **not** re-request on every push — after addressing feedback, use GitHub's "Re-request review" button (the trigger, if `dismiss_stale_reviews_on_push` cleared the request).
+- **Reviewer assignment**: the `main branch protection` ruleset's `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team on every PR, and the team's **code-review assignment** (configured on the team) auto-assigns and load-balances a specific member. No workflow is involved; `dismiss_stale_reviews_on_push` clears approvals on new commits, and GitHub re-requests per its own rules.
 - **Merge gate**: the ruleset's `required_reviewers` rule requires an `APPROVED` review from the `@Wave-RF/wavehouse-admins` team; it also adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
 - **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
 
