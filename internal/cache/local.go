@@ -58,30 +58,18 @@ func (l *LocalCache) Set(_ context.Context, sha string, deps []Namespace, value 
 // scope at once); a non-empty Scope bumps just that scope plus the whole-table
 // view. Returns the number of namespaces processed.
 //
-// A whole-table bump subsumes every per-scope bump for that table — the table
-// version is embedded in every namespace key, so bumping it already invalidates
-// all scopes. So we bump tables first, then bump only the scopes whose table
-// wasn't wholesale-bumped, skipping the redundant work (and the wasted
-// namespaceVersions entries it would otherwise create).
+// This bumps exactly what it's given. A whole-table bump already subsumes every
+// per-scope bump for the same table (the table version is embedded in every
+// namespace key), so a caller that knows a whole-table bump is coming should drop
+// the now-redundant scope entries itself — the ingest worker does this as it
+// builds the batch, where it already loops once and knows it's a single table.
 func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint64, error) {
-	bumpedTables := make(map[string]struct{})
 	for _, ns := range namespaces {
 		if ns.Scope == "" {
-			if _, done := bumpedTables[ns.Table]; done {
-				continue
-			}
 			l.versionManager.BumpTable(ns.Table)
-			bumpedTables[ns.Table] = struct{}{}
+		} else {
+			l.versionManager.BumpNamespace(ns.Table, ns.Scope)
 		}
-	}
-	for _, ns := range namespaces {
-		if ns.Scope == "" {
-			continue
-		}
-		if _, whole := bumpedTables[ns.Table]; whole {
-			continue // table bump already covers this scope
-		}
-		l.versionManager.BumpNamespace(ns.Table, ns.Scope)
 	}
 	return uint64(len(namespaces)), nil
 }

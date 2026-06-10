@@ -483,6 +483,14 @@ func TestHandleSuccess(t *testing.T) {
 			wantNamespaces: []cache.Namespace{{Table: "events", Scope: ""}},
 		},
 		{
+			// A scopeless message bumps the whole table, which subsumes every scope,
+			// so the worker collapses the batch to just the whole-table namespace.
+			name:           "scopeless message subsumes other scopes",
+			table:          "events",
+			scopes:         []string{"org_1", "", "org_2"},
+			wantNamespaces: []cache.Namespace{{Table: "events", Scope: ""}},
+		},
+		{
 			// Table and scope are percent-encoded so keys line up with the reader
 			// (internal/api/structured_query.go), which encodes the table too.
 			name:           "table and scope are percent-encoded",

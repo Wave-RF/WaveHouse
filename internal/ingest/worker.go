@@ -459,15 +459,20 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 }
 
 func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs []parsedMsg) {
-	// Invalidate the namespaces this batch touched: the encoded table paired with
-	// each distinct scope. Invalidate routes an empty scope to a whole-table bump and
-	// a non-empty scope to a per-scope bump (which also covers the whole-table view).
-	// Pre-allocate using len(msgs) to avoid rehashing.
+	// Build the minimal set of namespaces to invalidate. Every msg here is for
+	// tableName, so a single scopeless write bumps the whole table — which subsumes
+	// every scope — and there's nothing more to add. Otherwise invalidate each
+	// distinct scope. Doing this here (we already loop the batch once, and know it's
+	// one table) keeps Cache.Invalidate a simple one-pass bump.
 	encodedTable := query.SafeEncodeNATS(tableName)
 	seenScopes := make(map[string]struct{}, len(msgs))
 	namespaces := make([]cache.Namespace, 0, len(msgs))
 
 	for _, pm := range msgs {
+		if pm.scope == "" {
+			namespaces = []cache.Namespace{{Table: encodedTable}}
+			break
+		}
 		if _, exists := seenScopes[pm.scope]; exists {
 			continue
 		}
