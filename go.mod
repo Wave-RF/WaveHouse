@@ -4,6 +4,7 @@ go 1.26.4
 
 tool (
 	github.com/Zxilly/go-size-analyzer/cmd/gsa
+	github.com/boumenot/gocover-cobertura
 	github.com/loov/goda
 	github.com/vladopajic/go-test-coverage/v2
 	golang.org/x/tools/cmd/deadcode
@@ -74,6 +75,7 @@ require (
 	github.com/blacktop/go-dwarf v1.0.14 // indirect
 	github.com/blacktop/go-macho v1.1.271 // indirect
 	github.com/bluele/gcache v0.0.2 // indirect
+	github.com/boumenot/gocover-cobertura v1.5.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
