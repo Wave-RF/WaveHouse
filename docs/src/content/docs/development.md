@@ -349,7 +349,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
@@ -557,7 +557,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the required `PR housekeeping` check (`.github/workflows/housekeeping.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
+PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the `PR title` job under the required `CI` check (`.github/workflows/ci.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -567,16 +567,19 @@ Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`,
 
 The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
-If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
+If the title doesn't match, a sticky comment posts on the PR explaining the format (from the `PR housekeeping` workflow, which mirrors the same script); it auto-removes once the title is fixed. Fixing the title needs no new push — the edit triggers housekeeping, which re-runs the failed `PR title` job (the job re-reads the title from the API, not the stale event payload).
 
 ### Required status checks
 
-The `main branch protection` ruleset requires two status checks to pass before any PR can merge:
+The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
-- `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
+
+The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
 
 The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
+
+Approved, green PRs land through a **merge queue** ("Merge when ready"): the queue re-runs the required `CI` check against the PR merged with *current* main (a `merge_group` event — the CI workflow runs the full test suite for these) and fast-forwards only on green. That integration re-test replaces the old "branch is out-of-date with the base branch" requirement — queued PRs don't need manual branch updates, and the queue never pushes to the PR branch.
 
 Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 

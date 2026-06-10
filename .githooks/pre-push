@@ -1,21 +1,74 @@
 #!/usr/bin/env bash
-# Blocks `git push` unless `make ci` validated the tree of each ref tip.
-# Tree-keyed. Bypass: `git push --no-verify` (humans only).
+# Blocks `git push` unless the tree of each pushed ref tip was validated
+# locally. The bar scales with what changed — classified by the SAME
+# allowlist CI uses (scripts/classify-paths.sh), so local and CI agree on
+# what a change "is":
+#   - any code change → full `make ci` must have passed (tree-keyed marker
+#     tmp/ci-passed-tree-<tree>), exactly as before;
+#   - docs/prose-only → `make verify` is enough (CI skips the Go/SDK suites
+#     for these too), so only the verify marker is required — no spinning
+#     up the local Docker suites for a typo fix. pre-commit already runs
+#     `make verify`, so this is usually a zero-extra-work push.
+# Fail-closed: if the change set can't be classified (no resolvable base,
+# classifier error), fall back to requiring the full `make ci` marker.
+# Bypass: `git push --no-verify` (humans only).
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-while read -r _ local_sha _ _; do
-  [ -z "${local_sha:-}" ] && continue
-  [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
-  marker=$(scripts/ci-marker.sh path-for-commit "$local_sha" 2>/dev/null) || {
-    echo "🛑 pre-push: can't resolve tree for ${local_sha:0:8}." >&2; exit 1
+zero=0000000000000000000000000000000000000000
+
+# Net changed files for a pushed ref (base..tip), one per line. New branch
+# (no remote tip) → diff against the merge-base with origin/main. Returns
+# non-zero when no base resolves, so the caller fails closed.
+changed_files() {
+  local tip="$1" remote="$2" base
+  if [ "$remote" != "$zero" ]; then
+    base="$remote"
+  else
+    base="$(git merge-base origin/main "$tip" 2>/dev/null)" || return 1
+  fi
+  git diff --name-only "$base" "$tip" 2>/dev/null
+}
+
+block_ci() { # <sha> — require the full make-ci marker
+  local sha="$1" marker tree
+  marker=$(scripts/ci-marker.sh path-for-commit "$sha" 2>/dev/null) || {
+    echo "🛑 pre-push: can't resolve tree for ${sha:0:8}." >&2; exit 1
   }
   if [ ! -f "$marker" ]; then
     tree="${marker#tmp/ci-passed-tree-}"
-    echo "🛑 pre-push: 'make ci' has not been run for ${local_sha:0:8} (tree ${tree:0:8}). Run 'make ci' or 'git push --no-verify'." >&2
+    echo "🛑 pre-push: 'make ci' has not been run for ${sha:0:8} (tree ${tree:0:8}). Run 'make ci' or 'git push --no-verify'." >&2
     exit 1
   fi
+}
+
+while read -r _ local_sha _ remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  [ "$local_sha" = "$zero" ] && continue # branch deletion — nothing to validate
+
+  # Classify the push, failing closed to a code change on any hiccup.
+  code=true
+  if files="$(changed_files "$local_sha" "${remote_sha:-$zero}")"; then
+    verdict="$(printf '%s\n' "$files" | scripts/classify-paths.sh 2>/dev/null || true)"
+    case "$verdict" in
+      *code=false*) code=false ;;
+    esac
+  fi
+
+  if [ "$code" = false ]; then
+    marker=$(scripts/ci-marker.sh verify-path-for-commit "$local_sha" 2>/dev/null) || {
+      echo "🛑 pre-push: can't resolve tree for ${local_sha:0:8}." >&2; exit 1
+    }
+    if [ ! -f "$marker" ]; then
+      echo "🛑 pre-push: docs-only push, but 'make verify' hasn't passed for ${local_sha:0:8}. Run 'make verify' (no Docker) or 'git push --no-verify'." >&2
+      exit 1
+    fi
+    echo "✔ pre-push: docs/prose-only change — 'make verify' marker present for ${local_sha:0:8} (CI skips the suites too)." >&2
+    continue
+  fi
+
+  block_ci "$local_sha"
 done
 
 exit 0

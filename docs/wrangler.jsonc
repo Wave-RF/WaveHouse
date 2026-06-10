@@ -3,14 +3,18 @@
   // and the worker in worker/index.ts (using cloudflare-md-router) handles
   // Accept-header / user-agent routing before falling through to ASSETS.
   //
-  // Deploy is a tail step of the CI job (.github/workflows/ci.yml), NOT
-  // Cloudflare's Workers Builds: the build renders Mermaid diagrams via
-  // headless Chromium (rehype-mermaid) at build time, which the Workers
-  // Builds image can't provide (no browser, and no root to apt-install one).
-  // `make ci` already builds the site (where Chromium is available), so the
-  // deploy reuses that docs/dist/ and only runs once the whole pipeline is
-  // green — `wrangler deploy` on pushes to `main` (production → wavehouse.dev),
-  // `wrangler versions upload` on PRs (a per-version preview URL of the form
+  // Deploys run as dedicated jobs of the CI workflow (.github/workflows/
+  // ci.yml), NOT Cloudflare's Workers Builds: the build renders Mermaid
+  // diagrams via headless Chromium (rehype-mermaid) at build time, which the
+  // Workers Builds image can't provide (no browser, and no root to
+  // apt-install one). CI's build job uploads docs/dist/ as an artifact; the
+  // deploy jobs consume it from a checkout of trusted `main` — wrangler, the
+  // worker source, and this config never come from a PR tree (#305), so PR
+  // changes to worker/ or this file take effect on merge, not in previews.
+  // `docs-deploy` runs `wrangler deploy` on pushes to `main` once the whole
+  // pipeline is green (production → wavehouse.dev); `docs-preview` runs
+  // `wrangler versions upload` on PRs right after the build (a per-version
+  // preview URL of the form
   // `<version-prefix>-wavehouse-docs.wave-rf.workers.dev`, posted on the PR).
   // Needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID repo secrets, and
   // Workers Builds must stay disconnected from this Worker (else it
