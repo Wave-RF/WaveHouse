@@ -127,7 +127,10 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	scope := ""
 	safeTableName := query.SafeEncodeNATS(table)
 	// A structured query reads one table, so it depends on a single namespace.
-	deps := []cache.Namespace{{Table: safeTableName, Scope: scope}}
+	// Encode the scope the way the ingest worker does (worker.go handleSuccess) so
+	// the read and invalidation sides build identical namespace keys once scope is
+	// implemented; SafeEncodeNATS("") is "", so this is a no-op while scope is empty.
+	deps := []cache.Namespace{{Table: safeTableName, Scope: query.SafeEncodeNATS(scope)}}
 
 	// Try cache.
 	if h.Cache != nil {
