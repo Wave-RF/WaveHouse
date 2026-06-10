@@ -102,6 +102,11 @@ outputs:
 runs:
   using: composite
   steps:
+    # Key version (v2): bumped when the cache's expected CONTENTS change
+    # shape — v2 added the go toolchain itself (~/go/pkg/mod/golang.org/
+    # toolchain, see the GOTOOLCHAIN note below). Saves are gated on an
+    # exact-key miss, so without a bump the pre-change entry would
+    # exact-hit forever and the new content would never be saved.
     - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.go == 'true' }}
       id: gobuild-cache
@@ -109,12 +114,16 @@ runs:
         path: |
           ~/go/pkg/mod
           ~/.cache/go-build
-        key: gobuild-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.sum') }}
+        key: gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.sum') }}
         # Same-suffix prefix first (this job's flavor across go.sum bumps),
         # then the bare prefix as a cold-start fallback — it matches any
         # other job's suffixed entry, which still carries the shared module
-        # cache even if its build objects don't apply.
+        # cache even if its build objects don't apply. The unversioned (v1)
+        # prefixes are transitional warm-start fallbacks; drop them once a
+        # v2 entry has been saved on main.
         restore-keys: |
+          gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
+          gobuild-v2-${{ runner.os }}-go-
           gobuild-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
           gobuild-${{ runner.os }}-go-
 
@@ -129,12 +138,21 @@ runs:
         restore-keys: |
           golangci-${{ runner.os }}-
 
-    # `cache: false` — Go cache is managed explicitly above.
-    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+    # No actions/setup-go: it spends ~9s/job downloading + extracting a
+    # toolchain the runner can already provide. The image's preinstalled
+    # `go` + GOTOOLCHAIN=auto (the Go ≥1.21 default) resolve go.mod's
+    # pinned version exactly — and the auto-fetched toolchain lands in
+    # ~/go/pkg/mod/golang.org/toolchain, i.e. inside the module cache
+    # restored above, so warm runs download nothing. A cold cache (first
+    # run after a key rotation, when the image go is older than go.mod's
+    # pin) pays a one-time toolchain fetch from proxy.golang.org here —
+    # this step makes that cost visible and the save below captures it.
+    # Trade-off: setup-go's inline problem matchers (PR-file annotations
+    # on compile errors) are gone; the log output is unchanged.
+    - name: Verify Go resolves go.mod's toolchain
       if: ${{ inputs.go == 'true' }}
-      with:
-        go-version-file: go.mod
-        cache: false
+      shell: bash
+      run: go version
 
     # pnpm must install before its cache restore so the next step can
     # ask pnpm for the actual store path.
