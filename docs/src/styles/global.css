@@ -595,7 +595,12 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
   font-weight: 650;
   letter-spacing: -0.025em;
   padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--wh-border);
+  /* Section rule, but fading out to the right — the old full-width
+     border-bottom slammed into the content edge and boxed every section;
+     the fade keeps the scannability without the grid-paper feel. */
+  border-bottom: 0;
+  background: linear-gradient(90deg, var(--wh-border-strong), transparent 82%)
+    bottom left / 100% 1px no-repeat;
 }
 .sl-markdown-content h3 {
   margin-top: 2.5rem;
@@ -960,6 +965,13 @@ site-search dialog::backdrop {
   background: color-mix(in oklab, var(--wh-bg) 55%, transparent);
   backdrop-filter: blur(8px) saturate(120%);
   -webkit-backdrop-filter: blur(8px) saturate(120%);
+}
+/* The results list scrolls inside .dialog-frame — the stock chunky UA
+   scrollbar ran hard against the dialog's rounded corner. */
+site-search dialog,
+site-search .dialog-frame {
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
 }
 /* The input: code-surface + square radius to match the header trigger (the
    stock pill was the lone fully-round control on the site). Pagefind paints

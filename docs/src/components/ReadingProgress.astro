@@ -64,14 +64,27 @@
     top: var(--sl-nav-height);
     left: 0;
     right: 0;
-    height: 2.5px;
+    height: 2px;
     z-index: 9; /* under the header (--sl-z-index-navbar: 10), above content */
     pointer-events: none;
   }
+  /* Span only the content column: from the sidebar's right edge once the
+     sidebar exists, and not at all once the right-rail TOC takes over the
+     where-am-I job (a line crossing the sidebar read as misaligned chrome). */
+  @media (min-width: 50rem) {
+    .wh-read-progress {
+      left: var(--sl-sidebar-width);
+    }
+  }
+  @media (min-width: 72rem) {
+    .wh-read-progress {
+      display: none;
+    }
+  }
   .wh-read-progress__fill {
     height: 100%;
-    background: linear-gradient(90deg, var(--wh-accent), var(--wh-accent-hi));
-    box-shadow: 0 0 6px var(--wh-accent-glow);
+    background: var(--wh-accent);
+    opacity: 0.75;
     transform: scaleX(0);
     transform-origin: left;
     /* smooths the coarse scroll events of mobile momentum scrolling */
