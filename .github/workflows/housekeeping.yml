@@ -3,16 +3,17 @@ name: PR housekeeping
 # Runs once per PR open/push to:
 #   1. Apply path-based labels via actions/labeler.
 #   2. Validate PR title against Conventional Commits.
-#   3. Request review from the non-author admin on first open or
-#      draft → ready.
+#
+# Reviewer assignment is NOT here — GitHub does it natively: the ruleset's
+# `required_reviewers` rule requests the @Wave-RF/wavehouse-admins team, and
+# the team's code-review assignment auto-assigns + load-balances a member.
 #
 # Uses `pull_request_target` so fork PRs get labels + sticky comments
 # with base-repo permissions (a `pull_request` trigger lacks the
 # write scopes on forks).
 #
-# Required by branch protection. Fails only on a bad PR title;
-# labeling + reviewer-assign failures are non-fatal so a flaky API
-# call can't block merge.
+# Required by branch protection. Fails only on a bad PR title; labeling
+# failures are non-fatal so a flaky API call can't block merge.
 
 on:
   pull_request_target:
@@ -36,18 +37,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout main (board-config + composite-action source)
-        # Explicit ref so the local composite action and board-config.env
+      - name: Checkout main (trusted lint-pr-title.sh + labeler config source)
+        # Explicit ref so scripts/lint-pr-title.sh and .github/labeler.yml
         # resolve from the default branch, not the PR head.
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Load board config
-        # ADMINS (comma-separated) used by the reviewer-assign step.
-        run: grep -E '^[A-Z_][A-Z0-9_]*=' .github/board-config.env >> $GITHUB_ENV
 
       # `sync-labels: true` removes labels when their matching files
       # leave the diff, so labels track the current change set.
@@ -149,65 +146,6 @@ jobs:
             gh api -X DELETE "repos/$REPO/issues/comments/$EXISTING"
             echo "Removed stale pr-title-lint comment ($EXISTING)"
           fi
-
-      # Fires only on first open or draft → ready, NOT on every
-      # synchronize: with `dismiss_stale_reviews_on_push` enabled,
-      # re-requesting on every push would re-spam the reviewer before
-      # the author hit "re-request review" after a CHANGES_REQUESTED.
-      # Drafts are skipped. Dependabot PRs are included — they now go
-      # through normal admin review (the dependabot-automerge workflow
-      # was removed), so the non-author admin gets requested like any PR.
-      - name: Request review from non-author admin
-        if: |
-          (github.event.action == 'opened' || github.event.action == 'ready_for_review')
-          && github.event.pull_request.draft == false
-        env:
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        # Picks the non-author admin:
-        #   - author is an admin → the *other* admin
-        #   - otherwise → admin[PR_NUM % len(admins)] so review load
-        #     spreads deterministically over time
-        id: pick-reviewer
-        run: |
-          set -euo pipefail
-          IFS=',' read -ra admin_list <<< "$ADMINS"
-
-          picked=""
-          is_admin=false
-          for admin in "${admin_list[@]}"; do
-            [ "$admin" = "$PR_AUTHOR" ] && is_admin=true
-          done
-
-          if [ "$is_admin" = "true" ]; then
-            for admin in "${admin_list[@]}"; do
-              if [ "$admin" != "$PR_AUTHOR" ]; then
-                picked="$admin"
-                break
-              fi
-            done
-          else
-            idx=$(( PR_NUMBER % ${#admin_list[@]} ))
-            picked="${admin_list[$idx]}"
-          fi
-
-          echo "reviewer=$picked" >> "$GITHUB_OUTPUT"
-          echo "Picked reviewer: $picked (author=$PR_AUTHOR, is_admin=$is_admin)"
-
-      - name: Assign + request review (non-fatal)
-        # A flaky review-request API call must not mask the title-lint
-        # exit code that drives the required check.
-        if: |
-          (github.event.action == 'opened' || github.event.action == 'ready_for_review')
-          && github.event.pull_request.draft == false
-          && steps.pick-reviewer.outputs.reviewer != ''
-        continue-on-error: true
-        uses: ./.github/actions/assign-and-request-review
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repo: ${{ github.repository }}
-          pr-number: ${{ github.event.pull_request.number }}
-          reviewers: ${{ steps.pick-reviewer.outputs.reviewer }}
 
       - name: Fail the check if title was invalid
         # Final step owns the exit code so the check status reflects
