@@ -92,10 +92,10 @@ A browser `EventSource` can't set request headers, so the JWT can be passed as a
 ## Header and auth forwarding
 
 - **`Authorization`** — forward verbatim. WaveHouse validates the JWT and resolves the role from it.
-- **`X-Forwarded-For` / `X-Forwarded-Proto` / `Host`** — set these so logs and the real-client-IP middleware see the originating client, not the proxy.
+- **`X-Forwarded-For` / `X-Forwarded-Proto` / `Host`** — set these for your own logs and any upstream that reads them. WaveHouse does not currently derive a client IP from `X-Forwarded-For` (see the caution below); forwarding it is good hygiene and is what the trusted-proxy client-IP work ([#333](https://github.com/Wave-RF/WaveHouse/issues/333)) will consume.
 
-:::caution[Don't expose `:8080` directly — `X-Forwarded-For` is trusted]
-WaveHouse honors `True-Client-IP`, `X-Real-IP`, and `X-Forwarded-For` (in that precedence — `True-Client-IP` wins) to recover the client IP. That is correct **only** behind a trusted proxy that overwrites those headers. If `:8080` is reachable directly from untrusted clients, a caller can forge any of them — a forged `True-Client-IP` overrides the other two — and spoof their source IP in your logs and any per-IP logic upstream. Bind WaveHouse to a private interface or firewall `:8080` so the proxy is the only path in, and have the proxy set/overwrite all three (not just `X-Forwarded-For`).
+:::caution[Don't expose `:8080` directly]
+WaveHouse does **not** derive a client IP from forwarded headers — it does no per-IP logic (rate limiting and IP allow/deny are the proxy's job) and does not trust `X-Forwarded-For` / `X-Real-IP` / `True-Client-IP` to rewrite the connection's source address. So a forged forwarded header has no effect on WaveHouse, and `r.RemoteAddr` (what OpenTelemetry records as the peer) is the honest immediate peer — your proxy, when one is in front. Still, don't expose `:8080` to untrusted clients: bind WaveHouse to a private interface or firewall the port so the proxy is the only path in. Capturing the real client IP in WaveHouse's own traces and logs — trusted-proxy-aware, so it can't be spoofed — is tracked in [#333](https://github.com/Wave-RF/WaveHouse/issues/333).
 :::
 
 - **CORS** — WaveHouse applies its own CORS from `server.cors_allowed_origins`. Let one layer own CORS: either pass it through the proxy untouched (recommended), or strip it from WaveHouse and do it at the proxy — not both, or browsers see duplicate `Access-Control-Allow-Origin` headers and reject the response.
