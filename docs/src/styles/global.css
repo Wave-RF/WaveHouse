@@ -1379,7 +1379,7 @@ starlight-tabs .tab [role="tab"]:not([aria-selected="true"]):hover {
    DOCKS onto it (flush bottom edge, shared corner) so the pair reads as one
    unit instead of a floating control above an unrelated box. */
 .sl-markdown-content
-  starlight-tabs:has(> section[role="tabpanel"] > .expressive-code:first-child)
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
   .tablist-wrapper
   ul[role="tablist"] {
   margin-bottom: 0;
@@ -1390,16 +1390,23 @@ starlight-tabs .tab [role="tab"]:not([aria-selected="true"]):hover {
   z-index: 1;
 }
 .sl-markdown-content
-  starlight-tabs:has(> section[role="tabpanel"] > .expressive-code:first-child)
-  > section[role="tabpanel"] {
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  > [role="tabpanel"] {
   margin-top: 0;
 }
 .sl-markdown-content
-  starlight-tabs:has(> section[role="tabpanel"] > .expressive-code:first-child)
-  > section[role="tabpanel"]
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  > [role="tabpanel"]
   > .expressive-code:first-child
   :is(.frame, figcaption.header, pre) {
   border-top-left-radius: 0;
+}
+/* Inside a docked group the active tab already names the block (YAML / JSON
+   / a package manager) — the corner badge would just echo it. */
+.sl-markdown-content
+  starlight-tabs:has(> [role="tabpanel"] > .expressive-code:first-child)
+  .frame[data-wh-lang]::after {
+  content: none;
 }
 
 /* ---------- Small chrome the design system hadn't reached ---------- */
