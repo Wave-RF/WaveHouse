@@ -309,8 +309,18 @@ if (import.meta.env.DEV && !heroTitle) {
     gap: 1.5rem;
     align-items: flex-start;
   }
+  /* Entrance fades + rises, but the opacity floor is a small NON-ZERO value,
+     never 0. Chrome ignores an element painted at opacity:0 as an LCP
+     candidate, and the hero is the only above-the-fold content — so a
+     fade-from-0 disqualified its h1/tagline/panel and pushed LCP onto a tiny
+     late element (a poor LCP, plus intermittent "NO_LCP" in PageSpeed on mobile
+     when the live-demo number it landed on hadn't loaded). 0.01 is visually
+     indistinguishable from 0 but keeps the element LCP-eligible from first
+     paint; the translate carries the motion. Verified with Lighthouse mobile:
+     LCP lands on the hero tagline, not the late live-demo number. The
+     reduced-motion / replay-guard blocks below force opacity:1 (no fade). */
   .wh-hero__text > [data-stagger] {
-    opacity: 0;
+    opacity: 0.01;
     transform: translateY(8px);
     animation: wh-fade-up 0.6s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
     animation-delay: calc(0.12s * var(--stagger, 0) + 0.05s);
@@ -471,7 +481,7 @@ if (import.meta.env.DEV && !heroTitle) {
     position: relative;
     display: flex;
     min-width: 0; /* flex child default min-width:auto would re-floor the panel at min-content */
-    opacity: 0;
+    opacity: 0.01;
     transform: translateY(8px);
     animation: wh-fade-up 0.8s 0.3s cubic-bezier(0.21, 0.61, 0.35, 1) forwards;
   }

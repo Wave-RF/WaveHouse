@@ -177,11 +177,14 @@ func TestFindGapSequence(t *testing.T) {
 		return &jetstream.RawStreamMsg{Time: now.Add(-20 * time.Minute)}, nil
 	}
 	// boundary at seq 60: seqs 1..60 are before cutoff, 61..100 are within window.
+	// Minute (not second) margins: the impl recomputes cutoff at call time, so
+	// parallel-subtest scheduling delay eats into the margin — 1s margins flaked
+	// on loaded 2-core CI runners (#283).
 	boundaryAt60 := func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
 		if seq <= 60 {
-			return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Duration(61-seq) * time.Second)}, nil
+			return &jetstream.RawStreamMsg{Time: cutoff.Add(-time.Duration(61-seq) * time.Minute)}, nil
 		}
-		return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Duration(int64(seq-60)) * time.Second)}, nil //nolint:gosec // test-only, values are small
+		return &jetstream.RawStreamMsg{Time: cutoff.Add(time.Duration(seq-60) * time.Minute)}, nil //nolint:gosec // test-only, values are small
 	}
 	// seqs 40..60 missing (already purged), <40 are old, >60 are within window.
 	sparseSequences := func(_ context.Context, seq uint64, _ ...jetstream.GetMsgOpt) (*jetstream.RawStreamMsg, error) {
@@ -266,10 +269,7 @@ func TestFindGapSequence(t *testing.T) {
 			seq, err := s.findGapSequence(context.Background(), ms)
 
 			if tt.wantErrSub != "" {
-				assert.Error(t, err)
-				if err != nil {
-					assert.Contains(t, err.Error(), tt.wantErrSub)
-				}
+				assert.ErrorContains(t, err, tt.wantErrSub)
 				return
 			}
 			assert.NoError(t, err)
