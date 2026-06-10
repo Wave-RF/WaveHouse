@@ -61,7 +61,8 @@ Turn raw inputs — dogfooding logs, the open-issue backlog, code TODOs, PR/issu
 
 1. `gh pr list --state open` + `gh issue list --state open`; cross-check against the board.
 2. Flag: open PRs with no tracking issue / stale (no update in N days) / out-of-date-with-main; issues with open PRs that should be linked; epic checkboxes whose issues closed (tick them); board items whose Status drifted from reality (closed issue not Done, etc.).
-3. Propose the reconciling edits (comments, board status, checkbox ticks). Don't mass-comment.
+3. **Reconcile MERGED PRs against open tracking issues.** For each PR merged since `last_sha` (`git log --oneline <last_sha>..origin/main`, map commit→PR), check whether it completes a checklist item / precondition in an issue that is **still open** (#149, #268, the epics #194/#228/#294/#326/#327, …) and tick that box (SAFE tier). **Match by content, not `Closes #`:** many PRs — especially `ci:`/`docs:`/`chore:` — finish a tracked deliverable without a closing reference and without closing the issue, so there is *no* closed-issue or reference-graph signal (e.g. #308 provenance → #268's box; #283 runner-migration → #149 L25). Never dismiss the CI/docs/chore commits wholesale — they are often the tracked deliverable. Leave *partial-progress* boxes unticked (a single NO_LCP fix doesn't complete #248's "Lighthouse pass").
+4. Propose the reconciling edits (comments, board status, checkbox ticks). Don't mass-comment.
 
 ## Mode: all (the routine)
 
