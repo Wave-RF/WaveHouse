@@ -375,6 +375,17 @@ if (import.meta.env.DEV && !heroTitle) {
     gap: 0.75rem;
     margin-top: 0.5rem;
   }
+  /* Stacked CTAs on small phones hug their labels at ragged widths — go
+     full-width and centered so the pair reads as a deliberate stack. */
+  @media (max-width: 30rem) {
+    .wh-hero__actions {
+      width: 100%;
+    }
+    .wh-hero__action {
+      flex: 1 1 100%;
+      justify-content: center;
+    }
+  }
   .wh-hero__action {
     display: inline-flex;
     align-items: center;

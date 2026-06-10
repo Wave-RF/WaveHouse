@@ -230,7 +230,9 @@
   --sl-color-black: var(--wh-bg);
 
   --sl-color-bg: var(--wh-bg);
-  --sl-color-bg-nav: color-mix(in oklab, var(--wh-bg) 78%, transparent);
+  /* 88%, was 78% — scrolled body text stayed legible through the glass and
+     collided visually with the search trigger (fresh-eyes audit). */
+  --sl-color-bg-nav: color-mix(in oklab, var(--wh-bg) 88%, transparent);
   --sl-color-bg-sidebar: var(--wh-bg);
   --sl-color-bg-inline-code: var(--wh-code-bg);
   --sl-color-hairline: var(--wh-border);
@@ -973,6 +975,13 @@ site-search .dialog-frame {
   scrollbar-width: thin;
   scrollbar-color: var(--wh-border-strong) transparent;
 }
+/* Bottom scrim on the scroller: rows used to hard-clip mid-glyph against the
+   dialog's rounded bottom edge; the fade makes the cut read as intentional.
+   Bottom-only, so the pinned input at the top of the frame is unaffected. */
+site-search .dialog-frame {
+  mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
+}
 /* The input: code-surface + square radius to match the header trigger (the
    stock pill was the lone fully-round control on the site). Pagefind paints
    its own magnifier via a CSS mask on ::before. */
@@ -1127,6 +1136,9 @@ starlight-tabs .tablist-wrapper ul[role="tablist"] {
 }
 starlight-tabs .tab > [role="tab"] {
   border: 0;
+  /* Starlight's stock underline is a `box-shadow: 0 2px` on every tab —
+     with the border gone it survives as a floating arc under each pill. */
+  box-shadow: none;
   border-radius: calc(var(--radius-sm) - 2px);
   padding: 0.35rem 0.9rem;
   line-height: 1.4;
@@ -1191,8 +1203,14 @@ starlight-tabs .tab [role="tab"]:not([aria-selected="true"]):hover {
   scrollbar-color: var(--wh-border-strong) transparent;
 }
 
-/* Mobile menu button — stock inverts to a white circle when open, the
-   harshest element on a dark screen. Keep it on the surface scale. */
+/* Mobile menu button — stock is a heavy filled circle next to the bordered
+   search trigger (mismatched control family), inverting to white when open.
+   Put both states on the surface scale so the two header controls match. */
+starlight-menu-button button {
+  background-color: var(--wh-surface);
+  color: var(--wh-ink-muted);
+  box-shadow: 0 0 0 1px var(--wh-border);
+}
 starlight-menu-button button[aria-expanded="true"] {
   background-color: var(--wh-surface-overlay);
   color: var(--wh-ink);
