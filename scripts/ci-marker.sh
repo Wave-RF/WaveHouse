@@ -19,6 +19,7 @@ usage() {
 tree_of_working_dir() {
   local tmp_idx
   tmp_idx=$(mktemp); rm -f "$tmp_idx"
+  # shellcheck disable=SC2064  # expand NOW on purpose: $tmp_idx is function-local, gone at EXIT-trap time
   trap "rm -f '$tmp_idx'" EXIT
   export GIT_INDEX_FILE="$tmp_idx"
   git read-tree HEAD

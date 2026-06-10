@@ -1,33 +1,23 @@
 name: CI
 
 # Job DAG over the same Makefile targets `make ci` runs locally — local
-# `make ci` stays the dev mirror; CI just spreads the phases across free
-# 4-core public-repo runners instead of one process. The graph is shaped
-# for wall-clock: the e2e job — always the long pole — has NO `needs` at
-# all (it classifies the change set itself, builds its own inputs, runs
-# the suite sharded, and absorbs the merged-coverage gate at its tail);
-# everything that consumes a cross-job artifact POLLS for it instead of
-# adding a `needs` edge, so setup work always overlaps producer work:
+# `make ci` stays the dev mirror; CI spreads the phases across free
+# 4-core public-repo runners and shapes the graph for wall-clock.
 #
-#   e2e (classify → build → sharded suite → cov gate) ◁poll─ fragments ─┐
-#   changes ─┬→ unit ──────────(fragment)─┘                             │
-#            ├→ integration ───(fragment)─┘                             ├→ CI (aggregator,
-#            ├→ docs-build ──(docs-dist)─▷poll─ docs-preview (PRs) ─────┤   cross-checks the
-#            └────────────────────────────────────────────────────────── ┤   two classifiers)
-#   changes + lint + docs-build + suites ──→ docs-deploy (main)         │
-#   title (PRs) · lint ──────────────────────────────────────────────────┘
+# READ FIRST: .github/workflows/README.md — the architecture doc. It has
+# the DAG diagram, the design invariants (sole required check, the
+# poll-not-`needs` pattern, the dual classifier + drift guard, cache key
+# policy, e2e sharding, trust domains), and the how-to-add-a-job recipe.
+# Comments in this file explain only what's local to a step.
 #
-# The aggregator job is NAMED "CI" — it is the sole check the
-# `main branch protection` ruleset needs (skipped jobs pass, so
-# path-filtered/event-filtered jobs never orphan the required check, and
-# the ruleset never needs re-touching when jobs are added or renamed).
-#
-# Cross-job artifacts (docs dist, coverage fragments) are workflow
-# artifacts — free on public repos and outside the org's private-repo
-# storage pool. The warm Go build cache is shared per-job via setup-env
-# (go test recompiles per package, so a prebuilt binary can't be handed
-# to the test jobs; e2e compiles its own cover binary for the same
-# reason — waiting on a builder job costs more than compiling warm).
+# The short version:
+#   - e2e (the long pole) has NO `needs`: it classifies the change set
+#     itself, builds its own inputs, runs the suite sharded, and applies
+#     the merged coverage gate at its tail.
+#   - artifact consumers POLL (scripts/ci/wait-artifact.sh) instead of
+#     `needs`-waiting, so setup always overlaps producer work.
+#   - the aggregator job NAMED "CI" is the ruleset's sole required check
+#     (skipped jobs pass; it also cross-checks the two classifiers).
 
 on:
   push:
@@ -56,7 +46,7 @@ concurrency:
 
 jobs:
   # ── Change detection ───────────────────────────────────────────────
-  # Classifies the changed files (scripts/ci-classify-changes.sh — the
+  # Classifies the changed files (scripts/ci/classify-changes.sh — the
   # single source of truth for the code/docs outputs and their fail-closed
   # rules) so the unit/integration/docs jobs can skip work. The e2e job
   # does NOT wait on this job — it runs the same script itself so it can
@@ -84,7 +74,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_SHA: ${{ github.sha }}
-        run: scripts/ci-classify-changes.sh >> "$GITHUB_OUTPUT"
+        run: scripts/ci/classify-changes.sh >> "$GITHUB_OUTPUT"
 
   # ── PR title (Conventional Commits) ────────────────────────────────
   # The blocking half of the title gate (housekeeping.yml keeps the sticky
@@ -146,31 +136,12 @@ jobs:
           go-cache-suffix: "-lint"
           golangci: "true"
           astro: "true" # check-docs (astro check) reuses the content cache
-      # tidy + gofumpt + golangci + vulncheck + Biome + markdownlint +
-      # misspell + astro check + tsc. No Docker, no browser.
+      # tidy + gofumpt + golangci + vulncheck + shellcheck + actionlint +
+      # Biome + markdownlint + misspell + astro check + tsc. No Docker,
+      # no browser. (Cache saves are automatic — setup-env's nested
+      # actions/cache steps save at job end on an exact-key miss.)
       - name: Run static checks
         run: make verify
-      # Saves run on every branch, gated on `*-cache-hit != 'true'` so a
-      # same-key re-push is a no-op. PRs inherit main's cache scope, so a
-      # main-push save warms every PR. Keys come from setup-env outputs so
-      # save and restore can't drift. (Same pattern in every job below;
-      # the astro/pnpm/playwright saves belong to the docs-build job.)
-      - name: Save Go module + build cache
-        if: steps.setup.outputs.gobuild-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ steps.setup.outputs.gobuild-cache-key }}
-      - name: Save golangci-lint cache
-        if: steps.setup.outputs.golangci-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            .bin
-            ~/.cache/golangci-lint
-          key: ${{ steps.setup.outputs.golangci-cache-key }}
 
   # ── Docs site build ────────────────────────────────────────────────
   # Astro site → docs-dist artifact, feeding the two deploy jobs. Pure
@@ -216,34 +187,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           overwrite: true # re-runs of this job re-upload
-      # The pnpm/playwright/astro cache saves live here (not in lint, which
-      # also restores them) — all three are keyed on the lockfile, and any
-      # lockfile change flips changes.docs=true, so this job always runs
-      # when the keys rotate. Gated on `*-cache-hit != 'true'` so a
-      # same-key re-push is a no-op; PRs inherit main's cache scope.
-      # Drop store entries unreferenced by any workspace project before
-      # save, so the cache doesn't grow unboundedly as deps churn.
+      # On a lockfile change (= pnpm cache-key rotation; lockfile changes
+      # always flip changes.docs=true, so this job runs), drop store
+      # entries unreferenced by any workspace project before the post-job
+      # save captures the store — else the cache grows unboundedly as
+      # deps churn. Runs after the artifact upload, so docs-preview's
+      # poll never waits on it.
       - name: Prune pnpm store before save
         if: steps.setup.outputs.pnpm-cache-hit != 'true'
         run: pnpm store prune
-      - name: Save pnpm store cache
-        if: steps.setup.outputs.pnpm-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: ${{ steps.setup.outputs.pnpm-store-path }}
-          key: ${{ steps.setup.outputs.pnpm-cache-key }}
-      - name: Save Playwright browser cache
-        if: steps.setup.outputs.playwright-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ steps.setup.outputs.playwright-cache-key }}
-      - name: Save Astro content cache
-        if: steps.setup.outputs.astro-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: docs/.astro
-          key: ${{ steps.setup.outputs.astro-cache-key }}
 
   # ── Test suites ────────────────────────────────────────────────────
   # COV_DEFER=1: collect coverage, skip the per-suite render + gate — the
@@ -273,14 +225,6 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           overwrite: true
-      - name: Save Go module + build cache
-        if: steps.setup.outputs.gobuild-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ steps.setup.outputs.gobuild-cache-key }}
 
   integration:
     name: Integration tests
@@ -313,14 +257,6 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           overwrite: true
-      - name: Save Go module + build cache
-        if: steps.setup.outputs.gobuild-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ steps.setup.outputs.gobuild-cache-key }}
 
   # The run's long pole — every serial second here is a second on the PR's
   # wall-clock, so it cuts every dependency edge it can:
@@ -362,7 +298,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_SHA: ${{ github.sha }}
-        run: scripts/ci-classify-changes.sh >> "$GITHUB_OUTPUT"
+        run: scripts/ci/classify-changes.sh >> "$GITHUB_OUTPUT"
       # Background pull overlaps the ~35s of setup + build below, so the
       # orchestrators find the image already local (a concurrent pull of
       # the same tag is safe — dockerd dedupes layer downloads). Image tag
@@ -387,54 +323,22 @@ jobs:
       - name: Build SDK dist + cover binary, run E2E suite
         if: steps.detect.outputs.code == 'true'
         run: make -j "$(nproc)" test-e2e COV_DEFER=1 E2E_SHARDED=1 E2E_KEEP_CH=1
-      # Saved before the coverage tail so a failed sibling suite (which
-      # fails the wait step below) can't cost next run the warm build cache.
-      # No-op on the common exact-key hit.
-      - name: Save Go module + build cache
-        if: steps.detect.outputs.code == 'true' && steps.setup.outputs.gobuild-cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ steps.setup.outputs.gobuild-cache-key }}
       # ── Consolidated coverage report + gates ──────────────────────────
       # The local tmp/coverage already holds this job's e2e + ts-e2e data;
-      # the unit/integration fragments arrive as artifacts. They're almost
-      # always uploaded long before the suite above ends — the poll covers
-      # an unusually slow sibling, and fails fast when a sibling suite
-      # already failed OR skipped (skipped here = the changes job
+      # the unit/integration fragments arrive as artifacts, almost always
+      # uploaded long before the suite above ends. The wait fails fast
+      # when a sibling suite failed OR skipped (skipped = the changes job
       # classified docs-only while this job classified code — the drift
-      # the aggregator also guards; no point waiting out the timeout).
-      # Job names in the --jq filter must match the `name:` fields of the
-      # unit/integration jobs above.
+      # the aggregator also guards). Producer names must match the jobs'
+      # `name:` fields above.
       - name: Wait for sibling coverage fragments
         if: steps.detect.outputs.code == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          deadline=$(( $(date +%s) + 600 ))
-          while :; do
-            names="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-              --jq '[.artifacts[].name]')"
-            if jq -e 'index("coverage-unit") and index("coverage-integration")' >/dev/null <<<"$names"; then
-              echo "Both sibling coverage fragments are available."
-              break
-            fi
-            bad="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name == "Unit tests" or .name == "Integration tests")
-                     | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "skipped") | .name] | join(", ")')"
-            if [ -n "$bad" ]; then
-              echo "::error::Sibling suite(s) failed or skipped before uploading coverage ($bad) — cannot run the merged gate."
-              exit 1
-            fi
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::Timed out waiting for the sibling coverage fragments."
-              exit 1
-            fi
-            echo "Fragments not ready yet ($names) — retrying in 5s."
-            sleep 5
-          done
+        run: >-
+          scripts/ci/wait-artifact.sh
+          --artifacts coverage-unit,coverage-integration
+          --producers "Unit tests,Integration tests"
       - name: Download sibling coverage fragments
         if: steps.detect.outputs.code == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -516,12 +420,14 @@ jobs:
           go: "false"
       - name: Install workspace deps (trusted lockfile)
         run: make pnpm-install
-      # Same poll pattern as e2e's coverage tail: the docs-build job is
-      # usually still building while the setup above ran; wait for its
-      # artifact, failing fast if docs-build failed/was cancelled/skipped
-      # (the aggregator is red from docs-build itself in those cases —
-      # this just stops the wait). Job name in the --jq filter must match
-      # docs-build's `name:` field.
+      # Same poll pattern as e2e's coverage tail, but INLINE rather than
+      # scripts/ci/wait-artifact.sh: this job executes only files resolved
+      # from trusted main (README invariant 6), and inline YAML is the
+      # reviewed surface — also sidesteps the script-not-on-main-yet
+      # transition. Waits for docs-build's artifact, failing fast if that
+      # job failed/was cancelled/skipped (the aggregator is red from
+      # docs-build itself in those cases — this just stops the wait). Job
+      # name in the --jq filter must match docs-build's `name:` field.
       - name: Wait for docs site artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -599,12 +505,17 @@ jobs:
           fi
 
       # One sticky comment, updated in place (matched by the marker) so
-      # re-pushes don't spam the PR. Runs whether the upload succeeded or
-      # failed — `!cancelled()` + an outcome check, since a bare `if:` is
-      # implicitly `success()` and would skip after the upload step's exit 1 —
-      # so a failed deploy is noted rather than leaving a stale "live" comment.
-      # Skipped only when no upload was attempted (outcome == 'skipped'). gh +
-      # GITHUB_TOKEN, same pattern as the triage/housekeeping workflows.
+      # re-pushes don't spam the PR — built by scripts/ci/docs-preview-comment.sh,
+      # which resolves from the trusted MAIN checkout like everything else in
+      # this job. Runs whether the upload succeeded or failed — `!cancelled()`
+      # + an outcome check, since a bare `if:` is implicitly `success()` and
+      # would skip after the upload step's exit 1 — so a failed deploy is
+      # noted rather than leaving a stale "live" comment. Skipped only when
+      # no upload was attempted (outcome == 'skipped').
+      #
+      # Transition guard: until this PR merges, main doesn't have the script
+      # yet — skip with a notice instead of failing (the preview URL is still
+      # in the step summary). Drop the guard once it's on main.
       - name: Comment docs preview status
         if: ${{ !cancelled() && (steps.preview.outcome == 'success' || steps.preview.outcome == 'failure') }}
         continue-on-error: true
@@ -615,103 +526,11 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
           PREVIEW_OUTCOME: ${{ steps.preview.outcome }}
         run: |
-          marker='<!-- docs-preview-comment -->'
-          # Build a skimmable status comment (one labelled bullet per fact).
-          # Commit metadata — subject, author names/emails, and the commit's
-          # own-timezone timestamp (%cI) — is read from git, not the REST API,
-          # which normalizes commit dates to UTC and drops the zone. GitHub
-          # @-logins aren't in git, so author/committer logins come from one
-          # commits-API call (GitHub matches them by verified email), used only
-          # when the call succeeds, with a fallback that reads the login out of
-          # a github.com noreply address. The checkout above is main, so the
-          # PR head commit is fetched by SHA first. All user-controlled text
-          # (subject, names) is only ever a printf %s arg, never the format
-          # string, so a `%` can't act as a format directive.
-          git cat-file -e "${SHA}^{commit}" 2>/dev/null || git fetch --quiet origin "$SHA" 2>/dev/null || true
-          server="${GITHUB_SERVER_URL:-https://github.com}"
-          # @-link a person when a login is known, else show their plain name;
-          # login_from_email reads it out of [ID+]login@users.noreply.github.com.
-          gh_link() { if [ -n "$2" ]; then printf '[@%s](%s/%s)' "$2" "$server" "$2"; else printf '%s' "$1"; fi; }
-          login_from_email() { case "$1" in *@users.noreply.github.com) e="${1%@users.noreply.github.com}"; printf '%s' "${e#*+}";; esac; }
-
-          subject="$(git show -s --format=%s "$SHA" 2>/dev/null || true)"
-          [ -z "$subject" ] && subject='(commit subject unavailable)'
-          author_name="$(git show -s --format=%an "$SHA" 2>/dev/null || true)"
-          author_email="$(git show -s --format=%ae "$SHA" 2>/dev/null || true)"
-          committer_name="$(git show -s --format=%cn "$SHA" 2>/dev/null || true)"
-          committer_email="$(git show -s --format=%ce "$SHA" 2>/dev/null || true)"
-
-          # Logins, best-effort: one commits-API call (TSV: author, committer),
-          # used only on success so a transient API error can't leak its body
-          # into the comment; then a noreply-email fallback.
-          author_login=''; committer_login=''
-          if logins="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '[.author.login // "", .committer.login // ""] | @tsv' 2>/dev/null)"; then
-            author_login="$(printf '%s' "$logins" | cut -f1)"
-            committer_login="$(printf '%s' "$logins" | cut -f2)"
+          if [ ! -f scripts/ci/docs-preview-comment.sh ]; then
+            echo "::notice::scripts/ci/docs-preview-comment.sh is not on the default branch yet — skipping the sticky comment."
+            exit 0
           fi
-          [ -z "$author_login" ] && author_login="$(login_from_email "$author_email")"
-          [ -z "$committer_login" ] && committer_login="$(login_from_email "$committer_email")"
-
-          # Author(s): commit author, then Co-authored-by names, each @-linked
-          # when possible, de-duplicated by name.
-          authors="$(gh_link "$author_name" "$author_login")"
-          seen="|$author_name|"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            cname="$(printf '%s' "$line" | sed -E 's/ *<[^>]*> *$//; s/[[:space:]]+$//')"
-            cmail="$(printf '%s' "$line" | sed -nE 's/.*<([^>]*)>.*/\1/p')"
-            [ -z "$cname" ] && continue
-            case "$seen" in *"|$cname|"*) continue ;; esac
-            authors="$authors, $(gh_link "$cname" "$(login_from_email "$cmail")")"
-            seen="$seen$cname|"
-          done < <(git show -s --format=%B "$SHA" 2>/dev/null \
-            | grep -iE '^[[:space:]]*Co-authored-by:' | sed -E 's/^[^:]*:[[:space:]]*//')
-          [ -z "$author_name" ] && authors='(author unavailable)'
-
-          # A distinct human committer (someone else applied the patch); skip
-          # GitHub's web-flow bot and anyone already credited above.
-          if [ -n "$committer_name" ] && [ "$committer_name" != "$author_name" ] && [ "$committer_name" != "GitHub" ]; then
-            case "$seen" in
-              *"|$committer_name|"*) ;;
-              *) authors="$authors (committed by $(gh_link "$committer_name" "$committer_login"))" ;;
-            esac
-          fi
-
-          # Commit time in its own timezone: 2026-06-09T10:04:27-04:00 -> 2026-06-09 10:04 (UTC-04:00)
-          ciso="$(git show -s --format=%cI "$SHA" 2>/dev/null || true)"
-          committed='(unknown)'
-          if [ -n "$ciso" ]; then
-            day="${ciso%%T*}"; hm="${ciso#*T}"; hm="${hm:0:5}"
-            case "$ciso" in *Z|*+00:00) off='UTC' ;; *) off="UTC${ciso: -6}" ;; esac
-            committed="$day $hm ($off)"
-          fi
-          # Deploy time in the maintainer team's zone, DST-aware (EST/EDT); UTC
-          # if the runner lacks the zone. Distinct from the commit time — a
-          # re-run, or a push made long after authoring, makes them differ.
-          deployed="$(TZ='America/Detroit' date '+%Y-%m-%d %H:%M %Z')"
-          commit_url="$server/${GITHUB_REPOSITORY}/commit/${SHA}"
-
-          # Common bullets, built once (one labelled fact per line). `printf --`
-          # because the format starts with a list dash; user-controlled values
-          # are %s args here, and again in the final body printf below, so a `%`
-          # never reaches a format string.
-          bullets="$(printf -- '- **Commit** — [`%s`](%s): %s\n- **Author** — %s\n- **Committed** — %s' \
-            "${SHA:0:7}" "$commit_url" "$subject" "$authors" "$committed")"
-          # Headline + final time-label reflect how the upload actually went.
-          case "$PREVIEW_OUTCOME/${URL:+url}" in
-            success/url) headline="📚 **Docs preview is live** → $URL"; last="- **Deployed** — $deployed" ;;
-            success/)    headline="📚 **Docs preview** uploaded, but its URL could not be parsed from the wrangler output — see the run log."; last="- **Deployed** — $deployed" ;;
-            *)           headline="⚠️ **Docs preview failed to upload** (3 attempts) — any earlier preview is now stale. See the run log."; last="- **Upload failed** — $deployed" ;;
-          esac
-          body="$(printf '%s\n%s\n\n%s\n%s' "$marker" "$headline" "$bullets" "$last")"
-          cid="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-            --jq 'map(select(.body | startswith("<!-- docs-preview-comment -->"))) | .[0].id // empty' | head -1 || true)"
-          if [ -n "$cid" ]; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${cid}" -f body="$body" >/dev/null
-          else
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body" >/dev/null
-          fi
-          echo "Updated docs-preview comment on PR #${PR} (outcome=${PREVIEW_OUTCOME}, url=${URL:-none})"
+          scripts/ci/docs-preview-comment.sh
 
   # Production: push (or manual dispatch) on main → publish the active
   # version served on wavehouse.dev. Gated on the full pipeline (lint +
@@ -813,3 +632,39 @@ jobs:
             exit 1
           fi
           echo "All jobs succeeded (or were intentionally skipped)."
+
+  # ── Wall-clock summary (non-gating) ────────────────────────────────
+  # Writes a per-job timing table to the run's Summary page so "where did
+  # the time go" never needs per-job archaeology. Deliberately NOT in the
+  # aggregator: it needs a checkout + an API call, and the aggregator is
+  # the critical path's last hop. continue-on-error so a hiccup here can
+  # never red a run the aggregator passed.
+  timing:
+    name: Timing summary
+    needs:
+      [
+        changes,
+        title,
+        lint,
+        docs-build,
+        unit,
+        integration,
+        e2e,
+        docs-preview,
+        docs-deploy,
+      ]
+    if: ${{ !cancelled() }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # reads the run's own job timings
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Write wall-clock table
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/ci/timing-summary.sh >> "$GITHUB_STEP_SUMMARY"

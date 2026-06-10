@@ -1,113 +1,86 @@
-# Restores caches + sets up Go/pnpm/Node for the CI jobs. Composite
-# actions can't self-checkout, so the consuming job must checkout first.
-# Each CI job opts into exactly the toolchains it needs via the inputs
-# below; cache SAVES live in ci.yml, gated on the `*-cache-hit` outputs
-# and keyed by the `*-cache-key` outputs (actions/cache/restore's
-# cache-primary-key), so restore and save can never drift.
+# Caches + toolchains for the CI jobs, in one place. Composite actions
+# can't self-checkout, so the consuming job must checkout first. Each CI
+# job opts into exactly the toolchains it needs via the inputs below.
 #
-#   1. Go module + build cache keyed on every go.sum. `restore-keys`
-#      keeps the build cache warm across go.sum bumps — avoids
-#      setup-go's exact-key-only cache, see actions/setup-go#357.
+# Caching is OWNED here end-to-end: each cache is a nested `actions/cache`
+# step, whose automatic post-job step saves on an exact-key miss — no save
+# steps in ci.yml, so restore and save can never drift. Two consequences
+# to know about (both accepted for the boilerplate this kills):
+#   - saves happen at the END of the job (post steps), and only when the
+#     job SUCCEEDED — a failed run rebuilds from restore-keys next time;
+#   - when several jobs miss the same key in one run (e.g. a lockfile
+#     bump), each saves; the backend keeps the first and the rest log a
+#     benign "already exists" warning.
+#
+# The cache inventory (full architecture: .github/workflows/README.md):
+#
+#   1. Go module + build cache keyed on every go.sum, `gobuild-v2-` key
+#      family. `restore-keys` keeps the build cache warm across go.sum
+#      bumps — avoids setup-go's exact-key-only cache (actions/setup-go#357).
 #      `go-cache-suffix` partitions the cache per job: the unit,
 #      integration, and e2e jobs compile with different flags
-#      (-race/-cover/-coverpkg/-tags), so a shared entry would only
-#      ever be warm for whichever job saved it. Cross-suffix
-#      restore-keys still share the (identical) module cache on a
-#      cold start.
-#
+#      (-race/-cover/-coverpkg/-tags), so a shared entry would only ever
+#      be warm for whichever job saved it. Cross-suffix restore-keys
+#      still share the (identical) module cache on a cold start.
 #   2. golangci-lint binary + analysis cache keyed on Makefile +
 #      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
 #      Only the lint job needs it.
-#
 #   3. pnpm store (path resolved at runtime) keyed on the root
-#      lockfile — the three pnpm projects (clients/ts, tests/e2e/sdk,
-#      docs) share one workspace lockfile + store. Path is dynamic because
-#      pnpm's documented default ~/.local/share/pnpm/store only
-#      applies when $HOME and the project tree share a mount; on some
-#      runners it falls back to a workspace-relative path. Hard-coding
-#      the default silently fails the save with a Path Validation
-#      Error.
-#
+#      lockfile — the pnpm workspace projects share one lockfile +
+#      store. Path is dynamic because pnpm's documented default
+#      ~/.local/share/pnpm/store only applies when $HOME and the project
+#      tree share a mount; on some runners it falls back to a
+#      workspace-relative path. Hard-coding the default silently fails
+#      the save with a Path Validation Error.
 #   4. Playwright browser cache (~/.cache/ms-playwright) keyed on the
 #      root lockfile. ~130 MB Chromium download otherwise re-fetched
 #      every docs build (rehype-mermaid renders via headless Chrome).
-#      Only the build job needs it. See #132.
-#
+#      Only the docs-build job needs it. See #132.
 #   5. Astro content-collection cache (docs/.astro/) keyed on the root
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
 name: Setup CI environment
-description: Restores caches and sets up Go + pnpm + Node for WaveHouse CI
+description: Caches (restore + automatic post-job save) and toolchains for WaveHouse CI
 
 inputs:
   go:
-    description: "Set up the Go toolchain + restore the Go module/build cache"
+    description: "Set up the Go toolchain + the Go module/build cache"
     default: "true"
   go-cache-suffix:
     description: "Per-job Go build-cache partition, e.g. '-unit' (different jobs compile with different flags). Empty = the shared default key."
     default: ""
   golangci:
-    description: "Restore the golangci-lint binary + analysis cache (lint job only)"
+    description: "Cache the golangci-lint binary + analysis cache (lint job only)"
     default: "false"
   node:
-    description: "Set up pnpm + Node and restore the pnpm store cache"
+    description: "Set up pnpm + Node and cache the pnpm store"
     default: "true"
   playwright:
-    description: "Restore the Playwright Chromium cache (docs build only)"
+    description: "Cache the Playwright Chromium install (docs build only)"
     default: "false"
   astro:
-    description: "Restore the Astro content-collection cache (docs check/build)"
+    description: "Cache the Astro content collections (docs check/build)"
     default: "false"
 
-# Cache-hit flags + primary keys + resolved pnpm store path, surfaced to
-# ci.yml's save steps. Outputs of skipped restores are empty strings, so a
-# save step gated on `*-cache-hit != 'true'` must only exist in jobs that
-# enabled the matching restore.
+# Exact-key cache-hit flags, for consumers that want to skip work on a
+# warm cache (e.g. docs-build's pnpm-store prune). Saves are NOT gated on
+# these from the outside — the nested actions/cache steps handle their
+# own post-job saves.
 outputs:
-  gobuild-cache-hit:
-    description: "true if the exact-key Go module + build cache was restored"
-    value: ${{ steps.gobuild-cache.outputs.cache-hit }}
-  gobuild-cache-key:
-    description: "Primary key of the Go module + build cache restore"
-    value: ${{ steps.gobuild-cache.outputs.cache-primary-key }}
-  golangci-cache-hit:
-    description: "true if the exact-key golangci-lint cache was restored"
-    value: ${{ steps.golangci-cache.outputs.cache-hit }}
-  golangci-cache-key:
-    description: "Primary key of the golangci-lint cache restore"
-    value: ${{ steps.golangci-cache.outputs.cache-primary-key }}
   pnpm-cache-hit:
     description: "true if the exact-key pnpm store cache was restored"
     value: ${{ steps.pnpm-cache.outputs.cache-hit }}
-  pnpm-cache-key:
-    description: "Primary key of the pnpm store cache restore"
-    value: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
-  pnpm-store-path:
-    description: "Absolute path to the pnpm content-addressable store on this runner — pass to actions/cache/save in the consuming workflow."
-    value: ${{ steps.pnpm-store.outputs.path }}
-  playwright-cache-hit:
-    description: "true if the exact-key Playwright browser cache was restored"
-    value: ${{ steps.playwright-cache.outputs.cache-hit }}
-  playwright-cache-key:
-    description: "Primary key of the Playwright browser cache restore"
-    value: ${{ steps.playwright-cache.outputs.cache-primary-key }}
-  astro-cache-hit:
-    description: "true if the exact-key Astro content cache was restored"
-    value: ${{ steps.astro-cache.outputs.cache-hit }}
-  astro-cache-key:
-    description: "Primary key of the Astro content cache restore"
-    value: ${{ steps.astro-cache.outputs.cache-primary-key }}
 
 runs:
   using: composite
   steps:
     # Key version (v2): bumped when the cache's expected CONTENTS change
     # shape — v2 added the go toolchain itself (~/go/pkg/mod/golang.org/
-    # toolchain, see the GOTOOLCHAIN note below). Saves are gated on an
+    # toolchain, see the GOTOOLCHAIN note below). Saves only happen on an
     # exact-key miss, so without a bump the pre-change entry would
     # exact-hit forever and the new content would never be saved.
-    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.go == 'true' }}
       id: gobuild-cache
       with:
@@ -127,7 +100,7 @@ runs:
           gobuild-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
           gobuild-${{ runner.os }}-go-
 
-    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.golangci == 'true' }}
       id: golangci-cache
       with:
@@ -146,7 +119,7 @@ runs:
     # restored above, so warm runs download nothing. A cold cache (first
     # run after a key rotation, when the image go is older than go.mod's
     # pin) pays a one-time toolchain fetch from proxy.golang.org here —
-    # this step makes that cost visible and the save below captures it.
+    # this step makes that cost visible and the post-job save captures it.
     # Trade-off: setup-go's inline problem matchers (PR-file annotations
     # on compile errors) are gone; the log output is unchanged.
     - name: Verify Go resolves go.mod's toolchain
@@ -154,8 +127,8 @@ runs:
       shell: bash
       run: go version
 
-    # pnpm must install before its cache restore so the next step can
-    # ask pnpm for the actual store path.
+    # pnpm must install before its cache step so the store path can be
+    # resolved from pnpm itself.
     - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       if: ${{ inputs.node == 'true' }}
       with:
@@ -168,7 +141,7 @@ runs:
       shell: bash
       run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
-    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.node == 'true' }}
       id: pnpm-cache
       with:
@@ -182,7 +155,7 @@ runs:
     # Chromium during install-playwright-docs — adds 30-60s per run. Keyed
     # on the root pnpm-lock.yaml since that's where the Playwright version
     # is locked. Closes the Playwright half of #132.
-    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.playwright == 'true' }}
       id: playwright-cache
       with:
@@ -192,13 +165,13 @@ runs:
           playwright-${{ runner.os }}-
 
     # Astro's content-collection cache (docs/.astro/data-store.json plus
-    # generated content types). Restored across runs so unchanged Markdown
+    # generated content types). Kept across runs so unchanged Markdown
     # / MDX content skips the parse + transform pipeline. Keyed on
     # lockfile + astro.config.mjs since plugin-chain changes invalidate
     # the cache shape; intra-key content changes are caught by Astro's
     # own file-hash check inside data-store.json. Closes the build-cache
     # half of #132.
-    - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.astro == 'true' }}
       id: astro-cache
       with:

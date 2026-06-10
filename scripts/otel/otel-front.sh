@@ -24,7 +24,7 @@ echo "==> Dashboard running at: http://localhost:$PORT"
 if [ -z "${CI:-}" ]; then
   # Open browser once the dashboard is actually accepting connections
   (
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
       if curl -sf "http://localhost:${PORT}/" >/dev/null 2>&1; then
         if command -v open >/dev/null 2>&1; then
           open "http://localhost:${PORT}"
