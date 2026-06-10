@@ -681,6 +681,40 @@ samp,
   border-color: var(--wh-accent);
 }
 
+/* Language badge — every code frame names its language in the bottom-right
+   corner (Expressive Code stamps data-language on the <pre>). Quiet by
+   design: readers who need it find it, everyone else reads past it.
+   Terminal frames skip it (the title bar already says "shell"), as do
+   plain-text-family blocks where a label would be noise. */
+.expressive-code pre {
+  position: relative;
+}
+.expressive-code pre::after {
+  content: attr(data-language);
+  position: absolute;
+  bottom: 0.45rem;
+  right: 0.65rem;
+  font-family: var(--sl-font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--wh-ink-subtle);
+  opacity: 0.75;
+  pointer-events: none;
+  user-select: none;
+}
+.expressive-code .frame.is-terminal pre::after,
+.expressive-code pre:is(
+    [data-language="text"],
+    [data-language="plaintext"],
+    [data-language="txt"],
+    [data-language="ansi"]
+  )::after {
+  content: none;
+}
+
 /* Sidebar: group-header eyebrows, branded hover, accent current item.
    (The previous `.sidebar-content nav > ul …` selector matched 0 elements —
    the DOM is `nav.sidebar > .sidebar-content`, no nested nav — so the intended
@@ -711,6 +745,14 @@ samp,
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   padding-left: calc(var(--sl-sidebar-item-padding-inline) - 2px);
 }
+/* External sidebar links (GitHub guide/discussions/etc.) declare themselves —
+   sidebar.ts stamps target="_blank" on every off-site entry. */
+.sidebar-content a[target="_blank"]::after {
+  content: "↗";
+  margin-inline-start: 0.35em;
+  font-size: 0.75em;
+  opacity: 0.55;
+}
 
 /* Top nav — translucent glass over content (only when scrolled past 0).
    Inherits the same opacity as --sl-color-bg-nav so the design-system token
@@ -734,6 +776,18 @@ header.header {
   mobile-starlight-toc nav {
     background-color: var(--wh-bg);
     border-bottom: 1px solid var(--wh-border);
+  }
+  /* Icon-only search trigger: the desktop rule's bordered SQUARE surface has
+     no radius at this size — join the menu button's circular control family
+     (same surface, same hairline ring). */
+  site-search > button {
+    border: 0;
+    border-radius: 999px;
+    background-color: var(--wh-surface);
+    box-shadow: 0 0 0 1px var(--wh-border);
+  }
+  site-search > button:hover {
+    box-shadow: 0 0 0 1px var(--wh-accent);
   }
 }
 
@@ -909,19 +963,54 @@ a.sl-link-button.minimal:hover {
   .sl-markdown-content > * {
     grid-column: 2;
   }
-  /* The breakout set: scroller-wrapped tables/diagrams, code frames, and
-     paired diagrams. fit-content sizes each to what its content actually
-     needs — a short code block or narrow table stays at the prose width
+  /* Code frames + paired diagrams: fit-content sizes each to what its
+     content actually needs — a short code block stays at the prose width
      (min-width keeps its edges aligned with the text), a wide one grows up
      to the pane. Centered growth, symmetric margins. */
-  /* `table` covers the no-JS fallback (before ScrollHints wraps tables, they
-     are direct children using the display:block scroll pattern). */
-  .sl-markdown-content > :is(.wh-scroll-x, .expressive-code, .diagram-pair, table) {
+  .sl-markdown-content > :is(.expressive-code, .diagram-pair) {
     grid-column: 1 / -1;
     justify-self: center;
     width: fit-content;
     min-width: min(var(--sl-content-width), 100%);
     max-width: 100%;
+  }
+  /* Diagram scrollers need an EXPLICIT width: fit-content can't measure a
+     `width:100%` SVG child (it resolved to the min-width floor and pinned
+     2000px-natural diagrams at prose width). min(natural, pane) is the
+     intelligent default — a small diagram stays its natural size, a wide
+     one takes the full pane before scale-down kicks in. */
+  .sl-markdown-content > .wh-scroll-x:not(.wh-table-wrap) {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: min(var(--wh-natural-w, 100%), 100%);
+    max-width: 100%;
+  }
+  /* Same sizing for nested diagram wrappers (the .diagram-pair children).
+     The pair CONTAINER is excluded: it can host multiple diagrams, so a
+     single child's natural width doesn't describe it — it keeps the
+     fit-content sizing from the generic rule above. */
+  .sl-markdown-content .wh-scroll-x:not(.wh-table-wrap):not(.diagram-pair) {
+    width: min(var(--wh-natural-w, 100%), 100%);
+    margin-inline: auto;
+  }
+  /* Tables EARN their breakout (data-wh-wide, stamped by ScrollHints only
+     when the table overflows or crowds at prose width): a table whose prose
+     wraps fine at 45rem gains nothing from stretching its sentences to
+     unreadable line lengths, so it stays put. Wide tables cap below the
+     pane so they keep breathing room from the sidebar/TOC rails. */
+  .sl-markdown-content > .wh-table-wrap[data-wh-wide] {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: fit-content;
+    min-width: min(var(--sl-content-width), 100%);
+    max-width: min(calc(100% - 2.5rem), 68rem);
+  }
+  /* Everything else in the un-capped container but outside the grid (the
+     page footer: edit link, last-updated, prev/next) keeps the prose width,
+     centered on the same axis as the grid's middle track. */
+  .main-pane .sl-container:has(> .sl-markdown-content) > :not(.sl-markdown-content) {
+    max-width: var(--sl-content-width);
+    margin-inline: auto;
   }
 }
 

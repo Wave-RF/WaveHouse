@@ -43,6 +43,9 @@
       )) {
         if (svg.style.maxWidth) {
           svg.style.setProperty("--wh-natural-w", svg.style.maxWidth);
+          // The WRAPPER needs it too: its desktop breakout width is
+          // min(natural, pane) — fit-content can't measure a width:100% svg.
+          svg.parentElement?.style.setProperty("--wh-natural-w", svg.style.maxWidth);
         }
       }
       // Paired diagrams already live in a <p>/<div> wrapper that global.css
@@ -117,34 +120,48 @@
       }
     }
 
+    // 8px threshold, not ~0: fit-content widths and devicePixelRatio rounding
+    // leave a few phantom pixels of "overflow" on blocks with nothing real to
+    // scroll to — fading those reads as cut-off content that isn't there.
     function updateOne(el) {
-      const more = el.scrollWidth - el.clientWidth - el.scrollLeft > 3;
-      el.toggleAttribute("data-wh-more", more);
+      const end = el.scrollWidth - el.clientWidth - el.scrollLeft > 8;
+      const start = el.scrollLeft > 8;
+      el.toggleAttribute("data-wh-more", end);
+      el.toggleAttribute("data-wh-more-start", start);
     }
     function updateAll() {
       document.querySelectorAll(SCROLLERS).forEach(updateOne);
     }
-    // Tables get their per-column min-width floors ONLY once they genuinely
-    // overflow (data-wh-scrolls): floors stop auto layout crushing off-screen
-    // columns inside a scroller, but applied unconditionally they FORCED
-    // tables that would fit by wrapping into scrollers. Measure with floors
-    // off (remove all attrs first so a single reflow covers every table),
-    // then stamp the ones that still can't fit — plus the ones that "fit"
-    // only by CROWDING: a many-column table squeezed to a sliver per column
-    // wraps every other word and reads worse than a clean sideways pan, so
-    // below ~8.5rem of average column width it scrolls instead.
+    // Tables earn their treatments by measurement, in two passes:
+    //
+    // Pass 1 (at prose width): a table that overflows or CROWDS there —
+    // ≥4 columns squeezed below ~8.5rem average wrap every other word —
+    // gets data-wh-wide, which on desktop moves it to the breakout track
+    // (wider, centered). A table whose prose wraps comfortably at 45rem
+    // stays at prose width: stretching its sentences to 60rem line lengths
+    // reads worse, not better.
+    //
+    // Pass 2 (re-measured at whatever width pass 1 granted): still
+    // overflowing or crowded → data-wh-scrolls, which enables the
+    // horizontal scroller and the per-column min-width floors (floors stop
+    // auto layout crushing off-screen columns, but applied to a fitting
+    // table they would CREATE the scroll).
     function classifyTables() {
       const CROWD_PX = 136;
-      const wraps = document.querySelectorAll(".wh-table-wrap");
-      wraps.forEach((el) => el.removeAttribute("data-wh-scrolls"));
-      wraps.forEach((el) => {
+      const overOrCrowded = (el) => {
         const row = el.querySelector("tr");
         const cols = row ? row.cells.length : 0;
         const crowded = cols >= 4 && el.clientWidth / cols < CROWD_PX;
-        if (crowded || el.scrollWidth - el.clientWidth > 1) {
-          el.setAttribute("data-wh-scrolls", "");
-        }
+        return crowded || el.scrollWidth - el.clientWidth > 1;
+      };
+      const wraps = document.querySelectorAll(".wh-table-wrap");
+      wraps.forEach((el) => {
+        el.removeAttribute("data-wh-scrolls");
+        el.removeAttribute("data-wh-wide");
       });
+      const wide = [...wraps].filter(overOrCrowded);
+      wide.forEach((el) => el.setAttribute("data-wh-wide", ""));
+      wide.filter(overOrCrowded).forEach((el) => el.setAttribute("data-wh-scrolls", ""));
     }
     function init() {
       wrapScrollables();
@@ -188,10 +205,25 @@
     margin-block: 1rem;
     position: relative;
   }
-  /* The right-edge fade: content hidden past the edge reads as scrollable
-     instead of amputated. Cleared by the script at scroll end. */
+  /* Edge fades: content hidden past an edge reads as scrollable instead of
+     amputated — on BOTH sides (a right-scrolled view fades its left edge so
+     the way back reads as scrollable too). The combined two-attr rule must
+     come last: each fade is a full mask-image (multiple mask layers union,
+     they can't compose two opposite fades). */
   [data-wh-more] {
     mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  }
+  [data-wh-more-start] {
+    mask-image: linear-gradient(90deg, transparent, #000 32px);
+  }
+  [data-wh-more-start][data-wh-more] {
+    mask-image: linear-gradient(
+      90deg,
+      transparent,
+      #000 32px,
+      #000 calc(100% - 32px),
+      transparent
+    );
   }
   /* Wrapped tables: the wrapper carries the card frame so the border doesn't
      scroll away with the content; the table inside reverts to true auto
@@ -240,25 +272,31 @@
   .wh-table-wrap .wh-tok-path {
     white-space: normal;
   }
-  /* Touch screens get an explicit zoom affordance on diagrams — cursor:
-     zoom-in means nothing without a pointer. */
-  @media (pointer: coarse) {
-    .wh-scroll-x:not(.wh-table-wrap)::after {
-      content: "⤢";
-      position: absolute;
-      top: 0.4rem;
-      right: 0.4rem;
-      display: grid;
-      place-items: center;
-      width: 1.6rem;
-      height: 1.6rem;
-      border-radius: var(--radius-xs);
-      background: var(--wh-surface-overlay);
-      border: 1px solid var(--wh-border-strong);
-      color: var(--wh-ink-muted);
-      font-size: 0.95rem;
-      line-height: 1;
-      pointer-events: none;
-    }
+  /* Every diagram carries a quiet zoom affordance — cursor: zoom-in only
+     speaks to a pointer that happens to hover, so the corner chip is always
+     present (dimmed) and brightens on hover. */
+  .wh-scroll-x:not(.wh-table-wrap)::after {
+    content: "⤢";
+    position: absolute;
+    top: 0.4rem;
+    right: 0.4rem;
+    display: grid;
+    place-items: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: var(--radius-xs);
+    background: var(--wh-surface-overlay);
+    border: 1px solid var(--wh-border-strong);
+    color: var(--wh-ink-muted);
+    font-size: 0.95rem;
+    line-height: 1;
+    pointer-events: none;
+    opacity: 0.6;
+    transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .wh-scroll-x:not(.wh-table-wrap):hover::after {
+    opacity: 1;
+    border-color: var(--wh-accent);
+    color: var(--wh-accent-text);
   }
 </style>

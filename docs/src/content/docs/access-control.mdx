@@ -5,6 +5,8 @@ sidebar:
   order: 5
 ---
 
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
 WaveHouse authorizes every request against a single **access control policy**: a per-table, per-role document that decides which columns a caller may see, which rows they may touch, what they may aggregate, and how much work a query may do. It is Hasura-style — column-level and row-level permissions with JWT claim templating — stored centrally and applied on every read, write, and live stream.
 
 This guide explains the whole model: where roles come from, how to write a policy, how each rule is enforced, and how the policy is loaded and changed at runtime. For the raw config knobs see [Configuration](/configuration#access-control-policy); for the HTTP surface see the [API reference](/api#authentication). Named query pipes have their own, simpler authorization model — see [Named Pipes](/pipes).
@@ -135,7 +137,7 @@ Supported comparison operators:
 | `_gt` | `col > ?` | greater than |
 | `_lt` | `col < ?` | less than |
 
-> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in #224) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
+> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in [#224](https://github.com/Wave-RF/WaveHouse/issues/224)) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 
@@ -264,7 +266,9 @@ Because a deleted policy is a total lockout (including admin), treat the bootstr
 
 A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted.
 
-```yaml
+<Tabs syncKey="policy">
+<TabItem label="YAML">
+```yaml title="policy.yaml"
 admin_role: admin        # full access + the /v1/admin/* gate (this is also the default)
 default_role: ""         # "" = closed: a request with no/!valid token is denied
 
@@ -291,6 +295,46 @@ tables:
           tenant_id:
             _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+</TabItem>
+<TabItem label="JSON">
+```json title="policy.json"
+{
+  "admin_role": "admin",
+  "default_role": "",
+  "tables": {
+    "events": {
+      "select": {
+        "viewer": {
+          "deny_columns": ["user_email", "ip_address"],
+          "filter": {
+            "tenant_id": {
+              "_eq": "{{ jwt.app_metadata.tenant_id }}"
+            }
+          },
+          "denied_aggregations": ["quantile", "median"],
+          "max_rows": 1000,
+          "max_execution_time_ms": 5000
+        }
+      },
+      "insert": {
+        "writer": {
+          "allow_columns": ["event_name", "page", "score", "user_id", "tenant_id"],
+          "check": {
+            "user_id": {
+              "_eq": "{{ jwt.sub }}"
+            },
+            "tenant_id": {
+              "_eq": "{{ jwt.app_metadata.tenant_id }}"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+</TabItem>
+</Tabs>
 
 With this policy loaded:
 

@@ -1,8 +1,9 @@
 ---
-// Click-to-zoom for Mermaid diagrams. Diagrams render inside the ~46–58rem
-// content column, so wide ones (and dense ones) read small inline; clicking
-// any diagram opens it in a lightbox — small diagrams scale up to fill the
-// viewport, wide ones show at natural size with pan-scroll for full detail.
+// Click-to-zoom for Mermaid diagrams. Dense diagrams read small inline;
+// clicking any diagram opens it in a lightbox that always FITS the viewport
+// (small diagrams scale up, capped 2.5×; oversized ones scale down — never
+// scrollbars by default). Diagrams larger than the stage also get a 1:1
+// toggle: natural size with pan + edge fades, for full label detail.
 //
 // Rendered once (from Footer.astro, which is on every page). The script uses
 // event delegation on `document` so it survives Astro view-transition
@@ -42,12 +43,19 @@
       overlay.setAttribute("aria-modal", "true");
       overlay.setAttribute("aria-label", "Enlarged diagram");
       overlay.innerHTML =
+        '<button class="wh-zoom__one" type="button" hidden aria-pressed="false" ' +
+        'aria-label="Toggle natural size (pan to explore)">1:1</button>' +
         '<button class="wh-zoom__close" type="button" aria-label="Close enlarged diagram">' +
         '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" ' +
         'stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
         '<path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
         '<div class="wh-zoom__stage"></div>';
       overlay.addEventListener("click", (e) => {
+        if (e.target.closest(".wh-zoom__one")) {
+          const btn = e.target.closest(".wh-zoom__one");
+          if (overlay.__whSetMode) overlay.__whSetMode(btn.getAttribute("aria-pressed") !== "true");
+          return;
+        }
         // Backdrop / stage padding click closes; clicks on the SVG itself don't.
         if (!e.target.closest("svg") || e.target.closest(".wh-zoom__close")) close();
       });
@@ -88,26 +96,43 @@
         (window.innerWidth * 0.94 - padX) / natW,
         (window.innerHeight * 0.9 - padY) / natH,
       );
-      // Enlarge diagrams smaller than the viewport (cap 2.5×); show larger
-      // ones at natural size and let the stage scroll for pan. Floor the
-      // pixel sizes so fractional rounding can't tip a perfect fit into a
-      // 1px overflow (which renders as phantom scrollbars).
-      const scale = fit > 1 ? Math.min(fit, 2.5) : 1;
-      clone.style.width = Math.floor(natW * scale) + "px";
-      clone.style.height = Math.floor(natH * scale) + "px";
+      // The modal ALWAYS fits the diagram to the stage — scaling UP small
+      // diagrams (cap 2.5×) and DOWN oversized ones — so the default view
+      // never grows scrollbars (which also squared the sheet's rounded
+      // corners). Diagrams larger than the stage get a 1:1 toggle instead:
+      // natural size + pan, with the ScrollHints edge fades as the wayfinding
+      // (pinch-zoom also works natively on touch). Floor the pixel sizes so
+      // fractional rounding can't tip a perfect fit into a 1px overflow.
+      const fitScale = Math.min(fit, 2.5);
+      const sizeTo = (scale) => {
+        clone.style.width = Math.floor(natW * scale) + "px";
+        clone.style.height = Math.floor(natH * scale) + "px";
+      };
+      sizeTo(fitScale);
       clone.style.maxWidth = "none";
       clone.style.minWidth = "0";
       stage.appendChild(clone);
 
+      const oneBtn = overlay.querySelector(".wh-zoom__one");
+      oneBtn.hidden = !(fit < 0.98); // 1:1 only buys anything when fit shrank it
+      oneBtn.setAttribute("aria-pressed", "false");
+      overlay.__whSetMode = (natural) => {
+        sizeTo(natural ? 1 : fitScale);
+        oneBtn.setAttribute("aria-pressed", String(natural));
+        stage.scrollLeft = 0;
+        stage.scrollTop = 0;
+        // Stamp the edge fades for the new size (ScrollHints' capture-phase
+        // scroll listener keeps them updated as the user pans).
+        requestAnimationFrame(() => {
+          stage.toggleAttribute(
+            "data-wh-more",
+            stage.scrollWidth - stage.clientWidth - stage.scrollLeft > 8,
+          );
+          stage.toggleAttribute("data-wh-more-start", false);
+        });
+      };
+
       overlay.removeAttribute("hidden");
-      // Same right-edge fade contract as the inline scrollers (ScrollHints
-      // owns the [data-wh-more] CSS + the capture-phase scroll listener that
-      // clears/re-stamps it as the user pans) — without it the pannable stage
-      // hard-clipped nodes at its edge with no hint that it scrolls.
-      requestAnimationFrame(() => {
-        const more = stage.scrollWidth - stage.clientWidth - stage.scrollLeft > 3;
-        stage.toggleAttribute("data-wh-more", more);
-      });
       // Next frame so the un-hide paints before the open transition.
       requestAnimationFrame(() => overlay.classList.add("is-open"));
       document.documentElement.style.overflow = "hidden";
@@ -205,7 +230,8 @@
   .wh-zoom__stage > svg {
     display: block;
   }
-  .wh-zoom__close {
+  .wh-zoom__close,
+  .wh-zoom__one {
     position: fixed;
     top: clamp(0.5rem, 2vw, 1.25rem);
     right: clamp(0.5rem, 2vw, 1.25rem);
@@ -218,13 +244,30 @@
     background: var(--wh-surface, #14171c);
     color: var(--wh-ink, #f1f3f7);
     cursor: pointer;
-    transition: background 0.12s ease, transform 0.12s ease;
+    transition: background 0.12s ease, transform 0.12s ease,
+      border-color 0.12s ease;
   }
-  .wh-zoom__close:hover {
+  .wh-zoom__one {
+    right: calc(clamp(0.5rem, 2vw, 1.25rem) + 3.1rem);
+    font-family: var(--sl-font-mono);
+    font-size: 0.75rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+  .wh-zoom__one[hidden] {
+    display: none;
+  }
+  .wh-zoom__one[aria-pressed="true"] {
+    border-color: var(--wh-accent, #06b0bf);
+    color: var(--wh-accent-text, var(--wh-accent-hi, #1dc9d8));
+  }
+  .wh-zoom__close:hover,
+  .wh-zoom__one:hover {
     background: var(--wh-surface-2, #1b1f26);
     transform: scale(1.05);
   }
-  .wh-zoom__close:focus-visible {
+  .wh-zoom__close:focus-visible,
+  .wh-zoom__one:focus-visible {
     outline: 2px solid var(--wh-accent-text, var(--wh-accent-hi));
     outline-offset: 2px;
   }

@@ -6,6 +6,8 @@ description: "Schema introspection, access-control policy, DLQ stats, and health
 Operational surfaces of `@wavehouse/sdk`. Everything here except
 `wh.sys.health()` requires the admin role (`policy.admin_role`) — see
 [Access Control](/access-control) for how roles resolve.
+Examples import from `@wavehouse/sdk`; using the CDN instead, import from
+`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Schema — `wh.schema`
 

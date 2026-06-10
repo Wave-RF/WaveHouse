@@ -161,8 +161,7 @@ The response is a JSON array of rows. Results flow through the shared in-process
 
 For version-controlled, deploy-time pipe definitions, point `pipes.dir` at a directory of `.sql` files:
 
-```yaml
-# config.yaml
+```yaml title="config.yaml"
 pipes:
   dir: /app/pipes        # seed .sql files into KV on startup
 ```

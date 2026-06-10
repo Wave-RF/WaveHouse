@@ -6,6 +6,8 @@ description: "Real-time SSE streams, client-side filtering, and backfill-then-li
 Real-time consumption with `@wavehouse/sdk`: SSE event streams from tables,
 builders, and pipes, plus live queries that backfill history before going
 live. Builders and table refs come from [Queries](/sdk/queries).
+Examples import from `@wavehouse/sdk`; using the CDN instead, import from
+`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Streaming
 

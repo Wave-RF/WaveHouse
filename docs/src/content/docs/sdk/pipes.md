@@ -6,6 +6,8 @@ description: "Execute and manage named query pipes with @wavehouse/sdk."
 Named pipes are server-defined, parameterized queries — the
 [Named Pipes guide](/pipes) covers defining them. The SDK executes pipes for
 any allowed role and manages their definitions under the admin role.
+Examples import from `@wavehouse/sdk`; using the CDN instead, import from
+`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Named Pipes — `wh.pipe(name, params?)`
 
