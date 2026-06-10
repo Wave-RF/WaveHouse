@@ -134,7 +134,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data) //nolint:gosec // G705 XSS only JSON
+			_, _ = w.Write(data)
 			return
 		}
 	}
