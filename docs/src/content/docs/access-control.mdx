@@ -5,6 +5,8 @@ sidebar:
   order: 5
 ---
 
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
 WaveHouse authorizes every request against a single **access control policy**: a per-table, per-role document that decides which columns a caller may see, which rows they may touch, what they may aggregate, and how much work a query may do. It is Hasura-style — column-level and row-level permissions with JWT claim templating — stored centrally and applied on every read, write, and live stream.
 
 This guide explains the whole model: where roles come from, how to write a policy, how each rule is enforced, and how the policy is loaded and changed at runtime. For the raw config knobs see [Configuration](/configuration#access-control-policy); for the HTTP surface see the [API reference](/api#authentication). Named query pipes have their own, simpler authorization model — see [Named Pipes](/pipes).
@@ -51,7 +53,9 @@ For authorization, the behavior that matters is what happens with **no** role: t
 
 Setting `default_role` does nothing on its own; the role you name still needs entries under `tables` to grant any access. Think of it as "which role does an anonymous caller assume", not "what can anonymous callers do".
 
-> **`default_role: admin` is a dev-only footgun.** Setting `default_role` equal to `admin_role` is permitted — it makes every unauthenticated request a full admin, including `/v1/admin/*`, which is handy for local development with no tokens. It is **never** for production. Every node that loads such a policy logs a loud `WARN` on startup and on every update.
+:::caution[`default_role: admin` is a dev-only footgun]
+Setting `default_role` equal to `admin_role` is permitted — it makes every unauthenticated request a full admin, including `/v1/admin/*`, which is handy for local development with no tokens. It is **never** for production. Every node that loads such a policy logs a loud `WARN` on startup and on every update.
+:::
 
 ### `admin_role` — the privileged role
 
@@ -62,7 +66,9 @@ Setting `default_role` does nothing on its own; the role you name still needs en
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role).
 
-> **A missing policy locks everyone out — including admin.** `admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies everyone, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is server-side — restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot, not an "admin" token over HTTP.
+:::caution[A missing policy locks everyone out — including admin]
+`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies everyone, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is server-side — restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot, not an "admin" token over HTTP.
+:::
 
 ## Anatomy of a policy
 
@@ -76,6 +82,8 @@ A policy is a YAML or JSON document with three top-level fields:
 
 Each table entry holds permissions for two operations — `select` (reads) and `insert` (writes) — and each operation maps **role → permissions**:
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 tables:
   events:                 # ClickHouse table name
@@ -86,6 +94,28 @@ tables:
       writer:             # role → what "writer" may insert
         allow_columns: ["page", "score", "user_id"]
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "tables": {
+    "events": {
+      "select": {
+        "viewer": {
+          "allow_columns": ["page", "score"]
+        }
+      },
+      "insert": {
+        "writer": {
+          "allow_columns": ["page", "score", "user_id"]
+        }
+      }
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 A role with no entry under the operation it is attempting is denied. The set of permission fields below applies to both `select` and `insert` entries, though some (row `filter`, aggregations, limits) only take effect on the read path and some (`check`) only on the write path — the [enforcement table](#where-each-rule-is-enforced) maps which is which.
 
@@ -93,12 +123,28 @@ A role with no entry under the operation it is attempting is denied. The set of 
 
 `allow_columns` and `deny_columns` control which columns a role can read (on `select`) or write (on `insert`).
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
     allow_columns: ["page", "button", "received_timestamp"]
     deny_columns: ["user_email", "ip_address"]
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "allow_columns": ["page", "button", "received_timestamp"],
+      "deny_columns": ["user_email", "ip_address"]
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 The rules, in order:
 
@@ -112,6 +158,8 @@ On a structured query (`POST /v1/query?table={table}`) the allowlist is a **hard
 
 `filter` restricts *which rows* a role can read by injecting a `WHERE` clause into the generated SQL. Each entry maps a column to a comparison whose value is usually a **JWT claim template**:
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
@@ -119,6 +167,23 @@ select:
       tenant_id:
         _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "filter": {
+        "tenant_id": {
+          "_eq": "{{ jwt.app_metadata.tenant_id }}"
+        }
+      }
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 This produces `WHERE (tenant_id = ?)` with the caller's `app_metadata.tenant_id` claim bound as the parameter — so a `viewer` only ever sees rows for their own tenant, and the value comes from the signed token, not from anything the client sends.
 
@@ -131,7 +196,7 @@ Supported comparison operators:
 | `_gt` | `col > ?` | greater than |
 | `_lt` | `col < ?` | less than |
 
-> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in #224) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
+> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in [#224](https://github.com/Wave-RF/WaveHouse/issues/224)) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 
@@ -148,6 +213,8 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 `check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It only supports `_eq`.
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 insert:
   writer:
@@ -158,6 +225,27 @@ insert:
       tenant_id:
         _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "insert": {
+    "writer": {
+      "allow_columns": ["page", "score", "user_id", "tenant_id"],
+      "check": {
+        "user_id": {
+          "_eq": "{{ jwt.sub }}"
+        },
+        "tenant_id": {
+          "_eq": "{{ jwt.app_metadata.tenant_id }}"
+        }
+      }
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 For each checked column, on `POST /v1/ingest?table={table}`:
 
@@ -170,13 +258,33 @@ This pairs naturally with a matching `filter` on the `select` side: `check` stam
 
 `allowed_aggregations` and `denied_aggregations` restrict which aggregation functions a role may use in a structured query (`count`, `sum`, `avg`, `quantile`, …). Matching is case-insensitive and follows the same precedence as columns:
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
-    denied_aggregations: ["quantile", "median"]   # blocklist: everything else is allowed
+    # blocklist: everything else is allowed
+    denied_aggregations: ["quantile", "median"]
   analyst:
-    allowed_aggregations: ["count", "sum", "avg"]  # allowlist: only these three
+    # allowlist: only these three
+    allowed_aggregations: ["count", "sum", "avg"]
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "denied_aggregations": ["quantile", "median"]
+    },
+    "analyst": {
+      "allowed_aggregations": ["count", "sum", "avg"]
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 - `denied_aggregations` always wins.
 - An empty `allowed_aggregations` means all non-denied functions are allowed; a non-empty list is an allowlist.
@@ -192,12 +300,28 @@ Two fields cap the cost of a single structured query. Both must be non-negative;
 | `max_rows` | Caps the query's `LIMIT`. If the caller asks for more (or omits a limit), the result is clamped to `max_rows`. |
 | `max_execution_time_ms` | Caps the ClickHouse execution timeout for the query, applied as the *minimum* of this value and the server's `clickhouse.query_timeout`. |
 
+<Tabs syncKey="policy">
+  <TabItem label="YAML">
 ```yaml
 select:
   viewer:
     max_rows: 1000
     max_execution_time_ms: 5000
 ```
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "select": {
+    "viewer": {
+      "max_rows": 1000,
+      "max_execution_time_ms": 5000
+    }
+  }
+}
+```
+  </TabItem>
+</Tabs>
 
 These bound a role's blast radius on the cached read path. They do not apply to raw admin SQL, which is unbounded by design (other than the 64 MiB response cap noted in the [API reference](/api)).
 
@@ -213,7 +337,9 @@ The same policy drives every data path, but not every field is meaningful on eve
 | Raw SQL | `POST /v1/admin/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
 | Named pipe | `GET/POST /v1/pipes/{name}` | not the policy engine — per-pipe `allowed_roles`; see [Named Pipes](/pipes) |
 
-> **Live streams enforce access, not row filters.** SSE subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and `max_rows`/`max_execution_time_ms` limits are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
+:::caution[Live streams enforce access, not row filters]
+SSE subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and `max_rows`/`max_execution_time_ms` limits are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
+:::
 
 ## Managing the policy
 
@@ -246,21 +372,36 @@ NATS KV is the **source of truth** for the live policy. A file is only ever a *s
 - **When `policy.file_path` is set, the file must exist and parse**, or WaveHouse refuses to boot. That turns a typo or a missing mount into a loud failure instead of a silent fail-closed deployment that denies everything.
 - **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every request is denied (logged loudly) until you seed one via `PUT /v1/admin/policy`.
 
+In `config.yaml` (or the matching environment variable):
+
+<Tabs syncKey="cfg">
+<TabItem label="YAML">
 ```yaml
-# config.yaml
 policy:
-  file_path: /etc/wavehouse/policy.yaml   # seed on first boot only; KV wins thereafter
+  # seed on first boot only; KV wins thereafter
+  file_path: /etc/wavehouse/policy.yaml
 ```
+</TabItem>
+<TabItem label="Environment">
+```ini
+WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
+```
+</TabItem>
+</Tabs>
 
 Because a deleted policy is a total lockout (including admin), treat the bootstrap file as your recovery path: keep it in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
 
 ## A complete example
 
-A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted.
+A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted. Save it as your `policy.file_path` bootstrap file (`policy.yaml` or `policy.json` — both parse identically), or `PUT` it to `/v1/admin/policy`:
 
+<Tabs syncKey="policy">
+<TabItem label="YAML">
 ```yaml
-admin_role: admin        # full access + the /v1/admin/* gate (this is also the default)
-default_role: ""         # "" = closed: a request with no/!valid token is denied
+# admin: full access + the /v1/admin/* gate (this is also the default)
+admin_role: admin
+# "" = closed: a request with no/!valid token is denied
+default_role: ""
 
 tables:
   events:
@@ -285,6 +426,46 @@ tables:
           tenant_id:
             _eq: "{{ jwt.app_metadata.tenant_id }}"
 ```
+</TabItem>
+<TabItem label="JSON">
+```json
+{
+  "admin_role": "admin",
+  "default_role": "",
+  "tables": {
+    "events": {
+      "select": {
+        "viewer": {
+          "deny_columns": ["user_email", "ip_address"],
+          "filter": {
+            "tenant_id": {
+              "_eq": "{{ jwt.app_metadata.tenant_id }}"
+            }
+          },
+          "denied_aggregations": ["quantile", "median"],
+          "max_rows": 1000,
+          "max_execution_time_ms": 5000
+        }
+      },
+      "insert": {
+        "writer": {
+          "allow_columns": ["event_name", "page", "score", "user_id", "tenant_id"],
+          "check": {
+            "user_id": {
+              "_eq": "{{ jwt.sub }}"
+            },
+            "tenant_id": {
+              "_eq": "{{ jwt.app_metadata.tenant_id }}"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+</TabItem>
+</Tabs>
 
 With this policy loaded:
 

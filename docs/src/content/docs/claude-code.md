@@ -146,7 +146,7 @@ User-specific worktrunk config goes in `~/.config/worktrunk/config.toml`; the co
 
 The GitHub MCP server is useful for cross-repo code search and bulk graph queries, but neither is a daily WaveHouse pattern. If you want it, add at user level:
 
-```jsonc
+```jsonc title="~/.claude.json"
 // ~/.claude.json — your user-level config
 {
   "mcpServers": {
@@ -198,7 +198,7 @@ The deny list blocks:
 
 Not committed at project level. Personal preference — put in `.claude/settings.local.json`:
 
-```jsonc
+```jsonc title=".claude/settings.local.json"
 {
   "statusLine": { "type": "command", "command": "~/.config/claude/statusline.sh" },
   "outputStyle": "default",

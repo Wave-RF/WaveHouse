@@ -334,7 +334,7 @@ The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) is the canonical client a
 
 | Backend change | SDK considerations |
 | -------------- | ------------------ |
-| New user-facing API endpoint | Add a typed client method (in `clients/ts/src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`, etc.); update `docs/src/content/docs/sdk.md` |
+| New user-facing API endpoint | Add a typed client method (in `clients/ts/src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`, etc.); update the matching SDK doc page under `docs/src/content/docs/sdk/` (`queries`, `streaming`, `pipes`, `admin`, or `reference` by topic — plus the API tree in `reference.md`) |
 | Change to JWT auth / role extraction | Update auth handling in `clients/ts/src/http.ts` and types in `clients/ts/src/client.ts` |
 | Change to `EventMessage` / ingest event format | Update payload types in `clients/ts/src/` (some are codegen-regenerated — re-run the SDK codegen CLI) |
 | New / changed structured query AST | Update `clients/ts/src/query-builder.ts` types + builder methods |
