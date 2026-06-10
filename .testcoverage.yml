@@ -2,8 +2,10 @@
 # behind `make cov` / `make test-<suite>`) which renders profiles and
 # gates each suite against the numbers below. Schema is compatible with
 # `vladopajic/go-test-coverage`'s config format, but we don't run that
-# action anymore — see issue #133 for the future-state coverage
-# reporting decision (post-OSS-launch, likely Codecov or similar).
+# action anymore. Publishing (#133) lives in CI's `coverage` job — a
+# README badge from the merged Go total (`cov badge`) and PR comments
+# via GitHub Code Quality; see .github/workflows/README.md "Coverage
+# publishing". This file is the gate; publishing reads from it.
 
 # Merged-suites profile produced by `scripts/cov merge` at the end of
 # `make ci`. Contains unit + integration + e2e coverage stitched

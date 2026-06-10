@@ -21,6 +21,10 @@
 //	cov threshold <suite> Print the configured threshold for <suite>
 //	                      (or "total"). Used by the SDK pipeline to
 //	                      pass into vitest's --coverage.thresholds.
+//	cov badge             Emit the shields.io endpoint JSON for the merged
+//	                      Go-total coverage (the number threshold.total
+//	                      gates) to stdout — CI publishes it to the
+//	                      `badges` branch for the README coverage badge.
 //
 // All thresholds come from .testcoverage.yml — `threshold.total` is the
 // canonical merged-coverage gate (the same field go-test-coverage reads
@@ -30,6 +34,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,6 +147,10 @@ func main() {
 		if err := report(cfg); err != nil {
 			fatal("%v", err)
 		}
+	case "badge":
+		if err := badge(cfg); err != nil {
+			fatal("%v", err)
+		}
 	case "threshold":
 		if len(os.Args) < 3 {
 			usage()
@@ -153,7 +162,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cov render <suite> | merge | ts-merge | merge-all | report | threshold <suite>")
+	fmt.Fprintln(os.Stderr, "usage: cov render <suite> | merge | ts-merge | merge-all | report | badge | threshold <suite>")
 	os.Exit(2)
 }
 
@@ -612,6 +621,65 @@ func printReport(rows []reportRow) {
 			r.name, cov, color, floor, glyph, reset, r.html)
 	}
 	fmt.Println()
+}
+
+// badgeData is the shields.io endpoint schema (https://shields.io/endpoint).
+// The README's coverage badge is an <img> pointing at img.shields.io/endpoint
+// whose url= is this JSON, published to the `badges` branch by CI. Emitting it
+// here means the badge always shows the exact number `make cov` gated.
+type badgeData struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Label         string `json:"label"`
+	Message       string `json:"message"`
+	Color         string `json:"color"`
+}
+
+// badge writes the shields.io endpoint JSON for the merged Go-total coverage
+// (global excludes only — the same number threshold.total gates) to stdout,
+// and nothing else, so the caller can redirect it straight to a file. It reads
+// the profile `make cov`/`cov report` already rendered to tmp/coverage/total.
+func badge(c *config) error {
+	profile := filepath.Join(root, "total", "coverage.txt")
+	if _, err := os.Stat(profile); err != nil {
+		return fmt.Errorf("no merged Go profile at %s — run `make cov` first", profile)
+	}
+	_, total, covered, err := parseCoverage(profile, c, c.excludesFor(""))
+	if err != nil {
+		return err
+	}
+	msg, color := "unknown", "lightgrey"
+	if total > 0 {
+		pct := float64(covered) * 100.0 / float64(total)
+		msg = fmt.Sprintf("%.1f%%", pct)
+		color = badgeColor(pct, c.Threshold.Total)
+	}
+	out, err := json.Marshal(badgeData{SchemaVersion: 1, Label: "coverage", Message: msg, Color: color})
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
+}
+
+// badgeColor maps a coverage percentage to a shields.io color anchored on the
+// configured gate: at/above the gate reads green, warming through yellow to
+// red below it (so the badge color tracks the same line the build enforces).
+func badgeColor(pct float64, gate int) string {
+	g := float64(gate)
+	switch {
+	case pct >= g+10:
+		return "brightgreen"
+	case pct >= g:
+		return "green"
+	case pct >= g-10:
+		return "yellowgreen"
+	case pct >= g-20:
+		return "yellow"
+	case pct >= g-30:
+		return "orange"
+	default:
+		return "red"
+	}
 }
 
 // formatPctBare is formatPct without the trailing % ("85.1"), or "n/a".
