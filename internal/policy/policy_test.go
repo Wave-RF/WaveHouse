@@ -169,6 +169,8 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 						DeniedAggregations:  []string{"avg"},
 						MaxRows:             1000,
 						MaxExecutionTimeMs:  5000,
+						MaxRowsToRead:       2_000_000,
+						MaxMemoryUsageBytes: 4 << 30,
 					},
 				},
 			},
@@ -180,6 +182,10 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 	assert.Equal(t, []string{"avg"}, perms.DeniedAggregations)
 	assert.Equal(t, 1000, perms.MaxRows)
 	assert.Equal(t, 5000, perms.MaxExecutionTimeMs)
+	// The server-side resource caps (#316) must survive Evaluate so the query
+	// path can turn them into ClickHouse settings.
+	assert.Equal(t, int64(2_000_000), perms.MaxRowsToRead)
+	assert.Equal(t, int64(4<<30), perms.MaxMemoryUsageBytes)
 }
 
 func TestIsColumnAllowed(t *testing.T) {
@@ -456,6 +462,34 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: true,
 			wantMsg: "max_execution_time_ms",
+		},
+		{
+			name: "negative max_rows_to_read",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {MaxRowsToRead: -1},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "max_rows_to_read",
+		},
+		{
+			name: "negative max_memory_usage_bytes",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {MaxMemoryUsageBytes: -1},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "max_memory_usage_bytes",
 		},
 		{
 			name: "empty role key rejected",

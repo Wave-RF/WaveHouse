@@ -214,6 +214,10 @@ export interface RolePermissions {
   denied_aggregations?: string[];
   max_rows?: number;
   max_execution_time_ms?: number;
+  /** Max rows scanned from storage, enforced server-side by ClickHouse. 0 = no limit. */
+  max_rows_to_read?: number;
+  /** Max peak query memory in bytes, enforced server-side by ClickHouse. 0 = no limit. */
+  max_memory_usage_bytes?: number;
 }
 
 export interface PolicyFilter {

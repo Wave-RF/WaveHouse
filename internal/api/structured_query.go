@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
@@ -151,6 +152,13 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+
+		// Enforce the role's resource caps server-side, not just via the client
+		// context deadline (#316). The settings ride on the query context, so
+		// they reach ClickHouse for this query only.
+		if settings := chReadSettings(perms, timeout); settings != nil {
+			queryCtx = clickhouse.Context(queryCtx, clickhouse.WithSettings(settings))
+		}
 
 		start := time.Now()
 

@@ -469,4 +469,33 @@ describe("Query", () => {
       await admin.policy.set(currentPolicyRes.data!);
     }
   });
+
+  // ── #316: row/memory caps are enforced by ClickHouse server-side ────────────
+  //
+  // Before #316 the policy's resource caps reached ClickHouse only as a client
+  // context deadline — never as max_rows_to_read / max_memory_usage — so a
+  // capped role's query returned the full result set instead of being rejected.
+  // These drive the real public path (SDK → WaveHouse → ClickHouse) under a
+  // viewer policy whose cap is impossibly small, and assert the server rejects
+  // the read (500 carrying the ClickHouse limit error). Unlike the
+  // execution-time race above, both are deterministic: a full scan always blows
+  // past a 1-row / 1-byte budget on the first attempt. The unique event_id
+  // filter keeps each query's SQL out of the shared result cache, so a cached
+  // success can't mask a broken cap.
+
+  it("enforces max_rows_to_read policy limit server-side (#316)", async () => {
+    await withViewerSelect({ allow_columns: ["*"], max_rows_to_read: 1 }, async () => {
+      const result = await wh.from(T.clicks).selectAll().where("event_id", "=", testId()).fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(500);
+    });
+  });
+
+  it("enforces max_memory_usage_bytes policy limit server-side (#316)", async () => {
+    await withViewerSelect({ allow_columns: ["*"], max_memory_usage_bytes: 1 }, async () => {
+      const result = await wh.from(T.clicks).selectAll().where("event_id", "=", testId()).fetch();
+      expect(result.error).not.toBeNull();
+      expect(result.error!.status).toBe(500);
+    });
+  });
 });
