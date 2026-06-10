@@ -613,6 +613,7 @@ Live queries combine a historical backfill (`.fetch()`) with a real-time stream,
 
 ```ts
 const lq = wh.from('clicks')
+  .selectAll()
   .where('page', '=', '/home')
   .orderBy('received_timestamp', 'desc')
   .limit(100)

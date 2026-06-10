@@ -132,6 +132,7 @@ The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed ins
   ```ts
   // Historical backfill + real-time stream, deduplicated at the seam.
   const lq = wh.from('clicks')
+    .selectAll()
     .where('page', '=', '/home')
     .orderBy('received_timestamp', 'desc')
     .limit(100)
