@@ -126,13 +126,18 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// TODO: impl scope
 	scope := ""
 	safeTableName := query.SafeEncodeNATS(table)
+	// A structured query reads one table, so it depends on a single namespace.
+	// Encode the scope the way the ingest worker does (worker.go handleSuccess) so
+	// the read and invalidation sides build identical namespace keys once scope is
+	// implemented; SafeEncodeNATS("") is "", so this is a no-op while scope is empty.
+	deps := []cache.Namespace{{Table: safeTableName, Scope: query.SafeEncodeNATS(scope)}}
 
 	// Try cache.
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safeTableName, scope); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			_, _ = w.Write(data) //nolint:gosec // G705 XSS only JSON
+			_, _ = w.Write(data)
 			return
 		}
 	}
@@ -165,7 +170,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, safeTableName, scope, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, ttl)
 		}
 		return data, nil
 	})

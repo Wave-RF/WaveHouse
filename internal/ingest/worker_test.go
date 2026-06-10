@@ -221,21 +221,15 @@ func TestStartIngestWorker_EndToEnd(t *testing.T) {
 	assert.Equal(t, "events", params[0])
 	gotMu.Unlock()
 
-	// Cache invalidation should run with the table + the (encoded) subject.
+	// Cache invalidation should run with the table+scope namespace.
 	require.Eventually(t, func() bool {
-		keys := cache.GetKeys()
-		hasTable := false
-		hasSubject := false
-		for _, k := range keys {
-			if k == "events" {
-				hasTable = true
-			}
-			if k == "events.org_42" {
-				hasSubject = true
+		for _, ns := range cache.GetNamespaces() {
+			if ns.Table == "events" && ns.Scope == "org_42" {
+				return true
 			}
 		}
-		return hasTable && hasSubject
-	}, 4*time.Second, 25*time.Millisecond, "cache must be invalidated for table + subject")
+		return false
+	}, 4*time.Second, 25*time.Millisecond, "cache must be invalidated for the table+scope namespace")
 
 	// Shutdown (cancel + drain) is handled by t.Cleanup above.
 }
@@ -455,91 +449,94 @@ func TestInsertToClickHouse_NetworkError(t *testing.T) {
 func TestHandleSuccess(t *testing.T) {
 	t.Parallel()
 
-	// natsSafeSubject is what the worker derives by stripping "ingest." from
-	// the NATS subject the producer publishes to (see internal/api/ingest.go).
-	// In production that is always "<SafeEncodeNATS(table)>[.<SafeEncodeNATS(scope)>]",
-	// so e.g. table "events" + scope "org_1" yields natsSafeSubject "events.org_1".
-	// handleSuccess invalidates the encoded table key + each unique scoped key,
-	// deduping when the scopeless subject already equals the table key.
+	// handleSuccess invalidates one namespace per distinct scope in the batch: the
+	// encoded table paired with the encoded scope (envelope.scope). Invalidate turns
+	// an empty scope into a whole-table bump and a non-empty scope into a per-scope
+	// bump, so the worker only needs to emit the table+scope pairs it saw.
 
 	tests := []struct {
-		name             string
-		table            string
-		natsSafeSubjects []string // realistic shape: "<encoded_table>[.<encoded_scope>]"
-		cacheErr         error    // applied via MockCache.InvErr before the call
-		msgDoubleAckErr  error    // applied to every MockJetStreamMsg
-		wantCacheKeys    []string // expected (ElementsMatch) keys in cache.GetKeys()
+		name            string
+		table           string
+		scopes          []string // raw per-message scopes (envelope.scope)
+		cacheErr        error    // applied via MockCache.InvErr before the call
+		msgDoubleAckErr error    // applied to every MockJetStreamMsg
+		wantNamespaces  []cache.Namespace
 	}{
 		{
-			name:             "invalidates table + each unique scope",
-			table:            "events",
-			natsSafeSubjects: []string{"events.org_1", "events.org_2"},
-			wantCacheKeys:    []string{"events", "events.org_1", "events.org_2"},
+			name:           "invalidates each unique scope",
+			table:          "events",
+			scopes:         []string{"org_1", "org_2"},
+			wantNamespaces: []cache.Namespace{{Table: "events", Scope: "org_1"}, {Table: "events", Scope: "org_2"}},
 		},
 		{
-			// 3 msgs, 2 distinct scoped subjects → table + 2 scoped = 3 keys.
-			name:             "deduplicates repeated scope keys",
-			table:            "events",
-			natsSafeSubjects: []string{"events.org_1", "events.org_1", "events.org_2"},
-			wantCacheKeys:    []string{"events", "events.org_1", "events.org_2"},
+			// 3 msgs, 2 distinct scopes → 2 namespaces.
+			name:           "deduplicates repeated scopes",
+			table:          "events",
+			scopes:         []string{"org_1", "org_1", "org_2"},
+			wantNamespaces: []cache.Namespace{{Table: "events", Scope: "org_1"}, {Table: "events", Scope: "org_2"}},
 		},
 		{
-			// Scopeless: producer publishes to "ingest.<table>", so
-			// natsSafeSubject equals the encoded table → one key.
-			name:             "scopeless subject dedups against table key",
-			table:            "events",
-			natsSafeSubjects: []string{"events"},
-			wantCacheKeys:    []string{"events"},
+			// Scopeless message → empty-scope namespace (a whole-table bump).
+			name:           "scopeless message yields whole-table namespace",
+			table:          "events",
+			scopes:         []string{""},
+			wantNamespaces: []cache.Namespace{{Table: "events", Scope: ""}},
 		},
 		{
-			// Table name containing a '.' is percent-encoded on both sides of
-			// the version key — keys must use the encoded form for cache hits
-			// to line up with the reader (internal/api/structured_query.go).
-			name:             "table with special chars is percent-encoded",
-			table:            "events.staging",
-			natsSafeSubjects: []string{"events%2Estaging.org_1"},
-			wantCacheKeys:    []string{"events%2Estaging", "events%2Estaging.org_1"},
+			// A scopeless message bumps the whole table, which subsumes every scope,
+			// so the worker collapses the batch to just the whole-table namespace.
+			name:           "scopeless message subsumes other scopes",
+			table:          "events",
+			scopes:         []string{"org_1", "", "org_2"},
+			wantNamespaces: []cache.Namespace{{Table: "events", Scope: ""}},
+		},
+		{
+			// Table and scope are percent-encoded so keys line up with the reader
+			// (internal/api/structured_query.go), which encodes the table too.
+			name:           "table and scope are percent-encoded",
+			table:          "events.staging",
+			scopes:         []string{"org.1"},
+			wantNamespaces: []cache.Namespace{{Table: "events%2Estaging", Scope: "org%2E1"}},
 		},
 		{
 			// Cache failure must not prevent ack — failure is logged, non-fatal.
-			name:             "cache error still acks",
-			table:            "events",
-			natsSafeSubjects: []string{"events.org_1"},
-			cacheErr:         errors.New("cache backend down"),
-			wantCacheKeys:    []string{"events", "events.org_1"},
+			name:           "cache error still acks",
+			table:          "events",
+			scopes:         []string{"org_1"},
+			cacheErr:       errors.New("cache backend down"),
+			wantNamespaces: []cache.Namespace{{Table: "events", Scope: "org_1"}},
 		},
 		{
 			// DoubleAck error is logged but DoubleAcked flag still flips.
-			name:             "double ack error does not panic",
-			table:            "events",
-			natsSafeSubjects: []string{"events.org_1"},
-			msgDoubleAckErr:  errors.New("server unavailable"),
-			wantCacheKeys:    []string{"events", "events.org_1"},
+			name:            "double ack error does not panic",
+			table:           "events",
+			scopes:          []string{"org_1"},
+			msgDoubleAckErr: errors.New("server unavailable"),
+			wantNamespaces:  []cache.Namespace{{Table: "events", Scope: "org_1"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			w, _, cache, wait := newTestWorker(&testutil.MockRoundTripper{})
-			cache.InvErr = tt.cacheErr
+			w, _, mc, wait := newTestWorker(&testutil.MockRoundTripper{})
+			mc.InvErr = tt.cacheErr
 
-			msgs := make([]*testutil.MockJetStreamMsg, len(tt.natsSafeSubjects))
-			parsed := make([]parsedMsg, len(tt.natsSafeSubjects))
-			for i, sub := range tt.natsSafeSubjects {
-				// MsgSubject intentionally left blank — handleSuccess reads
-				// natsSafeSubject off parsedMsg, not the NATS msg itself.
+			msgs := make([]*testutil.MockJetStreamMsg, len(tt.scopes))
+			parsed := make([]parsedMsg, len(tt.scopes))
+			for i, scope := range tt.scopes {
+				// handleSuccess reads scope off parsedMsg, not the NATS msg itself.
 				msgs[i] = &testutil.MockJetStreamMsg{DoubleAckErr: tt.msgDoubleAckErr}
-				parsed[i] = parsedMsg{natsMsg: msgs[i], natsSafeSubject: sub}
+				parsed[i] = parsedMsg{natsMsg: msgs[i], scope: scope}
 			}
 
 			w.handleSuccess(context.Background(), tt.table, parsed)
 			wait()
 
-			assert.ElementsMatch(t, tt.wantCacheKeys, cache.GetKeys())
+			assert.ElementsMatch(t, tt.wantNamespaces, mc.GetNamespaces())
 			for i, m := range msgs {
 				assert.True(t, m.DoubleAcked.Load(),
-					"msg %d (natsSafeSubject=%q) must be DoubleAcked", i, tt.natsSafeSubjects[i])
+					"msg %d (scope=%q) must be DoubleAcked", i, tt.scopes[i])
 			}
 		})
 	}
@@ -711,7 +708,7 @@ func TestFlushTable_HappyPath(t *testing.T) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
 		},
 	}
-	w, _, cache, wait := newTestWorker(rt)
+	w, _, mc, wait := newTestWorker(rt)
 
 	m1 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 1})
 	m2 := newIngestMsg(t, "events", "org_1", map[string]any{"id": 2})
@@ -726,16 +723,15 @@ func TestFlushTable_HappyPath(t *testing.T) {
 	assert.True(t, m1.DoubleAcked.Load())
 	assert.True(t, m2.DoubleAcked.Load())
 
-	// Cache invalidation: table-level + the shared scoped key.
+	// Cache invalidation: one namespace for the single shared scope.
 	assert.ElementsMatch(t,
-		[]string{"events", "events.org_1"},
-		cache.GetKeys(),
+		[]cache.Namespace{{Table: "events", Scope: "org_1"}},
+		mc.GetNamespaces(),
 	)
 }
 
 // TestFlushTable_MultiScope covers a single table with multiple scopes: one bulk
-// HTTP insert, but each unique scope still gets its own cache version key bumped
-// alongside the global table key.
+// HTTP insert, but each unique scope still gets its own namespace invalidated.
 func TestFlushTable_MultiScope(t *testing.T) {
 	t.Parallel()
 	rt := &testutil.MockRoundTripper{
@@ -743,7 +739,7 @@ func TestFlushTable_MultiScope(t *testing.T) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("OK"))}, nil
 		},
 	}
-	w, _, cache, wait := newTestWorker(rt)
+	w, _, mc, wait := newTestWorker(rt)
 
 	msgs := parseAll(t, w,
 		newIngestMsg(t, "events", "org_1", map[string]any{"id": 1}),
@@ -757,10 +753,13 @@ func TestFlushTable_MultiScope(t *testing.T) {
 	// One bulk HTTP request despite multiple scopes.
 	assert.Equal(t, int32(1), rt.Hits())
 
-	// Cache: table key + each unique scope key, deduped.
+	// Cache: one namespace per unique scope, deduped.
 	assert.ElementsMatch(t,
-		[]string{"events", "events.org_1", "events.org_2"},
-		cache.GetKeys(),
+		[]cache.Namespace{
+			{Table: "events", Scope: "org_1"},
+			{Table: "events", Scope: "org_2"},
+		},
+		mc.GetNamespaces(),
 	)
 }
 
