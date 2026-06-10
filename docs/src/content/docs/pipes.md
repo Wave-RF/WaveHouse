@@ -46,7 +46,7 @@ The `parameters` array formally declares a parameter with metadata:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `name` | string | Placeholder name; matches `{{name}}` in the SQL. |
-| `type` | string | Documents the expected type (`"string"`, `"number"`, `"boolean"`). Descriptive — it advertises intent to callers and the SDK; binding itself keys off the runtime value. |
+| `type` | string | Expected value type: `"string"`, `"number"`, `"boolean"`, or `"array"`. **Enforced** — a value of the wrong kind (e.g. an array where a `"number"` is declared) is rejected with a `400`. An omitted or unrecognized type is not constrained. |
 | `required` | bool | If `true`, the caller must supply a value, even if the placeholder doesn't appear in the SQL. A missing required parameter is a `400`. |
 | `default` | any | Value used when the caller supplies none. |
 
@@ -83,9 +83,27 @@ Bound values are **inlined directly into the SQL string** (not sent as positiona
 | numeric string (e.g. `"100"`) | `100` | emitted bare, so `?limit=100` from a query string works as a number |
 | number | `42` / `42.5` | whole floats render as integers |
 | boolean | `1` / `0` | ClickHouse-style |
+| array | `('a', 'b')` | parenthesized list of escaped elements — for `IN` clauses (see below) |
 | null | `NULL` | |
 
-Because string values are single-quote-escaped, a parameter value can't break out of its literal and inject SQL. The SQL *structure* still comes only from the operator-authored template.
+Every leaf value is escaped the same way — including each element of an array — so a parameter value can't break out of its literal and inject SQL. The SQL *structure* still comes only from the operator-authored template. Values with no safe scalar form are **rejected** with a `400`: a JSON object, and an empty array (which would render as the invalid `IN ()`).
+
+#### Array parameters and `IN` lists
+
+A parameter whose value is a JSON array renders as a ClickHouse list literal — `(v1, v2, …)`, every element escaped — ready for an `IN` clause. Write the placeholder **without** surrounding parentheses; the value brings its own:
+
+```sql
+SELECT page, count() AS views FROM clicks WHERE page IN {{pages}} GROUP BY page
+```
+
+```bash
+curl -X POST http://localhost:8080/v1/pipes/by_pages \
+  -H "Content-Type: application/json" \
+  -d '{"pages": ["/home", "/pricing", "/docs"]}'
+# binds to: … WHERE page IN ('/home', '/pricing', '/docs')
+```
+
+Array values must come from a **JSON body** (`POST`) — query-string parameters are always scalar strings, so `GET …?pages=a&pages=b` binds only the first value as a string. Declare the parameter as `"type": "array"` to require a list (a scalar value is then a `400`); leave the type off to accept either a scalar or a list at the same placeholder.
 
 ## Authorizing a pipe
 
@@ -154,6 +172,8 @@ The response is a JSON array of rows. Results flow through the shared in-process
 | 404 | `{"error":"pipe not found"}` | No pipe registered under that name |
 | 403 | `{"error":"forbidden"}` | Caller's role isn't in `allowed_roles` (and isn't admin) |
 | 400 | `{"error":"missing required parameter: x"}` | A required parameter wasn't supplied |
+| 400 | `{"error":"parameter \"x\": expected number, got array"}` | A value violates the parameter's declared `type` |
+| 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar with no SQL form (a JSON object, or an empty array) |
 
 ## Bootstrapping from `.sql` files
 

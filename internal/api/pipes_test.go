@@ -377,6 +377,77 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+// TestPipesHandler_Execute_ArrayParamBinds: an array body param renders into an
+// IN list and passes binding (failing only later at the nil ClickHouse conn).
+func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name:       "by_ids",
+			SQL:        "SELECT * FROM clicks WHERE id IN {{ids}}",
+			Parameters: []pipes.ParamDef{{Name: "ids", Type: "array", Required: true}},
+		},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	body := map[string]any{"ids": []any{"a", "b"}}
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_ids/execute", "by_ids", body)
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	safeHandle(h.Execute, w, r)
+
+	// Binding succeeded — the only failure left is the nil conn, never a 400.
+	assert.NotEqual(t, http.StatusBadRequest, w.Code)
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+// TestPipesHandler_Execute_ObjectParamRejected: a JSON object has no scalar SQL
+// form and is refused with a 400 before any query runs (#317).
+func TestPipesHandler_Execute_ObjectParamRejected(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "by_col", SQL: "SELECT * FROM clicks WHERE col = {{p}}"},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	body := map[string]any{"p": map[string]any{"k": "v"}}
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_col/execute", "by_col", body)
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	h.Execute(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "unsupported parameter type object")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestPipesHandler_Execute_TypeMismatchRejected: a value that violates the
+// declared parameter type is a 400, honoring the declared-type contract (#317).
+func TestPipesHandler_Execute_TypeMismatchRejected(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name:       "top",
+			SQL:        "SELECT * FROM clicks LIMIT {{limit}}",
+			Parameters: []pipes.ParamDef{{Name: "limit", Type: "number", Required: true}},
+		},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	body := map[string]any{"limit": []any{"99"}}
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/top/execute", "top", body)
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	h.Execute(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "expected number, got array")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 // TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed: the privileged built-in
 // roles bypass the allowlist, so admin can run a pipe with no allowed_roles.
 func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {

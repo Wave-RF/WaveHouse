@@ -466,6 +466,8 @@ JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whe
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
 | 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
+| 400 | `{"error":"parameter \"x\": expected number, got array"}` | A value violates the parameter's declared `type` (`string`/`number`/`boolean`/`array`) |
+| 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, or an empty array (which would render as `IN ()`). A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
 
 ---
 
