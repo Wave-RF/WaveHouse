@@ -147,9 +147,11 @@ Prometheus exposition is its own top-level config block, independent of `otel.*`
 
 ## Example Config File
 
+Every key, with its default. Save the YAML as `config.yaml` next to the binary (or point `WH_CONFIG` at it), or supply the same settings as environment variables — e.g. an `env_file` in Compose:
+
 <Tabs syncKey="cfg">
 <TabItem label="YAML">
-```yaml title="config.yaml"
+```yaml
 data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
 
 server:
@@ -191,7 +193,8 @@ dlq:
   enabled: true
 
 policy:
-  file_path: ""          # empty = skip bootstrap (seed via PUT /v1/admin/policy); set to a path and the file MUST exist or boot fails
+  file_path: ""          # empty = skip bootstrap (seed via PUT /v1/admin/policy);
+                         # set to a path and the file MUST exist or boot fails
 
 pipes:
   dir: ""                # empty = skip bootstrap; set + read-only mount to seed pipes
@@ -215,53 +218,53 @@ prometheus:
 ```
 </TabItem>
 <TabItem label="Environment">
-```bash title="wavehouse.env"
-export WH_DATA_DIR=./data
+```ini
+WH_DATA_DIR=./data
 
-export WH_SERVER_PORT=8080
-export WH_SERVER_SHUTDOWN_TIMEOUT=10
-export WH_SERVER_CORS_ALLOWED_ORIGINS=*
+WH_SERVER_PORT=8080
+WH_SERVER_SHUTDOWN_TIMEOUT=10
+WH_SERVER_CORS_ALLOWED_ORIGINS=*
 
-export WH_CH_ADDR=localhost:9000
-export WH_CH_HTTP_PORT=8123
-export WH_CH_HTTP_SCHEME=http
-export WH_CH_DATABASE=default
-export WH_CH_USERNAME=default
-export WH_CH_PASSWORD=
-export WH_CH_QUERY_TIMEOUT=30s
+WH_CH_ADDR=localhost:9000
+WH_CH_HTTP_PORT=8123
+WH_CH_HTTP_SCHEME=http
+WH_CH_DATABASE=default
+WH_CH_USERNAME=default
+WH_CH_PASSWORD=
+WH_CH_QUERY_TIMEOUT=30s
 
-export WH_MQ_GAP_WINDOW_MINUTES=15
-export WH_MQ_MAX_BYTES_GB=50
+WH_MQ_GAP_WINDOW_MINUTES=15
+WH_MQ_MAX_BYTES_GB=50
 
-export WH_DEDUPE_ENABLED=false
-export WH_DEDUPE_ID_FIELD=event_id
+WH_DEDUPE_ENABLED=false
+WH_DEDUPE_ID_FIELD=event_id
 
-export WH_CACHE_L1_MAX_COST=67108864
-export WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
+WH_CACHE_L1_MAX_COST=67108864
+WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 
-export WH_AUTH_JWT_SECRET=change-me-in-production
-export WH_AUTH_JWKS_URL=
-export WH_AUTH_ROLE_CLAIM=role
+WH_AUTH_JWT_SECRET=change-me-in-production
+WH_AUTH_JWKS_URL=
+WH_AUTH_ROLE_CLAIM=role
 
-export WH_SCHEMA_REFRESH_INTERVAL=60
+WH_SCHEMA_REFRESH_INTERVAL=60
 
-export WH_DLQ_ENABLED=true
+WH_DLQ_ENABLED=true
 
-export WH_POLICY_FILE_PATH=
+WH_POLICY_FILE_PATH=
 
-export WH_PIPES_DIR=
+WH_PIPES_DIR=
 
-export WH_OTEL_ENABLED=false
-export WH_OTEL_ADDR=127.0.0.1:4317
-export WH_OTEL_TRACES_ENABLED=true
-export WH_OTEL_TRACES_SAMPLE_RATE=1.0
-export WH_OTEL_METRICS_ENABLED=true
-export WH_OTEL_LOGS_ENABLED=true
-export WH_OTEL_LOGS_SAMPLE_RATE=1.0
+WH_OTEL_ENABLED=false
+WH_OTEL_ADDR=127.0.0.1:4317
+WH_OTEL_TRACES_ENABLED=true
+WH_OTEL_TRACES_SAMPLE_RATE=1.0
+WH_OTEL_METRICS_ENABLED=true
+WH_OTEL_LOGS_ENABLED=true
+WH_OTEL_LOGS_SAMPLE_RATE=1.0
 
-export WH_PROMETHEUS_ENABLED=false
-export WH_PROMETHEUS_PATH=/metrics
-export WH_PROMETHEUS_PORT=0
+WH_PROMETHEUS_ENABLED=false
+WH_PROMETHEUS_PATH=/metrics
+WH_PROMETHEUS_PORT=0
 ```
 </TabItem>
 </Tabs>

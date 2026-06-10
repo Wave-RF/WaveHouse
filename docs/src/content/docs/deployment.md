@@ -29,8 +29,10 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
     ORDER BY (page)
   "
 
-# Ingest data (the standalone stack ships a permissive trial policy; WaveHouse is fail-closed otherwise — see Getting Started)
-# A 404 "unknown table" right after creating the table means schema discovery hasn't picked it up yet — retry (worst case 60s)
+# Ingest data (the standalone stack ships a permissive trial policy;
+# WaveHouse is fail-closed otherwise — see Getting Started)
+# A 404 "unknown table" right after creating the table means schema
+# discovery hasn't picked it up yet — retry (worst case 60s)
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
@@ -169,8 +171,10 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
 
-```text
-WARN  data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.
+```text wrap=false
+WARN  data directory does not exist — starting with no prior state.
+      If this is a redeploy, your persistent volume is not actually
+      persisting; verify your mount.
 ```
 
 On a first-ever run this is expected. On every subsequent run it should be silent — so when this warning *does* fire after a redeploy, that's the most direct signal that the persistent volume isn't actually persisting.
@@ -197,8 +201,10 @@ volumes:
 
 Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
 
-```text
-ERROR  mq init failed  error="..."  path=/app/data/nats  hint="if running in a container with a host bind mount, the host directory must be owned by UID 65532..."
+```text wrap=false
+ERROR  mq init failed  error="..."  path=/app/data/nats
+       hint="if running in a container with a host bind mount, the host
+       directory must be owned by UID 65532..."
 ```
 
 The fix is one host-side command before first start:
@@ -412,7 +418,9 @@ docker compose -f deployments/compose/standalone.yaml up -d
 ### Option 3: Reset for Local Binary Development
 
 ```bash
-rm -rf data/         # Removes embedded NATS + Pebble data (run `make clean-all` to also drop docker volumes)
-make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
+rm -rf data/         # Removes embedded NATS + Pebble data
+                     # (run `make clean-all` to also drop docker volumes)
+make clean           # Removes build artifacts:
+                     # bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
 make build && ./bin/wavehouse
 ```

@@ -89,7 +89,10 @@ Returns `200 OK` once the gateway has discovered ClickHouse table schemas at lea
 **Response (boot-degraded):**
 
 ```json
-{"status": "degraded", "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"}
+{
+  "status": "degraded",
+  "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"
+}
 ```
 
 Status code: `503 Service Unavailable`

@@ -243,7 +243,8 @@ curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 
 ### Using an .env File
 
-```bash title=".env"
+```bash
+# .env
 export WH_CH_ADDR=localhost:9000
 ```
 

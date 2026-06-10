@@ -66,6 +66,13 @@
       if (!overlay) buildOverlay();
       const stage = overlay.querySelector(".wh-zoom__stage");
       stage.replaceChildren();
+      // The stage is reused across opens — a prior 1:1 pan session leaves
+      // its edge-fade attributes behind, which painted a phantom fade on
+      // the next (fitting) diagram.
+      stage.removeAttribute("data-wh-more");
+      stage.removeAttribute("data-wh-more-start");
+      stage.scrollLeft = 0;
+      stage.scrollTop = 0;
 
       // Re-id the clone rather than cloneNode-ing as-is: a Mermaid SVG scopes
       // its entire inline <style> (font-family, themed fills) by the root id

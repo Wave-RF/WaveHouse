@@ -71,7 +71,9 @@ Fetch the table's column definitions from ClickHouse.
 
 ```ts
 const { data } = await clicks.schema();
-// data: { name: 'clicks', columns: [{ name: 'page', type: 'String', is_nullable: false, has_default: false }, ...] }
+// data: { name: 'clicks', columns: [
+//   { name: 'page', type: 'String', is_nullable: false, has_default: false }, ...
+// ] }
 ```
 
 ### `.select(...columns)`
@@ -194,7 +196,9 @@ Filter by a time window. `since` and `until` accept RFC3339 timestamps or relati
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
-clicks.select('page').timeRange('received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
+clicks.select('page').timeRange(
+  'received_timestamp', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z'
+)
 ```
 
 #### `.cacheTTL(seconds)`

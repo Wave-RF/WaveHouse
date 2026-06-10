@@ -370,21 +370,31 @@ NATS KV is the **source of truth** for the live policy. A file is only ever a *s
 - **When `policy.file_path` is set, the file must exist and parse**, or WaveHouse refuses to boot. That turns a typo or a missing mount into a loud failure instead of a silent fail-closed deployment that denies everything.
 - **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every request is denied (logged loudly) until you seed one via `PUT /v1/admin/policy`.
 
+In `config.yaml` (or the matching environment variable):
+
+<Tabs syncKey="cfg">
+<TabItem label="YAML">
 ```yaml
-# config.yaml
 policy:
   file_path: /etc/wavehouse/policy.yaml   # seed on first boot only; KV wins thereafter
 ```
+</TabItem>
+<TabItem label="Environment">
+```ini
+WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
+```
+</TabItem>
+</Tabs>
 
 Because a deleted policy is a total lockout (including admin), treat the bootstrap file as your recovery path: keep it in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
 
 ## A complete example
 
-A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted.
+A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` reads its own tenant's rows with sensitive columns masked and expensive aggregations blocked, `writer` ingests events that are stamped with the caller's identity, and `admin` is unrestricted. Save it as your `policy.file_path` bootstrap file (`policy.yaml` or `policy.json` — both parse identically), or `PUT` it to `/v1/admin/policy`:
 
 <Tabs syncKey="policy">
 <TabItem label="YAML">
-```yaml title="policy.yaml"
+```yaml
 admin_role: admin        # full access + the /v1/admin/* gate (this is also the default)
 default_role: ""         # "" = closed: a request with no/!valid token is denied
 
@@ -413,7 +423,7 @@ tables:
 ```
 </TabItem>
 <TabItem label="JSON">
-```json title="policy.json"
+```json
 {
   "admin_role": "admin",
   "default_role": "",

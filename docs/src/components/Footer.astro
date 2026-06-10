@@ -241,13 +241,25 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     letter-spacing: -0.02em;
     color: var(--wh-ink);
   }
-  /* push the links to the trailing edge of the content column */
+  /* push the links to the trailing edge of the content column (gap sized so
+     the row + the external-link arrows still fit the prose column on one
+     line — 1.25rem tipped it into an awkward two-row wrap) */
   .wh-footer__links {
     margin-inline-start: auto;
     display: flex;
     flex-wrap: wrap;
-    gap: 1.25rem;
+    gap: 1rem;
     font-size: 0.875rem;
+  }
+  /* In the 72–86rem window Starlight squeezes the content pane below the
+     prose width and the single-row bar can't fit (needs ~700px, gets ~650) —
+     wrap deliberately: links become their own left-aligned row under the
+     brand instead of a ragged right-aligned overflow. */
+  @media (max-width: 86rem) {
+    .wh-footer__links {
+      margin-inline-start: 0;
+      flex-basis: 100%;
+    }
   }
   .wh-footer__links a {
     color: var(--wh-ink-muted);

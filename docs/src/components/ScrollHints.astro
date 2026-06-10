@@ -264,8 +264,12 @@
     scrollbar-color: var(--wh-border-strong) transparent;
     margin-block: 1rem;
     position: relative;
-    /* Mermaid draws cluster borders ON the viewBox edge; overflow-y:hidden
-       was slicing the stroke's outer half at the top/bottom. */
+  }
+  /* Mermaid draws cluster borders ON the viewBox edge; overflow-y:hidden
+     was slicing the stroke's outer half at the top/bottom. Diagram
+     scrollers only — on a table wrap this padding opened a page-bg gap
+     between the card border and the header band. */
+  .wh-scroll-x:not(.wh-table-wrap) {
     padding-block: 2px;
   }
   /* Edge fades: content hidden past an edge reads as scrollable instead of

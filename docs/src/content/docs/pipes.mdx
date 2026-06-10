@@ -5,6 +5,8 @@ sidebar:
   order: 6
 ---
 
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
 A **named pipe** is a saved SQL query, registered under a name, that callers run by name with parameters — without ever sending raw SQL. They turn an ad-hoc query into a stable, cached, access-controlled endpoint: you write the SQL once as an operator, expose it at `GET/POST /v1/pipes/{name}`, and clients supply only the declared parameters.
 
 Pipes are the right tool when a query is reusable and shouldn't live in client code — dashboards, reports, public APIs over curated slices of data. They sit on the **cached read path** (shared L1 + singleflight, same as structured queries), and authorize through a simple per-pipe allowlist rather than the full [policy engine](/access-control).
@@ -159,12 +161,21 @@ The response is a JSON array of rows. Results flow through the shared in-process
 
 ## Bootstrapping from `.sql` files
 
-For version-controlled, deploy-time pipe definitions, point `pipes.dir` at a directory of `.sql` files:
+For version-controlled, deploy-time pipe definitions, point `pipes.dir` (in `config.yaml`, or its environment twin) at a directory of `.sql` files:
 
-```yaml title="config.yaml"
+<Tabs syncKey="cfg">
+<TabItem label="YAML">
+```yaml
 pipes:
   dir: /app/pipes        # seed .sql files into KV on startup
 ```
+</TabItem>
+<TabItem label="Environment">
+```ini
+WH_PIPES_DIR=/app/pipes
+```
+</TabItem>
+</Tabs>
 
 On startup, each top-level `*.sql` file is loaded as a pipe whose **name is the filename** (without the extension) and whose **SQL is the file contents**. So `pipes/top_pages.sql` becomes the pipe `top_pages`. The directory is a one-time **seed**, not authoritative storage:
 

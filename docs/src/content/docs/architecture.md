@@ -150,13 +150,14 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### Ingest Path
 
-```text
+```text wrap=false
 Client POST /v1/ingest?table={table}
   → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
   → Policy check: role allowed to insert into this table (before the body is parsed)
   → Validate JSON body against schema (type checks, required columns)
-  → Policy column rules + check clauses (disallowed columns rejected; claim-derived values enforced or injected)
+  → Policy column rules + check clauses (disallowed columns rejected;
+    claim-derived values enforced or injected)
   → Optional deduplication check (configurable ID field)
   → Publish to NATS JetStream (ingest.{table})
   → 200 OK returned immediately

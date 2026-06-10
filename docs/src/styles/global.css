@@ -646,13 +646,17 @@ svg[aria-roledescription^="flowchart"] .cluster rect {
 
 /* External links announce themselves everywhere, not just the sidebar —
    absolute http(s) hrefs are off-site by construction (internal links are
-   root-relative). Buttons and cards carry their own affordances. */
+   root-relative). Exclusions: buttons/cards carry their own affordances,
+   prev/next pagination cards already have a directional arrow (and a second
+   floating glyph inside the card read as broken), and the footer's
+   brand-sentence link ("A Wave RF open-source project") is prose identity,
+   not navigation — a mid-phrase arrow just splits the sentence. */
 .sl-markdown-content a[href^="http"]:not(:where(.sl-link-button, .sl-link-card, .not-content a))::after,
-footer a[href^="http"]::after {
+footer a[href^="http"]:not(:where(.pagination-links a, .wh-footer__sub a))::after {
   content: "↗";
   display: inline-block;
-  margin-inline-start: 0.25em;
-  font-size: 0.7em;
+  margin-inline-start: 0.2em;
+  font-size: 0.65em;
   opacity: 0.6;
 }
 
