@@ -38,6 +38,11 @@ check setup-env         true   true   .github/actions/setup-env/action.yml
 check worker-under-docs false  true   docs/worker/index.ts
 check agent-config      false  false  .claude/hooks/agent-bash-gate.sh
 check editor-config     false  false  .vscode/settings.json
+# GitHub meta paths, real casing. labeler.yml + ISSUE_TEMPLATE/config.yml
+# are NOT .md, so they exercise their own allowlist entries (not `.md$`).
+check labeler           false  false  .github/labeler.yml
+check issue-template    false  false  .github/ISSUE_TEMPLATE/config.yml
+check pr-template       false  false  .github/PULL_REQUEST_TEMPLATE.md
 check dep-bump-pnpm     true   true   pnpm-lock.yaml
 check dep-bump-go       true   false  go.mod go.sum
 check mixed-docs-go     true   true   docs/x.md internal/a.go

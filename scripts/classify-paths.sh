@@ -37,7 +37,9 @@ if [ -z "$files" ]; then
 fi
 
 # code=true unless EVERY changed path matches the prose/meta allowlist.
-if printf '%s\n' "$files" | grep -qvE '^(docs/|.*\.md$|LICENSE|NOTICE|\.gitignore$|\.gitattributes$|\.github/labeler\.yml$|\.github/ISSUE_TEMPLATE/|\.github/pull_request_template|\.claude/|\.vscode/)'; then
+# `grep` here is case-sensitive: GitHub meta paths use their real casing
+# (`.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md`).
+if printf '%s\n' "$files" | grep -qvE '^(docs/|.*\.md$|LICENSE|NOTICE|\.gitignore$|\.gitattributes$|\.github/labeler\.yml$|\.github/ISSUE_TEMPLATE/|\.github/PULL_REQUEST_TEMPLATE|\.claude/|\.vscode/)'; then
   echo "code=true"
 else
   echo "code=false"
