@@ -23,6 +23,7 @@
     "@wave-rf/starlight-llm-tools": "^0.3.1",
     "@wavehouse/sdk": "workspace:*",
     "astro": "^6.1.5",
+    "astro-vtbot": "^2.1.12",
     "katex": "^0.16.11",
     "rehype-katex": "^7.0.1",
     "rehype-mermaid": "^3.0.0",
@@ -35,7 +36,6 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240208.0",
-    "astro-vtbot": "^2.1.12",
     "playwright": "^1.59.1",
     "wrangler": "^4.81.0"
   },

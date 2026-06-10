@@ -86,6 +86,9 @@ importers:
       astro:
         specifier: ^6.1.5
         version: 6.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.60.4)(tsx@4.22.3)(yaml@2.9.0)
+      astro-vtbot:
+        specifier: ^2.1.12
+        version: 2.1.12
       katex:
         specifier: ^0.16.11
         version: 0.16.47
@@ -117,9 +120,6 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20240208.0
         version: 4.20260521.1
-      astro-vtbot:
-        specifier: ^2.1.12
-        version: 2.1.12
       playwright:
         specifier: ^1.59.1
         version: 1.60.0
