@@ -154,13 +154,13 @@ jobs:
       # synchronize: with `dismiss_stale_reviews_on_push` enabled,
       # re-requesting on every push would re-spam the reviewer before
       # the author hit "re-request review" after a CHANGES_REQUESTED.
-      # Drafts and Dependabot PRs are skipped (Dependabot is handled
-      # by dependabot-automerge.yml).
+      # Drafts are skipped. Dependabot PRs are included — they now go
+      # through normal admin review (the dependabot-automerge workflow
+      # was removed), so the non-author admin gets requested like any PR.
       - name: Request review from non-author admin
         if: |
           (github.event.action == 'opened' || github.event.action == 'ready_for_review')
           && github.event.pull_request.draft == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -200,7 +200,6 @@ jobs:
         if: |
           (github.event.action == 'opened' || github.event.action == 'ready_for_review')
           && github.event.pull_request.draft == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
           && steps.pick-reviewer.outputs.reviewer != ''
         continue-on-error: true
         uses: ./.github/actions/assign-and-request-review
