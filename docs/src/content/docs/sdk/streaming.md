@@ -143,7 +143,7 @@ lq.close();
 
 ```ts
 interface StreamSubscriber<T> {
-  initial: (result: Result<T[]>) => void;  // Historical backfill result
+  initial?: (result: Result<T[]>) => void; // Historical backfill result
   next: (event: StreamEvent<T>) => void;    // Live events
   status?: (state: string) => void;         // Connection state changes
   error?: (err: WaveHouseError) => void;    // Errors
