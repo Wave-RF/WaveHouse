@@ -514,7 +514,7 @@ Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs 
 
 PRs are grouped by ecosystem to reduce noise.
 
-**Auto-merge for Dependabot.** `.github/workflows/dependabot-automerge.yml` auto-approves and enables auto-merge on Dependabot PRs classified as `version-update:semver-patch` or `version-update:semver-minor`. Once CI passes, they merge hands-off. Major-version bumps get a comment flagging them for human review and stay open. Dependabot PRs bypass the `Admin approval` required check entirely (see `admin-approval.yml`), so **all** patch/minor bumps — including workflow-touching ones — merge without human intervention; the trust model for that is CI passing + `dependabot/fetch-metadata` classification.
+**No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. `housekeeping.yml` requests a review from a non-author admin so the right person is notified. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
 ## Releasing the SDK
 
@@ -554,15 +554,14 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 ### Required status checks
 
-The `main branch protection` ruleset requires three status checks to pass before any PR can merge:
+The `main branch protection` ruleset requires two status checks to pass before any PR can merge:
 
 - `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
 - `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
-- `Admin approval` — at least one `APPROVED` review from an admin (Eric or Taite), enforced by `.github/workflows/admin-approval.yml`
 
-The ruleset also enforces 1 approving review, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only.
+The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
+Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 
 ### Merge behavior
 
@@ -579,17 +578,17 @@ Advisory PR review comes from marketplace apps configured at the org/repo level:
 - **CodeRabbit** — automated PR review; auto-reviews on open + push, re-trigger with `@coderabbitai review`.
 - **Copilot** — tied to individual reviewer subscriptions; shows up on PRs where a maintainer with Copilot Pro is listed as a reviewer.
 
-Both are **advisory** — the `Admin approval` status check (admin review mandated via workflow) + the ruleset's approval / thread-resolution / linear-history rules are the actual merge-gate.
+Both are **advisory** — the ruleset's `required_reviewers` rule (an `@Wave-RF/wavehouse-admins` approval) plus its thread-resolution / linear-history / required-check rules are the actual merge-gate.
 
 ### Reviewer assignment and the Task Board
 
 Reviewer assignment is automated; the board itself is GitHub-native, not a workflow state machine:
 
 - **Reviewer assignment**: on PR open / ready-for-review, the `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) requests review from the non-author admin and sets them as assignee. It does **not** re-request on every push — after addressing feedback, use GitHub's "Re-request review" button (the trigger, if `dismiss_stale_reviews_on_push` cleared the request).
-- **Merge gate**: the `Admin approval` status check (`.github/workflows/admin-approval.yml`) fails until an admin has an `APPROVED` review; the ruleset adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
+- **Merge gate**: the ruleset's `required_reviewers` rule requires an `APPROVED` review from the `@Wave-RF/wavehouse-admins` team; it also adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
 - **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
 
-Dependabot PRs bypass `Admin approval` (`dependabot-automerge.yml` handles patch/minor bumps hands-off once CI is green; majors get a comment and stay open for human review).
+Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 
 ### Invoking bots manually
 
