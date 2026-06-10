@@ -57,6 +57,40 @@ func (l *LocalCache) InvalidateCache(_ context.Context, versionKeys []string) (u
 	return uint64(len(versionKeys)), nil
 }
 
+// getRaw fetches a value by an already-built cache key (no version folding). The
+// pipe layer folds a multi-namespace key via the VersionManager, then calls this.
+// Returns nil, 0, nil on miss.
+func (l *LocalCache) getRaw(key string) ([]byte, time.Duration, error) {
+	val, found := l.cache.Get(key)
+	if !found {
+		return nil, 0, nil
+	}
+	remaining, _ := l.cache.GetTTL(key)
+	return val, remaining, nil
+}
+
+// setRaw stores a value under an already-built cache key (no version folding).
+func (l *LocalCache) setRaw(key string, value []byte, ttl time.Duration) error {
+	if ok := l.cache.SetWithTTL(key, value, int64(len(value)), ttl); !ok {
+		return fmt.Errorf("cache admission rejected for key %q", key)
+	}
+	return nil
+}
+
+// GetQuery looks up a cached query RESULT by its sha (hash of SQL+params) and the
+// namespaces it depends on. This is the general namespace-cache read, used by BOTH
+// structured queries (which pass one Namespace) and pipes (which pass several).
+// Returns nil, 0, nil on miss.
+func (l *LocalCache) GetQuery(_ context.Context, sha string, deps []Namespace) ([]byte, time.Duration, error) {
+	return l.getRaw(l.versionManager.QueryKey(sha, deps))
+}
+
+// SetQuery stores a query result under the folded key for its dependency
+// namespaces. General write used by both structured queries and pipes.
+func (l *LocalCache) SetQuery(_ context.Context, sha string, deps []Namespace, value []byte, ttl time.Duration) error {
+	return l.setRaw(l.versionManager.QueryKey(sha, deps), value, ttl)
+}
+
 // Wait blocks until all buffered writes have been applied.
 // Exposed for testing; production callers rarely need this.
 func (l *LocalCache) Wait() {
