@@ -78,7 +78,9 @@ const wh = createClient<Database>({
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
-> **How the token is transmitted.** The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+:::note[How the token is transmitted]
+The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
+:::
 
 ### Type-Safe Tables
 
@@ -371,7 +373,9 @@ Execute a raw SQL query. `/v1/admin/query` is admin-only: the caller's JWT must 
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
 ```
 
-> **No parameter binding through the SDK.** Positional `?` substitution is not supported, and the SDK has no way to forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and `wh.sql()` doesn't expose a hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder (`wh.from(table)…`).
+:::note[No parameter binding through the SDK]
+Positional `?` substitution is not supported, and the SDK has no way to forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and `wh.sql()` doesn't expose a hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder (`wh.from(table)…`).
+:::
 
 ---
 
@@ -588,7 +592,9 @@ interface StreamEvent<T> {
 <!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
 <!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
-> **SSE connection limit:** The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
+:::note[SSE connection limit]
+The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
+:::
 
 ### Client-Side Stream Filtering
 

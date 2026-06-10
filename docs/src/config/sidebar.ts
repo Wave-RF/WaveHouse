@@ -16,6 +16,13 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
       { label: "Ingest Pipeline", slug: "ingest-pipeline" },
       { label: "Access Control", slug: "access-control" },
       { label: "Named Pipes", slug: "pipes" },
+    ],
+  },
+  {
+    // Lookup material, not narrative — its own group so "I need the exact
+    // endpoint/method" readers don't scan the conceptual guides for it.
+    label: "Reference",
+    items: [
       { label: "API Reference", slug: "api" },
       { label: "TypeScript SDK", slug: "sdk" },
     ],

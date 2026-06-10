@@ -33,7 +33,9 @@ A pipe is defined by five fields:
 }
 ```
 
-> **Pipe SQL is operator-authored and admin-only to write.** Anyone who can create or edit a pipe can run arbitrary SQL, so pipe management lives entirely behind the admin gate. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
+:::caution[Pipe SQL is operator-authored and admin-only to write]
+Anyone who can create or edit a pipe can run arbitrary SQL, so pipe management lives entirely behind the admin gate. Callers of a pipe never send SQL — only parameter values. Keep that boundary in mind when you design a pipe: the SQL is your trusted code, the parameters are untrusted input.
+:::
 
 ## Parameters
 
@@ -170,7 +172,9 @@ On startup, each top-level `*.sql` file is loaded as a pipe whose **name is the 
 - It will **not overwrite** a pipe that already exists in KV — once a pipe is in the store (seeded earlier, or created via the API), the file is skipped.
 - After bootstrap, the API and KV are the source of truth; the directory is read-only at runtime. Mount it read-only in containers (e.g. `./my-pipes:/app/pipes:ro`).
 
-> **Bootstrapped pipes are admin-only until you grant roles.** A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/admin/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
+:::caution[Bootstrapped pipes are admin-only until you grant roles]
+A `.sql` file carries only the SQL — there's no way to express `allowed_roles`, `parameters`, or a `description` in the file. A pipe seeded this way therefore has an empty `allowed_roles`, which (fails-closed) means **admin only**. To expose it to other roles or add formal parameters, `PUT` the full definition through `/v1/admin/pipes/{name}` after boot. Inline `{{name:default}}` placeholders still work in a bootstrapped file, so the SQL can be parameter-ready even without formal declarations.
+:::
 
 ## End-to-end example
 

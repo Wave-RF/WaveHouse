@@ -532,7 +532,9 @@ git tag sdk-v0.1.0
 git push origin sdk-v0.1.0
 ```
 
-> **The first tagged release promotes `latest`.** npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+:::caution[The first tagged release promotes `latest`]
+npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+:::
 
 ## CI & review automation
 

@@ -51,7 +51,9 @@ For authorization, the behavior that matters is what happens with **no** role: t
 
 Setting `default_role` does nothing on its own; the role you name still needs entries under `tables` to grant any access. Think of it as "which role does an anonymous caller assume", not "what can anonymous callers do".
 
-> **`default_role: admin` is a dev-only footgun.** Setting `default_role` equal to `admin_role` is permitted — it makes every unauthenticated request a full admin, including `/v1/admin/*`, which is handy for local development with no tokens. It is **never** for production. Every node that loads such a policy logs a loud `WARN` on startup and on every update.
+:::caution[`default_role: admin` is a dev-only footgun]
+Setting `default_role` equal to `admin_role` is permitted — it makes every unauthenticated request a full admin, including `/v1/admin/*`, which is handy for local development with no tokens. It is **never** for production. Every node that loads such a policy logs a loud `WARN` on startup and on every update.
+:::
 
 ### `admin_role` — the privileged role
 
@@ -62,7 +64,9 @@ Setting `default_role` does nothing on its own; the role you name still needs en
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role).
 
-> **A missing policy locks everyone out — including admin.** `admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies everyone, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is server-side — restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot, not an "admin" token over HTTP.
+:::caution[A missing policy locks everyone out — including admin]
+`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies everyone, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is server-side — restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot, not an "admin" token over HTTP.
+:::
 
 ## Anatomy of a policy
 
@@ -213,7 +217,9 @@ The same policy drives every data path, but not every field is meaningful on eve
 | Raw SQL | `POST /v1/admin/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
 | Named pipe | `GET/POST /v1/pipes/{name}` | not the policy engine — per-pipe `allowed_roles`; see [Named Pipes](/pipes) |
 
-> **Live streams enforce access, not row filters.** SSE subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and `max_rows`/`max_execution_time_ms` limits are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
+:::caution[Live streams enforce access, not row filters]
+SSE subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and `max_rows`/`max_execution_time_ms` limits are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
+:::
 
 ## Managing the policy
 
