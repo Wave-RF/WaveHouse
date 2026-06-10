@@ -311,7 +311,9 @@ svg[aria-roledescription^="state"] {
     min-width: var(--wh-natural-w, 540px);
   }
   .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="flowchart"]),
-  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]) {
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="sequence"]),
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="class"]),
+  .sl-markdown-content :where(p, div):has(> svg[aria-roledescription^="state"]) {
     overflow-x: auto;
     overflow-y: visible;
     scroll-padding-inline: 1rem;
@@ -1010,6 +1012,17 @@ a.sl-link-button.minimal:hover {
     min-width: min(var(--sl-content-width), 100%);
     max-width: 100%;
   }
+  /* Code-only tab groups breakout as a unit (data-wh-wide + --wh-natural-w
+     both stamped by ScrollHints). fit-content tracks the visible panel; the
+     min-width pin at the widest panel's natural width keeps the frame from
+     resizing on tab switches. */
+  .sl-markdown-content > starlight-tabs[data-wh-wide] {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: fit-content;
+    min-width: min(var(--wh-natural-w, var(--sl-content-width)), 100%);
+    max-width: 100%;
+  }
   /* Diagram scrollers need an EXPLICIT width: fit-content can't measure a
      `width:100%` SVG child (it resolved to the min-width floor and pinned
      2000px-natural diagrams at prose width). min(natural, pane) is the
@@ -1170,10 +1183,11 @@ site-search dialog {
     border-radius: var(--radius-lg);
   }
 }
+/* Standard property only — a hand-written -webkit- twin makes LightningCSS
+   drop the unprefixed declaration (see the header.header note above). */
 site-search dialog::backdrop {
   background: color-mix(in oklab, var(--wh-bg) 55%, transparent);
   backdrop-filter: blur(8px) saturate(120%);
-  -webkit-backdrop-filter: blur(8px) saturate(120%);
 }
 /* The results list scrolls inside .dialog-frame — the stock chunky UA
    scrollbar ran hard against the dialog's rounded corner. */

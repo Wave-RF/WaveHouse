@@ -19,8 +19,11 @@
 
 <script is:inline>
   (() => {
-    const SCROLLERS =
-      ".expressive-code pre, .sl-markdown-content table, .wh-scroll-x, .wh-zoom__stage";
+    // No bare `table` here: wrapScrollables() runs before any measurement,
+    // so tables always scroll on their .wh-table-wrap (matched via
+    // .wh-scroll-x) — a fade stamped on the non-scrolling <table> itself
+    // would never clear, since scroll events fire on the wrapper.
+    const SCROLLERS = ".expressive-code pre, .wh-scroll-x, .wh-zoom__stage";
 
     function wrapScrollables() {
       // Bare svgs in the content flow AND direct svg children of a
@@ -243,21 +246,66 @@
     // stretching it just strands a few words on the continuation line, so
     // it keeps the prose width. wrap=false blocks are the exception: they
     // scroll instead of wrapping, so the full pane minimizes the scroll.
+    // Code-ONLY tab groups (the YAML/JSON/env switchers) classify as a unit:
+    // one panel can't break out alone — the docked tablist and every sibling
+    // panel share the frame. All panels are measured (inactive ones are
+    // display:none, so they get an inline display:block for the batched
+    // read; layout never reaches paint between write and restore) and the
+    // group earns data-wh-wide when any panel would. Groups with prose in a
+    // panel are left alone: widening would stretch sentence line lengths.
     function classifyCode() {
       const md = document.querySelector(".sl-markdown-content");
       if (!md) return;
       const blocks = [...document.querySelectorAll(".sl-markdown-content > .expressive-code")];
-      if (!blocks.length) return;
+      const groups = [...document.querySelectorAll(".sl-markdown-content > starlight-tabs")]
+        .map((el) => ({ el, panels: [...el.querySelectorAll(":scope > [role='tabpanel']")] }))
+        .filter(
+          (g) =>
+            g.panels.length &&
+            g.panels.every(
+              (p) =>
+                p.children.length === 1 &&
+                p.firstElementChild.classList.contains("expressive-code"),
+            ),
+        );
+      if (!blocks.length && !groups.length) return;
       blocks.forEach((b) => b.removeAttribute("data-wh-wide"));
+      groups.forEach((g) => {
+        g.el.removeAttribute("data-wh-wide");
+        g.el.style.removeProperty("--wh-natural-w");
+        g.pres = g.panels.map((p) => p.querySelector("pre"));
+        g.hidden = g.panels.filter((p) => p.hasAttribute("hidden"));
+      });
       const pres = blocks.map((b) => b.querySelector("pre"));
       // Batched natural-width measurement (write-all → read-all → restore).
-      pres.forEach((p) => {
-        if (p) p.style.whiteSpace = "pre";
-      });
+      groups.forEach((g) =>
+        g.hidden.forEach((p) => {
+          // Inline display beats the UA [hidden] rule for the measurement.
+          p.style.display = "block";
+        }),
+      );
+      // EC's wrapping lives on the DESCENDANT code spans (`pre.wrap .ec-line
+      // .code { white-space: pre-wrap }`), so an inline white-space on the
+      // pre never unwraps anything — the wrap class itself comes off for the
+      // measurement. Restored before the classification loops (which test
+      // for it) and before anything paints.
+      const allPres = pres.concat(groups.flatMap((g) => g.pres));
+      const wrapped = allPres.filter((p) => p && p.classList.contains("wrap"));
+      wrapped.forEach((p) => p.classList.remove("wrap"));
       const naturals = pres.map((p) => (p ? p.scrollWidth : 0));
-      pres.forEach((p) => {
-        if (p) p.style.whiteSpace = "";
+      groups.forEach((g) => {
+        g.naturals = g.pres.map((p, i) => {
+          if (!p) return 0;
+          // EC's frame border sits outside pre.scrollWidth but inside the
+          // group's fit-content width — fold it into the pin, or the frame
+          // breathes by the border width when switching to a narrower tab.
+          const chrome = g.panels[i].firstElementChild.offsetWidth - p.clientWidth;
+          return p.scrollWidth + chrome;
+        });
+        g.width = g.el.clientWidth;
       });
+      wrapped.forEach((p) => p.classList.add("wrap"));
+      groups.forEach((g) => g.hidden.forEach((p) => p.style.removeProperty("display")));
       const avail = md.clientWidth - 8;
       blocks.forEach((b, i) => {
         const p = pres[i];
@@ -267,6 +315,22 @@
         if (needsMore && (fitsWide || !p.classList.contains("wrap"))) {
           b.setAttribute("data-wh-wide", "");
         }
+      });
+      groups.forEach((g) => {
+        const earns = g.pres.some((p, i) => {
+          if (!p) return false;
+          const fitsWide = g.naturals[i] <= avail;
+          const needsMore = g.naturals[i] > g.width + 8;
+          return needsMore && (fitsWide || !p.classList.contains("wrap"));
+        });
+        if (!earns) return;
+        g.el.setAttribute("data-wh-wide", "");
+        // Pin the group to its WIDEST panel so the frame keeps one stable
+        // width across tab switches instead of resizing per panel.
+        g.el.style.setProperty(
+          "--wh-natural-w",
+          `${Math.ceil(Math.min(Math.max(...g.naturals), avail))}px`,
+        );
       });
     }
 
@@ -302,6 +366,16 @@
         }),
       );
     }
+    // A tab switch reveals a pre that was display:none (unmeasurable) when
+    // fades were last stamped — refresh once the swap has happened. Click
+    // and keydown both: Starlight's tablist also switches on arrow keys.
+    const onTabSwitch = (e) => {
+      if (e.target instanceof Element && e.target.closest("[role='tab']")) {
+        requestAnimationFrame(updateAll);
+      }
+    };
+    document.addEventListener("click", onTabSwitch);
+    document.addEventListener("keydown", onTabSwitch);
     // Element scroll events don't bubble, but they do capture.
     document.addEventListener(
       "scroll",
