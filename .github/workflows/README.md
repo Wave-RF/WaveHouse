@@ -153,7 +153,7 @@ Queue settings live in the `main branch protection` ruleset's
 
 | Cache | Key | Saved by | Notes |
 |---|---|---|---|
-| Go modules + build | `gobuild-v2-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`). v2 = the GOTOOLCHAIN=auto toolchain rides in `~/go/pkg/mod` (no setup-go). **TODO:** drop the unversioned v1 restore-keys fallbacks once a v2 entry exists on main. |
+| Go modules + build | `gobuild-v2-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`). v2 = the GOTOOLCHAIN=auto toolchain rides in `~/go/pkg/mod` (no setup-go). |
 | golangci binary + analysis | `golangci-<os>-<Makefile,.golangci.yml hash>` | lint | Analysis cache: ~10s warm vs ~90s. `.bin` also carries shellcheck + actionlint. |
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
@@ -240,22 +240,3 @@ suite's wall-clock becomes a problem again, start here:
 - Re-run failed jobs is safe everywhere: fragments/dist artifacts
   persist per-run, `download-artifact` finds them instantly, and the
   sticky preview comment updates in place.
-
-## Transition notes (delete when done)
-
-- **v1 gobuild restore-keys** in setup-env: drop after the first main
-  run saves `gobuild-v2-*` entries.
-- **docs-preview comment guard**: the comment step skips with a notice
-  until `scripts/ci/docs-preview-comment.sh` exists on main (it executes
-  from the trusted-main checkout). Remove the guard after merge.
-- **PR-title script guard**: the `PR title` job's step skips with a notice
-  until `scripts/ci/check-pr-title.sh` exists on main (same trusted-main
-  checkout). Title enforcement is advisory via `PR housekeeping` until
-  then. Remove the guard after merge.
-- **Merge-queue ruleset flip**: AFTER the PR adding the `merge_group:`
-  trigger lands on main (ordering matters — flipping first strands every
-  other queued PR with no CI run), update the `main branch protection`
-  ruleset: add the `merge_queue` rule and set
-  `strict_required_status_checks_policy: false` (prepared payload:
-  `gh api -X PUT repos/Wave-RF/WaveHouse/rulesets/15353356 --input
-  tmp/ruleset-merge-queue.json`). Then delete this note.
