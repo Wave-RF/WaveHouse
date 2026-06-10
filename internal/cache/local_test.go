@@ -133,3 +133,33 @@ func TestLocalCache_Invalidate(t *testing.T) {
 	assert.Nil(t, valAfter)
 	assert.Zero(t, ttlAfter)
 }
+
+// A batch that bumps a whole table must invalidate that table's scoped entries
+// via the table bump alone — the redundant per-scope bumps are skipped, but the
+// scoped entry must still miss.
+func TestLocalCache_Invalidate_WholeTableSubsumesScopes(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	scoped := []Namespace{{Table: "events", Scope: "org_1"}}
+
+	require.NoError(t, c.Set(ctx, "q", scoped, []byte("v1"), 10*time.Second))
+	c.Wait()
+	val, _, err := c.Get(ctx, "q", scoped)
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), val)
+
+	// Mixed batch: whole-table entry + a scoped entry for the same table.
+	_, err = c.Invalidate(ctx, []Namespace{
+		{Table: "events", Scope: ""},
+		{Table: "events", Scope: "org_1"},
+	})
+	require.NoError(t, err)
+
+	after, _, err := c.Get(ctx, "q", scoped)
+	assert.NoError(t, err)
+	assert.Nil(t, after, "whole-table bump must invalidate the scoped entry")
+}
