@@ -263,9 +263,11 @@ This pairs naturally with a matching `filter` on the `select` side: `check` stam
 ```yaml
 select:
   viewer:
-    denied_aggregations: ["quantile", "median"]   # blocklist: everything else is allowed
+    # blocklist: everything else is allowed
+    denied_aggregations: ["quantile", "median"]
   analyst:
-    allowed_aggregations: ["count", "sum", "avg"]  # allowlist: only these three
+    # allowlist: only these three
+    allowed_aggregations: ["count", "sum", "avg"]
 ```
   </TabItem>
   <TabItem label="JSON">
@@ -376,7 +378,8 @@ In `config.yaml` (or the matching environment variable):
 <TabItem label="YAML">
 ```yaml
 policy:
-  file_path: /etc/wavehouse/policy.yaml   # seed on first boot only; KV wins thereafter
+  # seed on first boot only; KV wins thereafter
+  file_path: /etc/wavehouse/policy.yaml
 ```
 </TabItem>
 <TabItem label="Environment">
@@ -395,8 +398,10 @@ A multi-tenant analytics deployment: anonymous callers get nothing, `viewer` rea
 <Tabs syncKey="policy">
 <TabItem label="YAML">
 ```yaml
-admin_role: admin        # full access + the /v1/admin/* gate (this is also the default)
-default_role: ""         # "" = closed: a request with no/!valid token is denied
+# admin: full access + the /v1/admin/* gate (this is also the default)
+admin_role: admin
+# "" = closed: a request with no/!valid token is denied
+default_role: ""
 
 tables:
   events:

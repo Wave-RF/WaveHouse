@@ -143,6 +143,19 @@
     // real to scroll to — fading those reads as cut-off content that isn't
     // there. Anything under ~a character width isn't worth hinting anyway.
     function updateOne(el) {
+      // A WRAPPED code block can never meaningfully scroll sideways —
+      // pre-wrap + break-word guarantee every line fits. Whatever
+      // scrollWidth reports beyond clientWidth is hanging wrap-point
+      // whitespace or zoom/font-timing rounding, and this artifact class
+      // resisted several threshold bumps because it depends on exactly
+      // where lines wrap at the reader's width. Hard rule: no fades on
+      // pre.wrap, ever. (wrap=false blocks lack the class and keep their
+      // real scroll + fades.)
+      if (el.tagName === "PRE" && el.classList.contains("wrap")) {
+        el.removeAttribute("data-wh-more");
+        el.removeAttribute("data-wh-more-start");
+        return;
+      }
       const end = el.scrollWidth - el.clientWidth - el.scrollLeft > 12;
       const start = el.scrollLeft > 12;
       el.toggleAttribute("data-wh-more", end);
@@ -223,8 +236,43 @@
         })
         .forEach((el) => el.setAttribute("data-wh-scrolls", ""));
     }
+    // Code blocks earn breakout the same way tables do: widening is only
+    // worth it when it makes wrapping go AWAY. A block whose longest line
+    // fits the wide track grows to exactly that line (no wrap, no scroll);
+    // one whose longest line exceeds even the full pane would wrap anyway —
+    // stretching it just strands a few words on the continuation line, so
+    // it keeps the prose width. wrap=false blocks are the exception: they
+    // scroll instead of wrapping, so the full pane minimizes the scroll.
+    function classifyCode() {
+      const md = document.querySelector(".sl-markdown-content");
+      if (!md) return;
+      const blocks = [...document.querySelectorAll(".sl-markdown-content > .expressive-code")];
+      if (!blocks.length) return;
+      blocks.forEach((b) => b.removeAttribute("data-wh-wide"));
+      const pres = blocks.map((b) => b.querySelector("pre"));
+      // Batched natural-width measurement (write-all → read-all → restore).
+      pres.forEach((p) => {
+        if (p) p.style.whiteSpace = "pre";
+      });
+      const naturals = pres.map((p) => (p ? p.scrollWidth : 0));
+      pres.forEach((p) => {
+        if (p) p.style.whiteSpace = "";
+      });
+      const avail = md.clientWidth - 8;
+      blocks.forEach((b, i) => {
+        const p = pres[i];
+        if (!p) return;
+        const fitsWide = naturals[i] <= avail;
+        const needsMore = naturals[i] > b.clientWidth + 8;
+        if (needsMore && (fitsWide || !p.classList.contains("wrap"))) {
+          b.setAttribute("data-wh-wide", "");
+        }
+      });
+    }
+
     function init() {
       wrapScrollables();
+      classifyCode();
       classifyTables();
       updateAll();
     }
@@ -237,11 +285,23 @@
       "resize",
       () =>
         requestAnimationFrame(() => {
+          classifyCode();
           classifyTables();
           updateAll();
         }),
       { passive: true },
     );
+    // Web fonts change every measured width — re-derive once they land, so
+    // a classification made against fallback-font metrics can't go stale.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() =>
+        requestAnimationFrame(() => {
+          classifyCode();
+          classifyTables();
+          updateAll();
+        }),
+      );
+    }
     // Element scroll events don't bubble, but they do capture.
     document.addEventListener(
       "scroll",

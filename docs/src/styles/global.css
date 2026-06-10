@@ -995,11 +995,15 @@ a.sl-link-button.minimal:hover {
   .sl-markdown-content > * {
     grid-column: 2;
   }
-  /* Code frames + paired diagrams: fit-content sizes each to what its
-     content actually needs — a short code block stays at the prose width
-     (min-width keeps its edges aligned with the text), a wide one grows up
-     to the pane. Centered growth, symmetric margins. */
-  .sl-markdown-content > :is(.expressive-code, .diagram-pair) {
+  /* Code frames EARN breakout like tables do (data-wh-wide from
+     ScrollHints): only when widening actually eliminates wrapping (or the
+     block is wrap=false and scrolls). A block whose longest line would wrap
+     even at the full pane keeps the prose width — stretching it just
+     strands a few words on the continuation line. fit-content sizes a wide
+     block to exactly its longest line; min-width keeps short blocks' edges
+     aligned with the text. */
+  .sl-markdown-content > .diagram-pair,
+  .sl-markdown-content > .expressive-code[data-wh-wide] {
     grid-column: 1 / -1;
     justify-self: center;
     width: fit-content;

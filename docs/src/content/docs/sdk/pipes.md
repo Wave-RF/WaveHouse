@@ -14,9 +14,9 @@ Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 Execute a pre-defined named query pipe. Returns a `PipeRef` which is **PromiseLike**.
 
 ```ts
-// These are equivalent:
+// These are equivalent (PipeRef is PromiseLike):
 const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 }).fetch();
-const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 }); // PromiseLike
+const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 50 });
 ```
 
 ### `.fetch(opts?)`

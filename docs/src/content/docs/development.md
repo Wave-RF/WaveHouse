@@ -356,8 +356,11 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 **Running E2E tests**:
 
 ```bash
-make test-e2e                    # Build the cover binary, install deps, run all E2E tests
-KEEP_RUNNING=true make test-e2e  # Don't tear down services after tests
+# Build the cover binary, install deps, run all E2E tests
+make test-e2e
+
+# Don't tear down services after tests
+KEEP_RUNNING=true make test-e2e
 ```
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.

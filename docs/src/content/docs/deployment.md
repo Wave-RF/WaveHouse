@@ -118,7 +118,8 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-WH_CH_HTTP_PORT=8123                # Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+# Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+WH_CH_HTTP_PORT=8123
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
 # Schema discovery
@@ -152,7 +153,8 @@ WH_DEDUPE_ID_FIELD=event_id
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
-WH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers backpressure)
+# Max NATS JetStream disk usage (triggers backpressure)
+WH_MQ_MAX_BYTES_GB=50
 
 # DLQ
 WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
@@ -312,7 +314,8 @@ K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside th
 ```yaml
 startupProbe:
   httpGet: { path: /livez, port: 8080 }
-  failureThreshold: 30    # allow up to 5 min for first schema discovery (30 × periodSeconds)
+  # allow up to 5 min for first schema discovery (30 × periodSeconds)
+  failureThreshold: 30
   periodSeconds: 10
 livenessProbe:
   httpGet: { path: /livez, port: 8080 }
@@ -379,7 +382,8 @@ The underlying Docker run scripts live in `scripts/otel/` and are invoked via Ma
 ```bash
 make obs-aspire   # Simplest, in-memory, no login
 make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
-make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
+# Simple OTeL Frontend like aspire, with more control over dashboards
+make obs-front
 ```
 
 All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the default environment variable `WH_OTEL_ADDR=127.0.0.1:4317` will route telemetry to these containers automatically.
