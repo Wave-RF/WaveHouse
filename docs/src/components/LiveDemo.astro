@@ -199,7 +199,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
 
   function init() {
     const root = document.querySelector("[data-wh-live-root]");
-    if (root === activeRoot) return; // already initialized for this mount
+    if (root === activeRoot) return; // same mount (DOMContentLoaded + astro:page-load both fire)
     teardown?.();
     teardown = null;
     activeRoot = root;
@@ -499,6 +499,7 @@ const DEMO_HOST = "stats.wavehouse.dev";
   }
 
   document.addEventListener("DOMContentLoaded", init);
+  document.addEventListener("astro:page-load", init);
 </script>
 
 {/* is:global, not scoped: the feed rows are created at runtime by the script

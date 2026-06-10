@@ -19,21 +19,6 @@
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities);
 
-/* Browser-native cross-document view transitions — replaces Astro's
-   <ClientRouter/>. The SPA router detached Starlight's built-in search dialog
-   and mobile menu on navigation, breaking them (showModal on a removed
-   element). This rule ships on every page, so both ends of a navigation opt
-   in; it animates where the browser supports the View Transition API and is a
-   plain instant load everywhere else. */
-@view-transition {
-  navigation: auto;
-}
-@media (prefers-reduced-motion: reduce) {
-  @view-transition {
-    navigation: none;
-  }
-}
-
 /* ---------- Tailwind theme tokens ---------- */
 
 @theme {

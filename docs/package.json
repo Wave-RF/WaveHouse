@@ -35,6 +35,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240208.0",
+    "astro-vtbot": "^2.1.12",
     "playwright": "^1.59.1",
     "wrangler": "^4.81.0"
   },
