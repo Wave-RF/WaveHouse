@@ -459,24 +459,28 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 }
 
 func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs []parsedMsg) {
-	// Pre-allocate the set using the length of msgs (+1 for tableName itself) to prevent expensive rehashing
-	seenSubjects := make(map[string]struct{}, len(msgs)+1)
-	versionKeys := make([]string, 0, len(msgs)+1)
-
+	// Invalidate the namespaces this batch touched: the encoded table paired with
+	// each distinct scope. Invalidate routes an empty scope to a whole-table bump and
+	// a non-empty scope to a per-scope bump (which also covers the whole-table view).
+	// Pre-allocate using len(msgs) to avoid rehashing.
 	encodedTable := query.SafeEncodeNATS(tableName)
-	seenSubjects[encodedTable] = struct{}{}
-	versionKeys = append(versionKeys, encodedTable)
+	seenScopes := make(map[string]struct{}, len(msgs))
+	namespaces := make([]cache.Namespace, 0, len(msgs))
 
 	for _, pm := range msgs {
-		if _, exists := seenSubjects[pm.natsSafeSubject]; !exists {
-			seenSubjects[pm.natsSafeSubject] = struct{}{}
-			versionKeys = append(versionKeys, pm.natsSafeSubject)
+		if _, exists := seenScopes[pm.scope]; exists {
+			continue
 		}
+		seenScopes[pm.scope] = struct{}{}
+		namespaces = append(namespaces, cache.Namespace{
+			Table: encodedTable,
+			Scope: query.SafeEncodeNATS(pm.scope),
+		})
 	}
 
-	if len(versionKeys) > 0 {
+	if len(namespaces) > 0 {
 		invCtx := trace.ContextWithSpanContext(context.WithoutCancel(ctx), trace.SpanContextFromContext(ctx))
-		_, err := w.cache.InvalidateCache(invCtx, versionKeys)
+		_, err := w.cache.Invalidate(invCtx, namespaces)
 		if err != nil {
 			w.logger.ErrorContext(invCtx, "failed to invalidate cache after insert - your cache is holding stale data now!", "table", tableName, "error", err)
 		}
