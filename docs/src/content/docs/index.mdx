@@ -25,7 +25,7 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, LinkButton, Tabs, TabItem } from '@astrojs/starlight/components';
 import HomepageCtaTracking from '../../components/HomepageCtaTracking.astro';
 
 <div class="wh-stats not-content">
@@ -102,6 +102,49 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 **Plus** — optional [deduplication](/configuration#deduplication) (idempotent ingest by ID), a dead-letter queue for failed batch inserts, and Tinybird-style [named pipes](/pipes) with parameter binding and per-role restrictions.
 
+## Query it like a database. Subscribe to it like a socket.
+
+The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming:
+
+<Tabs>
+ <TabItem label="Ingest">
+  ```ts
+  import { createClient } from '@wavehouse/sdk';
+
+  const wh = createClient({ baseURL: 'https://wavehouse.example.com' });
+
+  // Returns immediately — buffered in the WAL, schema-validated
+  // at the edge, batch-flushed to ClickHouse behind the scenes.
+  await wh.from('clicks').insert({ page: '/home', button: 'signup' });
+  ```
+ </TabItem>
+ <TabItem label="Query">
+  ```ts
+  // Chainable, type-safe, never throws — branch on { data, error }.
+  const { data, error } = await wh.from('clicks')
+    .select('page', 'button', 'score')
+    .where('page', '=', '/home')
+    .orderBy('received_timestamp', 'desc')
+    .limit(100);
+  ```
+ </TabItem>
+ <TabItem label="Live updates">
+  ```ts
+  // Historical backfill + real-time stream, deduplicated at the seam.
+  const lq = wh.from('clicks')
+    .where('page', '=', '/home')
+    .orderBy('received_timestamp', 'desc')
+    .limit(100)
+    .liveQuery({
+      initial: (result) => setRows(result.data ?? []),
+      next: (event) => addRow(event.data),
+    });
+
+  // later: lq.close();
+  ```
+ </TabItem>
+</Tabs>
+
 ## Up in five minutes
 
 One compose file — ClickHouse + WaveHouse — and you have an ingest endpoint, a query endpoint, and a live event stream:
@@ -123,11 +166,7 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 
 WaveHouse is fail-closed, so the standalone stack ships a permissive trial policy (a non-admin `public` role that can read/write the demo tables, seeded on first boot) — then it's five minutes from `git clone` to a live event stream. See [Getting Started](/getting-started).
 
-## How it ships
-
-<Card title="A single binary, one dependency" icon="seti:config">
- One `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
-</Card>
+**How it ships:** one `wavehouse` process — API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup, all in-process. **The only external dependency is ClickHouse.** Same binary on a laptop, in Docker, or on a production host.
 
 ## Where to next
 

@@ -1108,6 +1108,45 @@ site-search .pagefind-ui__button:hover {
   background-color: color-mix(in oklab, var(--wh-rose) 8%, transparent);
 }
 
+/* ---------- Tabs — segmented control ----------
+   Starlight's default is an underlined tab row (full-width hairline, accent
+   border on the active tab) — the one chrome piece that still read as stock
+   once the landing adopted <Tabs>. Restyle as a segmented control on the
+   card surface; panels are untouched (EC code frames carry them). */
+starlight-tabs .tablist-wrapper ul[role="tablist"] {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--wh-surface);
+  border: 1px solid var(--wh-border);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--wh-border-strong) transparent;
+}
+starlight-tabs .tab > [role="tab"] {
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  padding: 0.35rem 0.9rem;
+  line-height: 1.4;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--wh-ink-muted);
+  white-space: nowrap;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+starlight-tabs .tab [role="tab"][aria-selected="true"] {
+  background: var(--wh-surface-elevated);
+  color: var(--wh-accent-text);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--wh-border-strong), var(--wh-shadow-sm);
+}
+starlight-tabs .tab [role="tab"]:not([aria-selected="true"]):hover {
+  color: var(--wh-ink);
+  background: color-mix(in oklab, var(--wh-surface-elevated) 60%, transparent);
+}
+
 /* ---------- Small chrome the design system hadn't reached ---------- */
 
 /* Heading anchor links — quiet by default, accent on hover (stock gray). */
