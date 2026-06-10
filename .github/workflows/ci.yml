@@ -31,6 +31,14 @@ on:
     # nudged along by housekeeping.yml re-running the failed title job.
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
+  # Merge queue: every queued PR gets a CI run against its merge-group ref
+  # (main ⊕ the PRs ahead of it ⊕ this PR) — the integration gate that
+  # replaces the old "require branches to be up to date" rule. Event-
+  # filtered jobs sit out (title was validated on the PR; the deploys are
+  # push/PR-scoped); everything else runs. A workflow WITHOUT this trigger
+  # never reports the required `CI` check on merge groups, so queued PRs
+  # would hang — keep it even if the queue is temporarily disabled.
+  merge_group:
   # Manual re-run escape hatch — `gh workflow run CI --ref <branch>`.
   workflow_dispatch:
 
@@ -70,7 +78,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PUSH_BEFORE: ${{ github.event.before }}
+          # On merge_group events the diff base is the merge group's own
+          # base (current main), not an `event.before` — `||` picks
+          # whichever the event provides.
+          PUSH_BEFORE: ${{ github.event.merge_group.base_sha || github.event.before }}
           PUSH_SHA: ${{ github.sha }}
         run: scripts/ci/classify-changes.sh >> "$GITHUB_OUTPUT"
 

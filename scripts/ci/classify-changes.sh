@@ -16,7 +16,7 @@
 # Computed from the GitHub API (CI checkouts are shallow, so `git diff`
 # against the base can't see the change set). Env in: GITHUB_EVENT_NAME,
 # GITHUB_REPOSITORY, GH_TOKEN, PR_NUMBER (pull_request), PUSH_BEFORE +
-# PUSH_SHA (push).
+# PUSH_SHA (push: before/after; merge_group: the group's base/head).
 
 # -e/-pipefail: an unexpected failure aborts (and the job reds) instead
 # of misclassifying; the two `gh api … || true` calls stay soft because
@@ -42,9 +42,10 @@ if [ -z "$files" ]; then
   exit 0
 fi
 # Pushes to main always run the full suite (they also save the caches
-# every PR inherits). For PRs, `code` flips false only if no file falls
-# outside the prose/meta allowlist.
-if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+# every PR inherits), and so do merge-group runs — the queue is the last
+# gate before main, so it never skips. For PRs, `code` flips false only
+# if no file falls outside the prose/meta allowlist.
+if [ "${GITHUB_EVENT_NAME}" = "push" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
   code=true
 elif printf '%s\n' "$files" | grep -qvE '^(docs/|.*\.md$|LICENSE|NOTICE|\.gitignore$|\.gitattributes$|\.github/labeler\.yml$|\.github/ISSUE_TEMPLATE/|\.github/pull_request_template|\.claude/|\.vscode/)'; then
   code=true

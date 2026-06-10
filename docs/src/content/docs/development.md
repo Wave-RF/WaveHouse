@@ -562,6 +562,8 @@ The `PR housekeeping` workflow still runs on every PR (labels + the title explai
 
 The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
 
+Approved, green PRs land through a **merge queue** ("Merge when ready"): the queue re-runs the required `CI` check against the PR merged with *current* main (a `merge_group` event — the CI workflow runs the full test suite for these) and fast-forwards only on green. That integration re-test replaces the old "branch is out-of-date with the base branch" requirement — queued PRs don't need manual branch updates, and the queue never pushes to the PR branch.
+
 Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 
 ### Merge behavior

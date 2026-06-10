@@ -91,6 +91,31 @@ Break one of these knowingly or not at all.
    cushion the next run), and concurrent same-key misses produce benign
    "already exists" warnings.
 
+## Merge queue
+
+PRs land through a **merge queue**: "Merge when ready" enqueues the PR,
+GitHub builds a merge-group ref (current main ⊕ the PRs ahead ⊕ this
+PR), runs the required `CI` check against **that**, and fast-forwards
+main only on green. This is the integration gate — it catches semantic
+conflicts with a main that advanced after the PR's own run, replaces
+the old "require branches to be up to date" rule (PRs no longer show
+"out of date", and nobody clicks Update-branch), and never touches the
+PR branch itself (so `require_last_push_approval` is never reset by it).
+
+How a `merge_group` run flows through the DAG: the classifier treats it
+like a push (full suite — the queue never skips code checks; `docs`
+still gates docs-build), while `title` (already validated on the PR),
+`docs-preview` (PR-scoped), and `docs-deploy` (push-scoped) sit out and
+the aggregator counts their skips as passes, exactly like any other
+event-filtered run. **Removing the `merge_group:` trigger from ci.yml
+would hang every queued PR** — no trigger means the required `CI` check
+never reports on the merge group, and entries bounce out only after the
+60-minute check timeout.
+
+Queue settings live in the `main branch protection` ruleset's
+`merge_queue` rule: squash merges, land-as-ready (`min_entries_to_merge:
+1`, no batching wait), up to 5 speculative builds.
+
 ## Cache inventory
 
 | Cache | Key | Saved by | Notes |
@@ -184,3 +209,10 @@ suite's wall-clock becomes a problem again, start here:
 - **docs-preview comment guard**: the comment step skips with a notice
   until `scripts/ci/docs-preview-comment.sh` exists on main (it executes
   from the trusted-main checkout). Remove the guard after merge.
+- **Merge-queue ruleset flip**: AFTER the PR adding the `merge_group:`
+  trigger lands on main (ordering matters — flipping first strands every
+  other queued PR with no CI run), update the `main branch protection`
+  ruleset: add the `merge_queue` rule and set
+  `strict_required_status_checks_policy: false` (prepared payload:
+  `gh api -X PUT repos/Wave-RF/WaveHouse/rulesets/15353356 --input
+  tmp/ruleset-merge-queue.json`). Then delete this note.
