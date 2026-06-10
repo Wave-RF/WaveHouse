@@ -116,6 +116,14 @@ export default defineConfig({
       lastUpdated: true,
       expressiveCode: {
         themes: ["github-dark", "github-light"],
+        // Long lines wrap with a hanging indent instead of growing a
+        // horizontal scrollbar — in a 45rem column, scroll-to-read code was
+        // the docs' biggest readability complaint. Authors can still opt a
+        // block out with ```lang wrap=false where alignment matters.
+        defaultProps: {
+          wrap: true,
+          preserveIndent: true,
+        },
         styleOverrides: {
           // 0.75rem − 1px so the frame's OUTER corner lands at exactly 12px
           // (--radius-md, matching cards): EC adds the 1px border width to the

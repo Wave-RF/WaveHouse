@@ -2,6 +2,7 @@
 import Default from "@astrojs/starlight/components/Head.astro";
 import VtbotStarlight from "astro-vtbot/components/starlight/Base.astro";
 import PostHog from "./PostHog.astro";
+import ProgressBar from "./ProgressBar.astro";
 ---
 
 {/*
@@ -11,9 +12,16 @@ import PostHog from "./PostHog.astro";
   <ClientRouter/> detached them (showModal on a removed dialog). fallback="swap"
   = instant swap where the View Transition API is absent. See Starlight #2823;
   full rationale in CHANGELOG.
+
+  No transition:animate choreography on purpose — a direction-aware slide +
+  title morph were tried (PR #313) and rejected as too much motion for docs.
+  <ProgressBar/> (ours, not vtbot's — see the component) is a top loading bar
+  for slow fetches; a grace delay keeps fast cached navigations from ever
+  seeing it.
 */}
 <VtbotStarlight viewTransitionsFallback="swap">
   <Default><slot /></Default>
+  <ProgressBar />
   <PostHog />
   {/*
     Two media-scoped theme-color tags so the browser chrome (mobile address bar,

@@ -140,7 +140,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 ### `query/` — Structured Query Engine
 
 - **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
-- **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the #223 hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `internal/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed (#279). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
+- **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the [#223](https://github.com/Wave-RF/WaveHouse/issues/223) hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `internal/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed ([#279](https://github.com/Wave-RF/WaveHouse/issues/279)). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
 
 ### `chsql/` — ClickHouse SQL Helpers
 
@@ -150,13 +150,14 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 
 ### Ingest Path
 
-```text
+```text wrap=false
 Client POST /v1/ingest?table={table}
   → JWT auth middleware (always runs; token optional)
   → Look up table schema from SchemaRegistry
   → Policy check: role allowed to insert into this table (before the body is parsed)
   → Validate JSON body against schema (type checks, required columns)
-  → Policy column rules + check clauses (disallowed columns rejected; claim-derived values enforced or injected)
+  → Policy column rules + check clauses (disallowed columns rejected;
+    claim-derived values enforced or injected)
   → Optional deduplication check (configurable ID field)
   → Publish to NATS JetStream (ingest.{table})
   → 200 OK returned immediately
