@@ -519,15 +519,13 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for five ecosystems:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
 - **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
-- **npm — docs site** (`docs/`), commit prefix `docs:`
-- **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
-- **npm — E2E tests** (`tests/e2e/sdk/`), commit prefix `deps(tests):`
+- **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 
-PRs are grouped by ecosystem to reduce noise.
+PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
