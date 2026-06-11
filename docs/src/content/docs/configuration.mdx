@@ -55,7 +55,7 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `query.default_max_rows` | `WH_QUERY_DEFAULT_MAX_ROWS` | `10000` | Fallback result `LIMIT` for a structured query when the caller and policy specify none. `0` falls back to the built-in default. |
+| `query.default_max_rows` | `WH_QUERY_DEFAULT_MAX_ROWS` | `10000` | Fallback result `LIMIT` for a structured query when the caller and policy specify none. `0` falls back to the built-in default; a negative value is rejected at startup. |
 
 This is a result-**shaping** default, not a resource limit. Server-wide resource limits (memory, rows scanned, execution time) belong in ClickHouse — see [Server-side resource limits](#server-side-resource-limits) below.
 
