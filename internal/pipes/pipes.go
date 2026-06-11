@@ -25,6 +25,16 @@ type NamedQuery struct {
 	Parameters   []ParamDef `json:"parameters,omitempty"`
 	Description  string     `json:"description,omitempty"`
 	AllowedRoles []string   `json:"allowed_roles,omitempty"` // empty = admin role only (fails closed)
+
+	// ResolvedTables is the set of ingested base tables this pipe reads, resolved
+	// from SQL when the pipe is created/updated (see internal/api/pipe_deps.go). It
+	// is server-owned — set by the resolver, never trusted from client input — and
+	// drives version-based cache invalidation: a write to any of these tables
+	// invalidates this pipe's cached results. Empty means dependencies are unknown
+	// (no resolver wired, or resolution failed), so the pipe falls back to TTL-only
+	// invalidation. The table set depends only on the SQL, not on the parameter
+	// values supplied per request, so it is resolved once per definition.
+	ResolvedTables []string `json:"resolved_tables,omitempty"`
 }
 
 // ParamDef describes a query parameter.
@@ -189,6 +199,47 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 		return "", nil, bindErr
 	}
 	return sql, nil, nil
+}
+
+// DummyBind binds q's SQL with type-appropriate placeholder values for every
+// parameter, producing runnable SQL for dependency resolution — where only the
+// set of tables the query reads matters, and that set is independent of the
+// parameter values. It supplies a typed dummy for each declared parameter and a
+// string dummy for any bare inline {{name}} placeholder that has no default,
+// leaving {{name:default}} placeholders to bind to the author's default. Returns
+// the bound SQL, or an error if binding fails (e.g. a placeholder it could not
+// cover), in which case the caller should skip resolution (TTL-only).
+func DummyBind(q *NamedQuery) (string, error) {
+	supplied := make(map[string]any)
+	for _, p := range q.Parameters {
+		supplied[p.Name] = dummyForType(p.Type)
+	}
+	for _, m := range inlineParamRe.FindAllStringSubmatch(q.SQL, -1) {
+		name, inlineDefault := m[1], m[2]
+		if _, ok := supplied[name]; ok {
+			continue
+		}
+		if inlineDefault != "" {
+			continue // BindParams will substitute the author's inline default
+		}
+		supplied[name] = "x"
+	}
+	sql, _, err := BindParams(q, supplied)
+	return sql, err
+}
+
+// dummyForType returns a placeholder value of the declared parameter type. The
+// concrete value is irrelevant to which tables a query reads; the type only has
+// to keep the bound SQL analyzable (a string where a string is expected, etc.).
+func dummyForType(t string) any {
+	switch strings.ToLower(t) {
+	case "number":
+		return 0
+	case "boolean":
+		return false
+	default: // "string" and anything unrecognized
+		return "x"
+	}
 }
 
 // formatParamValue converts a Go value to a safe SQL literal for inline substitution.

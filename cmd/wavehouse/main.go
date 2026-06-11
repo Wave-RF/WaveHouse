@@ -364,6 +364,13 @@ func run() int {
 		return 1
 	}
 
+	// Pipes resolve their ingested table dependencies at Put() time via the schema
+	// registry + ClickHouse connection, so writes invalidate cached pipe results;
+	// set as fields (see PipesHandler) rather than constructor args.
+	pipesHandler := api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger)
+	pipesHandler.Registry = registry
+	pipesHandler.Database = cfg.ClickHouse.Database
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -373,7 +380,7 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
+		Pipes:           pipesHandler,
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,

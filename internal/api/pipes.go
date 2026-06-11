@@ -10,6 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
@@ -18,10 +19,19 @@ import (
 
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store           *pipes.Store
-	PolicyStore     *policy.Store // resolves empty role to default_role; may be nil
-	CHConn          driver.Conn
-	Cache           cache.Cache
+	Store       *pipes.Store
+	PolicyStore *policy.Store // resolves empty role to default_role; may be nil
+	CHConn      driver.Conn
+	Cache       cache.Cache
+
+	// Registry and Database, when set, let Put() resolve each pipe's ingested
+	// base-table dependencies (via CHConn) so writes to those tables invalidate
+	// the pipe's cached results. They are plain fields rather than constructor
+	// arguments to avoid churning the many NewPipesHandler call sites; when either
+	// is unset, resolution is skipped and pipes fall back to TTL-only caching.
+	Registry *discovery.SchemaRegistry
+	Database string
+
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
 	logger          *slog.Logger
@@ -62,6 +72,12 @@ func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Name = name
+
+	// Dependencies are server-derived from the SQL, never trusted from client
+	// input — overwrite whatever the request body carried. Resolution is
+	// best-effort: if it can't run or fails, ResolvedTables is nil and the pipe
+	// caches TTL-only (see resolvePipeDeps).
+	q.ResolvedTables = h.resolvePipeDeps(r.Context(), &q)
 
 	if err := h.Store.Put(r.Context(), &q); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -136,14 +152,14 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache. A pipe can read several tables, but the current pipe impl doesn't
-	// expose its table/scope dependencies, so we pass no deps: the result is keyed
-	// by sha alone (TTL-only) and the ingest worker cannot version-invalidate it.
-	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
-	// invalidate cached pipe results.
+	// Cache. The pipe depends on the namespaces of the ingested tables it reads,
+	// resolved at Put() time (q.ResolvedTables). A write to any of them invalidates
+	// this result. When the set is unknown (resolution unavailable or failed) deps
+	// is nil, so the result is keyed by sha alone (TTL-only) — the prior behavior.
+	deps := pipeDeps(q.ResolvedTables)
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, nil); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -174,7 +190,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, nil, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, ttl)
 		}
 		return data, nil
 	})

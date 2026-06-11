@@ -1,0 +1,205 @@
+package api
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/pipes"
+	"github.com/Wave-RF/WaveHouse/internal/query"
+)
+
+// pipeResolveTimeout bounds the EXPLAIN round-trip a pipe Put() makes to resolve
+// its table dependencies, so a slow or stuck ClickHouse can't hang pipe
+// creation. Generous because EXPLAIN QUERY TREE only analyzes (it scans no data)
+// and Put() is a rare admin write, not a per-request cost.
+const pipeResolveTimeout = 10 * time.Second
+
+// resolvePipeDeps resolves the ingested base tables a pipe reads, for cache
+// invalidation. Best-effort: if no schema registry / ClickHouse connection is
+// wired, or resolution fails, it returns nil and the pipe falls back to TTL-only
+// caching. Because the table set depends only on the SQL (not on per-request
+// parameter values), resolving here at Put() — a rare admin write — keeps it off
+// the per-request read path and means it is computed once per definition.
+func (h *PipesHandler) resolvePipeDeps(ctx context.Context, q *pipes.NamedQuery) []string {
+	if h.Registry == nil || h.CHConn == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, pipeResolveTimeout)
+	defer cancel()
+	return resolvePipeTables(ctx, h.CHConn, h.Registry, h.Database, q)
+}
+
+// resolvePipeTables binds the pipe with dummy parameters, asks ClickHouse to
+// resolve the query — through views and aliases — to the tables it actually
+// reads via EXPLAIN QUERY TREE, then keeps only the names the schema registry
+// knows in the configured database (i.e. tables the ingest worker writes and can
+// therefore version-invalidate). Any failure returns nil so the caller degrades
+// to TTL-only with no error surfaced.
+func resolvePipeTables(ctx context.Context, conn driver.Conn, registry *discovery.SchemaRegistry, database string, q *pipes.NamedQuery) []string {
+	if conn == nil || registry == nil || q == nil {
+		return nil
+	}
+	boundSQL, err := pipes.DummyBind(q)
+	if err != nil {
+		return nil
+	}
+	raw, err := explainQueryTreeTables(ctx, conn, boundSQL)
+	if err != nil {
+		return nil
+	}
+	return filterKnownTables(raw, database, registry)
+}
+
+// explainQueryTreeTables runs EXPLAIN QUERY TREE over sql and returns the raw
+// `database.table` identifiers it references. Running the analyzer's passes
+// (run_passes = 1 runs them all) resolves views and aliases down to their
+// underlying tables, which static SQL parsing cannot do — the whole reason this
+// goes through ClickHouse rather than parsing the FROM clause. Read-only, so it
+// is safe to issue for any pipe (pipes are read queries).
+func explainQueryTreeTables(ctx context.Context, conn driver.Conn, sql string) ([]string, error) {
+	rows, err := conn.Query(ctx, "EXPLAIN QUERY TREE run_passes = 1 "+sql)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return nil, err
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return parseQueryTreeTables(lines), nil
+}
+
+// parseQueryTreeTables pulls table identifiers out of an EXPLAIN QUERY TREE dump.
+// After the analyzer passes run, every table the query reads — including those
+// reached through views and aliases — appears as a TABLE node carrying a
+// `table_name: <database>.<table>` field. We collect those raw identifiers; the
+// database qualifier and backtick quoting are handled by filterKnownTables.
+func parseQueryTreeTables(lines []string) []string {
+	const marker = "table_name:"
+	var out []string
+	for _, line := range lines {
+		_, after, found := strings.Cut(line, marker)
+		if !found {
+			continue
+		}
+		if id := identifierField(after); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// identifierField returns the leading identifier of a query-tree field value:
+// everything up to the first comma that is not inside backticks, trimmed. The
+// dump separates a node's fields with ", " and quotes identifiers containing
+// special characters with backticks, so a naive comma split would truncate a
+// quoted name that itself contains a comma.
+func identifierField(s string) string {
+	s = strings.TrimSpace(s)
+	inTick := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '`':
+			inTick = !inTick
+		case ',':
+			if !inTick {
+				return strings.TrimSpace(s[:i])
+			}
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+// filterKnownTables normalizes raw `database.table` identifiers to bare table
+// names and keeps only those the schema registry knows in the configured
+// database — i.e. tables the ingest worker writes and can version-invalidate. A
+// qualifier naming a different database is dropped (ingest can't signal changes
+// to it), as is anything the registry hasn't discovered (views, system tables,
+// unknown names): a pipe may still read those, but WaveHouse has no change signal
+// for them, so they stay covered by the TTL floor. Results are deduped and
+// sorted for a stable, order-independent dependency set.
+func filterKnownTables(raw []string, database string, registry *discovery.SchemaRegistry) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		db, table := splitQualified(r)
+		if db != "" && db != database {
+			continue // a table in another database — outside the ingest universe
+		}
+		if table == "" || registry.Get(table) == nil {
+			continue
+		}
+		if _, ok := seen[table]; ok {
+			continue
+		}
+		seen[table] = struct{}{}
+		out = append(out, table)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// splitQualified splits a ClickHouse `database.table` (or bare `table`)
+// identifier into its parts, tolerating the backtick quoting ClickHouse uses for
+// names with special characters. Only the first dot outside backticks separates
+// the database qualifier, so a quoted table name containing dots stays intact. A
+// bare name returns db "".
+func splitQualified(s string) (db, table string) {
+	s = strings.TrimSpace(s)
+	inTick := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '`':
+			inTick = !inTick
+		case '.':
+			if !inTick {
+				return unquoteIdent(s[:i]), unquoteIdent(s[i+1:])
+			}
+		}
+	}
+	return "", unquoteIdent(s)
+}
+
+// unquoteIdent strips ClickHouse backtick quoting from a single identifier and
+// unescapes the `\“ and `\\` sequences inside it, so the result matches the
+// bare name the schema registry is keyed by.
+func unquoteIdent(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '`' && s[len(s)-1] == '`' {
+		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s, "\\`", "`")
+		s = strings.ReplaceAll(s, "\\\\", "\\")
+	}
+	return s
+}
+
+// pipeDeps maps a pipe's resolved base tables to cache dependency namespaces.
+// The scope is empty (whole-table): a pipe can't know which scope of a table it
+// reads, and a scoped write bumps the whole-table view too, so a whole-table
+// dependency is still correctly invalidated by any write to the table. Each name
+// is NATS-encoded exactly as the ingest worker encodes it (worker.go
+// handleSuccess), so the read and invalidation sides build identical keys. nil
+// in, nil out — keeping pipes keyed by sha alone (TTL-only).
+func pipeDeps(tables []string) []cache.Namespace {
+	if len(tables) == 0 {
+		return nil
+	}
+	deps := make([]cache.Namespace, 0, len(tables))
+	for _, t := range tables {
+		deps = append(deps, cache.Namespace{Table: query.SafeEncodeNATS(t)})
+	}
+	return deps
+}
