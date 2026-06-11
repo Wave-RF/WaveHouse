@@ -293,7 +293,7 @@ A disallowed function returns `403 aggregation "x" not allowed`. This is useful 
 
 ## Resource limits
 
-Four fields cap the cost of a single structured query for this role. All must be non-negative; `0` / unset means "no role-imposed limit" (the [server-wide ClickHouse limits](#server-wide-limits-live-in-clickhouse) still apply).
+Four fields cap the cost of a single structured query for this role. All must be non-negative; `0` / unset means "no role-imposed limit" — the [server-wide ClickHouse limits](#server-wide-limits-live-in-clickhouse) still apply, and for `max_rows` the `query.default_max_rows` result default (10,000) still clamps the `LIMIT`.
 
 | Field | Effect |
 | ----- | ------ |
