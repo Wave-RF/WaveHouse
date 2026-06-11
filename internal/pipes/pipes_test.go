@@ -289,6 +289,11 @@ func TestFormatParamValue_OK(t *testing.T) {
 		{"array escapes each element", []any{"x' OR 1=1"}, "('x'' OR 1=1')"},
 		{"nested array recurses", []any{[]any{"a"}, "b"}, "(('a'), 'b')"},
 		{"single-element array", []any{"only"}, "('only')"},
+		// Only canonical numeric literals render bare; Go-only spellings that
+		// ClickHouse can't parse are quoted instead of emitted as invalid bare SQL.
+		{"underscore number is quoted not bare", "1_000", "'1_000'"},
+		{"non-finite is quoted not bare", "Inf", "'Inf'"},
+		{"hex float is quoted not bare", "0x1p-2", "'0x1p-2'"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -339,6 +344,8 @@ func TestValidateParamType(t *testing.T) {
 		{"number accepts int", "number", 5, ""},
 		{"number accepts numeric string", "number", "50", ""},
 		{"number rejects non-numeric string", "number", "abc", "expected number, got string"},
+		{"number rejects underscore string", "number", "1_000", "expected number, got string"},
+		{"number rejects non-finite string", "number", "Inf", "expected number, got string"},
 		{"number rejects array", "number", []any{float64(1)}, "expected number, got array"},
 		{"number rejects object", "number", map[string]any{}, "expected number, got object"},
 		{"number rejects bool", "number", true, "expected number, got boolean"},
@@ -384,6 +391,17 @@ func TestBindParams_ArrayWorksWithoutDeclaredType(t *testing.T) {
 	sql, _, err := BindParams(q, map[string]any{"ids": []any{float64(1), float64(2)}})
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t WHERE id IN (1, 2)", sql)
+}
+
+func TestBindParams_ArrayMixedNumericAndStringElements(t *testing.T) {
+	t.Parallel()
+	// Array elements carry no declared element type, so each leaf decides bare vs
+	// quoted on its own: a numeric-looking string renders bare, a non-numeric one
+	// is quoted (and escaped).
+	q := &NamedQuery{SQL: "SELECT * FROM t WHERE id IN {{ids}}"}
+	sql, _, err := BindParams(q, map[string]any{"ids": []any{"100", "abc"}})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE id IN (100, 'abc')", sql)
 }
 
 // TestBindParams_ArrayNeutralizesInjection is the #317 regression: an array
@@ -458,6 +476,25 @@ func TestBindParams_TypeNumber_AcceptsNumericStringFromQuery(t *testing.T) {
 	sql, _, err := BindParams(q, map[string]any{"limit": "50"})
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM t LIMIT 50", sql)
+}
+
+func TestBindParams_TypeBoolean_AcceptsBoolStringFromQuery(t *testing.T) {
+	t.Parallel()
+	// Query-string params always arrive as strings; a boolean param accepts the
+	// "true"/"false" spelling and renders it as the numeric 1/0 a Bool column
+	// expects — matching a JSON-body bool, not a quoted 'true' string literal.
+	q := &NamedQuery{
+		SQL:        "SELECT * FROM t WHERE active = {{active}}",
+		Parameters: []ParamDef{{Name: "active", Type: "boolean", Required: true}},
+	}
+
+	sqlTrue, _, err := BindParams(q, map[string]any{"active": "true"})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE active = 1", sqlTrue)
+
+	sqlFalse, _, err := BindParams(q, map[string]any{"active": "false"})
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE active = 0", sqlFalse)
 }
 
 func TestFormatParamValue_DeclaredStringQuotesNumeric(t *testing.T) {

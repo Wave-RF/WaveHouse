@@ -139,6 +139,22 @@ func (s *Store) Delete(ctx context.Context, name string) error {
 // inlineParamRe matches {{name}} or {{name:default}} placeholders in SQL templates.
 var inlineParamRe = regexp.MustCompile(`\{\{(\w+)(?::([^}]*))?\}\}`)
 
+// numericLiteralRe matches a finite base-10 numeric literal that both Go and
+// ClickHouse accept: optional sign, integer/decimal mantissa, optional exponent.
+// It deliberately excludes the Go-only spellings strconv.ParseFloat would accept
+// but ClickHouse cannot parse — underscore separators ("1_000"), hex floats
+// ("0x1p-2"), and the non-finite "Inf"/"NaN".
+var numericLiteralRe = regexp.MustCompile(`^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$`)
+
+// isNumericLiteral reports whether s is a plain SQL numeric literal. It is the
+// single source of truth for "looks like a number" shared by validateParamType
+// (a declared "number" param accepts only these; anything else is a clean 400)
+// and formatParamValue (only these render bare — any other string is quoted, so
+// a numeric-looking value can never become invalid bare SQL).
+func isNumericLiteral(s string) bool {
+	return numericLiteralRe.MatchString(s)
+}
+
 // BindParams replaces {{param}} and {{param:default}} placeholders in a NamedQuery's SQL
 // with supplied values or defaults. Formally declared Parameters provide type info and
 // required/default metadata. Inline {{name:default}} syntax also works without formal
@@ -232,21 +248,33 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 // declaredType is the parameter's declared ParamDef.Type ("" for inline or
 // untyped parameters). When it is "string", a numeric-looking value is quoted
 // rather than emitted bare, so a parameter declared a string always renders as
-// a string literal. Array elements carry no declared element type and are
-// formatted with an empty declaredType.
+// a string literal. When it is "boolean", a string spelling from the query
+// string ("true"/"false") renders as the numeric 1/0 a Bool column expects,
+// matching a JSON-body bool. Array elements carry no declared element type and
+// are formatted with an empty declaredType.
 func formatParamValue(v any, declaredType string) (string, error) {
 	if v == nil {
 		return "NULL", nil
 	}
 	switch val := v.(type) {
 	case string:
+		// A boolean declared via the query string arrives as "true"/"false";
+		// render it as the numeric 1/0 a Bool column expects, matching the
+		// JSON-body bool case below. validateParamType guarantees the string
+		// parses, but fall through to a quoted literal if it somehow doesn't.
+		if declaredType == "boolean" {
+			if b, err := strconv.ParseBool(val); err == nil {
+				if b {
+					return "1", nil
+				}
+				return "0", nil
+			}
+		}
 		// A numeric-looking string renders bare (so `?limit=100` from a query
 		// string works as a number), unless the parameter is declared a string —
 		// then it is always quoted, honoring the declared type.
-		if declaredType != "string" {
-			if _, err := strconv.ParseFloat(val, 64); err == nil {
-				return val, nil
-			}
+		if declaredType != "string" && isNumericLiteral(val) {
+			return val, nil
 		}
 		escaped := strings.ReplaceAll(val, `\`, `\\`)
 		escaped = strings.ReplaceAll(escaped, `'`, `''`)
@@ -312,7 +340,7 @@ func validateParamType(declared string, v any) error {
 		case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 			return nil
 		case string:
-			if _, err := strconv.ParseFloat(n, 64); err == nil {
+			if isNumericLiteral(n) {
 				return nil
 			}
 		}
