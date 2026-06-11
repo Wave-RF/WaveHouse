@@ -64,6 +64,8 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 | `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE gap-fill. The Active Sweeper will not purge messages newer than this window. |
 | `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
+**Durability.** The embedded server runs with JetStream `SyncAlways`, so every event is `fsync`'d to disk before `POST /v1/ingest` returns `200`. This makes your storage's `fsync` latency your ingest latency floor — see [Durability & Storage](/durability) to check whether your substrate can sustain it. There is no knob to relax this today ([#139](https://github.com/Wave-RF/WaveHouse/issues/139) tracks a configurable group-commit interval).
+
 ### Deduplication
 
 | YAML Key | Env Var | Default | Description |
@@ -119,12 +121,11 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 
 **Sampling rates apply only to the OTLP push path.** Stdout always emits 100% of records — operators using a scraping-style pipeline (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit, etc.) set the collection rate at the scraper, not the application. WaveHouse pushes telemetry to an OTel collector; the scraper world owns its own ingest policy. If you want to throttle OTLP volume for cost, lower the rates below. If you want to throttle Loki/Datadog Logs/etc., do it at that pipeline.
 
-**TLS / direct-to-cloud limitation.** The OTLP exporters currently use `WithInsecure()` — plaintext gRPC only. WaveHouse cannot ship directly to TLS-protected OTLP endpoints (Grafana Cloud's OTLP gateway, Honeycomb, Datadog OTLP, etc.). The standard workaround is a sidecar collector (the OTel collector or Grafana Alloy) on `127.0.0.1:4317` that receives our plaintext OTLP and re-exports to the cloud endpoint with TLS + auth headers configured locally. Tracked in [#97](https://github.com/Wave-RF/WaveHouse/issues/97).
+**Direct-to-cloud OTLP.** The OTLP destination is configured through the standard [`OTEL_EXPORTER_OTLP_*` environment variables](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) read by the OpenTelemetry SDK, not WaveHouse config: `OTEL_EXPORTER_OTLP_ENDPOINT` (always include a scheme — `https://` selects TLS via system root CAs, `http://` selects plaintext; a scheme-less `host:port` is **not** plaintext, it is mis-parsed and falls back to the default. With the endpoint unset that default is **TLS** to `localhost:4317`, so a plaintext local collector needs `http://localhost:4317` set explicitly or `OTEL_EXPORTER_OTLP_INSECURE=true`), `OTEL_EXPORTER_OTLP_HEADERS` for per-RPC auth, `OTEL_EXPORTER_OTLP_CERTIFICATE` to trust a custom/private CA, and `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` / `OTEL_EXPORTER_OTLP_CLIENT_KEY` for mutual TLS. Custom/private CA and mutual TLS apply to the trace and metric signals only: the pinned gRPC logs exporter ignores the env TLS-cert vars (upstream bug [open-telemetry/opentelemetry-go#6661](https://github.com/open-telemetry/opentelemetry-go/issues/6661)), so the logs signal falls back to system roots — route logs through a local collector if your gateway uses a private CA. With these set, WaveHouse ships telemetry straight to a TLS-protected cloud gateway (Grafana Cloud's OTLP gateway, Honeycomb, etc.) — no sidecar required (a sidecar is still useful for egress queuing, batching, and tail-based sampling; it's just no longer mandatory). A malformed `OTEL_EXPORTER_OTLP_HEADERS` entry is logged and skipped by the OpenTelemetry SDK (fail-soft) rather than failing startup. Datadog has no public direct-to-cloud OTLP endpoint — use the local DDOT Collector path in the [deployment guide](/deployment#observability). See [Deployment → Observability](/deployment#observability) for worked Honeycomb / Grafana Cloud examples.
 
 | YAML Key | Env Var | Default | Description |
-| --- | --- | ------- | ----------- |
-| `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. |
-| `otel.addr` | `WH_OTEL_ADDR` | `127.0.0.1:4317` | OTLP gRPC endpoint used by every enabled signal. Plain `host:port` — no scheme, plaintext gRPC only (see TLS note above). See `make help` for a local collector setup. |
+| -------- | ------- | ------- | ----------- |
+| `otel.enabled` | `WH_OTEL_ENABLED` | `false` | Master switch. When `false`, no signals are initialized regardless of the sub-toggles below. The OTLP endpoint, TLS, custom CA, mutual TLS, and auth headers are configured via the standard `OTEL_EXPORTER_OTLP_*` env vars (see the note above), not a WaveHouse key. |
 | `otel.traces.enabled` | `WH_OTEL_TRACES_ENABLED` | `true` | Export traces via OTLP gRPC. |
 | `otel.traces.sample_rate` | `WH_OTEL_TRACES_SAMPLE_RATE` | `1.0` | Head-based trace sampling rate in `[0.0, 1.0]`. `1.0` exports every trace; `0.0` exports none. Defaults to 100% (matches the OpenTelemetry SDK default); lower it for high-QPS production services where collector or backend cost is a concern. Best practice is "100% at the source, downsample at the collector" via tail-based sampling. Validated at config load. |
 | `otel.metrics.enabled` | `WH_OTEL_METRICS_ENABLED` | `true` | Export metrics + Go runtime metrics via OTLP gRPC. Periodic reader interval is fixed at 15s. Metrics are pre-aggregated so there is no sampling knob. |
@@ -203,7 +204,9 @@ pipes:
 
 otel:
   enabled: false         # master switch — set true to export via OTLP gRPC
-  addr: 127.0.0.1:4317
+  # Endpoint, TLS, custom CA, mTLS, and auth headers come from the standard
+  # OTEL_EXPORTER_OTLP_* env vars (OTEL_EXPORTER_OTLP_ENDPOINT=https://host:port,
+  # OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=KEY), read by the OTel SDK.
   traces:
     enabled: true
     sample_rate: 1.0     # head-based, [0.0, 1.0]; tune down for high QPS
@@ -257,7 +260,6 @@ WH_POLICY_FILE_PATH=
 WH_PIPES_DIR=
 
 WH_OTEL_ENABLED=false
-WH_OTEL_ADDR=127.0.0.1:4317
 WH_OTEL_TRACES_ENABLED=true
 WH_OTEL_TRACES_SAMPLE_RATE=1.0
 WH_OTEL_METRICS_ENABLED=true
