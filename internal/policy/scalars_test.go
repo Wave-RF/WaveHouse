@@ -3,7 +3,6 @@ package policy
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -103,25 +102,49 @@ func TestByteSize_FlexibleInput(t *testing.T) {
 }
 
 // TestScalars_YAML confirms the YAML bootstrap path accepts the same string or
-// bare-number forms (yaml.v3 hands the scalar text to UnmarshalYAML either way).
+// bare-number forms (yaml.v3 hands the scalar text to UnmarshalYAML either way)
+// and fails closed on inputs that would otherwise silently disable a cap: a
+// non-scalar node (empty Value reads as 0) or a negative sub-millisecond
+// duration (truncates toward 0).
 func TestScalars_YAML(t *testing.T) {
 	t.Parallel()
-	type doc struct {
-		T Millis   `yaml:"t"`
-		M ByteSize `yaml:"m"`
+	tests := []struct {
+		name    string
+		yaml    string
+		wantT   Millis
+		wantM   ByteSize
+		wantErr bool
+	}{
+		{name: "string form", yaml: "t: 10s\nm: 4GiB\n", wantT: 10_000, wantM: 4 << 30},
+		{name: "bare-number form", yaml: "t: 5000\nm: 4294967296\n", wantT: 5000, wantM: 4 << 30},
+		{name: "negative sub-millisecond duration is rejected", yaml: "t: -500us\nm: 4GiB\n", wantErr: true},
+		{name: "mapping node for duration is rejected", yaml: "t:\n  nested: 1\nm: 4GiB\n", wantErr: true},
+		{name: "sequence node for byte size is rejected", yaml: "t: 10s\nm:\n  - 1\n", wantErr: true},
 	}
-	var d doc
-	if err := yaml.Unmarshal([]byte("t: 10s\nm: 4GiB\n"), &d); err != nil {
-		t.Fatal(err)
-	}
-	if d.T.Duration() != 10*time.Second || d.M.Bytes() != 4<<30 {
-		t.Fatalf("string form: T=%v M=%d", d.T.Duration(), d.M.Bytes())
-	}
-	var n doc
-	if err := yaml.Unmarshal([]byte("t: 5000\nm: 4294967296\n"), &n); err != nil {
-		t.Fatal(err)
-	}
-	if n.T != 5000 || n.M.Bytes() != 4<<30 {
-		t.Fatalf("bare-number form: T=%d M=%d", n.T, n.M.Bytes())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			type doc struct {
+				T Millis   `yaml:"t"`
+				M ByteSize `yaml:"m"`
+			}
+			var d doc
+			err := yaml.Unmarshal([]byte(tt.yaml), &d)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got T=%d M=%d", tt.yaml, d.T, d.M.Bytes())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.yaml, err)
+			}
+			if d.T != tt.wantT {
+				t.Errorf("T = %d, want %d", d.T, tt.wantT)
+			}
+			if d.M != tt.wantM {
+				t.Errorf("M = %d, want %d", d.M, tt.wantM)
+			}
+		})
 	}
 }

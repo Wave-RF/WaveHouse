@@ -52,7 +52,7 @@ clickhouse:
 # — so they apply to every query uniformly; see docs/configuration. This block
 # holds only the result-LIMIT default.
 query:
-  default_max_rows: 10000          # fallback result LIMIT (0 = built-in default)
+  default_max_rows: 10000          # fallback result LIMIT (<=0 falls back to 10000)
 
 mq:
   gap_window_minutes: 15

@@ -46,9 +46,11 @@ func (m *Millis) parse(s string) error {
 		return fmt.Errorf("invalid duration %q (use %q, %q, or a number of milliseconds): %w", s, "5s", "500ms", err)
 	}
 	ms := d.Milliseconds()
-	if d > 0 && ms == 0 {
-		// Fail closed: a positive-but-sub-millisecond cap must not round to 0
-		// (which would read as "no limit").
+	if d != 0 && ms == 0 {
+		// Fail closed: a sub-millisecond cap must not round to 0 (which would read
+		// as "no limit"). Milliseconds() truncates toward zero, so this also
+		// catches negative sub-ms values like "-500us" that would otherwise slip
+		// past the negative-cap validation downstream.
 		return fmt.Errorf("duration %q is below the 1ms resolution of a resource cap", s)
 	}
 	*m = Millis(ms)
@@ -74,8 +76,15 @@ func (m *Millis) UnmarshalJSON(data []byte) error {
 }
 
 // UnmarshalYAML accepts either a string or a bare numeric scalar (yaml.v3 hands
-// the scalar's text to us either way).
-func (m *Millis) UnmarshalYAML(value *yaml.Node) error { return m.parse(value.Value) }
+// the scalar's text to us either way). A non-scalar node (mapping/sequence) is
+// rejected rather than parsed: its empty Value would read as 0 and silently
+// disable the cap.
+func (m *Millis) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("max_execution_time must be a scalar duration or millisecond number")
+	}
+	return m.parse(value.Value)
+}
 
 // ByteSize is a byte count. Input accepts a size string ("4GiB", "512MiB", with
 // SI vs IEC distinguished — "4GB" is 4×10⁹, "4GiB" is 4×2³⁰) or a bare integer
@@ -120,5 +129,12 @@ func (b *ByteSize) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// UnmarshalYAML accepts either a string or a bare numeric scalar.
-func (b *ByteSize) UnmarshalYAML(value *yaml.Node) error { return b.parse(value.Value) }
+// UnmarshalYAML accepts either a string or a bare numeric scalar. A non-scalar
+// node (mapping/sequence) is rejected rather than parsed: its empty Value would
+// read as 0 and silently disable the cap.
+func (b *ByteSize) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("max_memory_usage must be a scalar size or byte number")
+	}
+	return b.parse(value.Value)
+}
