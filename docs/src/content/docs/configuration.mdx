@@ -64,6 +64,8 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 | `mq.gap_window_minutes` | `WH_MQ_GAP_WINDOW_MINUTES` | `15` | How many minutes of messages to retain in NATS for SSE gap-fill. The Active Sweeper will not purge messages newer than this window. |
 | `mq.max_bytes_gb` | `WH_MQ_MAX_BYTES_GB` | `50` | Maximum NATS JetStream stream size in GB. When full, new publishes are rejected with `DiscardNew` policy, triggering 503 backpressure on the ingest endpoint. |
 
+**Durability.** The embedded server runs with JetStream `SyncAlways`, so every event is `fsync`'d to disk before `POST /v1/ingest` returns `200`. This makes your storage's `fsync` latency your ingest latency floor — see [Durability & Storage](/durability) to check whether your substrate can sustain it. There is no knob to relax this today ([#139](https://github.com/Wave-RF/WaveHouse/issues/139) tracks a configurable group-commit interval).
+
 ### Deduplication
 
 | YAML Key | Env Var | Default | Description |
