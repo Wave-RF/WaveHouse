@@ -298,7 +298,7 @@ func TestFormatParamValue_OK(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := formatParamValue(tc.in, "")
+			got, err := formatParamValue(tc.in)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -319,53 +319,7 @@ func TestFormatParamValue_Rejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := formatParamValue(tc.in, "")
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
-}
-
-func TestValidateParamType(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name     string
-		declared string
-		val      any
-		wantErr  string // "" means accept
-	}{
-		{"string accepts string", "string", "x", ""},
-		{"string accepts numeric string", "string", "100", ""},
-		{"string rejects number", "string", float64(5), "expected string, got number"},
-		{"string rejects bool", "string", true, "expected string, got boolean"},
-		{"string rejects array", "string", []any{"x"}, "expected string, got array"},
-		{"string rejects object", "string", map[string]any{"k": "v"}, "expected string, got object"},
-		{"number accepts float", "number", float64(5), ""},
-		{"number accepts int", "number", 5, ""},
-		{"number accepts numeric string", "number", "50", ""},
-		{"number rejects non-numeric string", "number", "abc", "expected number, got string"},
-		{"number rejects underscore string", "number", "1_000", "expected number, got string"},
-		{"number rejects non-finite string", "number", "Inf", "expected number, got string"},
-		{"number rejects array", "number", []any{float64(1)}, "expected number, got array"},
-		{"number rejects object", "number", map[string]any{}, "expected number, got object"},
-		{"number rejects bool", "number", true, "expected number, got boolean"},
-		{"boolean accepts bool", "boolean", true, ""},
-		{"boolean accepts bool string", "boolean", "true", ""},
-		{"boolean rejects other string", "boolean", "nope", "expected boolean, got string"},
-		{"boolean rejects number", "boolean", float64(1), "expected boolean, got number"},
-		{"array accepts array", "array", []any{"a"}, ""},
-		{"array rejects scalar", "array", "x", "expected array, got string"},
-		{"unknown type not enforced", "datetime", []any{"x"}, ""},
-		{"nil always accepted", "number", nil, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := validateParamType(tc.declared, tc.val)
-			if tc.wantErr == "" {
-				assert.NoError(t, err)
-				return
-			}
+			_, err := formatParamValue(tc.in)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
@@ -432,94 +386,4 @@ func TestBindParams_EmptyArrayRejected(t *testing.T) {
 	_, _, err := BindParams(q, map[string]any{"ids": []any{}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "array parameter must not be empty")
-}
-
-func TestBindParams_TypeMismatchRejected(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		typ     string
-		val     any
-		wantErr string
-	}{
-		{"number rejects array", "number", []any{"x"}, "expected number, got array"},
-		{"number rejects object", "number", map[string]any{}, "expected number, got object"},
-		{"number rejects text", "number", "abc", "expected number, got string"},
-		{"string rejects array", "string", []any{"x"}, "expected string, got array"},
-		{"string rejects number", "string", float64(5), "expected string, got number"},
-		{"boolean rejects array", "boolean", []any{true}, "expected boolean, got array"},
-		{"array rejects scalar", "array", "x", "expected array, got string"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			q := &NamedQuery{
-				SQL:        "SELECT * FROM t WHERE col = {{p}}",
-				Parameters: []ParamDef{{Name: "p", Type: tc.typ, Required: true}},
-			}
-			_, _, err := BindParams(q, map[string]any{"p": tc.val})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), `parameter "p"`)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
-}
-
-func TestBindParams_TypeNumber_AcceptsNumericStringFromQuery(t *testing.T) {
-	t.Parallel()
-	// Query-string params always arrive as strings; a number param accepts the
-	// numeric spelling and renders it bare.
-	q := &NamedQuery{
-		SQL:        "SELECT * FROM t LIMIT {{limit}}",
-		Parameters: []ParamDef{{Name: "limit", Type: "number", Required: true}},
-	}
-	sql, _, err := BindParams(q, map[string]any{"limit": "50"})
-	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM t LIMIT 50", sql)
-}
-
-func TestBindParams_TypeBoolean_AcceptsBoolStringFromQuery(t *testing.T) {
-	t.Parallel()
-	// Query-string params always arrive as strings; a boolean param accepts the
-	// "true"/"false" spelling and renders it as the numeric 1/0 a Bool column
-	// expects — matching a JSON-body bool, not a quoted 'true' string literal.
-	q := &NamedQuery{
-		SQL:        "SELECT * FROM t WHERE active = {{active}}",
-		Parameters: []ParamDef{{Name: "active", Type: "boolean", Required: true}},
-	}
-
-	sqlTrue, _, err := BindParams(q, map[string]any{"active": "true"})
-	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM t WHERE active = 1", sqlTrue)
-
-	sqlFalse, _, err := BindParams(q, map[string]any{"active": "false"})
-	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM t WHERE active = 0", sqlFalse)
-}
-
-func TestFormatParamValue_DeclaredStringQuotesNumeric(t *testing.T) {
-	t.Parallel()
-	// A numeric-looking value renders bare when untyped, but a parameter
-	// declared a string is always quoted so it can't be treated as a numeric
-	// literal.
-	bare, err := formatParamValue("100", "")
-	require.NoError(t, err)
-	assert.Equal(t, "100", bare)
-
-	quoted, err := formatParamValue("100", "string")
-	require.NoError(t, err)
-	assert.Equal(t, "'100'", quoted)
-}
-
-func TestBindParams_TypeString_QuotesNumericValue(t *testing.T) {
-	t.Parallel()
-	// A string-declared parameter renders a numeric-looking value as a quoted
-	// string literal, not a bare number.
-	q := &NamedQuery{
-		SQL:        "SELECT * FROM t WHERE code = {{code}}",
-		Parameters: []ParamDef{{Name: "code", Type: "string", Required: true}},
-	}
-	sql, _, err := BindParams(q, map[string]any{"code": "100"})
-	require.NoError(t, err)
-	assert.Equal(t, "SELECT * FROM t WHERE code = '100'", sql)
 }

@@ -30,9 +30,9 @@ type NamedQuery struct {
 // ParamDef describes a query parameter.
 type ParamDef struct {
 	Name string `json:"name"`
-	// Type is enforced when set: a supplied value of the wrong kind is a 400.
-	// "string", "number", "boolean" (scalar), or "array" (a list, e.g. for IN).
-	// An empty or unrecognized type imposes no constraint.
+	// Type documents the expected value kind ("string", "number", "boolean",
+	// "array") for callers and the SDK. It is advisory only — binding keys off
+	// the runtime value, and ClickHouse validates against the column type.
 	Type     string `json:"type"`
 	Required bool   `json:"required,omitempty"`
 	Default  any    `json:"default,omitempty"`
@@ -146,11 +146,10 @@ var inlineParamRe = regexp.MustCompile(`\{\{(\w+)(?::([^}]*))?\}\}`)
 // ("0x1p-2"), and the non-finite "Inf"/"NaN".
 var numericLiteralRe = regexp.MustCompile(`^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$`)
 
-// isNumericLiteral reports whether s is a plain SQL numeric literal. It is the
-// single source of truth for "looks like a number" shared by validateParamType
-// (a declared "number" param accepts only these; anything else is a clean 400)
-// and formatParamValue (only these render bare — any other string is quoted, so
-// a numeric-looking value can never become invalid bare SQL).
+// isNumericLiteral reports whether s is a plain SQL numeric literal. A
+// query-string parameter value (always a string) renders bare only when it
+// matches — any other string is quoted, so a numeric-looking value can never
+// become invalid bare SQL.
 func isNumericLiteral(s string) bool {
 	return numericLiteralRe.MatchString(s)
 }
@@ -162,8 +161,7 @@ func isNumericLiteral(s string) bool {
 //
 // Values are inlined directly into the SQL string (scalars are escaped, arrays
 // render as a parenthesized list — see formatParamValue). This avoids
-// driver-level positional parameter limitations (e.g. LIMIT position). A
-// declared ParamDef.Type is enforced before formatting.
+// driver-level positional parameter limitations (e.g. LIMIT position).
 func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 	// Build lookup from formal parameter definitions.
 	formal := make(map[string]*ParamDef, len(q.Parameters))
@@ -203,23 +201,7 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 			return match
 		}
 
-		// Enforce the declared type (if any) before formatting, so a parameter
-		// declared scalar rejects a non-scalar value rather than silently
-		// rendering it as a list. The declared type also reaches the formatter,
-		// so a declared string always renders as a quoted literal rather than
-		// taking the bare numeric shortcut.
-		declaredType := ""
-		if p, ok := formal[name]; ok {
-			declaredType = p.Type
-		}
-		if declaredType != "" {
-			if err := validateParamType(declaredType, val); err != nil {
-				bindErr = fmt.Errorf("parameter %q: %w", name, err)
-				return match
-			}
-		}
-
-		lit, err := formatParamValue(val, declaredType)
+		lit, err := formatParamValue(val)
 		if err != nil {
 			bindErr = fmt.Errorf("parameter %q: %w", name, err)
 			return match
@@ -244,36 +226,15 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 // Values with no scalar SQL representation are refused rather than emitted as
 // Go's `%v` text: a JSON object has no meaning here, and an empty array would
 // render as `IN ()`, a ClickHouse syntax error.
-//
-// declaredType is the parameter's declared ParamDef.Type ("" for inline or
-// untyped parameters). When it is "string", a numeric-looking value is quoted
-// rather than emitted bare, so a parameter declared a string always renders as
-// a string literal. When it is "boolean", a string spelling from the query
-// string ("true"/"false") renders as the numeric 1/0 a Bool column expects,
-// matching a JSON-body bool. Array elements carry no declared element type and
-// are formatted with an empty declaredType.
-func formatParamValue(v any, declaredType string) (string, error) {
+func formatParamValue(v any) (string, error) {
 	if v == nil {
 		return "NULL", nil
 	}
 	switch val := v.(type) {
 	case string:
-		// A boolean declared via the query string arrives as "true"/"false";
-		// render it as the numeric 1/0 a Bool column expects, matching the
-		// JSON-body bool case below. validateParamType guarantees the string
-		// parses, but fall through to a quoted literal if it somehow doesn't.
-		if declaredType == "boolean" {
-			if b, err := strconv.ParseBool(val); err == nil {
-				if b {
-					return "1", nil
-				}
-				return "0", nil
-			}
-		}
 		// A numeric-looking string renders bare (so `?limit=100` from a query
-		// string works as a number), unless the parameter is declared a string —
-		// then it is always quoted, honoring the declared type.
-		if declaredType != "string" && isNumericLiteral(val) {
+		// string works as a number); any other string is quoted and escaped.
+		if isNumericLiteral(val) {
 			return val, nil
 		}
 		escaped := strings.ReplaceAll(val, `\`, `\\`)
@@ -305,7 +266,7 @@ func formatParamValue(v any, declaredType string) (string, error) {
 		}
 		parts := make([]string, len(val))
 		for i, elem := range val {
-			s, err := formatParamValue(elem, "")
+			s, err := formatParamValue(elem)
 			if err != nil {
 				return "", err
 			}
@@ -314,54 +275,6 @@ func formatParamValue(v any, declaredType string) (string, error) {
 		return "(" + strings.Join(parts, ", ") + ")", nil
 	default:
 		return "", fmt.Errorf("unsupported parameter type %s", jsonKind(v))
-	}
-}
-
-// validateParamType checks a supplied value against a parameter's declared
-// type. Only the recognized types ("string", "number", "boolean", "array")
-// are enforced; an unrecognized type imposes no constraint (formatParamValue
-// still guarantees the rendered literal is safe). Values from the query string
-// always arrive as strings — even for number and boolean parameters — so those
-// checks accept the string spelling too.
-func validateParamType(declared string, v any) error {
-	if v == nil {
-		return nil // renders as NULL, valid for any column type
-	}
-	switch declared {
-	case "string":
-		// Query-string and JSON-string values both arrive as Go strings; a JSON
-		// number/boolean/array/object is a declared-type violation.
-		if _, ok := v.(string); !ok {
-			return fmt.Errorf("expected string, got %s", jsonKind(v))
-		}
-		return nil
-	case "number":
-		switch n := v.(type) {
-		case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-			return nil
-		case string:
-			if isNumericLiteral(n) {
-				return nil
-			}
-		}
-		return fmt.Errorf("expected number, got %s", jsonKind(v))
-	case "boolean":
-		switch b := v.(type) {
-		case bool:
-			return nil
-		case string:
-			if _, err := strconv.ParseBool(b); err == nil {
-				return nil
-			}
-		}
-		return fmt.Errorf("expected boolean, got %s", jsonKind(v))
-	case "array":
-		if _, ok := v.([]any); ok {
-			return nil
-		}
-		return fmt.Errorf("expected array, got %s", jsonKind(v))
-	default:
-		return nil // unrecognized declared type: not enforced
 	}
 }
 
