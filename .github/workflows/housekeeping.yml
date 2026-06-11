@@ -1,19 +1,24 @@
 name: PR housekeeping
 
-# Runs once per PR open/push to:
+# Runs once per PR open/edit/push to:
 #   1. Apply path-based labels via actions/labeler.
-#   2. Validate PR title against Conventional Commits.
+#   2. Mirror the PR-title (Conventional Commits) check as a sticky
+#      explainer comment — and, when a title edit fixes it, re-run the
+#      failed `PR title` job inside the required `CI` check.
+#
+# The BLOCKING title gate lives in ci.yml's `PR title` job (under the
+# `CI` aggregator — the ruleset's sole required check). This workflow
+# keeps the parts that need base-repo write permissions on fork PRs,
+# which only `pull_request_target` grants: labels and the sticky
+# comment. It still fails on a bad title so the mirror is honest, but
+# it is NOT a required check.
 #
 # Reviewer assignment is NOT here — GitHub does it natively: the ruleset's
 # `required_reviewers` rule requests the @Wave-RF/wavehouse-admins team, and
 # the team's code-review assignment auto-assigns + load-balances a member.
 #
-# Uses `pull_request_target` so fork PRs get labels + sticky comments
-# with base-repo permissions (a `pull_request` trigger lacks the
-# write scopes on forks).
-#
-# Required by branch protection. Fails only on a bad PR title; labeling
-# failures are non-fatal so a flaky API call can't block merge.
+# Labeling failures are non-fatal so a flaky API call can't block the
+# title mirror.
 
 on:
   pull_request_target:
@@ -23,9 +28,11 @@ permissions:
   # `issues: write` is required for the sticky-comment endpoint
   # (/repos/.../issues/{num}/comments) — `pull-requests: write` alone
   # does not grant it, and fork PRs fail to comment without it.
+  # `actions: write` lets the title-fix step re-run CI's failed jobs.
   contents: read
   issues: write
   pull-requests: write
+  actions: write
 
 concurrency:
   group: pr-housekeeping-${{ github.event.pull_request.number }}
@@ -83,7 +90,7 @@ jobs:
       - name: Post / update sticky comment on title fail
         # continue-on-error: GITHUB_TOKEN is read-only for fork PRs so
         # the comment fails there; that must not mask the final exit 1
-        # that drives the required-check status.
+        # that keeps this check an honest mirror of the title state.
         if: steps.check.outputs.passed == 'false'
         continue-on-error: true
         env:
@@ -113,7 +120,7 @@ jobs:
 
           ---
 
-          This check is required by the \`main branch protection\` ruleset — merge is blocked until the title matches. Edit the PR title to trigger a re-check automatically. I'll clean up this comment once the title is valid.
+          The required \`CI\` check enforces this via its \`PR title\` job — merge is blocked until the title matches. Edit the PR title and the failed job is re-run automatically. I'll clean up this comment once the title is valid.
           EOF
           )
 
@@ -145,6 +152,39 @@ jobs:
           if [[ -n "$EXISTING" ]]; then
             gh api -X DELETE "repos/$REPO/issues/comments/$EXISTING"
             echo "Removed stale pr-title-lint comment ($EXISTING)"
+          fi
+
+      # Title edits don't re-trigger the CI workflow (its `pull_request`
+      # trigger deliberately excludes `edited`: a description edit would
+      # cancel + restart a full in-flight run via the concurrency group).
+      # So when an edit makes the title valid, nudge the required `CI`
+      # check along: if the latest completed CI run for this head SHA
+      # failed its `PR title` job, re-run the run's failed jobs. That job
+      # re-reads the title from the API — not the stale event payload a
+      # re-run replays — so it turns green without a new push. Best-effort
+      # (continue-on-error): a manual re-run or the next push covers any
+      # miss, e.g. a title fixed while the CI run was still in flight.
+      - name: Re-run CI title job after a title fix
+        if: github.event.action == 'edited' && steps.check.outputs.passed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          run_id="$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request" \
+            --jq '[.workflow_runs[] | select(.name == "CI" and .status == "completed" and .conclusion == "failure")][0].id // empty')"
+          if [[ -z "$run_id" ]]; then
+            echo "No failed completed CI run for $HEAD_SHA — nothing to re-run."
+            exit 0
+          fi
+          title_failed="$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.name == "PR title" and .conclusion == "failure")] | length')"
+          if [[ "$title_failed" -gt 0 ]]; then
+            gh api -X POST "repos/$REPO/actions/runs/$run_id/rerun-failed-jobs" >/dev/null
+            echo "Re-ran failed jobs of CI run $run_id (its PR title job had failed)."
+          else
+            echo "CI run $run_id failed for reasons other than the title — leaving it alone."
           fi
 
       - name: Fail the check if title was invalid

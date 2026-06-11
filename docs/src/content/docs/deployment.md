@@ -29,8 +29,10 @@ docker compose -f deployments/compose/standalone.yaml exec clickhouse \
     ORDER BY (page)
   "
 
-# Ingest data (the standalone stack ships a permissive trial policy; WaveHouse is fail-closed otherwise — see Getting Started)
-# A 404 "unknown table" right after creating the table means schema discovery hasn't picked it up yet — retry (worst case 60s)
+# Ingest data (the standalone stack ships a permissive trial policy;
+# WaveHouse is fail-closed otherwise — see Getting Started)
+# A 404 "unknown table" right after creating the table means schema
+# discovery hasn't picked it up yet — retry (worst case 60s)
 curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
@@ -116,7 +118,8 @@ Key variables for production:
 ```bash
 # Required
 WH_CH_ADDR=clickhouse:9000
-WH_CH_HTTP_PORT=8123                # Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+# Port for HTTP inserts + /v1/admin/query proxy (default: 8123)
+WH_CH_HTTP_PORT=8123
 WH_CH_HTTP_SCHEME=http              # Scheme for the same (http/https)
 
 # Schema discovery
@@ -150,7 +153,8 @@ WH_DEDUPE_ID_FIELD=event_id
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
-WH_MQ_MAX_BYTES_GB=50              # Max NATS JetStream disk usage (triggers backpressure)
+# Max NATS JetStream disk usage (triggers backpressure)
+WH_MQ_MAX_BYTES_GB=50
 
 # DLQ
 WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
@@ -169,8 +173,10 @@ If `data_dir` resolves into the container's writable overlay layer instead, **Je
 
 WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
 
-```text
-WARN  data directory does not exist — starting with no prior state. If this is a redeploy, your persistent volume is not actually persisting; verify your mount.
+```text wrap=false
+WARN  data directory does not exist — starting with no prior state.
+      If this is a redeploy, your persistent volume is not actually
+      persisting; verify your mount.
 ```
 
 On a first-ever run this is expected. On every subsequent run it should be silent — so when this warning *does* fire after a redeploy, that's the most direct signal that the persistent volume isn't actually persisting.
@@ -197,8 +203,10 @@ volumes:
 
 Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
 
-```text
-ERROR  mq init failed  error="..."  path=/app/data/nats  hint="if running in a container with a host bind mount, the host directory must be owned by UID 65532..."
+```text wrap=false
+ERROR  mq init failed  error="..."  path=/app/data/nats
+       hint="if running in a container with a host bind mount, the host
+       directory must be owned by UID 65532..."
 ```
 
 The fix is one host-side command before first start:
@@ -246,7 +254,7 @@ API servers in standalone mode expose liveness and readiness endpoints under the
 
 Configure your load balancer or orchestrator to use these endpoints.
 
-**Exposure.** Probes share the API server's port (`:8080`) — kubelet probes the container internally, so there's no separate-port convention for them (metrics are the signal that optionally gets its own `prometheus.port`). If you forward `:8080` to the public internet the probe paths become reachable; they expose nothing sensitive (`/readyz`'s 503 surfaces a ClickHouse connection-error string at most), and restricting `/livez`/`/readyz`/`/healthz` to internal callers is a reverse-proxy/ingress concern rather than something WaveHouse enforces. The one health route meant to stay public is **`/v1/health`** — the SDK's content-free liveness ping — so don't filter that one out.
+**Exposure.** Probes share the API server's port (`:8080`) — kubelet probes the container internally, so there's no separate-port convention for them (metrics are the signal that optionally gets its own `prometheus.port`). If you forward `:8080` to the public internet the probe paths become reachable. The **recommended** posture is to keep `/livez`/`/readyz`/`/healthz` to internal callers and expose only **`/v1/health`** publicly (the SDK's content-free liveness ping, which never touches ClickHouse). `/readyz` issues a ClickHouse `Ping` on every call, so a public `/readyz` lets an unauthenticated flood become per-request backend pings, and the bare probes leak boot/readiness state — keeping them internal is a [reverse-proxy/ingress concern](/reverse-proxy#health-probes), and your orchestrator reaches them the internal way (kubelet on the container, LB on the backend) regardless.
 
 ### Boot-time degraded mode
 
@@ -306,7 +314,8 @@ K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside th
 ```yaml
 startupProbe:
   httpGet: { path: /livez, port: 8080 }
-  failureThreshold: 30    # allow up to 5 min for first schema discovery (30 × periodSeconds)
+  # allow up to 5 min for first schema discovery (30 × periodSeconds)
+  failureThreshold: 30
   periodSeconds: 10
 livenessProbe:
   httpGet: { path: /livez, port: 8080 }
@@ -315,6 +324,10 @@ readinessProbe:
 ```
 
 Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readinessProbe` against the pod — so a slow or temporarily-unreachable ClickHouse can't restart-loop the pod via the liveness path. Size `failureThreshold` to your expected worst-case CH boot time; the default 30 × 10s = 5min is generous and works for compose-on-NAS-style deployments where CH and WaveHouse can race during a host reboot.
+
+## Behind a reverse proxy
+
+WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage certificates, or rate-limit — put a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) in front for any internet-facing deployment. A few behaviors only matter behind a proxy: TLS termination, the request-body size limits, Server-Sent Events buffering and idle timeouts (WaveHouse has no SSE heartbeat yet, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)), header/auth forwarding, and which health paths to expose. See **[Behind a reverse proxy](/reverse-proxy)** for the full guide and example nginx/Caddy/Cloudflare configs.
 
 ## ClickHouse Schema
 
@@ -408,7 +421,8 @@ The underlying Docker run scripts live in `scripts/otel/` and are invoked via Ma
 ```bash
 make obs-aspire   # Simplest, in-memory, no login
 make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
-make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
+# Simple OTeL Frontend like aspire, with more control over dashboards
+make obs-front
 ```
 
 All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host (e.g. `make dev`), set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to reach them — the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects.
@@ -447,7 +461,9 @@ docker compose -f deployments/compose/standalone.yaml up -d
 ### Option 3: Reset for Local Binary Development
 
 ```bash
-rm -rf data/         # Removes embedded NATS + Pebble data (run `make clean-all` to also drop docker volumes)
-make clean           # Removes build artifacts: bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
+rm -rf data/         # Removes embedded NATS + Pebble data
+                     # (run `make clean-all` to also drop docker volumes)
+make clean           # Removes build artifacts:
+                     # bin/, dist/, clients/ts/dist/, docs/dist/, docs/.dev-dist/
 make build && ./bin/wavehouse
 ```

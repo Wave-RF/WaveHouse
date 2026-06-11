@@ -68,7 +68,9 @@ Historically some error paths defaulted to `text/plain` because they were emitte
 
 The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
 
-> **Caveat — streaming / partial-write responses.** For SSE, streaming endpoints, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
+:::caution[Streaming / partial-write responses]
+For SSE, streaming endpoints, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
+:::
 
 ## Endpoints
 
@@ -87,7 +89,10 @@ Returns `200 OK` once the gateway has discovered ClickHouse table schemas at lea
 **Response (boot-degraded):**
 
 ```json
-{"status": "degraded", "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"}
+{
+  "status": "degraded",
+  "error": "schema discovery: dial tcp 127.0.0.1:9000: connect: connection refused"
+}
 ```
 
 Status code: `503 Service Unavailable`
@@ -170,13 +175,15 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 | a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
 | one JSON object per line (NDJSON) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)).
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
-> **Insert-only.** The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/admin/*`).
->
-> The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
+:::note[Insert-only]
+The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/admin/*`).
+
+The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
+:::
 
 **Request:**
 
@@ -297,7 +304,9 @@ A `200` is returned whenever the body was read and the records were processed �
 | 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
 | 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
 
-> **At-least-once on retry.** A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+:::caution[At-least-once on retry]
+A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+:::
 
 **curl example (JSON array):**
 
@@ -321,13 +330,19 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 
 Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. Multi-statement input (`SELECT 1; TRUNCATE t`) also works on recent ClickHouse versions where multi-query is enabled by default; older or restrictively-configured servers may reject the second statement with a clear error. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting; other types are returned as ClickHouse renders them under `FORMAT JSON`.
 
-> **Inline `FORMAT` overrides the JSON envelope.** ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON` setting. When the SQL contains an explicit `FORMAT`, the proxy forwards ClickHouse's raw response body (CSV, Pretty, TSV, …) and passes through the upstream `Content-Type` header — `text/csv`, `text/tab-separated-values`, etc. — so consumers see the right MIME type. The "extract the `data` array" behavior only applies when ClickHouse returned the `FORMAT JSON` envelope, which is the default.
->
-> **64 MiB response cap.** The proxy buffers the upstream response in memory before forwarding (no row-streaming yet), so a `SELECT *` from a large table can pin RAM on the API server. To avoid an admin OOMing themselves, responses larger than 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Narrow the query with `LIMIT`, or use a streaming client outside WaveHouse that talks to ClickHouse directly (the standard escape hatch — the same admin credentials work).
+:::note[Inline `FORMAT` overrides the JSON envelope]
+ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON` setting. When the SQL contains an explicit `FORMAT`, the proxy forwards ClickHouse's raw response body (CSV, Pretty, TSV, …) and passes through the upstream `Content-Type` header — `text/csv`, `text/tab-separated-values`, etc. — so consumers see the right MIME type. The "extract the `data` array" behavior only applies when ClickHouse returned the `FORMAT JSON` envelope, which is the default.
+:::
+
+:::caution[64 MiB response cap]
+The proxy buffers the upstream response in memory before forwarding (no row-streaming yet), so a `SELECT *` from a large table can pin RAM on the API server. To avoid an admin OOMing themselves, responses larger than 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Narrow the query with `LIMIT`, or use a streaming client outside WaveHouse that talks to ClickHouse directly (the standard escape hatch — the same admin credentials work).
+:::
 
 This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
-> **Admin only.** The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+:::note[Admin only]
+The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+:::
 
 `/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
 
@@ -343,7 +358,9 @@ This endpoint **does not cache, does not singleflight, and emits `Cache-Control:
 | ----- | ---- | -------- | ----------- |
 | `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
 
-> **No parameter binding on this endpoint (yet).** The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
+:::note[No parameter binding on this endpoint (yet)]
+The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
+:::
 
 **Response:**
 
@@ -387,7 +404,9 @@ curl -X POST http://localhost:8080/v1/admin/query \
 
 Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
 
-> **The column allowlist is a hard cap on every clause.** Every column the query references — in `columns`, an aggregation argument, `filters`, `group_by`, `order_by`, or `time_range` — must be permitted by the role's `allow_columns`/`deny_columns`, or the request is rejected with `403 column "x" not allowed`. A full-row read is requested with `"select_all": true` (expanded to the columns the role may read — never a raw `SELECT *`); **omitting `columns` returns nothing**, so a hidden column never leaks by being left out, grouped on, or filtered on. See [Access control → Column permissions](/access-control#column-permissions).
+:::note[The column allowlist is a hard cap on every clause]
+Every column the query references — in `columns`, an aggregation argument, `filters`, `group_by`, `order_by`, or `time_range` — must be permitted by the role's `allow_columns`/`deny_columns`, or the request is rejected with `403 column "x" not allowed`. A full-row read is requested with `"select_all": true` (expanded to the columns the role may read — never a raw `SELECT *`); **omitting `columns` returns nothing**, so a hidden column never leaks by being left out, grouped on, or filtered on. See [Access control → Column permissions](/access-control#column-permissions).
+:::
 
 **Request:**
 
@@ -422,11 +441,15 @@ Executes a type-safe structured query against a table. The query AST is validate
 | `limit` | int | No | Max rows. Omitted or above 10,000 → silently capped at 10,000 (`DefaultMaxRows`); a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-duration relative values ("1h", "30m", "7d", "2w" — day and week suffixes expand to hours). Relative values mean that long *ago*. The window applies only when `column` and `since` are set — an `until` without `since` is ignored. |
 
-> **Identifier names.** Table, column, and alias names may contain any characters ClickHouse accepts — dots, spaces, unicode, reserved keywords — because every identifier is backtick-quoted automatically. The one exception is a name containing a literal `?`, which is rejected with `400` (a clickhouse-go positional-binder limitation tracked in [#279](https://github.com/Wave-RF/WaveHouse/issues/279)).
+:::note[Identifier names]
+Table, column, and alias names may contain any characters ClickHouse accepts — dots, spaces, unicode, reserved keywords — because every identifier is backtick-quoted automatically. The one exception is a name containing a literal `?`, which is rejected with `400` (a clickhouse-go positional-binder limitation tracked in [#279](https://github.com/Wave-RF/WaveHouse/issues/279)).
+:::
 
 **Response:**
 
 JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
+
+The inbound request body is capped at 1 MiB; a body over the cap is rejected with `413`. A query AST is bounded by nature (far under 1 MiB even with a large `in`-list), and the cap blocks a single-request memory-exhaustion vector on this public endpoint. Set a tighter or higher outer limit at your [reverse proxy](/reverse-proxy#request-body-size-limits) — but it can only narrow the effective limit, not raise it past this cap.
 
 **Error responses:**
 
@@ -437,6 +460,7 @@ JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: M
 | 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
 | 404 | `{"error":"unknown table: x"}` | Table not found |
+| 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
 
 ---
 
@@ -459,6 +483,8 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
 
+The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same control-plane cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
+
 **Error responses:**
 
 | Status | Body | Cause |
@@ -466,6 +492,7 @@ JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whe
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
 | 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
+| 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
 
 ---
 
@@ -503,6 +530,10 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 
 **CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
 
+:::caution[Behind a proxy: disable buffering, raise idle timeouts]
+SSE needs proxy-specific configuration. Disable response buffering (or the proxy holds events until a buffer fills), and raise the idle/read timeout for this route: WaveHouse sends a single `: connected` comment on open and then **no periodic heartbeat** ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so a quiet stream can be reset by an intermediary's idle timeout. Browser `EventSource` auto-reconnects (resuming via `Last-Event-ID`); server-side consumers should reconnect. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
+:::
+
 **curl example:**
 
 ```bash
@@ -519,7 +550,9 @@ curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z
 
 Returns all discovered ClickHouse table schemas.
 
-> **Admin only.** The schema and DLQ endpoints in this section require the `admin_role` (like [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); other callers get 401 (bad token) / 403. The quickstart's trial `public` role cannot call them.
+:::note[Admin only]
+The schema and DLQ endpoints in this section require the `admin_role` (like [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); other callers get 401 (bad token) / 403. The quickstart's trial `public` role cannot call them.
+:::
 
 **Response:**
 
@@ -625,6 +658,8 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 ### Admin Endpoints
 
 Admin endpoints require the policy `admin_role` (`"admin"` by default, exact case-sensitive match). There is no separate `service` role. The JWT middleware always runs — a request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied.
+
+The admin endpoints that accept a request body — `PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, and `PUT /v1/admin/pipes/{name}` — cap it at 1 MiB (the same control-plane backstop as the public read endpoints); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use.
 
 #### `GET /v1/admin/policy` — Get Access Control Policy
 

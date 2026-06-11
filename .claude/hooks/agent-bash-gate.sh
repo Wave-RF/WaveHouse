@@ -57,7 +57,7 @@ if printf '%s\n' "$stripped" | grep -qE '(^|[[:space:];|&]+)gh[[:space:]]+pr[[:s
 fi
 
 # gh pr create / gh pr edit --title: validate the title against the SAME
-# Conventional-Commits rule the required `PR housekeeping` check enforces
+# Conventional-Commits rule the required `CI` check's `PR title` job enforces
 # (scripts/lint-pr-title.sh is the shared rule) — so a too-long or wrong-format
 # title is caught locally BEFORE the PR exists, not after the required check
 # fails. Extract the quoted --title/-t value from the ORIGINAL command (the

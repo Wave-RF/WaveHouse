@@ -23,7 +23,7 @@ If you're new to Claude Code itself, the [official docs](https://code.claude.com
 
 | Layer | Lives in | Applies to | Purpose |
 | ----- | -------- | ---------- | ------- |
-| **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit, `make ci` passed before push |
+| **Git hooks** | `.githooks/` (installed by `make tools`) | Humans + Claude uniformly | Hard enforcement: `make verify` on commit; before push, `make ci` for a code change or `make verify` for a docs-only one (classifier-gated) |
 | **Claude Code agent gate** | `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + `.claude/settings.json` deny rules | Agents only | Catches accidental violations of [Agent PR Discipline](#agent-pr-discipline): drafts only, no human reviewer adds, a marker (from a review or a logged skip) from every reviewer in `scripts/pre-push-reviewers.sh` required on any push to a non-main branch with commits ahead of `main`; PR title linted via `scripts/lint-pr-title.sh` on `gh pr create` / `gh pr edit --title` |
 | **Claude Code ergonomic hooks** | `.claude/hooks/gofumpt-on-save.sh` (PostToolUse Edit/Write/MultiEdit), `.claude/hooks/review-marker.sh` (SubagentStop) | Claude only | gofumpt: auto-format on file edits (humans get this from their IDE). review-marker: on a reviewer's `VERDICT: ship_it`, writes that reviewer's `tmp/<name>-passed-<HEAD-sha>` marker |
 | **Claude Code skills / agents / commands** | `.claude/skills/`, `.claude/agents/`, `.claude/commands/` | Claude only (when relevant) | Workflow guidance and on-demand helpers — not gates |
@@ -37,11 +37,11 @@ Two scripts, both committed to the repo:
 | Hook | Behavior |
 | ---- | -------- |
 | `pre-commit` | Runs `make verify` (tidy + fmt + vulncheck + lint, ~30s) — **blocks on failure**. Skipped if `make ci` or `make verify` already ran for the current tree state (cached via `scripts/ci-marker.sh`). |
-| `pre-push` | Checks for `tmp/ci-passed-tree-<TREE-sha>` written by `make ci`. **Blocks** if absent — run `make ci`, fix failures, retry push. |
+| `pre-push` | Scales the bar to the change set (same classifier CI uses, `scripts/classify-paths.sh`): a **code** change requires the `make ci` marker (`tmp/ci-passed-tree-<TREE-sha>`); a **docs/prose-only** push requires only the `make verify` marker (`tmp/verify-passed-tree-<TREE-sha>`) — CI skips the Go/SDK suites for those too. **Blocks** if the required marker is absent. Fail-closed: an unclassifiable push falls back to requiring `make ci`. |
 
 `--no-verify` is for intentional WIP / draft pushes. Agents should not use it — policy in AGENTS.md §"Agent PR Discipline", not regex-enforced.
 
-Tree-keyed so commit-then-push works without a re-run when the tree is unchanged. `make ci` skips the marker write when `$CI` is set (CI runners don't push). Shared logic lives in `scripts/ci-marker.sh`.
+Both markers are tree-keyed so commit-then-push works without a re-run when the tree is unchanged. `make ci` / `make verify` skip the marker write when `$CI` is set (CI runners don't push). Shared logic lives in `scripts/ci-marker.sh`.
 
 ## What's in `.claude/` and `.config/`
 
@@ -103,7 +103,7 @@ To add a skill: create `.claude/skills/<name>/SKILL.md` with frontmatter `name` 
 
 Agents (Claude Code etc.) have additional gating beyond what humans face — enforced by `.claude/hooks/agent-bash-gate.sh` (PreToolUse Bash) + deny rules in `.claude/settings.json`. Humans keep full git/gh affordances; agents have these extra constraints:
 
-- **Drafts only.** `gh pr create` must include `--draft`. Only humans transition draft → ready (`gh pr ready` is blocked), approve (`gh pr review --approve` is blocked), or request changes (`gh pr review --request-changes` is blocked). The gate also lints the PR title on `gh pr create` / `gh pr edit --title` via `scripts/lint-pr-title.sh` — the same rule as the required `PR housekeeping` check, so a malformed title is caught before the PR exists (fail-open when no quoted title is parseable).
+- **Drafts only.** `gh pr create` must include `--draft`. Only humans transition draft → ready (`gh pr ready` is blocked), approve (`gh pr review --approve` is blocked), or request changes (`gh pr review --request-changes` is blocked). The gate also lints the PR title on `gh pr create` / `gh pr edit --title` via `scripts/lint-pr-title.sh` — the same rule as the required `CI` check's `PR title` job, so a malformed title is caught before the PR exists (fail-open when no quoted title is parseable).
 - **No human reviewer assignment.** `gh pr edit --add-reviewer / --add-assignee` and `POST /requested_reviewers` are blocked. GitHub assigns reviewers natively — the `required_reviewers` ruleset rule requests the `@Wave-RF/wavehouse-admins` team and the team's code-review assignment picks the member; humans handle the rest.
 - **Bot re-triggers via comments.** Agents CAN mention bots in PR comments to re-trigger reviews — `@coderabbitai review`, etc. This goes through `gh pr comment` (allowed), not the reviewer API.
 - **Pre-push review required on PR branches.** Before `git push` to a branch with commits ahead of `main`, the agent runs the reviewers in `scripts/pre-push-reviewers.sh` (today: `pre-push-reviewer` for code, `docs-reviewer` for docs prose + code↔docs sync) that the change needs — in fresh context, in parallel — and **skips** any with nothing to do via `scripts/skip-pre-push-review.sh <name> "<reason>"` (a logged skip that satisfies the marker, so a docs typo doesn't pay for a full code review). `/prepush` does all of this. `ship_it` requires zero findings at any severity — any `[MUST]` / `[SHOULD]` / `[MAY]` forces iterate; fix and re-invoke (always fresh context) until clean. The push gate requires a marker — from a `ship_it` or a logged skip — from every listed reviewer, and echoes the skips at push time.
@@ -146,7 +146,7 @@ User-specific worktrunk config goes in `~/.config/worktrunk/config.toml`; the co
 
 The GitHub MCP server is useful for cross-repo code search and bulk graph queries, but neither is a daily WaveHouse pattern. If you want it, add at user level:
 
-```jsonc
+```jsonc title="~/.claude.json"
 // ~/.claude.json — your user-level config
 {
   "mcpServers": {
@@ -198,7 +198,7 @@ The deny list blocks:
 
 Not committed at project level. Personal preference — put in `.claude/settings.local.json`:
 
-```jsonc
+```jsonc title=".claude/settings.local.json"
 {
   "statusLine": { "type": "command", "command": "~/.config/claude/statusline.sh" },
   "outputStyle": "default",
@@ -210,7 +210,7 @@ Not committed at project level. Personal preference — put in `.claude/settings
 
 1. Write code (gofumpt-on-save formats Go files as you go).
 2. `git commit` → pre-commit hook runs `make verify` (or skips if `make ci` already validated this tree). Fix anything that fails.
-3. `git push` → the pre-push hook blocks until `make ci` passed for the current tree (run `make ci`, fix, retry). For agents, the agent-bash-gate hook also requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh` on any push of a branch with commits ahead of `main` — including the first push, before the PR exists. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
+3. `git push` → the pre-push hook blocks until the tree is validated for what changed — `make ci` for a code change, `make verify` for a docs/prose-only one (run it, fix, retry). For agents, the agent-bash-gate hook also requires a marker for HEAD from every reviewer in `scripts/pre-push-reviewers.sh` on any push of a branch with commits ahead of `main` — including the first push, before the PR exists. Run `/prepush` → it judges which reviewers the change needs, runs those in parallel (on Ship it each marker auto-writes), and skips the rest on the record (`skip-pre-push-review.sh` writes their markers + logs why) → push succeeds. On Iterate/Block, fix, re-invoke (fresh context each time), repeat.
 4. Open the PR with `gh pr create --draft` (agents required to use `--draft`; humans flip to ready when ready).
 5. CI workflows fire on the new HEAD. Address review comments per AGENTS.md §Review Response.
 

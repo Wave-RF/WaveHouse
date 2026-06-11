@@ -2,30 +2,28 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
-// Cache provides key-value storage with TTL support.
+// Cache provides versioned query-result storage with TTL support.
 type Cache interface {
-	// Get retrieves a value and its remaining TTL. Returns nil, 0, nil on miss.
-	// key is the hashed cache key value, namespace is the table or pipe, and scope applies roles
-	Get(ctx context.Context, key string, namespace string, scope string) ([]byte, time.Duration, error)
+	// Get retrieves a cached query result and its remaining TTL. sha is the hash of
+	// the SQL+params; deps are the namespaces the result depends on (one for a
+	// structured query, several for a pipe). Returns nil, 0, nil on miss.
+	Get(ctx context.Context, sha string, deps []Namespace) ([]byte, time.Duration, error)
 
 	// TODO: TTL should be set based on query execution time
-	// Set stores a value with the given TTL.
-	// key is the hashed cache key value, namespace is the table or pipe, and scope applies roles
-	Set(ctx context.Context, key string, namespace string, scope string, value []byte, ttl time.Duration) error
+	// Set stores a query result keyed by sha + its dependency namespaces.
+	Set(ctx context.Context, sha string, deps []Namespace, value []byte, ttl time.Duration) error
 
 	// TODO: option to prefetch pipes when invalidated?
 	// TODO: AST query builder needs to give us a deterministic key or bypass cache entirely
 
-	// Version Registry
-	// Version operations accept a scope (e.g., "org_123")
-	// If scope is empty, it bumps the global table version
-
-	// InvalidateCache invalidates the cache for a given list of versionKeys
-	InvalidateCache(ctx context.Context, versionKeys []string) (uint64, error)
+	// Invalidate bumps the version for each namespace, orphaning every cached query
+	// that depends on it. A namespace with an empty Scope bumps the whole table
+	// (every scope); a non-empty Scope bumps just that scope plus the whole-table
+	// view. Returns the number of namespaces processed.
+	Invalidate(ctx context.Context, namespaces []Namespace) (uint64, error)
 
 	// TODO: for local cache, we can just store the versions in memory, but for distributed/L2 cache, we will need to be able to either have stored procedures/pipelines etc to query them and attach them to a query, or sync them to each edge api server.
 
@@ -52,11 +50,4 @@ func QueryTimeToTTL(queryTime time.Duration) time.Duration {
 	}
 
 	return ttl
-}
-
-func generateVersionKey(namespace string, scope string) string {
-	if scope == "" {
-		return namespace
-	}
-	return fmt.Sprintf("%s.%s", namespace, scope)
 }

@@ -1,0 +1,57 @@
+---
+// Navigation progress bar for slow loads, driven by astro-vtbot's loading()
+// hook — the same extension point vtbot's own <ProgressBar/> uses. We don't
+// ship that component because it imports Swup's progress plugin from
+// unpkg.com at runtime in every visitor's browser (a third-party CDN script
+// in prod). This is the same behavior, self-hosted: zero external fetches.
+// Styles live in global.css (#wh-progress-bar).
+---
+
+<script>
+  import { loading } from "astro-vtbot/components/loading-indicator";
+
+  const ID = "wh-progress-bar";
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  let visible = false;
+
+  function bar(): HTMLElement {
+    // Lazily created on the persistent <body> — ReplacementSwap only swaps
+    // .main-frame, so the element (like this module) survives soft navs.
+    let el = document.getElementById(ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = ID;
+      el.setAttribute("aria-hidden", "true");
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
+  // Show only after a grace period so fast (cached) navigations never flash
+  // the bar; trickle toward 85% while the fetch runs, then snap to 100% and
+  // fade out when the loader resolves (vtbot calls hide before the swap).
+  loading(
+    () => {
+      clearTimeout(graceTimer);
+      graceTimer = setTimeout(() => {
+        const el = bar();
+        visible = true;
+        el.style.transition = "none";
+        el.style.width = "0%";
+        el.style.opacity = "1";
+        void el.offsetWidth; // commit the reset before re-enabling transitions
+        el.style.transition = "width 3.5s cubic-bezier(0.08, 0.6, 0.16, 1)";
+        el.style.width = "85%";
+      }, 150);
+    },
+    () => {
+      clearTimeout(graceTimer);
+      if (!visible) return;
+      visible = false;
+      const el = bar();
+      el.style.transition = "width 0.2s ease, opacity 0.3s ease 0.25s";
+      el.style.width = "100%";
+      el.style.opacity = "0";
+    },
+  );
+</script>

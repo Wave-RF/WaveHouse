@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Canonical PR-title (Conventional Commits) validator. The SINGLE rule the local
 # pre-create gate (.claude/hooks/agent-bash-gate.sh) checks against, kept identical
-# to the required `PR housekeeping` check (.github/workflows/housekeeping.yml) so a
-# bad title is caught BEFORE `gh pr create` instead of after the required check fails
-# — the recurring "title too long / wrong format" round-trip.
+# to the required `CI` check's `PR title` job (.github/workflows/ci.yml) and the
+# advisory mirror in housekeeping.yml, so a bad title is caught BEFORE
+# `gh pr create` instead of after the required check fails — the recurring
+# "title too long / wrong format" round-trip.
 #
 # Usage:  scripts/lint-pr-title.sh "<title>"     (or pipe the title on stdin)
 # Exit:   0 = valid; 1 = invalid (human-readable reason on stderr).
 # Env:    PR_TITLE_SKIP_LENGTH=1  exempt the length cap (Dependabot grouped updates).
 #         PR_TITLE_MAX_LEN=N      override the 72-char cap.
 #
-# Rule (KEEP IN SYNC with .github/workflows/housekeeping.yml's `pattern`):
+# Rule (this script IS the single source — ci.yml and housekeeping.yml call it):
 #   <type>(optional-scope)(optional-!): <subject>
 #   - type in {feat,fix,docs,refactor,test,chore,ci,deps,build,perf,revert,style}
 #   - subject starts lowercase (house style) and has no trailing period
@@ -18,7 +19,7 @@
 set -uo pipefail
 
 MAX_LEN="${PR_TITLE_MAX_LEN:-72}"
-# Type list — keep in sync with CONTRIBUTING.md and housekeeping.yml.
+# Type list — keep in sync with CONTRIBUTING.md.
 PATTERN='^(feat|fix|docs|refactor|test|chore|ci|deps|build|perf|revert|style)(\([^)]+\))?!?: [^A-Z].+[^.]$'
 
 # Use the argument if one was passed (even an empty one — never block on stdin

@@ -12,7 +12,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 )
@@ -26,6 +25,13 @@ type PipesHandler struct {
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
 	logger          *slog.Logger
+
+	// maxRequestBytes optionally overrides the default inbound request body
+	// cap (maxControlBodyBytes) for the body-decoding paths (Put, Execute).
+	// When 0, the default applies. Test-only seam (pin the cap-overflow path
+	// without allocating 1 MiB per run); not a production knob. Mirrors
+	// StructuredQueryHandler / QueryHandler.
+	maxRequestBytes int64
 }
 
 func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, logger *slog.Logger) *PipesHandler {
@@ -57,8 +63,18 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Put creates or updates a named query (admin endpoint).
 func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+
+	reqCap := int64(maxControlBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
+
 	var q pipes.NamedQuery
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
+		if writeMaxBytesError(w, err, reqCap) {
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -123,8 +139,23 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.Method == http.MethodPost {
+		reqCap := int64(maxControlBodyBytes)
+		if h.maxRequestBytes > 0 {
+			reqCap = h.maxRequestBytes
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			// An oversized body is a hard stop: MaxBytesReader truncated it
+			// mid-decode, so the parameters can't be trusted — surface 413
+			// (parity with /v1/query and the ingest/admin handlers). Any other
+			// decode error keeps the historical lenient behavior: parameters may
+			// legitimately come from the query string alone, so a malformed or
+			// empty body falls through to those rather than failing the request.
+			if writeMaxBytesError(w, err, reqCap) {
+				return
+			}
+		} else {
 			for k, v := range body {
 				supplied[k] = v
 			}
@@ -137,16 +168,14 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: scope impl
-	scope := ""
-	safePipeName := query.SafeEncodeNATS(name)
-
-	// TODO: current pipe impl doesn't have a list of tables/scopes, so ingest worker cannot invalidate it
-
-	// Cache.
+	// Cache. A pipe can read several tables, but the current pipe impl doesn't
+	// expose its table/scope dependencies, so we pass no deps: the result is keyed
+	// by sha alone (TTL-only) and the ingest worker cannot version-invalidate it.
+	// TODO: once pipes expose their tables/scopes, pass them as deps here so writes
+	// invalidate cached pipe results.
 	cacheKey := queryCacheKey(sql, params)
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, safePipeName, scope); err == nil && data != nil {
+		if data, _, err := h.Cache.Get(r.Context(), cacheKey, nil); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -177,7 +206,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		ttl := cache.QueryTimeToTTL(queryDuration)
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, safePipeName, scope, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, nil, data, ttl)
 		}
 		return data, nil
 	})

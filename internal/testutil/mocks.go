@@ -114,25 +114,25 @@ func (m *MockDeduplicator) Close() error { return nil }
 
 // ── Mock Cache ───────────────────────────────────────────────────
 
-// MockCache implements cache.Cache and records invalidation keys for testing.
+// MockCache implements cache.Cache and records invalidated namespaces for testing.
 type MockCache struct {
-	cache.Cache // Embed to satisfy remaining interface methods silently
-	InvKeys     []string
-	InvErr      error
-	mu          sync.Mutex
+	cache.Cache   // Embed to satisfy remaining interface methods silently
+	InvNamespaces []cache.Namespace
+	InvErr        error
+	mu            sync.Mutex
 }
 
-func (m *MockCache) InvalidateCache(ctx context.Context, keys []string) (uint64, error) {
+func (m *MockCache) Invalidate(_ context.Context, namespaces []cache.Namespace) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.InvKeys = append(m.InvKeys, keys...)
-	return uint64(len(keys)), m.InvErr
+	m.InvNamespaces = append(m.InvNamespaces, namespaces...)
+	return uint64(len(namespaces)), m.InvErr
 }
 
-func (m *MockCache) GetKeys() []string {
+func (m *MockCache) GetNamespaces() []cache.Namespace {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]string(nil), m.InvKeys...) // Return copy
+	return append([]cache.Namespace(nil), m.InvNamespaces...) // Return copy
 }
 
 // ── Mock jetstream.Msg ───────────────────────────────────────────

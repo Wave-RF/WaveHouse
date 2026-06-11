@@ -1,0 +1,521 @@
+---
+// Horizontal-scroll affordances for code blocks, tables, and Mermaid
+// diagrams. Two jobs:
+//
+// 1. Wrap each bare Mermaid <svg> (rehype-mermaid emits them as direct
+//    children of .sl-markdown-content) in a .wh-scroll-x scroller, so on
+//    mobile the diagram keeps a readable size and pans instead of shrinking
+//    to a 3px-label thumbnail. No-JS keeps the old scale-to-fit CSS — the
+//    `> svg` carve-out in global.css stops matching once the svg is wrapped,
+//    which re-enables the readable min-width inside the scroller.
+//
+// 2. Stamp [data-wh-more] on any of these scrollers that has content hidden
+//    to the right; CSS fades the right edge so cut-off content reads as
+//    "scrollable", not "clipped". The attribute clears as you reach the end.
+//
+// Rendered once from Footer.astro (every page). Same is:inline + window-flag
+// convention as MermaidZoom for view-transition safety.
+---
+
+<script is:inline>
+  (() => {
+    // No bare `table` here: wrapScrollables() runs before any measurement,
+    // so tables always scroll on their .wh-table-wrap (matched via
+    // .wh-scroll-x) — a fade stamped on the non-scrolling <table> itself
+    // would never clear, since scroll events fire on the wrapper.
+    const SCROLLERS = ".expressive-code pre, .wh-scroll-x, .wh-zoom__stage";
+
+    function wrapScrollables() {
+      // Bare svgs in the content flow AND direct svg children of a
+      // .diagram-pair (rehype-mermaid sometimes unwraps the <p>) each get
+      // their OWN scroller — classing the pair container itself gave two
+      // diagrams one shared zoom chip and one shared natural width.
+      const bare = document.querySelectorAll(
+        ".sl-markdown-content > svg[aria-roledescription], .diagram-pair > svg[aria-roledescription]",
+      );
+      for (const svg of bare) {
+        const div = document.createElement("div");
+        div.className = "wh-scroll-x";
+        svg.replaceWith(div);
+        div.append(svg);
+      }
+      // Surface each diagram's natural width (Mermaid stamps it as an inline
+      // max-width) as a custom property. global.css uses it as the min-width
+      // pin on phones only — pan at natural size beats 5px labels there —
+      // while desktop keeps scale-to-fit (an unconditional inline min-width
+      // here once forced wide diagrams into horizontal scrollers at every
+      // viewport).
+      for (const svg of document.querySelectorAll(
+        ".wh-scroll-x > svg[aria-roledescription], .sl-markdown-content :is(p, div) > svg[aria-roledescription]",
+      )) {
+        if (svg.style.maxWidth) {
+          svg.style.setProperty("--wh-natural-w", svg.style.maxWidth);
+          // The WRAPPER needs it too: its desktop breakout width is
+          // min(natural, pane) — fit-content can't measure a width:100% svg.
+          svg.parentElement?.style.setProperty("--wh-natural-w", svg.style.maxWidth);
+        }
+      }
+      // Paired diagrams already live in a <p>/<div> wrapper that global.css
+      // makes scrollable; give those the same class so they share the scrim
+      // and the touch zoom hint.
+      const wrapped = document.querySelectorAll(
+        ".sl-markdown-content :is(p, div) > svg[aria-roledescription]",
+      );
+      for (const svg of wrapped) {
+        const parent = svg.parentElement;
+        if (
+          parent &&
+          !parent.classList.contains("wh-scroll-x") &&
+          !parent.classList.contains("diagram-pair")
+        ) {
+          parent.classList.add("wh-scroll-x");
+        }
+      }
+      // Surface each code frame's language for the corner badge — CSS attr()
+      // can only read from the element it styles, and EC stamps the language
+      // on the <pre> while the badge needs to live on the frame (inside the
+      // title bar for terminal/titled frames).
+      for (const pre of document.querySelectorAll(".expressive-code pre[data-language]")) {
+        const frame = pre.closest(".frame");
+        if (frame && !frame.hasAttribute("data-wh-lang")) {
+          frame.setAttribute("data-wh-lang", pre.dataset.language);
+        }
+      }
+      // Tables: a scroll WRAPPER lets the table itself use true auto layout
+      // (prose wraps first; the wrapper scrolls only when unbreakable columns
+      // genuinely can't fit). Without JS, the table's own display:block
+      // fallback in global.css still scrolls — it just doesn't wrap prose.
+      const tables = document.querySelectorAll(".sl-markdown-content table");
+      for (const t of tables) {
+        if (t.parentElement && t.parentElement.classList.contains("wh-table-wrap")) continue;
+        const div = document.createElement("div");
+        div.className = "wh-scroll-x wh-table-wrap";
+        t.replaceWith(div);
+        div.append(t);
+      }
+      tokenizeTableCode();
+    }
+
+    // Code in table cells must never split MID-token (`--url` reading as two
+    // flags) — but blanket nowrap also stopped multi-word code (JSON bodies,
+    // shell commands) from wrapping at its SPACES, which forced whole tables
+    // into scrollers. Split each plain-text code span into per-token nowrap
+    // <span>s: wrapping happens between tokens only. Tokens with interior
+    // slashes (paths, endpoints) additionally get a <wbr> after each slash —
+    // the conventional URL break points (a <wbr> copies as nothing, so
+    // clipboard text is unchanged). The data attribute flips the CSS from the
+    // no-JS nowrap fallback to normal wrapping, and keeps this idempotent
+    // across view-transition reruns.
+    function tokenizeTableCode() {
+      for (const code of document.querySelectorAll(".wh-table-wrap code")) {
+        if (code.dataset.whTok || code.children.length) continue;
+        code.dataset.whTok = "1";
+        const frag = document.createDocumentFragment();
+        for (const part of code.textContent.split(/(\s+)/)) {
+          if (!part) continue;
+          if (/^\s/.test(part)) {
+            frag.append(part);
+            continue;
+          }
+          // Slash-segments each get their OWN nowrap span with the <wbr>s
+          // between them in normal white-space — a <wbr> inside nowrap is
+          // suppressed, and a bare normal-flow token could still break at
+          // interior hyphens (the exact mid-token shred this prevents).
+          const bits = part.split(/(?<=\/)(?=.)/);
+          const host = document.createElement("span");
+          host.className = bits.length > 1 ? "wh-tok-path" : "wh-tok";
+          bits.forEach((b, i) => {
+            if (bits.length > 1) {
+              const seg = document.createElement("span");
+              seg.className = "wh-tok";
+              seg.textContent = b;
+              host.append(seg);
+            } else {
+              host.append(b);
+            }
+            if (i < bits.length - 1) host.append(document.createElement("wbr"));
+          });
+          frag.append(host);
+        }
+        code.replaceChildren(frag);
+      }
+    }
+
+    // 12px threshold, not ~0: fit-content widths and devicePixelRatio
+    // rounding leave phantom pixels of "overflow" on blocks with nothing
+    // real to scroll to — fading those reads as cut-off content that isn't
+    // there. Anything under ~a character width isn't worth hinting anyway.
+    function updateOne(el) {
+      // A WRAPPED code block can never meaningfully scroll sideways —
+      // pre-wrap + break-word guarantee every line fits. Whatever
+      // scrollWidth reports beyond clientWidth is hanging wrap-point
+      // whitespace or zoom/font-timing rounding, and this artifact class
+      // resisted several threshold bumps because it depends on exactly
+      // where lines wrap at the reader's width. Hard rule: no fades on
+      // pre.wrap, ever. (wrap=false blocks lack the class and keep their
+      // real scroll + fades.)
+      if (el.tagName === "PRE" && el.classList.contains("wrap")) {
+        el.removeAttribute("data-wh-more");
+        el.removeAttribute("data-wh-more-start");
+        return;
+      }
+      const end = el.scrollWidth - el.clientWidth - el.scrollLeft > 12;
+      const start = el.scrollLeft > 12;
+      el.toggleAttribute("data-wh-more", end);
+      el.toggleAttribute("data-wh-more-start", start);
+    }
+    function updateAll() {
+      document.querySelectorAll(SCROLLERS).forEach(updateOne);
+    }
+    // Tables earn their treatments by measurement, in two passes:
+    //
+    // Pass 1 (at prose width): a table that overflows or CROWDS there —
+    // ≥4 columns squeezed below ~8.5rem average wrap every other word —
+    // gets data-wh-wide, which on desktop moves it to the breakout track
+    // (wider, centered). A table whose prose wraps comfortably at 45rem
+    // stays at prose width: stretching its sentences to 60rem line lengths
+    // reads worse, not better.
+    //
+    // Pass 2 (re-measured at whatever width pass 1 granted): still
+    // overflowing or crowded → data-wh-scrolls, which enables the
+    // horizontal scroller and the per-column min-width floors (floors stop
+    // auto layout crushing off-screen columns, but applied to a fitting
+    // table they would CREATE the scroll).
+    function classifyTables() {
+      const CROWD_PX = 136; // below this avg column width, scroll beats wrapping
+      const TIGHT_PX = 200; // below this, a ≥4-col table is worth widening
+      const colsOf = (el) => {
+        const row = el.querySelector("tr");
+        return row ? row.cells.length : 0;
+      };
+      const overflowing = (el, slack) => el.scrollWidth - el.clientWidth > slack;
+      const wraps = [...document.querySelectorAll(".wh-table-wrap")];
+      wraps.forEach((el) => {
+        el.removeAttribute("data-wh-scrolls");
+        el.removeAttribute("data-wh-wide");
+      });
+      // Natural (max-content) width per table, measured in one batched
+      // reflow: a table whose natural width fits the breakout track widens
+      // to EXACTLY that width and stops wrapping entirely (feature matrices)
+      // — while prose-heavy tables (whose natural width is a full unwrapped
+      // sentence) don't widen just to stretch their line lengths.
+      const naturals = new Map();
+      wraps.forEach((el) => {
+        const t = el.querySelector("table");
+        if (t) t.style.width = "max-content";
+      });
+      wraps.forEach((el) => {
+        const t = el.querySelector("table");
+        if (t) naturals.set(el, t.getBoundingClientRect().width);
+      });
+      wraps.forEach((el) => {
+        const t = el.querySelector("table");
+        if (t) t.style.width = "";
+      });
+      const md = document.querySelector(".sl-markdown-content");
+      // Mirror the CSS cap: min(calc(100% - 2.5rem), 68rem).
+      const avail = md ? Math.min(md.clientWidth - 40, 1088) : 0;
+      const wide = wraps.filter((el) => {
+        const cols = colsOf(el);
+        const natural = naturals.get(el) ?? 0;
+        // The 1.3 factor: a table whose natural width is CLOSE to the
+        // breakout track still wins from widening (a touch of wrapping at
+        // full width beats heavy wrapping at prose width) — while genuinely
+        // prose-heavy tables (natural = whole unwrapped sentences, several
+        // times the track) stay at the reading measure.
+        return (
+          overflowing(el, 1) ||
+          (cols >= 4 && el.clientWidth / cols < TIGHT_PX) ||
+          (natural > el.clientWidth + 8 && natural <= avail * 1.3)
+        );
+      });
+      wide.forEach((el) => el.setAttribute("data-wh-wide", ""));
+      // Re-measure at the granted width: still overflowing or crowded →
+      // scroller + column floors.
+      wide
+        .filter((el) => {
+          const cols = colsOf(el);
+          return overflowing(el, 8) || (cols >= 4 && el.clientWidth / cols < CROWD_PX);
+        })
+        .forEach((el) => el.setAttribute("data-wh-scrolls", ""));
+    }
+    // Code blocks earn breakout the same way tables do: widening is only
+    // worth it when it makes wrapping go AWAY. A block whose longest line
+    // fits the wide track grows to exactly that line (no wrap, no scroll);
+    // one whose longest line exceeds even the full pane would wrap anyway —
+    // stretching it just strands a few words on the continuation line, so
+    // it keeps the prose width. wrap=false blocks are the exception: they
+    // scroll instead of wrapping, so the full pane minimizes the scroll.
+    // Code-ONLY tab groups (the YAML/JSON/env switchers) classify as a unit:
+    // one panel can't break out alone — the docked tablist and every sibling
+    // panel share the frame. All panels are measured (inactive ones are
+    // display:none, so they get an inline display:block for the batched
+    // read; layout never reaches paint between write and restore) and the
+    // group earns data-wh-wide when any panel would. Groups with prose in a
+    // panel are left alone: widening would stretch sentence line lengths.
+    function classifyCode() {
+      const md = document.querySelector(".sl-markdown-content");
+      if (!md) return;
+      const blocks = [...document.querySelectorAll(".sl-markdown-content > .expressive-code")];
+      const groups = [...document.querySelectorAll(".sl-markdown-content > starlight-tabs")]
+        .map((el) => ({ el, panels: [...el.querySelectorAll(":scope > [role='tabpanel']")] }))
+        .filter(
+          (g) =>
+            g.panels.length &&
+            g.panels.every(
+              (p) =>
+                p.children.length === 1 &&
+                p.firstElementChild.classList.contains("expressive-code"),
+            ),
+        );
+      if (!blocks.length && !groups.length) return;
+      blocks.forEach((b) => b.removeAttribute("data-wh-wide"));
+      groups.forEach((g) => {
+        g.el.removeAttribute("data-wh-wide");
+        g.el.style.removeProperty("--wh-natural-w");
+        g.pres = g.panels.map((p) => p.querySelector("pre"));
+        g.hidden = g.panels.filter((p) => p.hasAttribute("hidden"));
+      });
+      const pres = blocks.map((b) => b.querySelector("pre"));
+      // Batched natural-width measurement (write-all → read-all → restore).
+      groups.forEach((g) =>
+        g.hidden.forEach((p) => {
+          // Inline display beats the UA [hidden] rule for the measurement.
+          p.style.display = "block";
+        }),
+      );
+      // EC's wrapping lives on the DESCENDANT code spans (`pre.wrap .ec-line
+      // .code { white-space: pre-wrap }`), so an inline white-space on the
+      // pre never unwraps anything — the wrap class itself comes off for the
+      // measurement. Restored before the classification loops (which test
+      // for it) and before anything paints.
+      const allPres = pres.concat(groups.flatMap((g) => g.pres));
+      const wrapped = allPres.filter((p) => p && p.classList.contains("wrap"));
+      wrapped.forEach((p) => p.classList.remove("wrap"));
+      const naturals = pres.map((p) => (p ? p.scrollWidth : 0));
+      groups.forEach((g) => {
+        g.naturals = g.pres.map((p, i) => {
+          if (!p) return 0;
+          // EC's frame border sits outside pre.scrollWidth but inside the
+          // group's fit-content width — fold it into the pin, or the frame
+          // breathes by the border width when switching to a narrower tab.
+          const chrome = g.panels[i].firstElementChild.offsetWidth - p.clientWidth;
+          return p.scrollWidth + chrome;
+        });
+        g.width = g.el.clientWidth;
+      });
+      wrapped.forEach((p) => p.classList.add("wrap"));
+      groups.forEach((g) => g.hidden.forEach((p) => p.style.removeProperty("display")));
+      const avail = md.clientWidth - 8;
+      blocks.forEach((b, i) => {
+        const p = pres[i];
+        if (!p) return;
+        const fitsWide = naturals[i] <= avail;
+        const needsMore = naturals[i] > b.clientWidth + 8;
+        if (needsMore && (fitsWide || !p.classList.contains("wrap"))) {
+          b.setAttribute("data-wh-wide", "");
+        }
+      });
+      groups.forEach((g) => {
+        const earns = g.pres.some((p, i) => {
+          if (!p) return false;
+          const fitsWide = g.naturals[i] <= avail;
+          const needsMore = g.naturals[i] > g.width + 8;
+          return needsMore && (fitsWide || !p.classList.contains("wrap"));
+        });
+        if (!earns) return;
+        g.el.setAttribute("data-wh-wide", "");
+        // Pin the group to its WIDEST panel so the frame keeps one stable
+        // width across tab switches instead of resizing per panel.
+        g.el.style.setProperty(
+          "--wh-natural-w",
+          `${Math.ceil(Math.min(Math.max(...g.naturals), avail))}px`,
+        );
+      });
+    }
+
+    function init() {
+      wrapScrollables();
+      classifyCode();
+      classifyTables();
+      updateAll();
+    }
+
+    init();
+    if (window.__whScrollHintsBound) return;
+    window.__whScrollHintsBound = true;
+    document.addEventListener("astro:page-load", init);
+    window.addEventListener(
+      "resize",
+      () =>
+        requestAnimationFrame(() => {
+          classifyCode();
+          classifyTables();
+          updateAll();
+        }),
+      { passive: true },
+    );
+    // Web fonts change every measured width — re-derive once they land, so
+    // a classification made against fallback-font metrics can't go stale.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() =>
+        requestAnimationFrame(() => {
+          classifyCode();
+          classifyTables();
+          updateAll();
+        }),
+      );
+    }
+    // A tab switch reveals a pre that was display:none (unmeasurable) when
+    // fades were last stamped — refresh once the swap has happened. Click
+    // and keydown both: Starlight's tablist also switches on arrow keys.
+    const onTabSwitch = (e) => {
+      if (e.target instanceof Element && e.target.closest("[role='tab']")) {
+        requestAnimationFrame(updateAll);
+      }
+    };
+    document.addEventListener("click", onTabSwitch);
+    document.addEventListener("keydown", onTabSwitch);
+    // Element scroll events don't bubble, but they do capture.
+    document.addEventListener(
+      "scroll",
+      (e) => {
+        const t = e.target;
+        if (t instanceof Element && t.matches && t.matches(SCROLLERS)) {
+          updateOne(t);
+        }
+      },
+      { capture: true, passive: true },
+    );
+  })();
+</script>
+
+<style is:global>
+  .wh-scroll-x {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: var(--wh-border-strong) transparent;
+    margin-block: 1rem;
+    position: relative;
+  }
+  /* Mermaid draws cluster borders ON the viewBox edge; overflow-y:hidden
+     was slicing the stroke's outer half at the top/bottom. Diagram
+     scrollers only — on a table wrap this padding opened a page-bg gap
+     between the card border and the header band. */
+  .wh-scroll-x:not(.wh-table-wrap) {
+    padding-block: 2px;
+  }
+  /* Edge fades: content hidden past an edge reads as scrollable instead of
+     amputated — on BOTH sides (a right-scrolled view fades its left edge so
+     the way back reads as scrollable too). The combined two-attr rule must
+     come last: each fade is a full mask-image (multiple mask layers union,
+     they can't compose two opposite fades). */
+  [data-wh-more] {
+    mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  }
+  [data-wh-more-start] {
+    mask-image: linear-gradient(90deg, transparent, #000 32px);
+  }
+  [data-wh-more-start][data-wh-more] {
+    mask-image: linear-gradient(
+      90deg,
+      transparent,
+      #000 32px,
+      #000 calc(100% - 32px),
+      transparent
+    );
+  }
+  /* Wrapped tables: the wrapper carries the card frame so the border doesn't
+     scroll away with the content; the table inside reverts to true auto
+     layout at full wrapper width (overriding the no-JS block fallback). */
+  .wh-table-wrap {
+    border: 1px solid var(--wh-border);
+    border-radius: var(--radius-md);
+  }
+  .wh-table-wrap > table,
+  .sl-markdown-content .wh-table-wrap > table {
+    display: table;
+    width: 100%;
+    max-width: none;
+    overflow: visible;
+    border: 0;
+    margin: 0;
+  }
+  /* Horizontal room is free inside a scroller — never let a column crush.
+     Without floors, auto layout squeezed off-screen prose columns to ~100px,
+     whose 10-20 wrapped lines drove the row height and left near-blank
+     viewport-tall rows on phones. The last column (the docs' description
+     column by convention) gets a real reading measure. Scoped to tables the
+     script has measured as genuinely overflowing — on fitting tables the
+     floors themselves would create the scroll. */
+  .wh-table-wrap[data-wh-scrolls] :is(th, td) {
+    min-width: 6rem;
+  }
+  .wh-table-wrap[data-wh-scrolls] :is(th, td):last-child {
+    min-width: min(26rem, 75vw);
+  }
+  /* Code chips in cells never break mid-token (`--url` was splitting at its
+     hyphens into what read as separate flags). The nowrap here is the no-JS
+     fallback (the scroller absorbs the width); once the script tokenizes a
+     span ([data-wh-tok]) wrapping happens BETWEEN tokens — at spaces, and
+     after slashes in paths — while each token stays atomic in its own
+     nowrap span. */
+  .wh-table-wrap code {
+    white-space: nowrap;
+  }
+  .wh-table-wrap code[data-wh-tok] {
+    white-space: normal;
+  }
+  .wh-table-wrap .wh-tok {
+    white-space: nowrap;
+  }
+  .wh-table-wrap .wh-tok-path {
+    white-space: normal;
+  }
+  /* Every diagram carries a quiet zoom affordance — cursor: zoom-in only
+     speaks to a pointer that happens to hover, so the corner chip is always
+     present (dimmed) and brightens on hover. Two pseudo layers: ::after is
+     the chip surface, ::before the icon (a stroke "expand" glyph applied as
+     a mask so it takes theme colors — a data-URI background can't use
+     var()). The semi-translucent surface keeps whatever diagram edge it
+     overlaps readable underneath. */
+  .wh-scroll-x:not(.wh-table-wrap)::after {
+    content: "";
+    position: absolute;
+    top: 0.45rem;
+    right: 0.45rem;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: var(--radius-xs);
+    background: color-mix(in oklab, var(--wh-surface-overlay) 80%, transparent);
+    backdrop-filter: blur(3px);
+    border: 1px solid var(--wh-border-strong);
+    pointer-events: none;
+    opacity: 0.65;
+    transition: opacity 0.15s ease, border-color 0.15s ease;
+  }
+  .wh-scroll-x:not(.wh-table-wrap)::before {
+    content: "";
+    position: absolute;
+    top: calc(0.45rem + 7px);
+    right: calc(0.45rem + 7px);
+    width: 14px;
+    height: 14px;
+    z-index: 1;
+    background-color: var(--wh-ink-muted);
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='15 3 21 3 21 9'/%3E%3Cpolyline points='9 21 3 21 3 15'/%3E%3Cline x1='21' y1='3' x2='14' y2='10'/%3E%3Cline x1='3' y1='21' x2='10' y2='14'/%3E%3C/svg%3E");
+    mask-size: 100% 100%;
+    pointer-events: none;
+    opacity: 0.85;
+    transition: background-color 0.15s ease;
+  }
+  .wh-scroll-x:not(.wh-table-wrap):hover::after {
+    opacity: 1;
+    border-color: var(--wh-accent);
+  }
+  .wh-scroll-x:not(.wh-table-wrap):hover::before {
+    background-color: var(--wh-accent-text);
+    opacity: 1;
+  }
+</style>
