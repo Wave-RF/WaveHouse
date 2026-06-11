@@ -2000,3 +2000,55 @@ body:has(.wh-404) .content-panel:has(> .sl-container > h1) {
     transition: none !important;
   }
 }
+
+/* Query-playground results table — emitted at runtime by buildResultsTable()
+   in src/lib/playground.ts and rendered both on the /playground page
+   (QueryPlayground.astro) and in the landing query demo (HomeQueryDemo.astro),
+   so it lives here (site-wide) rather than in either component's is:global
+   block, which would only load on its own page. */
+.wh-pg__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--sl-font-mono);
+  font-size: 0.74rem;
+}
+.wh-pg__table th,
+.wh-pg__table td {
+  text-align: left;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--wh-code-border);
+  white-space: nowrap;
+  max-width: 20rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wh-pg__table thead th {
+  position: sticky;
+  top: 0;
+  background: color-mix(in oklab, var(--wh-code-bg) 85%, var(--wh-surface));
+  color: var(--wh-accent-text);
+  font-weight: 700;
+  z-index: 1;
+}
+.wh-pg__table tbody tr:hover td {
+  background: color-mix(in oklab, var(--wh-accent) 7%, transparent);
+}
+.wh-pg__td--num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.wh-pg__empty,
+.wh-pg__error {
+  margin: 0;
+  padding: 1.5rem 1rem;
+  text-align: center;
+  color: var(--wh-ink-subtle);
+  font-size: 0.82rem;
+}
+.wh-pg__error {
+  color: var(--wh-rose);
+  font-family: var(--sl-font-mono);
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+  text-align: left;
+}

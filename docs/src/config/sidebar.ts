@@ -9,6 +9,7 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
   { label: "Home", link: "/" },
   { label: "Getting Started", slug: "getting-started" },
   { label: "Why WaveHouse?", slug: "why-wavehouse" },
+  { label: "Query playground", slug: "playground", badge: { text: "live", variant: "tip" } },
   {
     label: "Guides",
     items: [

@@ -1,0 +1,505 @@
+---
+// The landing "Query it like a database. Subscribe to it like a socket."
+// section, made interactive. The three tabs keep their original snippets, but
+// Query and Live now run for real against the public read-only demo at
+// stats.wavehouse.dev via @wavehouse/sdk (shared runtime in src/lib/playground.ts):
+//   - Ingest stays illustrative — the public demo is read-only, so the write
+//     path is shown, not run (boot the stack locally to ingest).
+//   - Query: tweak the inline controls, watch the generated SDK chain update,
+//     hit Run to fetch live gh_events rows — or open the full /playground.
+//   - Live updates: hit Run to open an SSE tail and watch events land.
+// Server-rendered <Code> snippets keep the section highlighted + complete
+// before hydration; the script owns the controls, the live code box, and the
+// run/stream wiring with view-transition-safe teardown. See issue #286.
+import { Code } from "@astrojs/starlight/components";
+
+const ingestCode = `import { createClient } from "@wavehouse/sdk";
+
+const wh = createClient({ baseURL: "https://wavehouse.example.com" });
+
+// Returns immediately — buffered in the WAL, schema-validated
+// at the edge, batch-flushed to ClickHouse behind the scenes.
+await wh.from("clicks").insert({ page: "/home", button: "signup" });`;
+
+const liveCode = `// Historical backfill + real-time stream, deduplicated at the seam.
+const lq = wh.from("gh_events")
+  .selectAll()
+  .where("event_type", "in", ["star", "fork", "pull_request"])
+  .orderBy("event_ts", "desc")
+  .limit(20)
+  .liveQuery({
+    initial: (result) => render(result.data ?? []),
+    next:    (event)  => prepend(event.data),
+  });
+
+// later: lq.close();`;
+---
+
+<div class="wh-hq not-content" data-hq-root>
+  <div class="wh-hq__tabs" role="tablist" aria-label="Try the SDK">
+    <button type="button" class="wh-hq__tab" data-hq-tab="ingest" role="tab" aria-selected="false">
+      Ingest
+    </button>
+    <button type="button" class="wh-hq__tab" data-hq-tab="query" role="tab" aria-selected="true">
+      Query <span class="wh-hq__live-pill">live</span>
+    </button>
+    <button type="button" class="wh-hq__tab" data-hq-tab="live" role="tab" aria-selected="false">
+      Live updates <span class="wh-hq__live-pill">live</span>
+    </button>
+  </div>
+
+  {/* Ingest — illustrative (demo is read-only) */}
+  <div class="wh-hq__panel" data-hq-panel="ingest" hidden>
+    <Code code={ingestCode} lang="ts" />
+    <p class="wh-hq__note">
+      The public demo is <strong>read-only</strong>, so the write path is shown, not run. Boot the
+      stack locally to ingest your own events — it's <a href="/getting-started">five minutes</a>.
+    </p>
+  </div>
+
+  {/* Query — runnable + tweakable */}
+  <div class="wh-hq__panel" data-hq-panel="query">
+    <div class="wh-hq__controls">
+      <label class="wh-hq__ctl">
+        <span>event_type</span>
+        <select data-hq-type aria-label="event_type filter">
+          <option value="">any</option>
+          <option value="pull_request">pull_request</option>
+          <option value="issues">issues</option>
+          <option value="push">push</option>
+          <option value="star">star</option>
+          <option value="fork">fork</option>
+          <option value="release">release</option>
+        </select>
+      </label>
+      <label class="wh-hq__ctl">
+        <span>limit</span>
+        <input type="number" data-hq-limit min="1" max="50" step="1" value="10" />
+      </label>
+      <button type="button" class="wh-hq__run" data-hq-run>Run query</button>
+      <a class="wh-hq__open" data-hq-open href="/playground">Open the full playground →</a>
+    </div>
+    <div class="wh-hq__split">
+      <pre class="wh-hq__code"><code data-hq-code></code></pre>
+      <div class="wh-hq__results" data-hq-results>
+        <p class="wh-hq__empty">Press <strong>Run query</strong> to fetch live rows.</p>
+      </div>
+    </div>
+    <p class="wh-hq__status" data-hq-status aria-live="polite"></p>
+  </div>
+
+  {/* Live updates — runnable SSE tail */}
+  <div class="wh-hq__panel" data-hq-panel="live" hidden>
+    <Code code={liveCode} lang="ts" />
+    <div class="wh-hq__controls">
+      <button type="button" class="wh-hq__run" data-hq-live>Watch live</button>
+      <span class="wh-hq__status" data-hq-live-status aria-live="polite"
+        >Opens an SSE stream in your browser.</span
+      >
+    </div>
+    <ol class="wh-hq__feed" data-hq-feed aria-live="off"></ol>
+  </div>
+
+  <noscript>
+    <p class="wh-hq__note">
+      Running these live needs JavaScript. Every snippet works from the command line too — see the
+      <a href="/sdk">SDK docs</a>.
+    </p>
+  </noscript>
+</div>
+
+<script>
+  import {
+    RUN_TIMEOUT_MS,
+    buildResultsTable,
+    createStatsClient,
+    encodeSpec,
+    runSpec,
+    specToCode,
+    streamSpec,
+  } from "../lib/playground";
+  import type { QuerySpec } from "../lib/playground";
+
+  // Curated human-meaningful event types for the live tail (the raw table also
+  // carries CI noise). Mirrors the spirit of LiveDemo.astro's VERBS set.
+  const LIVE_TYPES = ["push", "pull_request", "issues", "issue_comment", "star", "fork", "release"];
+
+  let activeRoot: Element | null = null;
+  let teardown: (() => void) | null = null;
+
+  function init() {
+    const root = document.querySelector("[data-hq-root]");
+    if (root === activeRoot) return; // DOMContentLoaded + astro:page-load both fire
+    teardown?.();
+    teardown = null;
+    activeRoot = root;
+    if (!root) return;
+
+    const wh = createStatsClient();
+    let stopStream: (() => void) | null = null;
+    teardown = () => {
+      stopStream?.();
+      activeRoot = null;
+    };
+
+    const $ = <T extends Element>(sel: string) => root.querySelector(sel) as T | null;
+    const $$ = <T extends Element>(sel: string) => Array.from(root.querySelectorAll(sel)) as T[];
+
+    // --- Tabs
+    for (const tab of $$<HTMLButtonElement>("[data-hq-tab]")) {
+      tab.addEventListener("click", () => {
+        for (const t of $$<HTMLButtonElement>("[data-hq-tab]"))
+          t.setAttribute("aria-selected", String(t === tab));
+        for (const p of $$<HTMLElement>("[data-hq-panel]"))
+          p.hidden = p.dataset.hqPanel !== tab.dataset.hqTab;
+      });
+    }
+
+    // --- Query tab
+    const typeSel = $<HTMLSelectElement>("[data-hq-type]");
+    const limitInput = $<HTMLInputElement>("[data-hq-limit]");
+    const codeEl = $<HTMLElement>("[data-hq-code]");
+    const resultsBox = $<HTMLElement>("[data-hq-results]");
+    const runBtn = $<HTMLButtonElement>("[data-hq-run]");
+    const statusEl = $<HTMLElement>("[data-hq-status]");
+    const openLink = $<HTMLAnchorElement>("[data-hq-open]");
+
+    function querySpec(): QuerySpec {
+      const type = typeSel?.value ?? "";
+      const raw = Number.parseInt(limitInput?.value ?? "10", 10);
+      const limit = Number.isFinite(raw) ? Math.min(50, Math.max(1, raw)) : 10;
+      return {
+        mode: "rows",
+        columns: ["event_type", "actor_login", "number", "title", "event_ts"],
+        filters: type ? [{ column: "event_type", op: "=", value: type }] : [],
+        groupBy: [],
+        aggregations: [],
+        orderBy: [{ column: "event_ts", dir: "desc" }],
+        limit,
+        since: "720h",
+      };
+    }
+
+    function syncQuery() {
+      const spec = querySpec();
+      if (codeEl) codeEl.textContent = specToCode(spec);
+      if (openLink) openLink.href = `/playground?q=${encodeSpec(spec)}`;
+    }
+
+    async function runQuery() {
+      if (!runBtn || !resultsBox || !statusEl) return;
+      const spec = querySpec();
+      runBtn.disabled = true;
+      statusEl.textContent = "Running…";
+      statusEl.dataset.tone = "busy";
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), RUN_TIMEOUT_MS);
+      const t0 = performance.now();
+      const { ok, data, error } = await runSpec(wh, spec, ctrl.signal);
+      clearTimeout(timer);
+      const ms = Math.round(performance.now() - t0);
+      runBtn.disabled = false;
+      if (!ok || !data) {
+        const timedOut = error?.code === "ABORTED";
+        const p = document.createElement("p");
+        p.className = "wh-hq__empty";
+        p.textContent = timedOut
+          ? "Timed out — try the full playground with a tighter filter."
+          : (error?.message ?? "Query failed.");
+        resultsBox.replaceChildren(p);
+        statusEl.textContent = `${timedOut ? "Timed out" : "Error"} · ${ms} ms`;
+        statusEl.dataset.tone = "err";
+        return;
+      }
+      resultsBox.replaceChildren(buildResultsTable(data));
+      statusEl.textContent = `${data.length} row${data.length === 1 ? "" : "s"} · ${ms} ms`;
+      statusEl.dataset.tone = "ok";
+    }
+
+    typeSel?.addEventListener("change", syncQuery);
+    limitInput?.addEventListener("input", syncQuery);
+    runBtn?.addEventListener("click", runQuery);
+    syncQuery();
+
+    // --- Live tab
+    const liveBtn = $<HTMLButtonElement>("[data-hq-live]");
+    const liveStatus = $<HTMLElement>("[data-hq-live-status]");
+    const feed = $<HTMLOListElement>("[data-hq-feed]");
+
+    function eventLine(row: Record<string, unknown>): string {
+      const actor = String(row.actor_login ?? "someone");
+      const type = String(row.event_type ?? "");
+      const action = row.action ? ` ${row.action}` : "";
+      const num = Number(row.number) > 0 ? ` #${row.number}` : "";
+      const detail = String(row.title || row.ref || "").trim();
+      return `${actor} · ${type}${action}${num}${detail ? ` — ${detail}` : ""}`;
+    }
+
+    function stopLive() {
+      if (!stopStream) return;
+      stopStream();
+      stopStream = null;
+      if (liveBtn) liveBtn.textContent = "Watch live";
+      if (liveBtn) liveBtn.dataset.on = "";
+    }
+
+    liveBtn?.addEventListener("click", () => {
+      if (stopStream) {
+        stopLive();
+        if (liveStatus) liveStatus.textContent = "Stopped.";
+        return;
+      }
+      if (!feed) return;
+      feed.replaceChildren();
+      if (liveStatus) liveStatus.textContent = "Listening… star or fork the repo to see one land.";
+      liveBtn.textContent = "Stop";
+      liveBtn.dataset.on = "1";
+      let n = 0;
+      const spec: QuerySpec = {
+        mode: "rows",
+        columns: ["event_type", "action", "actor_login", "number", "title", "ref", "event_ts"],
+        filters: [{ column: "event_type", op: "in", value: LIVE_TYPES.join(", ") }],
+        groupBy: [],
+        aggregations: [],
+        orderBy: [],
+        limit: 50,
+        since: "",
+      };
+      stopStream = streamSpec(wh, spec, {
+        next: (ev) => {
+          const row = (ev?.data ?? {}) as Record<string, unknown>;
+          if (!row.event_type) return;
+          const li = document.createElement("li");
+          li.textContent = eventLine(row);
+          feed.prepend(li);
+          while (feed.children.length > 8) feed.lastElementChild?.remove();
+          if (liveStatus) liveStatus.textContent = `Live · ${++n} event${n === 1 ? "" : "s"}`;
+        },
+        status: (s: string) => {
+          if (s === "closed" && liveStatus) liveStatus.textContent = "Stream offline.";
+        },
+        error: () => {
+          if (liveStatus) liveStatus.textContent = "Stream offline.";
+        },
+      });
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+  document.addEventListener("astro:page-load", init);
+</script>
+
+<style is:global>
+  /* is:global, not scoped: the results table and live feed rows are created at
+     runtime by the script above. Everything here is namespaced under .wh-hq__*. */
+  .wh-hq {
+    margin: 1.5rem 0 0.5rem;
+  }
+  .wh-hq__tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2rem;
+    border-bottom: 1px solid var(--wh-code-border);
+    margin-bottom: 1rem;
+  }
+  .wh-hq__tab {
+    appearance: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--wh-ink-subtle);
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.9rem;
+    padding: 0.5rem 0.85rem;
+    margin-bottom: -1px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .wh-hq__tab[aria-selected="true"] {
+    color: var(--wh-ink);
+    border-bottom-color: var(--wh-accent);
+  }
+  .wh-hq__live-pill {
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--wh-emerald);
+    border: 1px solid color-mix(in oklab, var(--wh-emerald) 45%, transparent);
+    border-radius: var(--radius-pill);
+    padding: 0.05rem 0.35rem;
+    line-height: 1.4;
+  }
+
+  .wh-hq__panel[hidden] {
+    display: none;
+  }
+
+  .wh-hq__controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.6rem 0.75rem;
+    margin: 0.25rem 0 0.85rem;
+  }
+  .wh-hq__ctl {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .wh-hq__ctl > span {
+    font-family: var(--sl-font-mono);
+    font-size: 0.7rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-hq__ctl select,
+  .wh-hq__ctl input {
+    appearance: none;
+    padding: 0.35rem 0.5rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.8rem;
+    color: var(--wh-ink);
+    background: var(--wh-surface);
+    border: 1px solid var(--wh-border-strong);
+    border-radius: var(--radius-sm);
+  }
+  .wh-hq__ctl input {
+    width: 5rem;
+  }
+  .wh-hq__run {
+    appearance: none;
+    border: 1px solid var(--wh-accent-hi);
+    background: var(--wh-accent);
+    color: var(--wh-accent-ink);
+    font: inherit;
+    font-weight: 700;
+    font-size: 0.85rem;
+    padding: 0.45rem 1.1rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .wh-hq__run:hover {
+    background: var(--wh-accent-hi);
+  }
+  .wh-hq__run:disabled {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .wh-hq__run[data-on="1"] {
+    background: var(--wh-rose);
+    border-color: var(--wh-rose);
+  }
+  .wh-hq__open {
+    margin-left: auto;
+    align-self: center;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--wh-accent-text);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .wh-hq__open:hover {
+    text-decoration: underline;
+  }
+
+  .wh-hq__split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.85rem;
+  }
+  @media (min-width: 48rem) {
+    .wh-hq__split {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      align-items: stretch;
+    }
+  }
+  .wh-hq__code {
+    margin: 0;
+    padding: 0.85rem 1rem;
+    background: var(--wh-code-bg);
+    border: 1px solid var(--wh-code-border);
+    border-radius: var(--radius-sm);
+    overflow: auto;
+    min-height: 9rem;
+  }
+  .wh-hq__code code {
+    font-family: var(--sl-font-mono);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--wh-ink);
+    background: transparent;
+    border: 0;
+    padding: 0;
+    white-space: pre;
+  }
+  /* The results <table>/.wh-pg__empty injected by buildResultsTable() are
+     styled site-wide in global.css; this just frames the scroll container. */
+  .wh-hq__results {
+    border: 1px solid var(--wh-code-border);
+    border-radius: var(--radius-sm);
+    background: var(--wh-code-bg);
+    overflow: auto;
+    max-height: 22rem;
+    min-height: 9rem;
+  }
+
+  .wh-hq__empty {
+    margin: 0;
+    padding: 1.5rem 1rem;
+    text-align: center;
+    color: var(--wh-ink-subtle);
+    font-size: 0.82rem;
+  }
+  .wh-hq__status {
+    margin: 0.6rem 0 0;
+    font-family: var(--sl-font-mono);
+    font-size: 0.75rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-hq__status[data-tone="ok"] {
+    color: var(--wh-emerald);
+  }
+  .wh-hq__status[data-tone="err"] {
+    color: var(--wh-rose);
+  }
+  .wh-hq__note {
+    margin: 0.85rem 0 0;
+    font-size: 0.85rem;
+    color: var(--wh-ink-muted);
+  }
+
+  .wh-hq__feed {
+    list-style: none;
+    margin: 0.85rem 0 0;
+    padding: 0;
+    font-family: var(--sl-font-mono);
+    font-size: 0.78rem;
+  }
+  .wh-hq__feed li {
+    padding: 0.4rem 0.65rem;
+    border-bottom: 1px solid var(--wh-code-border);
+    color: var(--wh-ink-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: wh-hq-in 0.3s ease-out both;
+  }
+  @keyframes wh-hq-in {
+    from {
+      opacity: 0;
+      transform: translateY(-3px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wh-hq__feed li {
+      animation: none;
+    }
+  }
+</style>
