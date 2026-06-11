@@ -27,38 +27,30 @@ updates:
     commit-message:
       prefix: "ci"
 
-  # Docs site (npm)
+  # TypeScript packages (npm via pnpm workspace).
+  #
+  # ONE entry at the workspace ROOT — deliberately NOT one per member
+  # directory. The repo has a single root pnpm-lock.yaml (the #190
+  # consolidation) covering docs, clients/ts, and tests/e2e/sdk. Dependabot
+  # only updates a lockfile co-located with the manifest it is pointed at,
+  # so the old per-member configs (directory: /docs, /clients/ts,
+  # /tests/e2e/sdk) edited the member package.json but left the root
+  # lockfile untouched. Every such PR then failed CI's `pnpm install
+  # --frozen-lockfile` with ERR_PNPM_OUTDATED_LOCKFILE (e.g. #211, #337),
+  # and no rebase could fix it because a rebase never regenerates the
+  # lockfile. Pointing at / lets Dependabot read pnpm-workspace.yaml, walk
+  # every workspace member, and update the single root lockfile. As a bonus
+  # it also brings the root package.json's own devDeps (biome, markdownlint,
+  # nyc) under Dependabot — the per-member configs never covered them.
+  #
+  # One combined npm PR per Monday (grouped, like go-deps / actions-deps).
   - package-ecosystem: npm
-    directory: /docs
+    directory: /
     schedule:
       interval: weekly
       day: monday
     groups:
-      docs-deps:
+      npm-deps:
         patterns: ["*"]
     commit-message:
-      prefix: "docs"
-
-  # TypeScript SDK
-  - package-ecosystem: npm
-    directory: /clients/ts
-    schedule:
-      interval: weekly
-      day: monday
-    groups:
-      sdk-deps:
-        patterns: ["*"]
-    commit-message:
-      prefix: "deps(sdk)"
-
-  # E2E test harness (runs against the SDK)
-  - package-ecosystem: npm
-    directory: /tests/e2e/sdk
-    schedule:
-      interval: weekly
-      day: monday
-    groups:
-      e2e-deps:
-        patterns: ["*"]
-    commit-message:
-      prefix: "deps(tests)"
+      prefix: "deps"
