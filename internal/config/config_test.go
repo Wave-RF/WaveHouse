@@ -68,6 +68,66 @@ auth:
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 }
 
+func TestLoad_QueryLimits_Defaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, 10000, cfg.QueryLimits.DefaultMaxRows)
+	assert.Equal(t, int64(0), cfg.QueryLimits.DefaultMaxRowsToRead, "rows-to-read default is off")
+	assert.Equal(t, int64(4<<30), cfg.QueryLimits.DefaultMaxMemoryUsage.Bytes(), "4GiB memory backstop by default")
+}
+
+func TestLoad_QueryLimits_FromYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// default_max_memory_usage uses the human-readable form; default_max_rows*
+	// are plain counts.
+	yamlContent := `
+query_limits:
+  default_max_rows: 25000
+  default_max_rows_to_read: 5000000
+  default_max_memory_usage: 2GiB
+`
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, 25000, cfg.QueryLimits.DefaultMaxRows)
+	assert.Equal(t, int64(5_000_000), cfg.QueryLimits.DefaultMaxRowsToRead)
+	assert.Equal(t, int64(2<<30), cfg.QueryLimits.DefaultMaxMemoryUsage.Bytes())
+}
+
+func TestValidate_NegativeQueryLimits(t *testing.T) {
+	t.Parallel()
+	base := func() Config {
+		return Config{
+			Server:     Server{Port: 8080},
+			ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+			Schema:     Schema{RefreshInterval: 60},
+		}
+	}
+	tests := []struct {
+		name string
+		mut  func(*Config)
+		want string
+	}{
+		{"negative default_max_rows", func(c *Config) { c.QueryLimits.DefaultMaxRows = -1 }, "default_max_rows"},
+		{"negative default_max_rows_to_read", func(c *Config) { c.QueryLimits.DefaultMaxRowsToRead = -1 }, "default_max_rows_to_read"},
+		{"negative default_max_memory_usage", func(c *Config) { c.QueryLimits.DefaultMaxMemoryUsage = -1 }, "default_max_memory_usage"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base()
+			tt.mut(&cfg)
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestLoad_EnvOverridesYAML(t *testing.T) {
 	dir := t.TempDir()
 	yamlContent := `

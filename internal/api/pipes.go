@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
@@ -24,11 +25,12 @@ type PipesHandler struct {
 	Cache           cache.Cache
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
+	limits          QueryLimits
 	logger          *slog.Logger
 }
 
-func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, logger: logger}
+func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, limits QueryLimits, logger *slog.Logger) *PipesHandler {
+	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, limits: limits, logger: logger}
 }
 
 // List returns all named queries (admin endpoint).
@@ -114,6 +116,13 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pipes carry no per-role resource caps, so a non-admin pipe read runs under
+	// the server-wide query_limits defaults (rows scanned + memory) — the DoS
+	// backstop the structured path gets from policy (#316). Admin bypasses.
+	// Execution time is bounded by the context deadline (= query_timeout) below.
+	isAdmin := policy.IsAdmin(p, role)
+	rowsToRead, memBytes := h.limits.resolveReadBudget(0, 0, isAdmin)
+
 	// Gather parameters from query string and/or JSON body.
 	supplied := make(map[string]any)
 	for key, vals := range r.URL.Query() {
@@ -155,6 +164,11 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 		defer cancel()
+
+		// Enforce the rows-scanned / memory backstop server-side (#316).
+		if settings := chReadSettings(chQueryLimits{MaxRowsToRead: rowsToRead, MaxMemoryBytes: memBytes}); settings != nil {
+			queryCtx = clickhouse.Context(queryCtx, clickhouse.WithSettings(settings))
+		}
 
 		start := time.Now()
 

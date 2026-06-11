@@ -45,6 +45,15 @@ clickhouse:
   password: ""
   query_timeout: 30s
 
+# Server-wide default resource caps for non-admin reads (structured queries +
+# named pipes), enforced server-side by ClickHouse. A per-table-per-role policy
+# cap overrides these; the admin role bypasses them. The execution-time default
+# is clickhouse.query_timeout above.
+query_limits:
+  default_max_rows: 10000          # fallback result LIMIT (0 = built-in default)
+  default_max_rows_to_read: 0      # rows scanned cap; 0 = off (opt-in)
+  default_max_memory_usage: 4GiB   # peak memory backstop; 0 = off
+
 mq:
   gap_window_minutes: 15
   max_bytes_gb: 50

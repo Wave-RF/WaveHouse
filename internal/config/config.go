@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/units"
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
@@ -16,19 +17,39 @@ type Config struct {
 	// Subdirectory names are conventions, not config — one knob, one mount.
 	// In a container this MUST resolve to a host-backed volume; the relative
 	// `./data` default is fine for local binary use only.
-	DataDir    string     `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
-	Server     Server     `yaml:"server"`
-	ClickHouse ClickHouse `yaml:"clickhouse"`
-	MQ         MQ         `yaml:"mq"`
-	Dedupe     Dedupe     `yaml:"dedupe"`
-	Cache      Cache      `yaml:"cache"`
-	Auth       Auth       `yaml:"auth"`
-	Schema     Schema     `yaml:"schema"`
-	DLQ        DLQ        `yaml:"dlq"`
-	Policy     Policy     `yaml:"policy"`
-	Pipes      Pipes      `yaml:"pipes"`
-	OTel       OTel       `yaml:"otel"`
-	Prometheus Prometheus `yaml:"prometheus"`
+	DataDir     string      `yaml:"data_dir" env:"WH_DATA_DIR" env-default:"./data"`
+	Server      Server      `yaml:"server"`
+	ClickHouse  ClickHouse  `yaml:"clickhouse"`
+	MQ          MQ          `yaml:"mq"`
+	Dedupe      Dedupe      `yaml:"dedupe"`
+	Cache       Cache       `yaml:"cache"`
+	Auth        Auth        `yaml:"auth"`
+	Schema      Schema      `yaml:"schema"`
+	DLQ         DLQ         `yaml:"dlq"`
+	Policy      Policy      `yaml:"policy"`
+	Pipes       Pipes       `yaml:"pipes"`
+	OTel        OTel        `yaml:"otel"`
+	Prometheus  Prometheus  `yaml:"prometheus"`
+	QueryLimits QueryLimits `yaml:"query_limits"`
+}
+
+// QueryLimits configures the server-wide default resource caps applied to
+// non-admin reads (structured queries AND named pipes) when a role's policy
+// sets no tighter cap of its own. Per-table-per-role policy fields override
+// these; admin bypasses them. The execution-time default is not here — it is
+// clickhouse.query_timeout, which already bounds every read.
+type QueryLimits struct {
+	// DefaultMaxRows is the result LIMIT applied to a structured query when the
+	// caller and policy specify none — the visible, tunable form of what used to
+	// be the hard-coded query.DefaultMaxRows. 0 falls back to that constant.
+	DefaultMaxRows int `yaml:"default_max_rows" env:"WH_QUERY_DEFAULT_MAX_ROWS" env-default:"10000"`
+	// DefaultMaxRowsToRead caps rows scanned from storage server-side. 0 = off
+	// (left unset by default: a wrong value breaks legitimate large scans).
+	DefaultMaxRowsToRead int64 `yaml:"default_max_rows_to_read" env:"WH_QUERY_DEFAULT_MAX_ROWS_TO_READ" env-default:"0"`
+	// DefaultMaxMemoryUsage caps peak per-query memory server-side. The 4GiB
+	// default is a safe backstop (ClickHouse server defaults are often ~10GiB);
+	// a public read needing more is almost certainly abusive. 0 = off.
+	DefaultMaxMemoryUsage units.ByteSize `yaml:"default_max_memory_usage" env:"WH_QUERY_DEFAULT_MAX_MEMORY_USAGE" env-default:"4GiB"`
 }
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
@@ -182,6 +203,20 @@ func (c *Config) Validate() error {
 
 	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
 		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
+	}
+
+	// default_max_rows is the fallback result LIMIT. 0 (or a directly-built
+	// config that omits it) means "use the built-in query.DefaultMaxRows" — the
+	// builder substitutes the constant for any non-positive value — so only a
+	// negative value is an error.
+	if c.QueryLimits.DefaultMaxRows < 0 {
+		return fmt.Errorf("query_limits.default_max_rows must be non-negative, got %d", c.QueryLimits.DefaultMaxRows)
+	}
+	if c.QueryLimits.DefaultMaxRowsToRead < 0 {
+		return fmt.Errorf("query_limits.default_max_rows_to_read must be non-negative, got %d", c.QueryLimits.DefaultMaxRowsToRead)
+	}
+	if c.QueryLimits.DefaultMaxMemoryUsage < 0 {
+		return fmt.Errorf("query_limits.default_max_memory_usage must be non-negative, got %s", c.QueryLimits.DefaultMaxMemoryUsage)
 	}
 
 	if c.MQ.GapWindowMinutes < 0 {

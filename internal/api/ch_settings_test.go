@@ -3,79 +3,68 @@ package api
 import (
 	"testing"
 	"time"
-
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// TestChReadSettings locks the policy-cap → ClickHouse-setting mapping that
-// enforces resource budgets server-side (#316). It is the regression guard for
-// the mapping itself; the handler-level enforcement (settings actually reach
-// ClickHouse and are honored) is proven by the integration + e2e suites.
+// TestChReadSettings locks the resource-budget → ClickHouse-setting mapping that
+// enforces caps server-side (#316). It is the regression guard for the mapping
+// itself; the handler-level enforcement (settings actually reach ClickHouse and
+// are honored) is proven by the integration + e2e suites.
 func TestChReadSettings(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		perms   *policy.ResolvedPermissions
-		timeout time.Duration
+		name   string
+		limits chQueryLimits
 		// want is the exact settings map expected; nil means chReadSettings
 		// must return nil (no caps → no context wrapping).
 		want map[string]any
 	}{
 		{
-			name:  "nil perms",
-			perms: nil,
-			want:  nil,
+			name:   "no caps set",
+			limits: chQueryLimits{},
+			want:   nil,
 		},
 		{
-			name:  "no caps set",
-			perms: &policy.ResolvedPermissions{Allowed: true},
-			want:  nil,
-		},
-		{
-			name:    "sub-second execution time is a fractional max_execution_time",
-			perms:   &policy.ResolvedPermissions{MaxExecutionTimeMs: 500},
-			timeout: 500 * time.Millisecond,
+			name:   "sub-second execution time is a fractional max_execution_time",
+			limits: chQueryLimits{ExecutionTime: 500 * time.Millisecond},
 			// The driver only auto-derives max_execution_time for deadlines > 1s,
 			// so a 500ms cap MUST be emitted explicitly or it reaches CH unbounded.
 			want: map[string]any{"max_execution_time": 0.5},
 		},
 		{
-			name:    "multi-second execution time",
-			perms:   &policy.ResolvedPermissions{MaxExecutionTimeMs: 3000},
-			timeout: 3 * time.Second,
-			want:    map[string]any{"max_execution_time": 3.0},
+			name:   "multi-second execution time",
+			limits: chQueryLimits{ExecutionTime: 3 * time.Second},
+			want:   map[string]any{"max_execution_time": 3.0},
 		},
 		{
-			name:  "max_rows caps result rows with throw mode",
-			perms: &policy.ResolvedPermissions{MaxRows: 1000},
+			name:   "max_result_rows caps result rows with throw mode",
+			limits: chQueryLimits{MaxResultRows: 1000},
 			want: map[string]any{
 				"max_result_rows":      1000,
 				"result_overflow_mode": "throw",
 			},
 		},
 		{
-			name:  "max_rows_to_read caps rows scanned with throw mode",
-			perms: &policy.ResolvedPermissions{MaxRowsToRead: 1_000_000},
+			name:   "max_rows_to_read caps rows scanned with throw mode",
+			limits: chQueryLimits{MaxRowsToRead: 1_000_000},
 			want: map[string]any{
 				"max_rows_to_read":   int64(1_000_000),
 				"read_overflow_mode": "throw",
 			},
 		},
 		{
-			name:  "max_memory_usage_bytes caps peak query memory",
-			perms: &policy.ResolvedPermissions{MaxMemoryUsageBytes: 4 << 30}, // 4 GiB > int32
-			want:  map[string]any{"max_memory_usage": int64(4 << 30)},
+			name:   "max_memory_usage caps peak query memory",
+			limits: chQueryLimits{MaxMemoryBytes: 4 << 30}, // 4 GiB > int32
+			want:   map[string]any{"max_memory_usage": int64(4 << 30)},
 		},
 		{
 			name: "all caps together",
-			perms: &policy.ResolvedPermissions{
-				MaxExecutionTimeMs:  2000,
-				MaxRows:             500,
-				MaxRowsToRead:       2_000_000,
-				MaxMemoryUsageBytes: 8 << 30,
+			limits: chQueryLimits{
+				ExecutionTime:  2 * time.Second,
+				MaxResultRows:  500,
+				MaxRowsToRead:  2_000_000,
+				MaxMemoryBytes: 8 << 30,
 			},
-			timeout: 2 * time.Second,
 			want: map[string]any{
 				"max_execution_time":   2.0,
 				"max_result_rows":      500,
@@ -86,11 +75,8 @@ func TestChReadSettings(t *testing.T) {
 			},
 		},
 		{
-			name: "zero caps are omitted even when others are set",
-			perms: &policy.ResolvedPermissions{
-				MaxRowsToRead: 42,
-				// MaxRows / MaxExecutionTimeMs / MaxMemoryUsageBytes left at 0.
-			},
+			name:   "zero caps are omitted even when others are set",
+			limits: chQueryLimits{MaxRowsToRead: 42},
 			want: map[string]any{
 				"max_rows_to_read":   int64(42),
 				"read_overflow_mode": "throw",
@@ -101,7 +87,7 @@ func TestChReadSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := chReadSettings(tt.perms, tt.timeout)
+			got := chReadSettings(tt.limits)
 
 			if tt.want == nil {
 				if got != nil {
@@ -124,6 +110,34 @@ func TestChReadSettings(t *testing.T) {
 				if gotV != wantV {
 					t.Errorf("setting %q = %#v (%T), want %#v (%T)", k, gotV, gotV, wantV, wantV)
 				}
+			}
+		})
+	}
+}
+
+// TestResolveReadBudget covers the per-role-override → global-default → admin-
+// bypass precedence that both read handlers share.
+func TestResolveReadBudget(t *testing.T) {
+	t.Parallel()
+	defaults := QueryLimits{DefaultMaxRowsToRead: 100, DefaultMaxMemoryBytes: 200}
+
+	tests := []struct {
+		name                    string
+		perRoleRows, perRoleMem int64
+		isAdmin                 bool
+		wantRows, wantMem       int64
+	}{
+		{name: "admin bypasses everything", perRoleRows: 5, perRoleMem: 5, isAdmin: true, wantRows: 0, wantMem: 0},
+		{name: "no per-role cap falls back to defaults", wantRows: 100, wantMem: 200},
+		{name: "per-role override wins", perRoleRows: 7, perRoleMem: 9, wantRows: 7, wantMem: 9},
+		{name: "per-role wins for one, default for the other", perRoleRows: 7, wantRows: 7, wantMem: 200},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotRows, gotMem := defaults.resolveReadBudget(tt.perRoleRows, tt.perRoleMem, tt.isAdmin)
+			if gotRows != tt.wantRows || gotMem != tt.wantMem {
+				t.Errorf("resolveReadBudget = (%d, %d), want (%d, %d)", gotRows, gotMem, tt.wantRows, tt.wantMem)
 			}
 		})
 	}

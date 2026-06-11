@@ -47,7 +47,17 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 | `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
-| `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum allowed execution time for ClickHouse queries |
+| `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum allowed execution time for ClickHouse queries. Also the default per-query `max_execution_time` budget for every read. |
+
+### Query Limits
+
+Server-wide default resource caps applied to **non-admin** reads — structured queries *and* named pipes — when a role's [policy](/access-control#resource-limits) sets no tighter cap of its own. A per-table-per-role policy cap overrides these; the admin role bypasses them. They are enforced server-side by ClickHouse, so a read can't outrun its budget during a scan/merge/aggregation phase. (The execution-time default is `clickhouse.query_timeout` above — not duplicated here.)
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `query_limits.default_max_rows` | `WH_QUERY_DEFAULT_MAX_ROWS` | `10000` | Fallback result `LIMIT` for a structured query when the caller and policy specify none. `0` falls back to the built-in default. |
+| `query_limits.default_max_rows_to_read` | `WH_QUERY_DEFAULT_MAX_ROWS_TO_READ` | `0` | Default cap on rows **scanned from storage**. `0` = off (a wrong value breaks legitimate large scans, so it is opt-in). |
+| `query_limits.default_max_memory_usage` | `WH_QUERY_DEFAULT_MAX_MEMORY_USAGE` | `4GiB` | Default cap on **peak query memory**, as a size string (`4GiB`, `512MiB`) or a plain byte count. `0` = off. The 4 GiB backstop is on out of the box. |
 
 ### Schema Discovery
 
@@ -169,6 +179,11 @@ clickhouse:
   password: ""
   query_timeout: 30s
 
+query_limits:
+  default_max_rows: 10000
+  default_max_rows_to_read: 0
+  default_max_memory_usage: 4GiB
+
 mq:
   gap_window_minutes: 15
   max_bytes_gb: 50
@@ -232,6 +247,10 @@ WH_CH_DATABASE=default
 WH_CH_USERNAME=default
 WH_CH_PASSWORD=
 WH_CH_QUERY_TIMEOUT=30s
+
+WH_QUERY_DEFAULT_MAX_ROWS=10000
+WH_QUERY_DEFAULT_MAX_ROWS_TO_READ=0
+WH_QUERY_DEFAULT_MAX_MEMORY_USAGE=4GiB
 
 WH_MQ_GAP_WINDOW_MINUTES=15
 WH_MQ_MAX_BYTES_GB=50

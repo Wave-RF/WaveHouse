@@ -41,7 +41,7 @@ func TestPipesHandler_List(t *testing.T) {
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page, count(*) FROM clicks GROUP BY page"},
 		&pipes.NamedQuery{Name: "recent", SQL: "SELECT * FROM clicks ORDER BY ts DESC LIMIT 10"},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes", nil)
@@ -58,7 +58,7 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "top_pages", SQL: "SELECT page FROM clicks"},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/top_pages", "top_pages", nil)
@@ -73,7 +73,7 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 func TestPipesHandler_Get_NotFound(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes/nope", "nope", nil)
@@ -87,7 +87,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 func TestPipesHandler_List_Empty(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodGet, "/v1/pipes", "", nil)
@@ -103,7 +103,7 @@ func TestPipesHandler_List_Empty(t *testing.T) {
 func TestPipesHandler_Execute_NotFound(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/nope/execute", "nope", nil)
@@ -127,7 +127,7 @@ func TestPipesHandler_Execute_RoleAuthorization(t *testing.T) {
 		// A real (non-nil) policy so the default admin role ("admin") is defined
 		// and bypasses the allowlist, per the matrix. With a nil policy nobody is
 		// admin (total lockout) — covered separately in internal/policy tests.
-		h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+		h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 		w := httptest.NewRecorder()
 		r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
@@ -154,7 +154,7 @@ func TestPipesHandler_Execute_RestrictedPipe_EmptyRoleDenied(t *testing.T) {
 			AllowedRoles: []string{"admin"},
 		},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	// No ContextKeyRole set, which simulates no token or a JWT without the role claim.
@@ -175,7 +175,7 @@ func TestPipesHandler_Execute_DefaultRoleGrantsAccess(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"viewer"}},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{DefaultRole: "viewer"})
 
 	w := httptest.NewRecorder()
@@ -196,7 +196,7 @@ func TestPipesHandler_Execute_DefaultRoleNotInAllowedRolesDenied(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "admin_report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"admin"}},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{DefaultRole: "viewer"})
 
 	w := httptest.NewRecorder()
@@ -220,7 +220,7 @@ func TestPipesHandler_Execute_MissingParam(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	// No query params or body — missing "page".
@@ -245,7 +245,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes/by_page/execute?page=/home", nil)
@@ -264,7 +264,7 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/pipes/test", bytes.NewReader([]byte(`{bad}`)))
@@ -281,7 +281,7 @@ func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 func TestPipesHandler_Put_Success(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPut, "/v1/pipes/new_pipe", "new_pipe", map[string]any{
@@ -300,7 +300,7 @@ func TestPipesHandler_Put_Success(t *testing.T) {
 func TestPipesHandler_Put_MissingSQL(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPut, "/v1/pipes/bad", "bad", map[string]any{
@@ -317,7 +317,7 @@ func TestPipesHandler_Delete_Success(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "to_delete", SQL: "SELECT 1"},
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodDelete, "/v1/pipes/to_delete", "to_delete", nil)
@@ -339,7 +339,7 @@ func TestPipesHandler_Execute_PostBodyParams(t *testing.T) {
 			},
 		},
 	)
-	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	body := map[string]any{"page": "/about"}
@@ -362,7 +362,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"}, // no AllowedRoles
 	)
-	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, nil, nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)
@@ -384,7 +384,7 @@ func TestPipesHandler_Execute_NoAllowedRoles_AdminAllowed(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "open", SQL: "SELECT * FROM clicks"},
 	)
-	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, QueryLimits{}, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/open/execute", "open", nil)

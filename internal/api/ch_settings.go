@@ -4,60 +4,90 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// chReadSettings builds the per-query ClickHouse Settings that enforce a role's
-// resource caps SERVER-SIDE, so a structured read can't outrun its policy
-// budget during a server-side scan / merge / aggregation phase (#316).
-//
-// Without these, the only budget reaching ClickHouse is whatever clickhouse-go
-// derives from the context deadline — and it only appends max_execution_time
-// for deadlines > 1s, never bounds memory or rows scanned, and a context cancel
-// only fires while the client goroutine is in the block-read loop (a long
-// server-side aggregation runs to completion first). So a heavy aggregation can
-// allocate GBs of state, or scan an entire table, well within the time budget.
-//
-// Mapping (a 0 cap means "no policy limit" and is omitted):
-//
-//   - MaxExecutionTimeMs → max_execution_time (fractional seconds of the
-//     effective timeout). The driver already derives max_execution_time from
-//     the context deadline for multi-second budgets, but SKIPS deadlines ≤ 1s,
-//     so a sub-second policy cap would otherwise reach the server with no time
-//     bound. Emitting it explicitly closes that hole; for >1s budgets the
-//     driver overwrites it with deadline+5s, which is a fine backstop.
-//   - MaxRows → max_result_rows + result_overflow_mode=throw. Defense-in-depth
-//     behind the SQL LIMIT the builder already applied — a hard ceiling that
-//     survives a future query-shape change. Never trips in practice because the
-//     LIMIT keeps the result at or under the cap.
-//   - MaxRowsToRead → max_rows_to_read + read_overflow_mode=throw (rows scanned
-//     from storage; the lever that stops a full-table scan).
-//   - MaxMemoryUsageBytes → max_memory_usage (peak per-query memory; the lever
-//     that stops a heavy aggregation from exhausting the box).
-//
-// timeout is the effective execution budget the caller already computed (min of
-// the role's max_execution_time_ms and the server query_timeout). Returns nil
-// when the role sets no caps, so the caller can skip wrapping the context.
-func chReadSettings(perms *policy.ResolvedPermissions, timeout time.Duration) clickhouse.Settings {
-	if perms == nil {
-		return nil
+// QueryLimits holds the server-wide default resource caps applied to non-admin
+// reads when a role sets no tighter cap of its own. It mirrors
+// config.QueryLimits (translated in cmd/wavehouse) so the api package stays
+// free of the config import. A zero field means "no server-imposed default" for
+// that dimension. DefaultMaxRows is the structured-query result LIMIT applied
+// when the caller and policy specify none (formerly the hard-coded
+// query.DefaultMaxRows).
+type QueryLimits struct {
+	DefaultMaxRows        int
+	DefaultMaxRowsToRead  int64
+	DefaultMaxMemoryBytes int64
+}
+
+// resolveReadBudget returns the effective rows-scanned and memory caps for a
+// read: the per-role override when set, else the server-wide default. Admin
+// bypasses both — admins run heavy queries, and the structured LIMIT plus the
+// unbounded /v1/admin/query path are their guardrails, not these DoS backstops.
+// A returned 0 means "no cap" for that dimension. The pipe path has no per-role
+// caps, so it passes 0 for both per-role values and gets the defaults.
+func (d QueryLimits) resolveReadBudget(perRoleRowsToRead, perRoleMemory int64, isAdmin bool) (rowsToRead, memory int64) {
+	if isAdmin {
+		return 0, 0
 	}
+	rowsToRead = perRoleRowsToRead
+	if rowsToRead == 0 {
+		rowsToRead = d.DefaultMaxRowsToRead
+	}
+	memory = perRoleMemory
+	if memory == 0 {
+		memory = d.DefaultMaxMemoryBytes
+	}
+	return rowsToRead, memory
+}
+
+// chQueryLimits is the resolved, per-request resource budget a single read runs
+// under. A zero field means "no limit" for that dimension and is omitted from
+// the settings. The caller resolves these from the role's policy caps and the
+// server-wide defaults (see resolveReadBudget).
+type chQueryLimits struct {
+	// ExecutionTime is the wall-clock budget, emitted as max_execution_time in
+	// fractional seconds. clickhouse-go already derives max_execution_time from
+	// the context deadline, but only for deadlines > 1s — so a sub-second cap
+	// would otherwise reach the server with no time bound, and a context cancel
+	// can't interrupt an already-running server-side phase. Emitting it
+	// explicitly closes that hole; for >1s budgets the driver overwrites it with
+	// deadline+5s, a fine backstop.
+	ExecutionTime time.Duration
+	// MaxResultRows caps rows RETURNED (max_result_rows + result_overflow_mode=
+	// throw) — defense-in-depth behind the SQL LIMIT the structured builder
+	// applies; not used on the pipe path (a pipe may legitimately return many).
+	MaxResultRows int
+	// MaxRowsToRead caps rows SCANNED from storage (max_rows_to_read +
+	// read_overflow_mode=throw) — the lever that stops a full-table scan.
+	MaxRowsToRead int64
+	// MaxMemoryBytes caps peak query memory (max_memory_usage) — the lever that
+	// stops a heavy aggregation from exhausting the box.
+	MaxMemoryBytes int64
+}
+
+// chReadSettings builds the per-query ClickHouse Settings that enforce a read's
+// resource budget SERVER-SIDE, so it can't outrun the budget during a
+// server-side scan / merge / aggregation phase (#316). Without these, the only
+// budget reaching ClickHouse is whatever clickhouse-go derives from the context
+// deadline — which never bounds memory or rows scanned. Returns nil when no cap
+// applies, so the caller can skip wrapping the context.
+func chReadSettings(l chQueryLimits) clickhouse.Settings {
 	settings := clickhouse.Settings{}
-	if perms.MaxExecutionTimeMs > 0 {
-		// Fractional seconds — ClickHouse accepts them, and they preserve a
-		// sub-second cap that a whole-second representation would round away.
-		settings["max_execution_time"] = timeout.Seconds()
+	if l.ExecutionTime > 0 {
+		// Fractional seconds — ClickHouse accepts them, preserving a sub-second
+		// cap that a whole-second representation would round away.
+		settings["max_execution_time"] = l.ExecutionTime.Seconds()
 	}
-	if perms.MaxRows > 0 {
-		settings["max_result_rows"] = perms.MaxRows
+	if l.MaxResultRows > 0 {
+		settings["max_result_rows"] = l.MaxResultRows
 		settings["result_overflow_mode"] = "throw"
 	}
-	if perms.MaxRowsToRead > 0 {
-		settings["max_rows_to_read"] = perms.MaxRowsToRead
+	if l.MaxRowsToRead > 0 {
+		settings["max_rows_to_read"] = l.MaxRowsToRead
 		settings["read_overflow_mode"] = "throw"
 	}
-	if perms.MaxMemoryUsageBytes > 0 {
-		settings["max_memory_usage"] = perms.MaxMemoryUsageBytes
+	if l.MaxMemoryBytes > 0 {
+		settings["max_memory_usage"] = l.MaxMemoryBytes
 	}
 	if len(settings) == 0 {
 		return nil

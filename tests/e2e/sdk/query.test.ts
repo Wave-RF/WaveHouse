@@ -419,7 +419,7 @@ describe("Query", () => {
     });
   });
 
-  it("enforces max_execution_time_ms policy limit", async () => {
+  it("enforces max_execution_time policy limit", async () => {
     const admin = adminClient();
     const currentPolicyRes = await admin.policy.get();
 
@@ -432,7 +432,7 @@ describe("Query", () => {
           select: {
             viewer: {
               allow_columns: ["*"],
-              max_execution_time_ms: 1, // 1 millisecond limit
+              max_execution_time: "1ms", // human-readable duration
             },
           },
         },
@@ -491,8 +491,8 @@ describe("Query", () => {
     });
   });
 
-  it("enforces max_memory_usage_bytes policy limit server-side (#316)", async () => {
-    await withViewerSelect({ allow_columns: ["*"], max_memory_usage_bytes: 1 }, async () => {
+  it("enforces max_memory_usage policy limit server-side (#316)", async () => {
+    await withViewerSelect({ allow_columns: ["*"], max_memory_usage: "1B" }, async () => {
       const result = await wh.from(T.clicks).selectAll().where("event_id", "=", testId()).fetch();
       expect(result.error).not.toBeNull();
       expect(result.error!.status).toBe(500);
