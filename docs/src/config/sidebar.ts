@@ -46,6 +46,7 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     items: [
       { label: "Configuration", slug: "configuration" },
       { label: "Deployment", slug: "deployment" },
+      { label: "Behind a reverse proxy", slug: "reverse-proxy" },
     ],
   },
   {
