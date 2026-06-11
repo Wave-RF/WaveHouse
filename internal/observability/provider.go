@@ -42,10 +42,13 @@ var runtimeStartOnce sync.Once
 // set — the underlying OTel MeterProvider is the shared substrate. When
 // PrometheusEnabled is true InitProvider returns a non-nil promHandler.
 //
-// Endpoint is the OTLP gRPC target. It is dialed only by the OTLP exporters
-// (traces / metrics-OTLP / logs); Prometheus-only operation leaves it unused.
+// The OTLP exporters take no endpoint/TLS/header options here: the
+// OpenTelemetry SDK reads those from the standard OTEL_EXPORTER_OTLP_* env vars
+// — endpoint (with `https://` selecting TLS via system root CAs), a custom CA
+// via _CERTIFICATE, mutual TLS via _CLIENT_CERTIFICATE/_CLIENT_KEY, and auth
+// _HEADERS. A malformed header is logged and skipped by the SDK (fail-soft),
+// not fatal.
 type ProviderConfig struct {
-	Endpoint          string
 	TracesEnabled     bool
 	TracesSampleRate  float64
 	MetricsEnabled    bool
@@ -115,10 +118,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	)
 
 	if cfg.TracesEnabled {
-		traceExporter, err := otlptracegrpc.New(ctx,
-			otlptracegrpc.WithEndpoint(cfg.Endpoint),
-			otlptracegrpc.WithInsecure(),
-		)
+		traceExporter, err := otlptracegrpc.New(ctx)
 		if err != nil {
 			handleErr(err)
 			return shutdown, nil, err
@@ -138,10 +138,7 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 		readers := []metric.Reader{}
 
 		if cfg.MetricsEnabled {
-			metricExporter, err := otlpmetricgrpc.New(ctx,
-				otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
-				otlpmetricgrpc.WithInsecure(),
-			)
+			metricExporter, err := otlpmetricgrpc.New(ctx)
 			if err != nil {
 				handleErr(err)
 				return shutdown, nil, err
@@ -195,10 +192,13 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	}
 
 	if cfg.LogsEnabled {
-		logExporter, err := otlploggrpc.New(ctx,
-			otlploggrpc.WithEndpoint(cfg.Endpoint),
-			otlploggrpc.WithInsecure(),
-		)
+		// Endpoint, TLS, and headers come from the SDK's OTEL_EXPORTER_OTLP_*
+		// env vars, same as traces/metrics. Known gap: the pinned otlploggrpc
+		// (v0.19) ignores the env TLS-cert vars, so a custom/private CA and
+		// mutual TLS do not apply to the logs signal (public-CA TLS and
+		// plaintext still work). Upstream bug, not worked around here:
+		// open-telemetry/opentelemetry-go#6661.
+		logExporter, err := otlploggrpc.New(ctx)
 		if err != nil {
 			handleErr(err)
 			return shutdown, nil, err
