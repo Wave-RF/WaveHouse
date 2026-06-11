@@ -192,15 +192,13 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	}
 
 	if cfg.LogsEnabled {
-		// Endpoint/headers come from the env like the other signals; the TLS
-		// options are the one exception — see logExporterTLSOptions for the
-		// otlploggrpc v0.19 custom-CA/mTLS workaround (nil when none is set).
-		logOpts, err := logExporterTLSOptions()
-		if err != nil {
-			handleErr(err)
-			return shutdown, nil, err
-		}
-		logExporter, err := otlploggrpc.New(ctx, logOpts...)
+		// Endpoint, TLS, and headers come from the SDK's OTEL_EXPORTER_OTLP_*
+		// env vars, same as traces/metrics. Known gap: the pinned otlploggrpc
+		// (v0.19) ignores the env TLS-cert vars, so a custom/private CA and
+		// mutual TLS do not apply to the logs signal (public-CA TLS and
+		// plaintext still work). Upstream bug, not worked around here:
+		// open-telemetry/opentelemetry-go#6661.
+		logExporter, err := otlploggrpc.New(ctx)
 		if err != nil {
 			handleErr(err)
 			return shutdown, nil, err

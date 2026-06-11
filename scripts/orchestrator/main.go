@@ -157,6 +157,10 @@ func run() error {
 		"WH_CH_HTTP_PORT="+chHTTPPort.Port(),
 		"WH_DATA_DIR="+dataDir,
 	)
+	
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
+		whCmd.Env = append(whCmd.Env, "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317")
+	}
 	if verbose {
 		whCmd.Stdout = io.MultiWriter(whLog, os.Stdout)
 		whCmd.Stderr = io.MultiWriter(whLog, os.Stderr)
