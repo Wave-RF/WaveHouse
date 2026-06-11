@@ -340,17 +340,17 @@ When `dlq.enabled` is `true` (default), failed batch inserts are published to th
 
 ## Observability
 
-Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) to export traces, metrics, and logs, then point the OpenTelemetry SDK at your collector or gateway with the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var (an `https://` URL selects TLS, `http://` stays plaintext; default `localhost:4317`). `OTEL_EXPORTER_OTLP_HEADERS` carries cloud auth and `OTEL_EXPORTER_OTLP_CERTIFICATE` trusts a private CA, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
+Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) to export traces, metrics, and logs, then point the OpenTelemetry SDK at your collector or gateway with the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var (always include a scheme — `https://` selects TLS, `http://` selects plaintext; with the endpoint unset the SDK defaults to **TLS** at `localhost:4317`, so a plaintext local collector needs `http://localhost:4317` set explicitly). `OTEL_EXPORTER_OTLP_HEADERS` carries cloud auth and `OTEL_EXPORTER_OTLP_CERTIFICATE` trusts a private CA, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
 
 WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
 
 ### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
-WaveHouse defaults to a plaintext `localhost:4317` collector, so for a local collector on the default port, enabling OTel is all you need. To point elsewhere, set `OTEL_EXPORTER_OTLP_ENDPOINT`. All three signals (traces, metrics, logs) push through the same connection. This is the simplest setup.
+A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push through the same connection. This is the simplest setup.
 
 ```yaml
 otel:
-  enabled: true   # exports to OTEL_EXPORTER_OTLP_ENDPOINT, default http://localhost:4317 (plaintext)
+  enabled: true   # plaintext local collector: also set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 (the unset SDK default is TLS)
 ```
 
 ### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud)
@@ -411,7 +411,7 @@ make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
 make obs-front    # Simple OTeL Frontend like aspire, with more control over dashboards
 ```
 
-All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP). If you are running WaveHouse directly on your host (e.g. `make dev`), the SDK's default endpoint (`localhost:4317`) routes telemetry to these containers automatically.
+All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host (e.g. `make dev`), set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to reach them — the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects.
 
 If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to reach the host-bound collector: `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
 
