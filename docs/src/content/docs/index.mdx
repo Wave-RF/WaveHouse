@@ -25,8 +25,9 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard, LinkButton, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/components';
 import HomepageCtaTracking from '../../components/HomepageCtaTracking.astro';
+import HomeQueryDemo from '../../components/HomeQueryDemo.astro';
 
 <div class="wh-stats not-content">
   <div class="wh-stat">
@@ -104,47 +105,9 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 ## Query it like a database. Subscribe to it like a socket.
 
-The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming:
+The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming. The **Query** and **Live updates** tabs below are live: tweak the query, hit **Run**, and watch it execute in your browser against a public read-only demo — or open the full [query playground](/playground).
 
-<Tabs>
- <TabItem label="Ingest">
-  ```ts
-  import { createClient } from '@wavehouse/sdk';
-
-  const wh = createClient({ baseURL: 'https://wavehouse.example.com' });
-
-  // Returns immediately — buffered in the WAL, schema-validated
-  // at the edge, batch-flushed to ClickHouse behind the scenes.
-  await wh.from('clicks').insert({ page: '/home', button: 'signup' });
-  ```
- </TabItem>
- <TabItem label="Query">
-  ```ts
-  // Chainable, type-safe, never throws — branch on { data, error }.
-  const { data, error } = await wh.from('clicks')
-    .select('page', 'button', 'score')
-    .where('page', '=', '/home')
-    .orderBy('received_timestamp', 'desc')
-    .limit(100);
-  ```
- </TabItem>
- <TabItem label="Live updates">
-  ```ts
-  // Historical backfill + real-time stream, deduplicated at the seam.
-  const lq = wh.from('clicks')
-    .selectAll()
-    .where('page', '=', '/home')
-    .orderBy('received_timestamp', 'desc')
-    .limit(100)
-    .liveQuery({
-      initial: (result) => setRows(result.data ?? []),
-      next: (event) => addRow(event.data),
-    });
-
-  // later: lq.close();
-  ```
- </TabItem>
-</Tabs>
+<HomeQueryDemo />
 
 ## Up in five minutes
 

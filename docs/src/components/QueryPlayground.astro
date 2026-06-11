@@ -1,0 +1,971 @@
+---
+// Interactive structured-query builder for the docs /playground page. Drives
+// the shared runtime in src/lib/playground.ts: every control edits a typed
+// QuerySpec, which renders live to (a) a results table, (b) a copy-pasteable
+// @wavehouse/sdk chain, and (c) the raw JSON AST posted to /v1/query. "Run"
+// and "Watch live" execute against the public read-only role on
+// stats.wavehouse.dev (our GitHub-activity dogfood) — no eval, the code box is
+// generated, never executed text. Server-rendered chrome (column checkboxes,
+// selects) keeps the panel layout-complete before hydration; the script owns
+// the dynamic filter/aggregation rows and all wiring. Closes #286.
+import { COLUMNS, TIME_RANGES } from "../lib/playground";
+---
+
+<section class="wh-pg not-content" data-pg-root aria-label="WaveHouse query playground">
+  <div class="wh-pg__builder">
+    <div class="wh-pg__modes" role="tablist" aria-label="Query mode">
+      <button type="button" class="wh-pg__mode" data-pg-mode="rows" role="tab" aria-selected="true">
+        Rows
+      </button>
+      <button type="button" class="wh-pg__mode" data-pg-mode="aggregate" role="tab" aria-selected="false">
+        Aggregate
+      </button>
+    </div>
+
+    {/* Rows mode — column projection */}
+    <fieldset class="wh-pg__group" data-pg-fieldset="rows">
+      <legend class="wh-pg__legend">Columns <span class="wh-pg__hint">none = all allowed</span></legend>
+      <div class="wh-pg__checks">
+        {
+          COLUMNS.map((c) => (
+            <label class="wh-pg__check" title={c.desc}>
+              <input type="checkbox" data-pg-column value={c.name} />
+              <span>{c.name}</span>
+            </label>
+          ))
+        }
+      </div>
+    </fieldset>
+
+    {/* Aggregate mode — group-by + aggregations */}
+    <fieldset class="wh-pg__group" data-pg-fieldset="aggregate" hidden>
+      <legend class="wh-pg__legend">Group by</legend>
+      <div class="wh-pg__checks">
+        {
+          COLUMNS.map((c) => (
+            <label class="wh-pg__check" title={c.desc}>
+              <input type="checkbox" data-pg-groupby value={c.name} />
+              <span>{c.name}</span>
+            </label>
+          ))
+        }
+      </div>
+      <div class="wh-pg__sub">
+        <span class="wh-pg__legend">Aggregations</span>
+        <div class="wh-pg__rows" data-pg-aggs></div>
+        <button type="button" class="wh-pg__add" data-pg-add-agg>+ aggregation</button>
+      </div>
+    </fieldset>
+
+    {/* Filters (both modes) */}
+    <fieldset class="wh-pg__group">
+      <legend class="wh-pg__legend">Filters <span class="wh-pg__hint">combined with AND</span></legend>
+      <div class="wh-pg__rows" data-pg-filters></div>
+      <button type="button" class="wh-pg__add" data-pg-add-filter>+ filter</button>
+    </fieldset>
+
+    {/* Order / limit / time range */}
+    <fieldset class="wh-pg__group wh-pg__triple">
+      <label class="wh-pg__field">
+        <span>Order by</span>
+        <span class="wh-pg__order">
+          <select data-pg-order-col aria-label="Order column"></select>
+          <select data-pg-order-dir aria-label="Order direction">
+            <option value="desc">desc</option>
+            <option value="asc">asc</option>
+          </select>
+        </span>
+      </label>
+      <label class="wh-pg__field">
+        <span>Limit</span>
+        <input type="number" data-pg-limit min="1" max="1000" step="1" value="25" />
+      </label>
+      <label class="wh-pg__field">
+        <span>Time range</span>
+        <select data-pg-time aria-label="Time range">
+          {TIME_RANGES.map((t) => <option value={t.value}>{t.label}</option>)}
+        </select>
+      </label>
+    </fieldset>
+
+    <div class="wh-pg__actions">
+      <button type="button" class="wh-pg__run" data-pg-run>Run query</button>
+      <button type="button" class="wh-pg__btn" data-pg-live>Watch live</button>
+      <button type="button" class="wh-pg__btn" data-pg-reset>Reset</button>
+      <button type="button" class="wh-pg__btn" data-pg-share>Copy link</button>
+      <span class="wh-pg__status" data-pg-status aria-live="polite"></span>
+    </div>
+  </div>
+
+  <div class="wh-pg__output">
+    <div class="wh-pg__tabs" role="tablist" aria-label="Output">
+      <button type="button" class="wh-pg__tab" data-pg-tab="results" role="tab" aria-selected="true">
+        Results
+      </button>
+      <button type="button" class="wh-pg__tab" data-pg-tab="code" role="tab" aria-selected="false">
+        SDK code
+      </button>
+      <button type="button" class="wh-pg__tab" data-pg-tab="ast" role="tab" aria-selected="false">
+        Raw AST
+      </button>
+    </div>
+
+    <div class="wh-pg__panel" data-pg-panel="results">
+      <div class="wh-pg__results" data-pg-results>
+        <p class="wh-pg__empty">Press <strong>Run query</strong> to fetch live rows.</p>
+      </div>
+    </div>
+    <div class="wh-pg__panel" data-pg-panel="code" hidden>
+      <button type="button" class="wh-pg__copy" data-pg-copy>Copy</button>
+      <pre class="wh-pg__pre"><code data-pg-code></code></pre>
+    </div>
+    <div class="wh-pg__panel" data-pg-panel="ast" hidden>
+      <pre class="wh-pg__pre"><code data-pg-ast></code></pre>
+    </div>
+  </div>
+
+  <noscript>
+    <p class="wh-pg__noscript">
+      The query playground needs JavaScript. The same queries run from the command line — see the
+      <a href="/sdk">SDK docs</a> and <a href="/api">API reference</a>.
+    </p>
+  </noscript>
+
+  <datalist id="wh-pg-event-types"></datalist>
+</section>
+
+<script>
+  import {
+    AGG_FNS,
+    COLUMN_NAMES,
+    EVENT_TYPE_SUGGESTIONS,
+    FILTER_OPS,
+    MAX_LIMIT,
+    RUN_TIMEOUT_MS,
+    buildResultsTable,
+    columnKind,
+    createStatsClient,
+    decodeSpec,
+    emptySpec,
+    encodeSpec,
+    exampleSpec,
+    runSpec,
+    specToAst,
+    specToCode,
+    streamSpec,
+  } from "../lib/playground";
+  import type { AggFn, FilterOp, FilterSpec, QueryMode, QuerySpec } from "../lib/playground";
+
+  let activeRoot: Element | null = null;
+  let teardown: (() => void) | null = null;
+
+  function init() {
+    const root = document.querySelector("[data-pg-root]");
+    if (root === activeRoot) return; // DOMContentLoaded + astro:page-load both fire
+    teardown?.();
+    teardown = null;
+    activeRoot = root;
+    if (!root) return;
+
+    const wh = createStatsClient();
+    let stopStream: (() => void) | null = null;
+    let runCtrl: AbortController | null = null;
+    const cleanups: (() => void)[] = [() => stopStream?.(), () => runCtrl?.abort()];
+    teardown = () => {
+      cleanups.forEach((fn) => fn());
+      activeRoot = null;
+    };
+
+    const $ = <T extends Element>(sel: string) => root.querySelector(sel) as T | null;
+    const $$ = <T extends Element>(sel: string) => Array.from(root.querySelectorAll(sel)) as T[];
+
+    const filtersBox = $<HTMLElement>("[data-pg-filters]")!;
+    const aggsBox = $<HTMLElement>("[data-pg-aggs]")!;
+    const orderCol = $<HTMLSelectElement>("[data-pg-order-col]")!;
+    const orderDir = $<HTMLSelectElement>("[data-pg-order-dir]")!;
+    const limitInput = $<HTMLInputElement>("[data-pg-limit]")!;
+    const timeSelect = $<HTMLSelectElement>("[data-pg-time]")!;
+    const statusEl = $<HTMLElement>("[data-pg-status]")!;
+    const resultsBox = $<HTMLElement>("[data-pg-results]")!;
+    const codeEl = $<HTMLElement>("[data-pg-code]")!;
+    const astEl = $<HTMLElement>("[data-pg-ast]")!;
+    const runBtn = $<HTMLButtonElement>("[data-pg-run]")!;
+    const liveBtn = $<HTMLButtonElement>("[data-pg-live]")!;
+    let mode: QueryMode = "rows";
+
+    // Seed the event_type datalist (shared by every event_type filter input).
+    const datalist = $<HTMLDataListElement>("#wh-pg-event-types")!;
+    for (const t of EVENT_TYPE_SUGGESTIONS) {
+      const opt = document.createElement("option");
+      opt.value = t;
+      datalist.appendChild(opt);
+    }
+
+    // --- Dynamic row builders --------------------------------------------
+
+    function selectFrom(values: readonly string[], selected: string): HTMLSelectElement {
+      const sel = document.createElement("select");
+      for (const v of values) {
+        const opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = v;
+        if (v === selected) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      return sel;
+    }
+
+    function addFilterRow(f?: FilterSpec) {
+      const row = document.createElement("div");
+      row.className = "wh-pg__filter";
+
+      const col = selectFrom(COLUMN_NAMES, f?.column ?? "event_type");
+      col.setAttribute("aria-label", "Filter column");
+
+      const op = document.createElement("select");
+      op.setAttribute("aria-label", "Filter operator");
+      for (const o of FILTER_OPS) {
+        const opt = document.createElement("option");
+        opt.value = o.op;
+        opt.textContent = o.label;
+        if (f && o.op === f.op) opt.selected = true;
+        op.appendChild(opt);
+      }
+
+      const val = document.createElement("input");
+      val.type = "text";
+      val.setAttribute("aria-label", "Filter value");
+      val.value = f?.value ?? "";
+
+      const syncHints = () => {
+        const isEvt = col.value === "event_type";
+        val.setAttribute("list", isEvt ? "wh-pg-event-types" : "");
+        if (!isEvt) val.removeAttribute("list");
+        val.placeholder =
+          op.value === "in"
+            ? "a, b, c"
+            : columnKind(col.value) === "number"
+              ? "42"
+              : columnKind(col.value) === "datetime"
+                ? "2026-06-01"
+                : "value";
+      };
+      syncHints();
+
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "wh-pg__rm";
+      rm.setAttribute("aria-label", "Remove filter");
+      rm.textContent = "×";
+      rm.addEventListener("click", () => {
+        row.remove();
+        onChange();
+      });
+
+      col.addEventListener("change", () => {
+        syncHints();
+        onChange();
+      });
+      op.addEventListener("change", () => {
+        syncHints();
+        onChange();
+      });
+      val.addEventListener("input", onChange);
+
+      row.append(col, op, val, rm);
+      filtersBox.appendChild(row);
+    }
+
+    function addAggRow(agg?: { fn: AggFn; column: string; alias: string }) {
+      const row = document.createElement("div");
+      row.className = "wh-pg__agg";
+
+      const fn = selectFrom(AGG_FNS, agg?.fn ?? "count");
+      fn.setAttribute("aria-label", "Aggregation function");
+      const col = selectFrom(["*", ...COLUMN_NAMES], agg?.column ?? "*");
+      col.setAttribute("aria-label", "Aggregation column");
+      const alias = document.createElement("input");
+      alias.type = "text";
+      alias.setAttribute("aria-label", "Result alias");
+      alias.placeholder = "alias";
+      let aliasEdited = Boolean(agg?.alias);
+      alias.value = agg?.alias ?? defaultAlias(fn.value as AggFn, col.value);
+
+      const refreshAlias = () => {
+        if (!aliasEdited) alias.value = defaultAlias(fn.value as AggFn, col.value);
+      };
+
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "wh-pg__rm";
+      rm.setAttribute("aria-label", "Remove aggregation");
+      rm.textContent = "×";
+      rm.addEventListener("click", () => {
+        row.remove();
+        onChange();
+      });
+
+      fn.addEventListener("change", () => {
+        refreshAlias();
+        onChange();
+      });
+      col.addEventListener("change", () => {
+        refreshAlias();
+        onChange();
+      });
+      alias.addEventListener("input", () => {
+        aliasEdited = alias.value.trim().length > 0;
+        onChange();
+      });
+
+      row.append(fn, col, alias, rm);
+      aggsBox.appendChild(row);
+    }
+
+    function defaultAlias(fn: AggFn, col: string): string {
+      if (fn === "count") return "total";
+      return `${fn}_${col === "*" ? "all" : col}`.toLowerCase();
+    }
+
+    // --- Spec ⇄ DOM -------------------------------------------------------
+
+    function readSpec(): QuerySpec {
+      const columns = $$<HTMLInputElement>("[data-pg-column]:checked").map((el) => el.value);
+      const groupBy = $$<HTMLInputElement>("[data-pg-groupby]:checked").map((el) => el.value);
+      const filters: FilterSpec[] = Array.from(filtersBox.children).map((row) => {
+        const sels = row.querySelectorAll("select");
+        const input = row.querySelector("input") as HTMLInputElement;
+        return {
+          column: (sels[0] as HTMLSelectElement).value,
+          op: (sels[1] as HTMLSelectElement).value as FilterOp,
+          value: input.value,
+        };
+      });
+      const aggregations = Array.from(aggsBox.children).map((row) => {
+        const sels = row.querySelectorAll("select");
+        const input = row.querySelector("input") as HTMLInputElement;
+        return {
+          fn: (sels[0] as HTMLSelectElement).value as AggFn,
+          column: (sels[1] as HTMLSelectElement).value,
+          alias: input.value.trim() || defaultAlias((sels[0] as HTMLSelectElement).value as AggFn, (sels[1] as HTMLSelectElement).value),
+        };
+      });
+      const orderColVal = orderCol.value;
+      const rawLimit = Number.parseInt(limitInput.value, 10);
+      const limit = Number.isFinite(rawLimit) ? Math.min(MAX_LIMIT, Math.max(1, rawLimit)) : 25;
+      return {
+        mode,
+        columns,
+        groupBy,
+        filters,
+        aggregations,
+        orderBy: orderColVal ? [{ column: orderColVal, dir: orderDir.value === "asc" ? "asc" : "desc" }] : [],
+        limit,
+        since: timeSelect.value,
+      };
+    }
+
+    function writeSpec(spec: QuerySpec) {
+      setMode(spec.mode);
+      for (const el of $$<HTMLInputElement>("[data-pg-column]")) el.checked = spec.columns.includes(el.value);
+      for (const el of $$<HTMLInputElement>("[data-pg-groupby]")) el.checked = spec.groupBy.includes(el.value);
+      filtersBox.replaceChildren();
+      for (const f of spec.filters) addFilterRow(f);
+      aggsBox.replaceChildren();
+      for (const a of spec.aggregations) addAggRow(a);
+      limitInput.value = String(spec.limit);
+      timeSelect.value = spec.since;
+      rebuildOrderOptions(spec);
+      const first = spec.orderBy[0];
+      orderCol.value = first ? first.column : "";
+      orderDir.value = first?.dir ?? "desc";
+      onChange();
+    }
+
+    // Order-by options follow the projection: plain columns in rows mode, the
+    // group-by keys + aggregation aliases in aggregate mode (you can only order
+    // by something you select).
+    function rebuildOrderOptions(spec: QuerySpec) {
+      const prev = orderCol.value;
+      const opts = spec.mode === "aggregate" ? [...spec.groupBy, ...spec.aggregations.map((a) => a.alias)] : [...COLUMN_NAMES];
+      orderCol.replaceChildren();
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "— none —";
+      orderCol.appendChild(none);
+      for (const o of opts) {
+        const opt = document.createElement("option");
+        opt.value = o;
+        opt.textContent = o;
+        orderCol.appendChild(opt);
+      }
+      orderCol.value = opts.includes(prev) ? prev : "";
+    }
+
+    // --- Live preview (code + AST) ---------------------------------------
+
+    function onChange() {
+      const spec = readSpec();
+      rebuildOrderOptions(spec);
+      codeEl.textContent = specToCode(spec);
+      astEl.textContent = JSON.stringify(specToAst(spec), null, 2);
+    }
+
+    // --- Mode toggle ------------------------------------------------------
+
+    function setMode(next: QueryMode) {
+      mode = next;
+      for (const b of $$<HTMLButtonElement>("[data-pg-mode]")) {
+        const on = b.dataset.pgMode === next;
+        b.setAttribute("aria-selected", String(on));
+      }
+      for (const fs of $$<HTMLElement>("[data-pg-fieldset]")) {
+        fs.hidden = fs.dataset.pgFieldset !== next;
+      }
+    }
+
+    for (const b of $$<HTMLButtonElement>("[data-pg-mode]")) {
+      b.addEventListener("click", () => {
+        setMode(b.dataset.pgMode as QueryMode);
+        onChange();
+      });
+    }
+
+    // --- Output tabs ------------------------------------------------------
+
+    for (const tab of $$<HTMLButtonElement>("[data-pg-tab]")) {
+      tab.addEventListener("click", () => {
+        const name = tab.dataset.pgTab;
+        for (const t of $$<HTMLButtonElement>("[data-pg-tab]")) t.setAttribute("aria-selected", String(t === tab));
+        for (const p of $$<HTMLElement>("[data-pg-panel]")) p.hidden = p.dataset.pgPanel !== name;
+      });
+    }
+
+    function showPanel(name: string) {
+      $<HTMLButtonElement>(`[data-pg-tab="${name}"]`)?.click();
+    }
+
+    // --- Run --------------------------------------------------------------
+
+    function setStatus(text: string, tone: "ok" | "err" | "busy" | "") {
+      statusEl.textContent = text;
+      statusEl.dataset.tone = tone;
+    }
+
+    async function run() {
+      stopLive();
+      const spec = readSpec();
+      runBtn.disabled = true;
+      setStatus("Running…", "busy");
+      runCtrl = new AbortController();
+      const timer = setTimeout(() => runCtrl?.abort(), RUN_TIMEOUT_MS);
+      const t0 = performance.now();
+      const { ok, data, error } = await runSpec(wh, spec, runCtrl.signal);
+      clearTimeout(timer);
+      runCtrl = null;
+      const ms = Math.round(performance.now() - t0);
+      runBtn.disabled = false;
+      if (!ok || !data) {
+        const timedOut = error?.code === "ABORTED";
+        resultsBox.replaceChildren(
+          errorEl(
+            timedOut
+              ? "Timed out. This shared demo bounds query time — add a filter, drop the limit, or narrow the time range."
+              : (error?.message ?? "Query failed."),
+          ),
+        );
+        setStatus(`${timedOut ? "Timed out" : "Error"} · ${ms} ms`, "err");
+        showPanel("results");
+        return;
+      }
+      resultsBox.replaceChildren(buildResultsTable(data));
+      setStatus(`${data.length} row${data.length === 1 ? "" : "s"} · ${ms} ms`, "ok");
+      showPanel("results");
+    }
+
+    function errorEl(msg: string): HTMLElement {
+      const p = document.createElement("p");
+      p.className = "wh-pg__error";
+      p.textContent = msg;
+      return p;
+    }
+
+    // --- Watch live -------------------------------------------------------
+
+    function stopLive() {
+      if (!stopStream) return;
+      stopStream();
+      stopStream = null;
+      liveBtn.textContent = "Watch live";
+      liveBtn.dataset.on = "";
+    }
+
+    function watchLive() {
+      if (stopStream) {
+        stopLive();
+        setStatus("Stopped", "");
+        return;
+      }
+      const spec = readSpec();
+      const list = document.createElement("ol");
+      list.className = "wh-pg__live";
+      const hint = document.createElement("p");
+      hint.className = "wh-pg__empty";
+      hint.textContent = "Listening for live events… (star/fork the repo to see one land)";
+      resultsBox.replaceChildren(hint, list);
+      showPanel("results");
+      setStatus("Live", "busy");
+      liveBtn.textContent = "Stop";
+      liveBtn.dataset.on = "1";
+
+      let n = 0;
+      stopStream = streamSpec(wh, spec, {
+        next: (ev) => {
+          const row = (ev?.data ?? {}) as Record<string, unknown>;
+          const li = document.createElement("li");
+          li.textContent = JSON.stringify(row);
+          list.prepend(li);
+          while (list.children.length > 20) list.lastElementChild?.remove();
+          hint.hidden = true;
+          setStatus(`Live · ${++n} event${n === 1 ? "" : "s"}`, "ok");
+        },
+        status: (s: string) => {
+          if (s === "closed") setStatus("Stream offline", "err");
+        },
+        error: () => setStatus("Stream offline", "err"),
+      });
+    }
+
+    // --- Buttons ----------------------------------------------------------
+
+    runBtn.addEventListener("click", run);
+    liveBtn.addEventListener("click", watchLive);
+    $<HTMLButtonElement>("[data-pg-reset]")?.addEventListener("click", () => {
+      stopLive();
+      writeSpec(emptySpec());
+      resultsBox.replaceChildren(promptEl());
+      setStatus("", "");
+      history.replaceState(null, "", location.pathname);
+    });
+    $<HTMLButtonElement>("[data-pg-share]")?.addEventListener("click", async () => {
+      const url = `${location.origin}${location.pathname}?q=${encodeSpec(readSpec())}`;
+      history.replaceState(null, "", url);
+      try {
+        await navigator.clipboard.writeText(url);
+        setStatus("Link copied", "ok");
+      } catch {
+        setStatus("Link in address bar", "ok");
+      }
+    });
+    $<HTMLButtonElement>("[data-pg-copy]")?.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(codeEl.textContent ?? "");
+        setStatus("Code copied", "ok");
+      } catch {
+        setStatus("Copy failed", "err");
+      }
+    });
+    for (const el of [limitInput, timeSelect, orderCol, orderDir]) {
+      el.addEventListener("change", onChange);
+    }
+    // The column / group-by checkboxes are server-rendered (not built by
+    // addFilterRow/addAggRow), so wire them here so toggling one updates the
+    // generated code + AST previews live, not just on the next Run.
+    for (const el of $$<HTMLInputElement>("[data-pg-column], [data-pg-groupby]")) {
+      el.addEventListener("change", onChange);
+    }
+
+    function promptEl(): HTMLElement {
+      const p = document.createElement("p");
+      p.className = "wh-pg__empty";
+      p.innerHTML = "Press <strong>Run query</strong> to fetch live rows.";
+      return p;
+    }
+
+    // --- Boot: URL state or the worked example ---------------------------
+    cleanups.push(() => stopLive());
+    const fromUrl = decodeSpec(new URLSearchParams(location.search).get("q"));
+    writeSpec(fromUrl ?? exampleSpec());
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+  document.addEventListener("astro:page-load", init);
+</script>
+
+<style is:global>
+  /* is:global, not scoped: the filter/aggregation rows and the results table
+     are created at runtime by the script above, so they never carry Astro's
+     scope attribute. Everything here is namespaced under .wh-pg__*. */
+  /* A single stacked column: the playground lives in the ~45rem Starlight
+     content column, so builder-on-top / output-below reads better (and wider)
+     than two cramped side-by-side columns. */
+  .wh-pg {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    margin: 1.5rem 0;
+  }
+
+  .wh-pg__builder {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    min-width: 0;
+  }
+
+  .wh-pg__modes {
+    display: inline-flex;
+    gap: 0.25rem;
+    padding: 0.2rem;
+    background: var(--wh-code-bg);
+    border: 1px solid var(--wh-code-border);
+    border-radius: var(--radius-pill);
+    width: fit-content;
+  }
+  .wh-pg__mode {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--wh-ink-muted);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 0.3rem 0.85rem;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+  }
+  .wh-pg__mode[aria-selected="true"] {
+    background: var(--wh-accent);
+    color: var(--wh-accent-ink);
+  }
+
+  .wh-pg__group {
+    margin: 0;
+    padding: 0.75rem 0.85rem 0.85rem;
+    border: 1px solid var(--wh-code-border);
+    border-radius: var(--radius-sm);
+    background: color-mix(in oklab, var(--wh-code-bg) 60%, var(--wh-surface));
+    min-width: 0;
+  }
+  .wh-pg__group[hidden] {
+    display: none;
+  }
+  .wh-pg__legend,
+  legend.wh-pg__legend {
+    padding: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-pg__hint {
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--wh-ink-subtle);
+    opacity: 0.8;
+  }
+
+  .wh-pg__checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.6rem;
+    margin-top: 0.55rem;
+  }
+  .wh-pg__check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.76rem;
+    color: var(--wh-ink-muted);
+    cursor: pointer;
+  }
+  .wh-pg__check input {
+    accent-color: var(--wh-accent);
+  }
+
+  .wh-pg__sub {
+    margin-top: 0.85rem;
+  }
+  .wh-pg__rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin: 0.55rem 0;
+  }
+  .wh-pg__filter,
+  .wh-pg__agg {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1.2fr) auto;
+    gap: 0.35rem;
+    align-items: center;
+  }
+
+  .wh-pg select,
+  .wh-pg input[type="text"],
+  .wh-pg input[type="number"] {
+    appearance: none;
+    width: 100%;
+    min-width: 0;
+    padding: 0.32rem 0.45rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.76rem;
+    color: var(--wh-ink);
+    background: var(--wh-surface);
+    border: 1px solid var(--wh-border-strong);
+    border-radius: var(--radius-sm);
+  }
+  .wh-pg select:focus-visible,
+  .wh-pg input:focus-visible {
+    outline: 2px solid var(--wh-accent);
+    outline-offset: 1px;
+  }
+  .wh-pg__rm {
+    appearance: none;
+    border: 1px solid var(--wh-border-strong);
+    background: var(--wh-code-bg);
+    color: var(--wh-ink-subtle);
+    border-radius: var(--radius-sm);
+    width: 1.7rem;
+    height: 1.7rem;
+    line-height: 1;
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  .wh-pg__rm:hover {
+    color: var(--wh-rose);
+    border-color: var(--wh-rose);
+  }
+  .wh-pg__add {
+    appearance: none;
+    border: 1px dashed var(--wh-border-strong);
+    background: transparent;
+    color: var(--wh-accent-text);
+    font: inherit;
+    font-size: 0.76rem;
+    font-weight: 600;
+    padding: 0.3rem 0.65rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .wh-pg__add:hover {
+    border-color: var(--wh-accent);
+  }
+
+  .wh-pg__triple {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.6rem;
+  }
+  @media (max-width: 30rem) {
+    .wh-pg__triple {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .wh-pg__field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+  .wh-pg__field > span {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-pg__order {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.3rem;
+  }
+
+  .wh-pg__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .wh-pg__run {
+    appearance: none;
+    border: 1px solid var(--wh-accent-hi);
+    background: var(--wh-accent);
+    color: var(--wh-accent-ink);
+    font: inherit;
+    font-weight: 700;
+    font-size: 0.82rem;
+    padding: 0.42rem 1rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .wh-pg__run:hover {
+    background: var(--wh-accent-hi);
+  }
+  .wh-pg__run:disabled {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .wh-pg__btn {
+    appearance: none;
+    border: 1px solid var(--wh-border-strong);
+    background: var(--wh-code-bg);
+    color: var(--wh-ink-muted);
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .wh-pg__btn:hover {
+    color: var(--wh-ink);
+    border-color: var(--wh-accent);
+  }
+  .wh-pg__btn[data-on="1"] {
+    color: var(--wh-accent-ink);
+    background: var(--wh-rose);
+    border-color: var(--wh-rose);
+  }
+  .wh-pg__status {
+    font-family: var(--sl-font-mono);
+    font-size: 0.74rem;
+    color: var(--wh-ink-subtle);
+  }
+  .wh-pg__status[data-tone="ok"] {
+    color: var(--wh-emerald);
+  }
+  .wh-pg__status[data-tone="err"] {
+    color: var(--wh-rose);
+  }
+
+  /* Output column */
+  .wh-pg__output {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid var(--wh-code-border);
+    border-radius: var(--radius-sm);
+    background: var(--wh-code-bg);
+    overflow: hidden;
+  }
+  .wh-pg__tabs {
+    display: flex;
+    gap: 0.15rem;
+    padding: 0.4rem 0.4rem 0;
+    border-bottom: 1px solid var(--wh-code-border);
+    background: color-mix(in oklab, var(--wh-code-bg) 80%, var(--wh-surface));
+  }
+  .wh-pg__tab {
+    appearance: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--wh-ink-subtle);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.45rem 0.7rem;
+    cursor: pointer;
+  }
+  .wh-pg__tab[aria-selected="true"] {
+    color: var(--wh-ink);
+    border-bottom-color: var(--wh-accent);
+  }
+  .wh-pg__panel {
+    min-width: 0;
+  }
+  .wh-pg__panel[hidden] {
+    display: none;
+  }
+
+  /* The results <table>, .wh-pg__empty and .wh-pg__error are styled site-wide
+     in global.css (shared with HomeQueryDemo via buildResultsTable). */
+  .wh-pg__results {
+    max-height: 28rem;
+    overflow: auto;
+  }
+
+  .wh-pg__live {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-family: var(--sl-font-mono);
+    font-size: 0.72rem;
+  }
+  .wh-pg__live li {
+    padding: 0.3rem 0.6rem;
+    border-bottom: 1px solid var(--wh-code-border);
+    color: var(--wh-ink-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: wh-pg-in 0.3s ease-out both;
+  }
+  @keyframes wh-pg-in {
+    from {
+      opacity: 0;
+      transform: translateY(-3px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .wh-pg__panel[data-pg-panel="code"],
+  .wh-pg__panel[data-pg-panel="ast"] {
+    position: relative;
+  }
+  .wh-pg__pre {
+    margin: 0;
+    padding: 0.85rem 1rem;
+    max-height: 28rem;
+    overflow: auto;
+    background: transparent;
+    font-size: 0.76rem;
+    line-height: 1.55;
+  }
+  .wh-pg__pre code {
+    font-family: var(--sl-font-mono);
+    color: var(--wh-ink);
+    background: transparent;
+    border: 0;
+    padding: 0;
+    white-space: pre;
+  }
+  .wh-pg__copy {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    appearance: none;
+    border: 1px solid var(--wh-border-strong);
+    background: var(--wh-surface);
+    color: var(--wh-ink-muted);
+    font: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.25rem 0.55rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    z-index: 1;
+  }
+  .wh-pg__copy:hover {
+    color: var(--wh-ink);
+    border-color: var(--wh-accent);
+  }
+
+  .wh-pg__noscript {
+    grid-column: 1 / -1;
+    color: var(--wh-ink-muted);
+    font-size: 0.85rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .wh-pg__live li {
+      animation: none;
+    }
+  }
+</style>

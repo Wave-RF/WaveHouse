@@ -1,0 +1,57 @@
+---
+title: Query playground
+description: Build and run live WaveHouse queries in your browser against a public read-only demo — the @wavehouse/sdk chain and raw query AST are generated as you go.
+tableOfContents: false
+---
+
+import QueryPlayground from '../../components/QueryPlayground.astro';
+
+Build a query with the controls below and hit **Run query**. It executes in your
+browser through [`@wavehouse/sdk`](/sdk) against a **public, read-only** WaveHouse
+instance at `stats.wavehouse.dev` — our own dogfood deployment that ingests
+GitHub activity for [Wave-RF/WaveHouse](https://github.com/Wave-RF/WaveHouse)
+into a `gh_events` table. As you build, the equivalent SDK chain and the raw JSON
+query AST update live, so you can copy either straight into your own project.
+
+<QueryPlayground />
+
+## The `gh_events` table
+
+The demo role exposes these columns. There's no separate schema call — the
+playground knows them, and the real ingest contract lives in
+[Wave-RF/WaveHouse-Stats](https://github.com/Wave-RF/WaveHouse-Stats).
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `event_type` | string | GitHub event family — `push`, `pull_request`, `issues`, `star`, `fork`, `release`, … |
+| `action` | string | Event sub-action — `opened`, `closed`, `created`, `published`, … |
+| `actor_login` | string | GitHub username that triggered the event |
+| `event_ts` | datetime | When the event happened (UTC) |
+| `number` | number | Issue / PR number (`0` when not applicable) |
+| `title` | string | Issue / PR / release title |
+| `ref` | string | Git ref for `push` / `create` / `delete` |
+| `repo_name` | string | `owner/repo` the event belongs to |
+
+## Things to try
+
+- **Rows mode**: select `actor_login`, `title`, `event_ts`; filter `event_type` `in` `pull_request, issues`; order by `event_ts` desc.
+- **Aggregate mode**: group by `event_type`, add a `count` aggregation, order by `total` desc — the live leaderboard of what's happening in the repo.
+- **Watch live**: keep a filter on `event_type` `in` `star, fork`, hit **Watch live**, then [star the repo](https://github.com/Wave-RF/WaveHouse) and watch your event land over SSE.
+
+## Notes & limits
+
+This is a shared, public endpoint, so a few guardrails apply — the same ones any
+WaveHouse operator can configure per [role](/access-control):
+
+- **Read-only.** The demo role can query and stream but not ingest. To run the
+  ingest side, boot the stack locally — see [Getting Started](/getting-started).
+- **Capped.** Each run is limited to 1000 rows and gives up after 12 seconds in
+  your browser; the demo role enforces its own server-side row cap on top.
+  Playground queries are ad-hoc structured reads, not pre-defined
+  [pipes](/pipes) — but they still share the same in-process read cache, so a
+  repeated identical query can come straight back from cache (`X-Cache: HIT`).
+- **Public data only.** Columns like internal IDs aren't exposed to the demo role.
+
+Want the full picture of the SDK surface? Start with the
+[SDK overview](/sdk), then [Queries](/sdk/queries) and
+[Streaming & live queries](/sdk/streaming).
