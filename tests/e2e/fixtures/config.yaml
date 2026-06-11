@@ -37,8 +37,10 @@ policy:
   # to the repo root.
   file_path: tests/e2e/fixtures/policy.yaml
 
-# OTel on so the export branches get coverage. gRPC exporters init lazily,
-# so the absence of a collector at :4317 doesn't matter for the suite.
+# OTel on so the export branches get coverage. The endpoint is set by the
+# orchestrator (scripts/orchestrator) via OTEL_EXPORTER_OTLP_ENDPOINT, default
+# http://127.0.0.1:4317 — there's no otel.addr key anymore. gRPC exporters init
+# lazily, so with no collector on :4317 the suite is unaffected; with a
+# `make obs-*` dashboard running it feeds that UI.
 otel:
   enabled: true
-  addr: "127.0.0.1:4317"
