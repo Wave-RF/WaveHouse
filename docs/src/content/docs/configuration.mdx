@@ -49,17 +49,55 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 | `clickhouse.database` | `WH_CH_DATABASE` | `default` | Database name. Tables are discovered from this database. |
 | `clickhouse.username` | `WH_CH_USERNAME` | `default` | Authentication username. |
 | `clickhouse.password` | `WH_CH_PASSWORD` | *(empty)* | Authentication password. |
-| `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum allowed execution time for ClickHouse queries. Also the default per-query `max_execution_time` budget for every read. |
+| `clickhouse.query_timeout` | `WH_CH_QUERY_TIMEOUT` | `30s` | Maximum wall-clock time WaveHouse waits for a read. It bounds the client context deadline, from which the driver derives a server-side `max_execution_time`. |
 
-### Query Limits
-
-Server-wide default resource caps applied to **non-admin** reads — structured queries *and* named pipes — when a role's [policy](/access-control#resource-limits) sets no tighter cap of its own. A per-table-per-role policy cap overrides these; the admin role bypasses them. They are enforced server-side by ClickHouse, so a read can't outrun its budget during a scan/merge/aggregation phase. (The execution-time default is `clickhouse.query_timeout` above — not duplicated here.)
+### Query
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `query_limits.default_max_rows` | `WH_QUERY_DEFAULT_MAX_ROWS` | `10000` | Fallback result `LIMIT` for a structured query when the caller and policy specify none. `0` falls back to the built-in default. |
-| `query_limits.default_max_rows_to_read` | `WH_QUERY_DEFAULT_MAX_ROWS_TO_READ` | `0` | Default cap on rows **scanned from storage**. `0` = off (a wrong value breaks legitimate large scans, so it is opt-in). |
-| `query_limits.default_max_memory_usage` | `WH_QUERY_DEFAULT_MAX_MEMORY_USAGE` | `4GiB` | Default cap on **peak query memory**, as a size string (`4GiB`, `512MiB`) or a plain byte count. `0` = off. The 4 GiB backstop is on out of the box. |
+| `query.default_max_rows` | `WH_QUERY_DEFAULT_MAX_ROWS` | `10000` | Fallback result `LIMIT` for a structured query when the caller and policy specify none. `0` falls back to the built-in default. |
+
+This is a result-**shaping** default, not a resource limit. Server-wide resource limits (memory, rows scanned, execution time) belong in ClickHouse — see [Server-side resource limits](#server-side-resource-limits) below.
+
+### Server-side resource limits
+
+WaveHouse enforces a role's **per-role** resource caps (from the [access-control policy](/access-control#resource-limits)) by attaching them to each query as ClickHouse settings. **Server-wide** limits — the backstop that applies to *every* query regardless of role, including raw admin SQL — are configured in **ClickHouse itself**, via its [settings profiles](https://clickhouse.com/docs/operations/settings/settings-profiles) and [quotas](https://clickhouse.com/docs/operations/quotas). This keeps one authoritative place for global governance, has ClickHouse enforce it natively (defense-in-depth, even against a WaveHouse bug), and lets you use standard ClickHouse operations.
+
+Set the backstop on the profile of the ClickHouse user WaveHouse connects as (`clickhouse.username`). For example, in `users.xml`:
+
+```xml
+<clickhouse>
+  <profiles>
+    <default>
+      <!-- Per-query ceilings: a query that exceeds these is rejected. -->
+      <max_memory_usage>4000000000</max_memory_usage>     <!-- ~4 GiB -->
+      <max_execution_time>30</max_execution_time>         <!-- seconds -->
+      <max_rows_to_read>1000000000</max_rows_to_read>
+
+      <!-- Optionally make the memory ceiling a hard cap WaveHouse's per-role
+           settings cannot raise above (but may still tighten). -->
+      <constraints>
+        <max_memory_usage><max>8000000000</max></max_memory_usage>
+      </constraints>
+    </default>
+  </profiles>
+
+  <!-- Quotas add time-windowed limits (queries/sec, rows read per hour, …)
+       that per-query settings can't express. -->
+  <quotas>
+    <default>
+      <interval>
+        <duration>3600</duration>
+        <read_rows>10000000000</read_rows>
+      </interval>
+    </default>
+  </quotas>
+</clickhouse>
+```
+
+:::caution[How the two layers compose]
+WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so they **compose** with the ClickHouse profile — a per-role cap *tightens* within the profile's ceiling, and a `<constraints>` block bounds how far any setting can move. But if the profile marks a setting `readonly` (or `<constraints>` disallows changing it), ClickHouse will **reject** WaveHouse's per-query override and the query fails. So keep the settings WaveHouse manages (`max_memory_usage`, `max_execution_time`, `max_rows_to_read`, `max_result_rows`) **changeable** for its user — use a `<max>` constraint, not `readonly`, if you want a hard ceiling.
+:::
 
 ### Schema Discovery
 
@@ -182,10 +220,8 @@ clickhouse:
   password: ""
   query_timeout: 30s
 
-query_limits:
+query:
   default_max_rows: 10000
-  default_max_rows_to_read: 0
-  default_max_memory_usage: 4GiB
 
 mq:
   gap_window_minutes: 15
@@ -254,8 +290,6 @@ WH_CH_PASSWORD=
 WH_CH_QUERY_TIMEOUT=30s
 
 WH_QUERY_DEFAULT_MAX_ROWS=10000
-WH_QUERY_DEFAULT_MAX_ROWS_TO_READ=0
-WH_QUERY_DEFAULT_MAX_MEMORY_USAGE=4GiB
 
 WH_MQ_GAP_WINDOW_MINUTES=15
 WH_MQ_MAX_BYTES_GB=50

@@ -14,7 +14,7 @@ import (
 
 // DefaultMaxRows is the fallback result LIMIT applied when no explicit LIMIT is
 // specified and no policy MaxRows is set — preventing an unbounded read. It is
-// the default value of the operator-facing query_limits.default_max_rows config
+// the default value of the operator-facing query.default_max_rows config
 // knob (passed into Build), and the guard Build falls back to when that knob is
 // misconfigured to 0.
 const DefaultMaxRows = 10000
@@ -124,7 +124,7 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	}
 
 	// LIMIT — apply the caller's explicit limit, capped at the configured
-	// default maximum (query_limits.default_max_rows). A misconfigured
+	// default maximum (query.default_max_rows). A misconfigured
 	// non-positive default falls back to the DefaultMaxRows constant so a read
 	// can never be left unbounded or clamped to LIMIT 0.
 	maxRows := defaultMaxRows

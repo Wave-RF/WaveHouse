@@ -492,7 +492,9 @@ describe("Query", () => {
   });
 
   it("enforces max_memory_usage policy limit server-side (#316)", async () => {
-    await withViewerSelect({ allow_columns: ["*"], max_memory_usage: "1B" }, async () => {
+    // A bare number is bytes, so 1 = a 1-byte cap (also exercises the
+    // number-input form alongside the "1ms" string above).
+    await withViewerSelect({ allow_columns: ["*"], max_memory_usage: 1 }, async () => {
       const result = await wh.from(T.clicks).selectAll().where("event_id", "=", testId()).fetch();
       expect(result.error).not.toBeNull();
       expect(result.error!.status).toBe(500);

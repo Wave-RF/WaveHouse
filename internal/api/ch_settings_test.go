@@ -114,31 +114,3 @@ func TestChReadSettings(t *testing.T) {
 		})
 	}
 }
-
-// TestResolveReadBudget covers the per-role-override → global-default → admin-
-// bypass precedence that both read handlers share.
-func TestResolveReadBudget(t *testing.T) {
-	t.Parallel()
-	defaults := QueryLimits{DefaultMaxRowsToRead: 100, DefaultMaxMemoryBytes: 200}
-
-	tests := []struct {
-		name                    string
-		perRoleRows, perRoleMem int64
-		isAdmin                 bool
-		wantRows, wantMem       int64
-	}{
-		{name: "admin bypasses everything", perRoleRows: 5, perRoleMem: 5, isAdmin: true, wantRows: 0, wantMem: 0},
-		{name: "no per-role cap falls back to defaults", wantRows: 100, wantMem: 200},
-		{name: "per-role override wins", perRoleRows: 7, perRoleMem: 9, wantRows: 7, wantMem: 9},
-		{name: "per-role wins for one, default for the other", perRoleRows: 7, wantRows: 7, wantMem: 200},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			gotRows, gotMem := defaults.resolveReadBudget(tt.perRoleRows, tt.perRoleMem, tt.isAdmin)
-			if gotRows != tt.wantRows || gotMem != tt.wantMem {
-				t.Errorf("resolveReadBudget = (%d, %d), want (%d, %d)", gotRows, gotMem, tt.wantRows, tt.wantMem)
-			}
-		})
-	}
-}

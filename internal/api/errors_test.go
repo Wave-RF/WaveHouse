@@ -136,7 +136,7 @@ func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 	store := pipes.NewMemoryStore(
 		&pipes.NamedQuery{Name: "report", SQL: "SELECT * FROM clicks", AllowedRoles: []string{"analyst", "viewer"}},
 	)
-	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, QueryLimits{}, logger)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, logger)
 
 	r := pipesRequest(t, http.MethodPost, "/v1/pipes/report/execute", "report", nil)
 	r = r.WithContext(auth.WithRole(r.Context(), "guest"))

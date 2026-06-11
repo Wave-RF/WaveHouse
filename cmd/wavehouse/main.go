@@ -371,14 +371,6 @@ func run() int {
 		return 1
 	}
 
-	// Translate the config-level query_limits into the api package's plain-int
-	// form so api stays free of the config + units imports.
-	queryLimits := api.QueryLimits{
-		DefaultMaxRows:        cfg.QueryLimits.DefaultMaxRows,
-		DefaultMaxRowsToRead:  cfg.QueryLimits.DefaultMaxRowsToRead,
-		DefaultMaxMemoryBytes: cfg.QueryLimits.DefaultMaxMemoryUsage.Bytes(),
-	}
-
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -388,8 +380,8 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, queryLimits, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, queryLimits, logger),
+		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
 		Logger:          logger,

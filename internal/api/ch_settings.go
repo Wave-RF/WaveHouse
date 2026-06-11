@@ -6,44 +6,12 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 )
 
-// QueryLimits holds the server-wide default resource caps applied to non-admin
-// reads when a role sets no tighter cap of its own. It mirrors
-// config.QueryLimits (translated in cmd/wavehouse) so the api package stays
-// free of the config import. A zero field means "no server-imposed default" for
-// that dimension. DefaultMaxRows is the structured-query result LIMIT applied
-// when the caller and policy specify none (formerly the hard-coded
-// query.DefaultMaxRows).
-type QueryLimits struct {
-	DefaultMaxRows        int
-	DefaultMaxRowsToRead  int64
-	DefaultMaxMemoryBytes int64
-}
-
-// resolveReadBudget returns the effective rows-scanned and memory caps for a
-// read: the per-role override when set, else the server-wide default. Admin
-// bypasses both — admins run heavy queries, and the structured LIMIT plus the
-// unbounded /v1/admin/query path are their guardrails, not these DoS backstops.
-// A returned 0 means "no cap" for that dimension. The pipe path has no per-role
-// caps, so it passes 0 for both per-role values and gets the defaults.
-func (d QueryLimits) resolveReadBudget(perRoleRowsToRead, perRoleMemory int64, isAdmin bool) (rowsToRead, memory int64) {
-	if isAdmin {
-		return 0, 0
-	}
-	rowsToRead = perRoleRowsToRead
-	if rowsToRead == 0 {
-		rowsToRead = d.DefaultMaxRowsToRead
-	}
-	memory = perRoleMemory
-	if memory == 0 {
-		memory = d.DefaultMaxMemoryBytes
-	}
-	return rowsToRead, memory
-}
-
-// chQueryLimits is the resolved, per-request resource budget a single read runs
-// under. A zero field means "no limit" for that dimension and is omitted from
-// the settings. The caller resolves these from the role's policy caps and the
-// server-wide defaults (see resolveReadBudget).
+// chQueryLimits is the per-request resource budget a single read runs under,
+// taken from the role's resolved policy caps. A zero field means "no limit" for
+// that dimension and is omitted from the settings. Server-wide backstops are
+// ClickHouse's job (settings profiles / quotas), not WaveHouse's — so an admin,
+// whose policy resolves to no caps, sends no settings here and is bounded only
+// by ClickHouse's own config.
 type chQueryLimits struct {
 	// ExecutionTime is the wall-clock budget, emitted as max_execution_time in
 	// fractional seconds. clickhouse-go already derives max_execution_time from

@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/units"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -170,7 +169,7 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 						AllowedAggregations: []string{"count", "sum"},
 						DeniedAggregations:  []string{"avg"},
 						MaxRows:             1000,
-						MaxExecutionTime:    units.Duration(5 * time.Second),
+						MaxExecutionTime:    Millis(5000),
 						MaxRowsToRead:       2_000_000,
 						MaxMemoryUsage:      4 << 30,
 					},
@@ -185,9 +184,10 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 	assert.Equal(t, 1000, perms.MaxRows)
 	// The server-side resource caps (#316) must survive Evaluate so the query
 	// path can turn them into ClickHouse settings.
-	assert.Equal(t, units.Duration(5*time.Second), perms.MaxExecutionTime)
+	assert.Equal(t, Millis(5000), perms.MaxExecutionTime)
+	assert.Equal(t, 5*time.Second, perms.MaxExecutionTime.Duration())
 	assert.Equal(t, int64(2_000_000), perms.MaxRowsToRead)
-	assert.Equal(t, units.ByteSize(4<<30), perms.MaxMemoryUsage)
+	assert.Equal(t, ByteSize(4<<30), perms.MaxMemoryUsage)
 }
 
 func TestIsColumnAllowed(t *testing.T) {
@@ -457,7 +457,7 @@ func TestValidate(t *testing.T) {
 				Tables: map[string]TablePolicy{
 					"clicks": {
 						Insert: map[string]RolePermissions{
-							"user": {MaxExecutionTime: units.Duration(-500 * time.Millisecond)},
+							"user": {MaxExecutionTime: Millis(-500)},
 						},
 					},
 				},

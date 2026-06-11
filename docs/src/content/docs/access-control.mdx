@@ -293,16 +293,18 @@ A disallowed function returns `403 aggregation "x" not allowed`. This is useful 
 
 ## Resource limits
 
-Four fields cap the cost of a single structured query. All must be non-negative; `0` (the default) means "no role-imposed limit" — the server-wide [`query_limits` defaults](/configuration#query-limits) still apply (see below).
+Four fields cap the cost of a single structured query for this role. All must be non-negative; `0` / unset means "no role-imposed limit" (the [server-wide ClickHouse limits](#server-wide-limits-live-in-clickhouse) still apply).
 
 | Field | Effect |
 | ----- | ------ |
 | `max_rows` | Caps the query's `LIMIT`. If the caller asks for more (or omits a limit), the result is clamped to `max_rows`. |
-| `max_execution_time` | A duration string (`"5s"`, `"500ms"`) capping the query execution time, applied as the *minimum* of this value and the server's `clickhouse.query_timeout`. |
+| `max_execution_time` | Caps the query execution time, applied as the *minimum* of this value and the server's `clickhouse.query_timeout`. |
 | `max_rows_to_read` | Caps the rows **scanned from storage** server-side — the lever that stops a full-table scan. The read is rejected once it is exceeded. |
-| `max_memory_usage` | A size string (`"4GiB"`, `"512MiB"`) capping **peak query memory** server-side — the lever that stops a heavy aggregation from exhausting the box. The read is rejected once it is exceeded. |
+| `max_memory_usage` | Caps **peak query memory** server-side — the lever that stops a heavy aggregation from exhausting the box. The read is rejected once it is exceeded. |
 
-`max_rows_to_read`, `max_memory_usage`, and the execution-time budget are enforced **server-side by ClickHouse** (sent as per-query `max_rows_to_read` / `max_memory_usage` / `max_execution_time` settings), so a query can't outrun its budget during a server-side scan, merge, or aggregation phase — not just while the client is reading rows back. `max_rows` is applied as the SQL `LIMIT` (and mirrored server-side as `max_result_rows` for defense-in-depth).
+`max_execution_time`, `max_rows_to_read`, and `max_memory_usage` are enforced **server-side by ClickHouse** (sent as per-query `max_execution_time` / `max_rows_to_read` / `max_memory_usage` settings), so a query can't outrun its budget during a server-side scan, merge, or aggregation phase — not just while the client is reading rows back. `max_rows` is applied as the SQL `LIMIT` (and mirrored server-side as `max_result_rows` for defense-in-depth).
+
+**`max_execution_time` and `max_memory_usage` accept a human-readable value or a number.** Set `max_execution_time` as a duration string (`"5s"`, `"500ms"`) or a bare number of **milliseconds**; set `max_memory_usage` as a size string (`"4GiB"`, `"512MiB"` — IEC vs SI is respected, so `"4GB"` is 4×10⁹ and `"4GiB"` is 4×2³⁰) or a bare number of **bytes**. The API always **returns** them as those numbers (ms and bytes), so SDK consumers read a plain integer.
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
@@ -333,9 +335,9 @@ select:
 
 These bound a role's blast radius on the cached read path. They do not apply to raw admin SQL, which is unbounded by design (other than the 64 MiB response cap noted in the [API reference](/api)).
 
-### Server-wide defaults
+### Server-wide limits live in ClickHouse
 
-A role that sets no cap of its own still gets a safety net: the [`query_limits` config block](/configuration#query-limits) (`default_max_rows`, `default_max_rows_to_read`, `default_max_memory_usage`) applies its rows-scanned and memory budget to **every non-admin read — structured queries *and* named pipes**, since pipes carry no per-role caps. A per-role policy cap overrides the default for that table+role; the **admin role bypasses these resource backstops entirely**. The 4 GiB default memory cap is on out of the box; the rows-scanned default is off (`0`) by default.
+These policy fields are **per-role** caps. A **server-wide** backstop — one that applies to *every* query regardless of role, including named pipes and raw admin SQL — is not part of the WaveHouse policy: configure it in ClickHouse's own [settings profiles and quotas](/configuration#server-side-resource-limits), where it is enforced natively and composes with the per-role caps above. That keeps global resource governance in one authoritative place and holds even against paths the policy engine doesn't touch.
 
 ## Where each rule is enforced
 
@@ -343,11 +345,11 @@ The same policy drives every data path, but not every field is meaningful on eve
 
 | Surface | Endpoint | Enforced |
 | ------- | -------- | -------- |
-| Structured read | `POST /v1/query?table={table}` | table+role `select` required, then `allow`/`deny_columns`, row `filter`, aggregation rules, `max_rows`, `max_execution_time`, `max_rows_to_read`, `max_memory_usage` (the last three over the [`query_limits` defaults](/configuration#query-limits)) |
+| Structured read | `POST /v1/query?table={table}` | table+role `select` required, then `allow`/`deny_columns`, row `filter`, aggregation rules, and the per-role `max_rows` / `max_execution_time` / `max_rows_to_read` / `max_memory_usage` caps (over the [ClickHouse server-wide limits](/configuration#server-side-resource-limits)) |
 | Ingest (write) | `POST /v1/ingest?table={table}` | table+role `insert` required, then `allow`/`deny_columns` and `check` (enforced and auto-injected) |
 | Live stream | `GET /v1/stream` | table+role `select` required (a table the role can't read is skipped), then denied columns are masked from each event |
 | Raw SQL | `POST /v1/admin/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
-| Named pipe | `GET/POST /v1/pipes/{name}` | per-pipe `allowed_roles` (not the policy engine; see [Named Pipes](/pipes)), plus the server-wide `query_limits` rows-scanned/memory defaults for non-admin reads |
+| Named pipe | `GET/POST /v1/pipes/{name}` | per-pipe `allowed_roles` (not the policy engine; see [Named Pipes](/pipes)). Resource limits come from ClickHouse's [server-wide settings](/configuration#server-side-resource-limits), not per-role policy caps |
 
 :::caution[Live streams enforce access, not row filters]
 SSE subscribers are checked for table-level `select` permission and have denied columns stripped from each event, but the row-level `filter` predicates and the resource limits (`max_rows`, `max_execution_time`, `max_rows_to_read`, `max_memory_usage`) are a property of the SQL query path and are **not** applied to the live event stream. If a role must never observe another tenant's rows in real time, don't grant it stream access to a shared table — scope the data at the table level.
@@ -498,10 +500,10 @@ Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
 | `check` | map | insert | Required insert values (`_eq` only). Enforced if present in the body, auto-injected if absent. Supports templating. |
 | `allowed_aggregations` | string[] | select | Allowlist of aggregation functions. Empty = all (minus denied). Case-insensitive. |
 | `denied_aggregations` | string[] | select | Blocklist of aggregation functions. Always wins. |
-| `max_rows` | int | select | Caps the query `LIMIT`. `0` = no role limit (the `query_limits.default_max_rows` default applies). Must be non-negative. |
-| `max_execution_time` | duration string | select | Caps the query timeout (min with `clickhouse.query_timeout`), e.g. `"5s"`, `"500ms"`. Empty = no limit. Must be non-negative. |
-| `max_rows_to_read` | int | select | Caps rows **scanned** server-side (ClickHouse `max_rows_to_read`); the read is rejected once exceeded. `0` = inherit `query_limits.default_max_rows_to_read`. Must be non-negative. |
-| `max_memory_usage` | size string | select | Caps peak query memory server-side (ClickHouse `max_memory_usage`), e.g. `"4GiB"`, `"512MiB"`; the read is rejected once exceeded. Empty/`0` = inherit `query_limits.default_max_memory_usage`. Must be non-negative. |
+| `max_rows` | int | select | Caps the query `LIMIT`. `0` = no limit (the `query.default_max_rows` config default applies). Must be non-negative. |
+| `max_execution_time` | duration or ms | select | Caps the query timeout (min with `clickhouse.query_timeout`). Set as `"5s"`/`"500ms"` or a number of ms; returned as ms. `0` = no limit. Must be non-negative. |
+| `max_rows_to_read` | int | select | Caps rows **scanned** server-side (ClickHouse `max_rows_to_read`); the read is rejected once exceeded. `0` = no role limit. Must be non-negative. |
+| `max_memory_usage` | size or bytes | select | Caps peak query memory server-side (ClickHouse `max_memory_usage`). Set as `"4GiB"`/`"512MiB"` or a number of bytes; returned as bytes. `0` = no role limit. Must be non-negative. |
 
 ## See also
 

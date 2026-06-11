@@ -214,12 +214,20 @@ export interface RolePermissions {
   denied_aggregations?: string[];
   /** Caps the query result LIMIT. 0 = no limit. */
   max_rows?: number;
-  /** Max query execution time as a duration string, e.g. "5s" or "500ms". Enforced server-side by ClickHouse. */
-  max_execution_time?: string;
+  /**
+   * Max query execution time, enforced server-side by ClickHouse. Set it as a
+   * duration string ("5s", "500ms") or a number of milliseconds; reads always
+   * return the number of milliseconds.
+   */
+  max_execution_time?: number | string;
   /** Max rows scanned from storage, enforced server-side by ClickHouse. 0 = no limit. */
   max_rows_to_read?: number;
-  /** Max peak query memory as a size string, e.g. "4GiB" or "512MiB". Enforced server-side by ClickHouse. */
-  max_memory_usage?: string;
+  /**
+   * Max peak query memory, enforced server-side by ClickHouse. Set it as a size
+   * string ("4GiB", "512MiB") or a number of bytes; reads always return the
+   * number of bytes.
+   */
+  max_memory_usage?: number | string;
 }
 
 export interface PolicyFilter {

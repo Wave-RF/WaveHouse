@@ -263,7 +263,7 @@ func TestBuild_LimitWithinRange_Respected(t *testing.T) {
 }
 
 // TestBuild_ConfigurableDefaultMaxRows pins that the default LIMIT is the value
-// the caller passes (the query_limits.default_max_rows knob), both as the
+// the caller passes (the query.default_max_rows knob), both as the
 // no-limit fallback and as the ceiling an over-large request is clamped to —
 // and that a non-positive value falls back to the DefaultMaxRows constant so a
 // read is never left unbounded or clamped to LIMIT 0.

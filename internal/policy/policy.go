@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
-	"github.com/Wave-RF/WaveHouse/internal/units"
 )
 
 // Policy is the top-level access control configuration.
@@ -47,9 +46,9 @@ type RolePermissions struct {
 	// MaxExecutionTime and MaxMemoryUsage are human-readable scalars ("5s",
 	// "4GiB") to match clickhouse.query_timeout; MaxRowsToRead is a plain count
 	// (int64, since it can exceed 2³¹ on a large table).
-	MaxExecutionTime units.Duration `json:"max_execution_time,omitempty" yaml:"max_execution_time,omitempty"`
-	MaxRowsToRead    int64          `json:"max_rows_to_read,omitempty" yaml:"max_rows_to_read,omitempty"`
-	MaxMemoryUsage   units.ByteSize `json:"max_memory_usage,omitempty" yaml:"max_memory_usage,omitempty"`
+	MaxExecutionTime Millis   `json:"max_execution_time,omitempty" yaml:"max_execution_time,omitempty"`
+	MaxRowsToRead    int64    `json:"max_rows_to_read,omitempty" yaml:"max_rows_to_read,omitempty"`
+	MaxMemoryUsage   ByteSize `json:"max_memory_usage,omitempty" yaml:"max_memory_usage,omitempty"`
 }
 
 // Filter represents a single comparison operation.
@@ -72,9 +71,9 @@ type ResolvedPermissions struct {
 	AllowedAggregations []string
 	DeniedAggregations  []string
 	MaxRows             int
-	MaxExecutionTime    units.Duration
+	MaxExecutionTime    Millis
 	MaxRowsToRead       int64
-	MaxMemoryUsage      units.ByteSize
+	MaxMemoryUsage      ByteSize
 }
 
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
