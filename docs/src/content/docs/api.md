@@ -175,7 +175,7 @@ Accepts a single flat JSON object, a JSON array of objects, or a newline-delimit
 | a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
 | one JSON object per line (NDJSON) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)).
+The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
 The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
 
@@ -449,6 +449,8 @@ Table, column, and alias names may contain any characters ClickHouse accepts —
 
 JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
 
+The inbound request body is capped at 1 MiB; a body over the cap is rejected with `413`. A query AST is bounded by nature (far under 1 MiB even with a large `in`-list), and the cap blocks a single-request memory-exhaustion vector on this public endpoint. Set a tighter or higher outer limit at your [reverse proxy](/reverse-proxy#request-body-size-limits) — but it can only narrow the effective limit, not raise it past this cap.
+
 **Error responses:**
 
 | Status | Body | Cause |
@@ -458,6 +460,7 @@ JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: M
 | 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
 | 404 | `{"error":"unknown table: x"}` | Table not found |
+| 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
 
 ---
 
@@ -480,6 +483,8 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
 
+The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same control-plane cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
+
 **Error responses:**
 
 | Status | Body | Cause |
@@ -487,6 +492,7 @@ JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whe
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
 | 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
 | 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
+| 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
 
 ---
 
@@ -523,6 +529,10 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
 **CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
+
+:::caution[Behind a proxy: disable buffering, raise idle timeouts]
+SSE needs proxy-specific configuration. Disable response buffering (or the proxy holds events until a buffer fills), and raise the idle/read timeout for this route: WaveHouse sends a single `: connected` comment on open and then **no periodic heartbeat** ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so a quiet stream can be reset by an intermediary's idle timeout. Browser `EventSource` auto-reconnects (resuming via `Last-Event-ID`); server-side consumers should reconnect. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
+:::
 
 **curl example:**
 
@@ -648,6 +658,8 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 ### Admin Endpoints
 
 Admin endpoints require the policy `admin_role` (`"admin"` by default, exact case-sensitive match). There is no separate `service` role. The JWT middleware always runs — a request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied.
+
+The admin endpoints that accept a request body — `PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, and `PUT /v1/admin/pipes/{name}` — cap it at 1 MiB (the same control-plane backstop as the public read endpoints); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use.
 
 #### `GET /v1/admin/policy` — Get Access Control Policy
 

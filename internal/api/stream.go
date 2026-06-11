@@ -61,6 +61,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Tell nginx-class proxies not to buffer this response, so events reach the
+	// client as they're flushed instead of being held until a buffer fills.
+	// nginx strips X-Accel-Buffering before forwarding (the browser never sees
+	// it); Caddy/Cloudflare ignore it harmlessly. Saves operators a per-location
+	// `proxy_buffering off` — see docs: Behind a reverse proxy → Server-Sent Events.
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Flush headers immediately so the client's EventSource.onopen fires right
 	// away instead of waiting for the first data event.

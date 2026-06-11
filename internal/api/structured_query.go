@@ -29,6 +29,13 @@ type StructuredQueryHandler struct {
 	maxQueryTimeout time.Duration
 	limits          QueryLimits
 	logger          *slog.Logger
+
+	// maxRequestBytes optionally overrides the default inbound request body
+	// cap (maxControlBodyBytes). When 0, the default applies. Exists so
+	// same-package tests can pin the cap-overflow path without allocating
+	// 1 MiB per run; not a production tuning knob, hence unexported. Mirrors
+	// QueryHandler.
+	maxRequestBytes int64
 }
 
 func NewStructuredQueryHandler(
@@ -66,8 +73,22 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Bound the inbound body before decoding it. The query AST is a small,
+	// bounded description, but a JSON array of many tiny elements (e.g. a huge
+	// `in`-list value) amplifies ~13× bytes→live-heap when decoded, so an
+	// uncapped decoder on this public endpoint is a single-request OOM vector
+	// (#315). 413 (not 400) tells a caller "too much", distinct from "garbage".
+	reqCap := int64(maxControlBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
+
 	var sq query.StructuredQuery
 	if err := json.NewDecoder(r.Body).Decode(&sq); err != nil {
+		if writeMaxBytesError(w, err, reqCap) {
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}

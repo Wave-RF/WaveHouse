@@ -27,6 +27,13 @@ type PipesHandler struct {
 	maxQueryTimeout time.Duration
 	limits          QueryLimits
 	logger          *slog.Logger
+
+	// maxRequestBytes optionally overrides the default inbound request body
+	// cap (maxControlBodyBytes) for the body-decoding paths (Put, Execute).
+	// When 0, the default applies. Test-only seam (pin the cap-overflow path
+	// without allocating 1 MiB per run); not a production knob. Mirrors
+	// StructuredQueryHandler / QueryHandler.
+	maxRequestBytes int64
 }
 
 func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, limits QueryLimits, logger *slog.Logger) *PipesHandler {
@@ -58,8 +65,18 @@ func (h *PipesHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Put creates or updates a named query (admin endpoint).
 func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+
+	reqCap := int64(maxControlBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
+
 	var q pipes.NamedQuery
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
+		if writeMaxBytesError(w, err, reqCap) {
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -131,8 +148,23 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.Method == http.MethodPost {
+		reqCap := int64(maxControlBodyBytes)
+		if h.maxRequestBytes > 0 {
+			reqCap = h.maxRequestBytes
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			// An oversized body is a hard stop: MaxBytesReader truncated it
+			// mid-decode, so the parameters can't be trusted — surface 413
+			// (parity with /v1/query and the ingest/admin handlers). Any other
+			// decode error keeps the historical lenient behavior: parameters may
+			// legitimately come from the query string alone, so a malformed or
+			// empty body falls through to those rather than failing the request.
+			if writeMaxBytesError(w, err, reqCap) {
+				return
+			}
+		} else {
 			for k, v := range body {
 				supplied[k] = v
 			}

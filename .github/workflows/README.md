@@ -24,6 +24,7 @@ graph TB
     unit -. "coverage-unit (poll)" .-> coverage
     integration -. "coverage-integration (poll)" .-> coverage
     e2e -. "coverage-e2e (poll)" .-> coverage
+    coverage --> badge["badge (main) — non-gating"]
     title["title (PRs)"] --> ci["CI (aggregator — sole required check)"]
     lint["lint"] --> ci
     coverage --> ci
@@ -54,12 +55,14 @@ Break one of these knowingly or not at all.
    Go suites) and event-filtered jobs (title on pushes, deploys on PRs)
    never orphan the required check, and adding/renaming jobs never
    requires a ruleset edit. Consequence: every job that must gate merges
-   **must be in the aggregator's `needs` list**. Two jobs are deliberately
-   non-gating and excluded: `timing` (advisory wall-clock table) and
+   **must be in the aggregator's `needs` list**. Three jobs are deliberately
+   non-gating and excluded: `timing` (advisory wall-clock table),
    `docs-preview` (the convenience Cloudflare preview deploy — `docs-build`
    already validates the build and *is* a need, so only the build gates;
    the preview deploy reports its own "Docs preview" check but, slow or
-   failed, never delays or reds `CI`).
+   failed, never delays or reds `CI`), and `badge` (publishes the README
+   coverage badge to the `badges` branch on main pushes — a badge push must
+   never block a merge; it reports its own "Coverage badge" status).
 
 2. **A dedicated `coverage` job applies the consolidated gate, polling —
    not `needs`-ing — the suites.** Each suite (`unit`, `integration`,
@@ -123,6 +126,33 @@ Break one of these knowingly or not at all.
    `ci.yml`. Trade-offs accepted: failed jobs don't save (restore-keys
    cushion the next run), and concurrent same-key misses produce benign
    "already exists" warnings.
+
+## Coverage publishing
+
+The `coverage` job both **gates** (`make cov` against the floors in
+`.testcoverage.yml`) and **publishes** — independent concerns, and only the
+gate blocks merges ([#133](https://github.com/Wave-RF/WaveHouse/issues/133)):
+
+- **Per-run job summary** — the merged per-package func table on every run's
+  Summary page.
+- **PR comment (GitHub Code Quality)** — on same-repo PRs and main pushes the
+  job converts the merged Go profile to Cobertura (`go tool gocover-cobertura`,
+  `-ignore-dirs` mirroring `.testcoverage.yml`'s global excludes so the % tracks
+  the merged-total gate) and uploads it via `actions/upload-code-coverage`; the
+  `github-code-quality[bot]` posts the aggregate + per-file diff-vs-main
+  comment. **Non-gating**: the upload is `continue-on-error`, so this
+  public-preview feature can never red `CI`. Fork PRs skip (no `code-quality`
+  token, per GitHub's own guard). Renders only once the repo's *Settings →
+  Security → Code quality* is enabled.
+- **README badge** — on main pushes the job emits a shields.io endpoint JSON
+  for the merged Go total (`cov badge`, the exact gated number); the separate
+  non-gating `badge` job publishes it to the orphan `badges` branch, which the
+  README badge reads over `raw.githubusercontent.com` (public-repo only). The
+  `badge` job is the sole holder of `contents:write` and runs only on trusted
+  main, so a push to `badges` can't be influenced by PR code (invariant 5).
+
+SDK (TS) coverage is gated by `make cov` but not yet published — extend with a
+`language: javascript` upload step and a second badge JSON when wanted.
 
 ## Merge queue
 

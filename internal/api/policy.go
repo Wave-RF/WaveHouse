@@ -10,6 +10,13 @@ import (
 // PolicyHandler handles policy CRUD endpoints.
 type PolicyHandler struct {
 	Store *policy.Store
+
+	// maxRequestBytes optionally overrides the default inbound body cap
+	// (maxControlBodyBytes) on the decoding paths (Put, Validate). When 0, the
+	// default applies. Test-only seam (pin the cap-overflow path without
+	// allocating 1 MiB per run); not a production knob. Mirrors the other
+	// body-decoding handlers in this package.
+	maxRequestBytes int64
 }
 
 func NewPolicyHandler(store *policy.Store) *PolicyHandler {
@@ -30,8 +37,16 @@ func (h *PolicyHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 // Put replaces the current access control policy.
 func (h *PolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
+	reqCap := int64(maxControlBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 	var p policy.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		if writeMaxBytesError(w, err, reqCap) {
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -47,8 +62,16 @@ func (h *PolicyHandler) Put(w http.ResponseWriter, r *http.Request) {
 
 // Validate checks a policy without saving it.
 func (h *PolicyHandler) Validate(w http.ResponseWriter, r *http.Request) {
+	reqCap := int64(maxControlBodyBytes)
+	if h.maxRequestBytes > 0 {
+		reqCap = h.maxRequestBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, reqCap)
 	var p policy.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		if writeMaxBytesError(w, err, reqCap) {
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}

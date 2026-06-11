@@ -54,9 +54,12 @@ type QueryLimits struct {
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
 // when false, no signals are initialized regardless of the per-signal toggles.
+// The OTLP destination — endpoint, TLS, custom CA, mutual TLS, and auth headers
+// — is configured through the standard OTEL_EXPORTER_OTLP_* environment
+// variables read by the OpenTelemetry SDK, not WaveHouse config. See
+// docs/configuration.md.
 type OTel struct {
 	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
-	Addr    string      `yaml:"addr" env:"WH_OTEL_ADDR" env-default:"127.0.0.1:4317"`
 	Traces  OTelTraces  `yaml:"traces"`
 	Metrics OTelMetrics `yaml:"metrics"`
 	Logs    OTelLogs    `yaml:"logs"`
@@ -224,9 +227,6 @@ func (c *Config) Validate() error {
 	}
 
 	if c.OTel.Enabled {
-		if c.OTel.Addr == "" {
-			return fmt.Errorf("otel.addr must be non-empty when otel.enabled is true")
-		}
 		// Only validate sample rates for signals that are actually enabled —
 		// an unused field shouldn't block startup.
 		if c.OTel.Traces.Enabled {
