@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,7 +169,9 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 						AllowedAggregations: []string{"count", "sum"},
 						DeniedAggregations:  []string{"avg"},
 						MaxRows:             1000,
-						MaxExecutionTimeMs:  5000,
+						MaxExecutionTime:    Millis(5000),
+						MaxRowsToRead:       2_000_000,
+						MaxMemoryUsage:      4 << 30,
 					},
 				},
 			},
@@ -179,7 +182,12 @@ func TestEvaluate_AggregationLimits(t *testing.T) {
 	assert.Equal(t, []string{"count", "sum"}, perms.AllowedAggregations)
 	assert.Equal(t, []string{"avg"}, perms.DeniedAggregations)
 	assert.Equal(t, 1000, perms.MaxRows)
-	assert.Equal(t, 5000, perms.MaxExecutionTimeMs)
+	// The server-side resource caps (#316) must survive Evaluate so the query
+	// path can turn them into ClickHouse settings.
+	assert.Equal(t, Millis(5000), perms.MaxExecutionTime)
+	assert.Equal(t, 5*time.Second, perms.MaxExecutionTime.Duration())
+	assert.Equal(t, int64(2_000_000), perms.MaxRowsToRead)
+	assert.Equal(t, ByteSize(4<<30), perms.MaxMemoryUsage)
 }
 
 func TestIsColumnAllowed(t *testing.T) {
@@ -449,13 +457,41 @@ func TestValidate(t *testing.T) {
 				Tables: map[string]TablePolicy{
 					"clicks": {
 						Insert: map[string]RolePermissions{
-							"user": {MaxExecutionTimeMs: -500},
+							"user": {MaxExecutionTime: Millis(-500)},
 						},
 					},
 				},
 			},
 			wantErr: true,
-			wantMsg: "max_execution_time_ms",
+			wantMsg: "max_execution_time",
+		},
+		{
+			name: "negative max_rows_to_read",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {MaxRowsToRead: -1},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "max_rows_to_read",
+		},
+		{
+			name: "negative max_memory_usage",
+			policy: &Policy{
+				Tables: map[string]TablePolicy{
+					"clicks": {
+						Select: map[string]RolePermissions{
+							"viewer": {MaxMemoryUsage: -1},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			wantMsg: "max_memory_usage",
 		},
 		{
 			name: "empty role key rejected",

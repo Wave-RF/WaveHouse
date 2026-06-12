@@ -148,7 +148,7 @@ func TestIntegration_WeirdColumnNamesRoundTrip(t *testing.T) {
 			res, err := query.Build(table, &query.StructuredQuery{
 				Columns: []string{col},
 				Filters: []query.Filter{{Column: "id", Op: "eq", Value: "row1"}},
-			}, schema, nil, 0)
+			}, schema, nil, 0, query.DefaultMaxRows)
 			require.NoErrorf(t, err, "builder must accept legal ClickHouse column %q", col)
 
 			assert.Equalf(t, want, queryOneString(t, res),
@@ -182,7 +182,7 @@ func TestIntegration_WeirdTableNamesRoundTrip(t *testing.T) {
 			res, err := query.Build(table, &query.StructuredQuery{
 				Columns: []string{"val"},
 				Filters: []query.Filter{{Column: "id", Op: "eq", Value: "row1"}},
-			}, schema, nil, 0)
+			}, schema, nil, 0, query.DefaultMaxRows)
 			require.NoError(t, err)
 
 			assert.Equalf(t, want, queryOneString(t, res),
@@ -207,7 +207,7 @@ func TestIntegration_WeirdEverythingCombined(t *testing.T) {
 	res, err := query.Build(table, &query.StructuredQuery{
 		Aggregations: []query.Aggregation{{Fn: "max", Column: "weird.metric", Alias: "naïve max"}},
 		Filters:      []query.Filter{{Column: "id", Op: "eq", Value: "row1"}},
-	}, schema, nil, 0)
+	}, schema, nil, 0, query.DefaultMaxRows)
 	require.NoError(t, err, "builder must accept weird table + weird agg column + weird alias")
 
 	assert.Equal(t, "7", queryOneString(t, res),
@@ -232,7 +232,7 @@ func TestIntegration_AliasInjectionContained(t *testing.T) {
 	const evil = "c FROM system.tables; --"
 	res, err := query.Build(table, &query.StructuredQuery{
 		Aggregations: []query.Aggregation{{Fn: "count", Column: "*", Alias: evil}},
-	}, schema, nil, 0)
+	}, schema, nil, 0, query.DefaultMaxRows)
 	require.NoError(t, err, "a permissive alias must be accepted, not rejected")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -262,13 +262,13 @@ func TestIntegration_StarColumnSemantics(t *testing.T) {
 		"discovery should surface a real column literally named *")
 
 	// columns:["*"] reads the literal column named "*" — not all columns.
-	res, err := query.Build(table, &query.StructuredQuery{Columns: query.Columns{"*"}}, schema, nil, 0)
+	res, err := query.Build(table, &query.StructuredQuery{Columns: query.Columns{"*"}}, schema, nil, 0, query.DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Equalf(t, "star-value", queryOneString(t, res),
 		`columns:["*"] must read the literal column named *: %s`, res.SQL)
 
 	// select_all is the all-columns wildcard (returns every column, including *).
-	res, err = query.Build(table, &query.StructuredQuery{SelectAll: true}, schema, nil, 0)
+	res, err = query.Build(table, &query.StructuredQuery{SelectAll: true}, schema, nil, 0, query.DefaultMaxRows)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

@@ -67,6 +67,43 @@ auth:
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
 }
 
+func TestLoad_QueryLimits_Defaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	// Only the result-LIMIT default lives in WaveHouse config now; server-wide
+	// resource limits (memory, rows scanned, time) are ClickHouse's job.
+	assert.Equal(t, 10000, cfg.Query.DefaultMaxRows)
+}
+
+func TestLoad_QueryLimits_FromYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yamlContent := `
+query:
+  default_max_rows: 25000
+`
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, 25000, cfg.Query.DefaultMaxRows)
+}
+
+func TestValidate_NegativeQueryDefaultMaxRows(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+		Schema:     Schema{RefreshInterval: 60},
+		Query:      Query{DefaultMaxRows: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_max_rows")
+}
+
 func TestLoad_EnvOverridesYAML(t *testing.T) {
 	dir := t.TempDir()
 	yamlContent := `

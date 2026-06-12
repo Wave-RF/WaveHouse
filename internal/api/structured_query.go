@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
@@ -26,6 +27,7 @@ type StructuredQueryHandler struct {
 	BucketSecs      int
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
+	defaultMaxRows  int
 	logger          *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body
@@ -43,6 +45,7 @@ func NewStructuredQueryHandler(
 	policyStore *policy.Store,
 	bucketSecs int,
 	queryTimeout time.Duration,
+	defaultMaxRows int,
 	logger *slog.Logger,
 ) *StructuredQueryHandler {
 	return &StructuredQueryHandler{
@@ -52,6 +55,7 @@ func NewStructuredQueryHandler(
 		PolicyStore:     policyStore,
 		BucketSecs:      bucketSecs,
 		maxQueryTimeout: queryTimeout,
+		defaultMaxRows:  defaultMaxRows,
 		logger:          logger,
 	}
 }
@@ -110,7 +114,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// clause (columns, aggregations, filters, group_by, order_by, time_range) can
 	// skip the check. A policy denial returns a typed error we map to 403; a
 	// malformed query maps to 400.
-	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs)
+	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs, h.defaultMaxRows)
 	if err != nil {
 		// A query that selects nothing — no columns, no aggregations, no
 		// select_all — is a request for no data, not an error: return an empty
@@ -166,12 +170,31 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		timeout := h.maxQueryTimeout
-		if perms.MaxExecutionTimeMs > 0 {
-			timeout = min(time.Duration(perms.MaxExecutionTimeMs)*time.Millisecond, timeout)
+		if perms.MaxExecutionTime > 0 {
+			timeout = min(perms.MaxExecutionTime.Duration(), timeout)
 		}
 
 		queryCtx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+
+		// Enforce the role's resource caps server-side, not just via the client
+		// context deadline (#316). The settings ride on the query context, so they
+		// reach ClickHouse for this query only. Server-wide backstops are
+		// ClickHouse's job (settings profiles / quotas); a role with no caps (e.g.
+		// admin) sends nothing here. An explicit max_execution_time is sent only
+		// when the role set a time cap; otherwise the context deadline (=
+		// query_timeout) is the time bound the driver derives.
+		limits := chQueryLimits{
+			MaxResultRows:  perms.MaxRows,
+			MaxRowsToRead:  perms.MaxRowsToRead,
+			MaxMemoryBytes: perms.MaxMemoryUsage.Bytes(),
+		}
+		if perms.MaxExecutionTime > 0 {
+			limits.ExecutionTime = timeout
+		}
+		if settings := chReadSettings(limits); settings != nil {
+			queryCtx = clickhouse.Context(queryCtx, clickhouse.WithSettings(settings))
+		}
 
 		start := time.Now()
 

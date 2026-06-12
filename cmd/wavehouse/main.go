@@ -381,7 +381,7 @@ func run() int {
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
 		Logger:          logger,

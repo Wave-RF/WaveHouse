@@ -438,7 +438,7 @@ Every column the query references — in `columns`, an aggregation argument, `fi
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
-| `limit` | int | No | Max rows. Omitted or above 10,000 → silently capped at 10,000 (`DefaultMaxRows`); a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
+| `limit` | int | No | Max rows. Omitted or above the configured `query.default_max_rows` (default 10,000) → silently capped at that value; a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
 | `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-duration relative values ("1h", "30m", "7d", "2w" — day and week suffixes expand to hours). Relative values mean that long *ago*. The window applies only when `column` and `since` are set — an `until` without `since` is ignored. |
 
 :::note[Identifier names]
