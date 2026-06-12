@@ -304,7 +304,7 @@ Four fields cap the cost of a single structured query for this role. All must be
 
 `max_execution_time`, `max_rows_to_read`, and `max_memory_usage` are enforced **server-side by ClickHouse** (sent as per-query `max_execution_time` / `max_rows_to_read` / `max_memory_usage` settings), so a query can't outrun its budget during a server-side scan, merge, or aggregation phase — not just while the client is reading rows back. `max_rows` is applied as the SQL `LIMIT` (and mirrored server-side as `max_result_rows` for defense-in-depth).
 
-**`max_execution_time` and `max_memory_usage` accept a human-readable value or a number.** Set `max_execution_time` as a duration string (`"5s"`, `"500ms"`) or a bare number of **milliseconds**; set `max_memory_usage` as a size string (`"4GiB"`, `"512MiB"` — IEC vs SI is respected, so `"4GB"` is 4×10⁹ and `"4GiB"` is 4×2³⁰) or a bare number of **bytes**. The API always **returns** them as those numbers (ms and bytes), so SDK consumers read a plain integer.
+**`max_execution_time` and `max_memory_usage` accept a human-readable value or a number.** Set `max_execution_time` as a duration string (`"5s"`, `"500ms"`) or a bare number of **milliseconds**; set `max_memory_usage` as a size string (`"4GiB"`, `"512MiB"` — IEC vs SI is respected, so `"4GB"` is 4×10<sup>9</sup> and `"4GiB"` is 4×2<sup>30</sup>) or a bare number of **bytes**. The API always **returns** them as those numbers (ms and bytes), so SDK consumers read a plain integer.
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">

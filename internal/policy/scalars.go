@@ -87,7 +87,7 @@ func (m *Millis) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // ByteSize is a byte count. Input accepts a size string ("4GiB", "512MiB", with
-// SI vs IEC distinguished — "4GB" is 4×10⁹, "4GiB" is 4×2³⁰) or a bare integer
+// SI vs IEC distinguished — "4GB" is 4×10^9, "4GiB" is 4×2^30) or a bare integer
 // count of bytes.
 type ByteSize int64
 

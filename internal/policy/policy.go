@@ -45,7 +45,7 @@ type RolePermissions struct {
 	// a heavy aggregation can't exhaust the box within the time budget.
 	// MaxExecutionTime and MaxMemoryUsage are human-readable scalars ("5s",
 	// "4GiB") to match clickhouse.query_timeout; MaxRowsToRead is a plain count
-	// (int64, since it can exceed 2³¹ on a large table).
+	// (int64, since it can exceed 2^31 on a large table).
 	MaxExecutionTime Millis   `json:"max_execution_time,omitempty" yaml:"max_execution_time,omitempty"`
 	MaxRowsToRead    int64    `json:"max_rows_to_read,omitempty" yaml:"max_rows_to_read,omitempty"`
 	MaxMemoryUsage   ByteSize `json:"max_memory_usage,omitempty" yaml:"max_memory_usage,omitempty"`
