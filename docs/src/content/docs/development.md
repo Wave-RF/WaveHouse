@@ -27,7 +27,7 @@ Run `make tools` once after cloning to populate everything that doesn't have to 
 
 - **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
 - **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
-- **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
+- **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
 - **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by `rehype-mermaid` (SVG diagram rendering at build time; nothing else in the docs *build* uses a browser — the manual `docs/scripts/screenshot.mjs` QA helper drives the same Chromium). `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
 
 ### Verify your setup
@@ -349,7 +349,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 
 **Architecture**:
 
-- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved.
+- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
 - `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
@@ -519,15 +519,13 @@ For a combined security scan, run `make verify` — it runs `vulncheck` alongsid
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for five ecosystems:
+Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
 
 - **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
 - **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
-- **npm — docs site** (`docs/`), commit prefix `docs:`
-- **npm — TypeScript SDK** (`clients/ts/`), commit prefix `deps(sdk):`
-- **npm — E2E tests** (`tests/e2e/sdk/`), commit prefix `deps(tests):`
+- **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
 
-PRs are grouped by ecosystem to reduce noise.
+PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
@@ -557,7 +555,7 @@ This repo has three tiers of AI automation sitting alongside the normal CI check
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the required `PR housekeeping` check (`.github/workflows/housekeeping.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
+PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the `PR title` job under the required `CI` check (`.github/workflows/ci.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
@@ -567,16 +565,19 @@ Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`,
 
 The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
 
-If the title doesn't match, a sticky comment posts on the PR explaining the format; it auto-removes once the title is fixed.
+If the title doesn't match, a sticky comment posts on the PR explaining the format (from the `PR housekeeping` workflow, which mirrors the same script); it auto-removes once the title is fixed. Fixing the title needs no new push — the edit triggers housekeeping, which re-runs the failed `PR title` job (the job re-reads the title from the API, not the stale event payload).
 
 ### Required status checks
 
-The `main branch protection` ruleset requires two status checks to pass before any PR can merge:
+The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the full `make ci` pipeline (verify + builds + unit/SDK tests, then integration + E2E + coverage gates), run as a single job in `.github/workflows/ci.yml`
-- `PR housekeeping` — PR title is Conventional Commits (`.github/workflows/housekeeping.yml`)
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
+
+The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
 
 The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
+
+Approved, green PRs land through a **merge queue** ("Merge when ready"): the queue re-runs the required `CI` check against the PR merged with *current* main (a `merge_group` event — the CI workflow runs the full test suite for these) and fast-forwards only on green. That integration re-test replaces the old "branch is out-of-date with the base branch" requirement — queued PRs don't need manual branch updates, and the queue never pushes to the PR branch.
 
 Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
 

@@ -173,6 +173,19 @@ AIR         := $(LOCAL_BIN)/air-$(AIR_VERSION)
 MISSPELL_VERSION := v0.8.0
 MISSPELL         := $(LOCAL_BIN)/misspell-$(MISSPELL_VERSION)
 
+# shellcheck: shell-script linter — the CI workflow logic lives in scripts/
+# now, so it gates like any other source. Haskell binary (no `go install`
+# path): official release tarball, checksum-verified by
+# scripts/install-shellcheck.sh. The version is pinned THERE (with the
+# per-platform checksums); this variable only names the installed file.
+SHELLCHECK_VERSION := v0.11.0
+SHELLCHECK         := $(LOCAL_BIN)/shellcheck-$(SHELLCHECK_VERSION)
+
+# actionlint: GitHub Actions workflow linter (also shellchecks the inline
+# `run:` blocks via $(SHELLCHECK)). Pure Go — go-install pattern like air.
+ACTIONLINT_VERSION := v1.7.12
+ACTIONLINT         := $(LOCAL_BIN)/actionlint-$(ACTIONLINT_VERSION)
+
 # --- Coverage Directories -----------------------------------------------------
 # One path per suite. Internal layout (managed by scripts/coverage.sh):
 #   $(COV_X)/data/         binary covdata (covmeta.* / covcounters.*)
@@ -371,6 +384,30 @@ lint-md: pnpm-install
 lint-prose: $(MISSPELL)
 	$(call run,misspell (US spelling),$(MISSPELL) -locale US -source text -error $(DOCS_PROSE),run make fix to auto-correct)
 
+# lint-sh: shellcheck over every tracked shell script (scripts/, hooks,
+# docs tooling). -x follows `source`d files; -P SCRIPTDIR resolves
+# `# shellcheck source=` directives relative to the sourcing script, not
+# the cwd. Lazily expanded so the ls-files only runs when the target does.
+SHELL_SOURCES = $(shell git ls-files '*.sh')
+.PHONY: lint-sh
+lint-sh: $(SHELLCHECK)
+	$(call run,shellcheck,$(SHELLCHECK) -x -P SCRIPTDIR $(SHELL_SOURCES),)
+
+# lint-gha: actionlint over .github/workflows/*.yml — expression/type
+# errors, action-input mismatches, SHA-pin syntax, and shellcheck (via the
+# pinned $(SHELLCHECK)) on inline run: blocks.
+.PHONY: lint-gha
+lint-gha: $(ACTIONLINT) $(SHELLCHECK)
+	$(call run,actionlint (workflows),$(ACTIONLINT) -shellcheck $(SHELLCHECK),)
+
+# test-classify-paths: assert scripts/classify-paths.sh (the shared change
+# classifier behind CI's `changes` job and the local git hooks) against the
+# canonical change shapes — fast, dependency-free, so the allowlists can't
+# silently regress. A verify leaf so CI's lint job runs it.
+.PHONY: test-classify-paths
+test-classify-paths:
+	$(call run,classify-paths test,scripts/classify-paths.test.sh,)
+
 .PHONY: vulncheck
 vulncheck: go-mod-download ## Run govulncheck (V=1 for full call stacks)
 ifdef V
@@ -446,7 +483,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths vulncheck check-docs typecheck-ts
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -651,6 +688,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 # from the cover binary → tmp/coverage/e2e/data/; vitest v8 coverage of
 # the SDK source → tmp/coverage/ts-e2e/) — same "always coverage" pattern
 # as the Go test targets. `make cov` merges ts-unit + ts-e2e after.
+#
 .PHONY: test-e2e
 test-e2e: build-ts build-cover ## Run E2E SDK suite against cover binary + render coverage + gate
 	@printf "$(CYAN)==> Running E2E Tests...$(RESET)\n"
@@ -837,10 +875,11 @@ clean-all: clean clean-test clean-tools ## Full reset — clean + clean-test + c
 # them pre-compiled (offline CI image baking), run them once with --help.
 .PHONY: tools
 tools: ## Install pinned tools, Go modules, pnpm deps, and git hooks
-	@# The five installs are independent — fan them out under -j (golangci-lint
-	@# download ∥ air ∥ misspell ∥ go-mod-download ∥ pnpm-install). Go's module
-	@# cache is concurrency-safe, so this is just faster on a cold clone.
-	@$(MAKE) -j $(JOBS) $(GOLANGCI_LINT) $(AIR) $(MISSPELL) go-mod-download pnpm-install
+	@# The installs are independent — fan them out under -j (golangci-lint
+	@# download ∥ air ∥ misspell ∥ shellcheck ∥ actionlint ∥ go-mod-download
+	@# ∥ pnpm-install). Go's module cache is concurrency-safe, so this is
+	@# just faster on a cold clone.
+	@$(MAKE) -j $(JOBS) $(GOLANGCI_LINT) $(AIR) $(MISSPELL) $(SHELLCHECK) $(ACTIONLINT) go-mod-download pnpm-install
 	@# Install team-wide git hooks via core.hooksPath. Idempotent — running
 	@# `make tools` repeatedly just re-asserts the config. The .githooks/
 	@# directory is committed; this line plumbs git to it. Users can opt out
@@ -881,4 +920,16 @@ $(MISSPELL):
 	@mkdir -p $(LOCAL_BIN)
 	@GOBIN=$(LOCAL_BIN) go install github.com/golangci/misspell/cmd/misspell@$(MISSPELL_VERSION)
 	@mv $(LOCAL_BIN)/misspell $@
+	@echo "$(GREEN)==> Installed: $@$(RESET)"
+
+# shellcheck is a Haskell binary — fetched as the official release tarball
+# and checksum-verified; version + per-platform sha256 live in the script.
+$(SHELLCHECK):
+	@scripts/install-shellcheck.sh $@
+
+$(ACTIONLINT):
+	@echo "$(YELLOW)==> Installing actionlint $(ACTIONLINT_VERSION) for $(OS)_$(ARCH)...$(RESET)"
+	@mkdir -p $(LOCAL_BIN)
+	@GOBIN=$(LOCAL_BIN) go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	@mv $(LOCAL_BIN)/actionlint $@
 	@echo "$(GREEN)==> Installed: $@$(RESET)"

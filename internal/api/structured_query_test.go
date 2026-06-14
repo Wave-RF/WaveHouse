@@ -40,7 +40,7 @@ func newStructuredQueryHandler() *StructuredQueryHandler {
 			},
 		},
 	})
-	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second, testutil.NopLogger())
+	return NewStructuredQueryHandler(nil, nil, reg, nil, 60, 5*time.Second, 0, testutil.NopLogger())
 }
 
 func TestStructuredQuery_MissingTable(t *testing.T) {
@@ -119,6 +119,36 @@ func TestStructuredQuery_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestStructuredQuery_RequestBodyCap pins the control-plane body cap on the
+// public read path. The handler wraps r.Body in http.MaxBytesReader before the
+// decode (#315), so a well-formed-but-oversized query returns 413 — distinct
+// from "invalid json", and well before the JSON array amplifies in the decoder.
+// maxRequestBytes is set to a tiny value so we don't allocate 1 MiB per run.
+func TestStructuredQuery_RequestBodyCap(t *testing.T) {
+	t.Parallel()
+
+	const testCap = 64
+	h := newStructuredQueryHandler()
+	h.maxRequestBytes = testCap
+
+	// A valid query whose JSON exceeds the cap — a big `in`-list, the exact
+	// array-amplification vector from #315. 413 (not 400) proves the cap fired.
+	sq := query.StructuredQuery{
+		Filters: []query.Filter{{Column: "page", Op: "in", Value: make([]int, 100)}},
+	}
+	body, err := json.Marshal(sq)
+	require.NoError(t, err)
+	require.Greater(t, len(body), testCap, "test body must exceed the cap")
+
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table=clicks", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.Handle(w, r)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized request must 413, not 400")
+	assert.Contains(t, w.Body.String(), "request body exceeded")
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
@@ -262,7 +292,7 @@ func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *Stru
 			},
 		},
 	})
-	return NewStructuredQueryHandler(conn, nil, reg, policy.NewMemoryStore(p), 60, 5*time.Second, testutil.NopLogger())
+	return NewStructuredQueryHandler(conn, nil, reg, policy.NewMemoryStore(p), 60, 5*time.Second, 0, testutil.NopLogger())
 }
 
 func viewerRequest(t *testing.T, sq query.StructuredQuery) *http.Request {

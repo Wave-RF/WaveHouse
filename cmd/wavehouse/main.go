@@ -104,8 +104,11 @@ func run() int {
 	// wanted — Prometheus-only operation (Alloy/scrape, no collector) is a
 	// first-class mode. The OTel SDK MeterProvider is the shared substrate.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
+		// Endpoint, TLS, and auth headers come from the standard
+		// OTEL_EXPORTER_OTLP_* env vars, read by the SDK. A malformed header is
+		// logged and skipped by the SDK (fail-soft); InitProvider's own error is
+		// likewise non-fatal — we log it and fall back to stdout below.
 		otelShutdown, ph, err := observability.InitProvider(ctx, serviceName, observability.ProviderConfig{
-			Endpoint:          cfg.OTel.Addr,
 			TracesEnabled:     cfg.OTel.Enabled && cfg.OTel.Traces.Enabled,
 			TracesSampleRate:  cfg.OTel.Traces.SampleRate,
 			MetricsEnabled:    cfg.OTel.Enabled && cfg.OTel.Metrics.Enabled,
@@ -136,11 +139,15 @@ func run() int {
 				)
 				slog.SetDefault(logger)
 			}
+			otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+			if otlpEndpoint == "" {
+				otlpEndpoint = "localhost:4317 (SDK default)"
+			}
 			switch {
 			case cfg.OTel.Enabled && cfg.Prometheus.Enabled:
-				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr, "prometheus", true)
+				logger.Info("observability pipeline established", "otlp_endpoint", otlpEndpoint, "prometheus", true)
 			case cfg.OTel.Enabled:
-				logger.Info("observability pipeline established", "otlp_endpoint", cfg.OTel.Addr)
+				logger.Info("observability pipeline established", "otlp_endpoint", otlpEndpoint)
 			case cfg.Prometheus.Enabled:
 				logger.Info("observability pipeline established", "prometheus", true)
 			}
@@ -381,7 +388,7 @@ func run() int {
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, logger),
+		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
 		Logger:          logger,

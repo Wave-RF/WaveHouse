@@ -28,7 +28,7 @@ func testSchema() *discovery.TableSchema {
 func TestBuild_SimpleSelect(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Columns: []string{"page", "count"}, Limit: 10}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT `page`, `count` FROM `clicks` LIMIT 10", result.SQL)
 	assert.Empty(t, result.Params)
@@ -37,7 +37,7 @@ func TestBuild_SimpleSelect(t *testing.T) {
 func TestBuild_SelectStar(t *testing.T) {
 	t.Parallel()
 	// SelectAll (not omitted columns) is what produces a full-row read.
-	result, err := Build("clicks", &StructuredQuery{SelectAll: true}, testSchema(), nil, 0)
+	result, err := Build("clicks", &StructuredQuery{SelectAll: true}, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM `clicks` LIMIT 10000", result.SQL)
 }
@@ -57,7 +57,7 @@ func TestBuild_EmptyProjection(t *testing.T) {
 	for name, sq := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Build("clicks", sq, testSchema(), nil, 0)
+			_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 			require.ErrorIs(t, err, ErrEmptyProjection)
 		})
 	}
@@ -67,7 +67,7 @@ func TestBuild_EmptyProjection(t *testing.T) {
 // ambiguous → ErrColumnsAndSelectAll (handler maps it to 400).
 func TestBuild_ColumnsAndSelectAll(t *testing.T) {
 	t.Parallel()
-	_, err := Build("clicks", &StructuredQuery{Columns: Columns{"page"}, SelectAll: true}, testSchema(), nil, 0)
+	_, err := Build("clicks", &StructuredQuery{Columns: Columns{"page"}, SelectAll: true}, testSchema(), nil, 0, DefaultMaxRows)
 	require.ErrorIs(t, err, ErrColumnsAndSelectAll)
 }
 
@@ -76,13 +76,13 @@ func TestBuild_ColumnsAndSelectAll(t *testing.T) {
 func TestBuild_LiteralStarColumn(t *testing.T) {
 	t.Parallel()
 	// Not in the schema → unknown column.
-	_, err := Build("clicks", &StructuredQuery{Columns: Columns{"*"}}, testSchema(), nil, 0)
+	_, err := Build("clicks", &StructuredQuery{Columns: Columns{"*"}}, testSchema(), nil, 0, DefaultMaxRows)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown column")
 
 	// Present in the schema → selected as the quoted literal `*`, never a wildcard.
 	starSchema := &discovery.TableSchema{Name: "t", Columns: []discovery.Column{{Name: "*", Type: "String"}}}
-	result, err := Build("t", &StructuredQuery{Columns: Columns{"*"}}, starSchema, nil, 0)
+	result, err := Build("t", &StructuredQuery{Columns: Columns{"*"}}, starSchema, nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT `*` FROM `t` LIMIT 10000", result.SQL)
 }
@@ -93,7 +93,7 @@ func TestBuild_WithAggregation(t *testing.T) {
 		Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "total"}},
 		GroupBy:      []string{"page"},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "count(*) AS `total`")
 	assert.Contains(t, result.SQL, "GROUP BY `page`")
@@ -120,7 +120,7 @@ func TestBuild_AllFilterOperators(t *testing.T) {
 				Columns: []string{"page"},
 				Filters: []Filter{{Column: "page", Op: tt.op, Value: "test"}},
 			}
-			result, err := Build("clicks", sq, testSchema(), nil, 0)
+			result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 			require.NoError(t, err)
 			assert.Contains(t, result.SQL, tt.want)
 		})
@@ -133,7 +133,7 @@ func TestBuild_InFilter(t *testing.T) {
 		Columns: []string{"page"},
 		Filters: []Filter{{Column: "page", Op: "in", Value: []any{"/home", "/about"}}},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`page` IN (?,?)")
 	assert.Len(t, result.Params, 2)
@@ -145,14 +145,14 @@ func TestBuild_OrderBy(t *testing.T) {
 		Columns: []string{"page", "count"},
 		OrderBy: []OrderClause{{Column: "count", Dir: "desc"}, {Column: "page", Dir: "asc"}},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "ORDER BY `count` DESC, `page` ASC")
 }
 
 func TestBuild_UnknownColumn(t *testing.T) {
 	t.Parallel()
-	_, err := Build("clicks", &StructuredQuery{Columns: []string{"nonexistent"}}, testSchema(), nil, 0)
+	_, err := Build("clicks", &StructuredQuery{Columns: []string{"nonexistent"}}, testSchema(), nil, 0, DefaultMaxRows)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown column")
 }
@@ -160,7 +160,7 @@ func TestBuild_UnknownColumn(t *testing.T) {
 func TestBuild_InvalidAggFn(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "drop_table", Column: "count"}}}
-	_, err := Build("clicks", sq, testSchema(), nil, 0)
+	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported aggregation")
 }
@@ -171,7 +171,7 @@ func TestBuild_TimeRange(t *testing.T) {
 		Columns:   []string{"page"},
 		TimeRange: &TimeRange{Column: "ts", Since: "2024-01-01T00:00:00Z"},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`ts` >= ?")
 	assert.Len(t, result.Params, 1)
@@ -240,7 +240,7 @@ func TestIsValidAggFn(t *testing.T) {
 func TestBuild_DefaultMaxRows_Applied(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Columns: []string{"page"}} // Limit: 0.
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows))
 }
@@ -248,7 +248,7 @@ func TestBuild_DefaultMaxRows_Applied(t *testing.T) {
 func TestBuild_LimitExceedsDefaultMaxRows_Capped(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Columns: []string{"page"}, Limit: DefaultMaxRows + 1}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows))
 	assert.NotContains(t, result.SQL, fmt.Sprintf("LIMIT %d", DefaultMaxRows+1))
@@ -257,9 +257,40 @@ func TestBuild_LimitExceedsDefaultMaxRows_Capped(t *testing.T) {
 func TestBuild_LimitWithinRange_Respected(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Columns: []string{"page"}, Limit: 50}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "LIMIT 50")
+}
+
+// TestBuild_ConfigurableDefaultMaxRows pins that the default LIMIT is the value
+// the caller passes (the query.default_max_rows knob), both as the
+// no-limit fallback and as the ceiling an over-large request is clamped to —
+// and that a non-positive value falls back to the DefaultMaxRows constant so a
+// read is never left unbounded or clamped to LIMIT 0.
+func TestBuild_ConfigurableDefaultMaxRows(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		limit          int
+		defaultMaxRows int
+		wantLimit      int
+	}{
+		{name: "custom default applied when no limit", limit: 0, defaultMaxRows: 250, wantLimit: 250},
+		{name: "request capped at custom default", limit: 999, defaultMaxRows: 250, wantLimit: 250},
+		{name: "request under custom default respected", limit: 100, defaultMaxRows: 250, wantLimit: 100},
+		{name: "custom default above the constant is honored", limit: 0, defaultMaxRows: 50000, wantLimit: 50000},
+		{name: "zero falls back to the constant", limit: 0, defaultMaxRows: 0, wantLimit: DefaultMaxRows},
+		{name: "negative falls back to the constant", limit: 0, defaultMaxRows: -1, wantLimit: DefaultMaxRows},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sq := &StructuredQuery{Columns: []string{"page"}, Limit: tt.limit}
+			result, err := Build("clicks", sq, testSchema(), nil, 0, tt.defaultMaxRows)
+			require.NoError(t, err)
+			assert.Contains(t, result.SQL, fmt.Sprintf("LIMIT %d", tt.wantLimit))
+		})
+	}
 }
 
 func TestBuild_InvalidFilterColumn(t *testing.T) {
@@ -268,7 +299,7 @@ func TestBuild_InvalidFilterColumn(t *testing.T) {
 		Columns: []string{"page"},
 		Filters: []Filter{{Column: "nonexistent", Op: "eq", Value: "x"}},
 	}
-	_, err := Build("clicks", sq, testSchema(), nil, 0)
+	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown column")
 }
@@ -279,7 +310,7 @@ func TestBuild_InvalidGroupByColumn(t *testing.T) {
 		Columns: []string{"page"},
 		GroupBy: []string{"nonexistent"},
 	}
-	_, err := Build("clicks", sq, testSchema(), nil, 0)
+	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown column")
 }
@@ -433,7 +464,7 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 		OrderBy: []OrderClause{{Column: "received_timestamp", Dir: "desc"}},
 		Limit:   3,
 	}
-	result, err := Build("events", sq, schema, nil, 0)
+	result, err := Build("events", sq, schema, nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`received_timestamp` < ?")
 	require.Len(t, result.Params, 1)
@@ -445,7 +476,7 @@ func TestBuild_FilterWithTimestampValue(t *testing.T) {
 func TestBuild_TableNameWithBacktick(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Columns: []string{"page"}, Limit: 10}
-	result, err := Build("my`table", sq, testSchema(), nil, 0)
+	result, err := Build("my`table", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	// ClickHouse's canonical escaping (per SHOW CREATE) is backslash, not
 	// backtick-doubling: an embedded ` becomes \`. The column is quoted too.
@@ -500,7 +531,7 @@ func TestBuild_InvalidColumns(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Build("clicks", tt.sq, testSchema(), nil, 0)
+			_, err := Build("clicks", tt.sq, testSchema(), nil, 0, DefaultMaxRows)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -513,7 +544,7 @@ func TestBuild_TimeRange_SinceOnly(t *testing.T) {
 		Columns:   []string{"page"},
 		TimeRange: &TimeRange{Column: "ts", Since: "2024-01-01T00:00:00Z", Until: ""},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "`ts` >= ?")
 	assert.NotContains(t, result.SQL, "`ts` <= ?")
@@ -529,7 +560,7 @@ func TestBuild_TimeRange_ClickHouseDateTimeFormat(t *testing.T) {
 			Until:  "2024-01-02T03:04:05Z",
 		},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	require.Len(t, result.Params, 2)
 	assert.Equal(t, "2024-01-01 00:00:00", result.Params[0])
@@ -548,7 +579,7 @@ func TestBuild_FilterUnsupportedOp(t *testing.T) {
 		// Unsupported operations should gracefully be ignored by filterToSQL
 		Filters: []Filter{{Column: "page", Op: "magic", Value: "val"}},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 }
@@ -560,7 +591,7 @@ func TestBuild_FilterInOp_InvalidValueType(t *testing.T) {
 		// 'in' operator requires an array ([]any) value. A scalar string shouldn't panic.
 		Filters: []Filter{{Column: "page", Op: "in", Value: "not-an-array"}},
 	}
-	result, err := Build("clicks", sq, testSchema(), nil, 0)
+	result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 }
@@ -593,7 +624,7 @@ func TestBuild_AuthorizesEveryClause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Build("clicks", tt.sq, testSchema(), perms, 0)
+			_, err := Build("clicks", tt.sq, testSchema(), perms, 0, DefaultMaxRows)
 			var fce *ForbiddenColumnError
 			require.ErrorAs(t, err, &fce, "denied column in %s must be rejected", tt.name)
 			assert.Equal(t, denied, fce.Column)
@@ -613,7 +644,7 @@ func TestBuild_AllowsAuthorizedColumnsInEveryClause(t *testing.T) {
 		OrderBy:   []OrderClause{{Column: "ts", Dir: "asc"}},
 		TimeRange: &TimeRange{Column: "ts", Since: "1h"},
 	}
-	_, err := Build("clicks", sq, testSchema(), perms, 0)
+	_, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
 	require.NoError(t, err)
 }
 
@@ -665,7 +696,7 @@ func TestBuild_SelectAllProjection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result, err := Build("clicks", &StructuredQuery{SelectAll: true}, testSchema(), tt.perms, 0)
+			result, err := Build("clicks", &StructuredQuery{SelectAll: true}, testSchema(), tt.perms, 0, DefaultMaxRows)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				assert.Nil(t, result)
@@ -685,7 +716,7 @@ func TestBuild_ForbiddenAggregation(t *testing.T) {
 	t.Parallel()
 	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"count"}, DeniedAggregations: []string{"sum"}}
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "sum", Column: "count", Alias: "total"}}}
-	_, err := Build("clicks", sq, testSchema(), perms, 0)
+	_, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
 	var fae *ForbiddenAggregationError
 	require.ErrorAs(t, err, &fae)
 	assert.Equal(t, "sum", fae.Fn)
@@ -704,7 +735,7 @@ func TestBuild_OrderByAliasSkipsColumnPolicy(t *testing.T) {
 		GroupBy:      []string{"page"},
 		OrderBy:      []OrderClause{{Column: "n", Dir: "desc"}},
 	}
-	result, err := Build("clicks", sq, testSchema(), perms, 0)
+	result, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "ORDER BY `n` DESC")
 }
@@ -716,7 +747,7 @@ func TestBuild_CountStarWithoutReadableColumns(t *testing.T) {
 	t.Parallel()
 	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"nonexistent"}}
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n"}}}
-	result, err := Build("clicks", sq, testSchema(), perms, 0)
+	result, err := Build("clicks", sq, testSchema(), perms, 0, DefaultMaxRows)
 	require.NoError(t, err)
 	assert.Contains(t, result.SQL, "count(*) AS `n`")
 }
@@ -744,7 +775,7 @@ func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 		t.Run(alias, func(t *testing.T) {
 			t.Parallel()
 			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: alias}}}
-			result, err := Build("clicks", sq, testSchema(), nil, 0)
+			result, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 			require.NoError(t, err)
 			assert.Contains(t, result.SQL, "AS "+chsql.QuoteIdent(alias),
 				"alias must be emitted as one backtick-quoted, escaped token")
@@ -757,7 +788,7 @@ func TestBuild_AggregationAliasQuotedAndContained(t *testing.T) {
 func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	t.Parallel()
 	sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "we?ird"}}}
-	_, err := Build("clicks", sq, testSchema(), nil, 0)
+	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported aggregation alias")
 }
@@ -817,7 +848,7 @@ func TestBuild_PermissiveColumnNames_AcceptedInEveryClause(t *testing.T) {
 				"time_range":  {Columns: []string{"id"}, TimeRange: &TimeRange{Column: col, Since: "1h"}},
 			}
 			for clause, sq := range clauses {
-				_, err := Build("weird", sq, schema, nil, 0)
+				_, err := Build("weird", sq, schema, nil, 0, DefaultMaxRows)
 				require.NoErrorf(t, err, "%s clause must accept legal ClickHouse column %q", clause, col)
 			}
 		})
@@ -841,7 +872,7 @@ func TestBuild_PermissiveAliases_Accepted(t *testing.T) {
 		t.Run(alias, func(t *testing.T) {
 			t.Parallel()
 			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: alias}}}
-			_, err := Build("clicks", sq, testSchema(), nil, 0)
+			_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 			require.NoErrorf(t, err, "alias %q must be accepted — containment is an escaping concern, not a rejection", alias)
 		})
 	}

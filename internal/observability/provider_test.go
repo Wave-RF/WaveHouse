@@ -2,7 +2,6 @@ package observability
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 )
 
 // TestInitProvider_Shutdown verifies that the provider pipeline initializes
-// against an arbitrary endpoint (the gRPC exporters dial lazily) and the
+// (the gRPC exporters dial lazily, so no collector need be reachable) and the
 // returned shutdown function drains both pipelines without error.
 func TestInitProvider_Shutdown(t *testing.T) {
 	// No t.Parallel(): InitProvider mutates global OTel state. Save the
@@ -27,18 +26,13 @@ func TestInitProvider_Shutdown(t *testing.T) {
 		otel.SetMeterProvider(savedMP)
 	})
 
-	// Bind a local TCP listener so the exporter has a reachable address to
-	// dial if it chooses to — we never actually serve OTLP on it.
-	var lc net.ListenConfig
-	lis, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = lis.Close() })
-
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
+	// No OTEL_EXPORTER_OTLP_ENDPOINT set → the SDK uses its default target and
+	// the gRPC exporters dial lazily, so InitProvider succeeds regardless of
+	// whether anything is listening.
 	shutdown, promHandler, err := InitProvider(ctx, "wavehouse-test", ProviderConfig{
-		Endpoint:         lis.Addr().String(),
 		TracesEnabled:    true,
 		TracesSampleRate: 0.10,
 		MetricsEnabled:   true,
@@ -49,9 +43,9 @@ func TestInitProvider_Shutdown(t *testing.T) {
 	assert.Nil(t, promHandler, "prometheus exporter not requested → handler must be nil")
 
 	// Drain the pipeline. We tolerate flush errors here because the OTLP
-	// exporter can't actually reach our listener (we never accept on it), so
-	// the metric exporter times out its final upload. What matters for
-	// coverage is that the shutdown path runs through both providers.
+	// exporter can't reach a collector, so the metric exporter times out its
+	// final upload. What matters for coverage is that the shutdown path runs
+	// through both providers.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 	_ = shutdown(shutdownCtx)

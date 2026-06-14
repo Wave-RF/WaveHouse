@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -261,6 +262,35 @@ func TestPipesHandler_Execute_ParamsFromQuery(t *testing.T) {
 	assert.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
+// TestPipesHandler_Execute_RequestBodyCap pins the control-plane body cap on a
+// pipe's POST parameter body (#315). An oversized body returns 413 — the auth
+// gate (admin) and pipe lookup pass, so the cap is what fires. maxRequestBytes
+// is tiny so we don't allocate 1 MiB per run.
+func TestPipesHandler_Execute_RequestBodyCap(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name:       "by_page",
+			SQL:        "SELECT * FROM clicks WHERE page = {{page}}",
+			Parameters: []pipes.ParamDef{{Name: "page", Type: "string", Required: true}},
+		},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+	h.maxRequestBytes = 64
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_page/execute", "by_page", map[string]any{
+		"page": strings.Repeat("x", 200),
+	})
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	h.Execute(w, r)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized body must 413")
+	assert.Contains(t, w.Body.String(), "request body exceeded")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	store := pipes.NewMemoryStore()
@@ -276,6 +306,26 @@ func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid json")
+}
+
+// TestPipesHandler_Put_RequestBodyCap pins the control-plane body cap on the
+// admin pipe-definition decoder (#315). A valid-but-oversized definition
+// returns 413, not 400 "invalid json".
+func TestPipesHandler_Put_RequestBodyCap(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore()
+	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
+	h.maxRequestBytes = 64
+
+	w := httptest.NewRecorder()
+	r := pipesRequest(t, http.MethodPut, "/v1/pipes/big", "big", map[string]any{
+		"sql": "SELECT " + strings.Repeat("a", 200),
+	})
+	h.Put(w, r)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized body must 413")
+	assert.Contains(t, w.Body.String(), "request body exceeded")
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestPipesHandler_Put_Success(t *testing.T) {
@@ -374,6 +424,52 @@ func TestPipesHandler_Execute_NoAllowedRoles_NonAdminDenied(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"a pipe with no allowed_roles must reject a non-admin role")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestPipesHandler_Execute_ArrayParamBinds: an array body param renders into an
+// IN list and passes binding (failing only later at the nil ClickHouse conn).
+func TestPipesHandler_Execute_ArrayParamBinds(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{
+			Name:       "by_ids",
+			SQL:        "SELECT * FROM clicks WHERE id IN {{ids}}",
+			Parameters: []pipes.ParamDef{{Name: "ids", Type: "array", Required: true}},
+		},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	body := map[string]any{"ids": []any{"a", "b"}}
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_ids/execute", "by_ids", body)
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	safeHandle(h.Execute, w, r)
+
+	// Binding succeeded — the only failure left is the nil conn, never a 400.
+	assert.NotEqual(t, http.StatusBadRequest, w.Code)
+	assert.NotEqual(t, http.StatusNotFound, w.Code)
+}
+
+// TestPipesHandler_Execute_ObjectParamRejected: a JSON object has no scalar SQL
+// form and is refused with a 400 before any query runs (#317).
+func TestPipesHandler_Execute_ObjectParamRejected(t *testing.T) {
+	t.Parallel()
+	store := pipes.NewMemoryStore(
+		&pipes.NamedQuery{Name: "by_col", SQL: "SELECT * FROM clicks WHERE col = {{p}}"},
+	)
+	h := NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), nil, nil, 0, testutil.NopLogger())
+
+	w := httptest.NewRecorder()
+	body := map[string]any{"p": map[string]any{"k": "v"}}
+	r := pipesRequest(t, http.MethodPost, "/v1/pipes/by_col/execute", "by_col", body)
+	r = r.WithContext(auth.WithRole(r.Context(), "admin"))
+
+	h.Execute(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "unsupported parameter type object")
 	testutil.AssertJSONErrorResponse(t, w)
 }
 

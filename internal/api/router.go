@@ -47,7 +47,11 @@ func NewRouter(deps Dependencies) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// No middleware.RealIP: it rewrites r.RemoteAddr from spoofable forwarded
+	// headers on every request (chi deprecated it for the IP-spoofing GHSAs),
+	// and nothing here reads RemoteAddr — WaveHouse does no per-IP logic (that's
+	// the reverse proxy's job). Trusted-proxy-aware client-IP capture for
+	// traces/logs is tracked in #333; don't re-add RealIP to get it.
 	r.Use(jsonRecoverer)
 	r.Use(corsMiddleware(deps.CORSOrigins))
 

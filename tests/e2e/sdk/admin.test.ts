@@ -147,6 +147,31 @@ describe("Admin", () => {
       }
     });
 
+    it("executes a pipe with an array (IN list) param", async () => {
+      const inPipe = `test_pipe_in_${Date.now()}`;
+      const created = await wh.pipes.set(inPipe, {
+        sql: `SELECT page, count() AS views FROM default.${T.clicks} WHERE page IN {{pages}} GROUP BY page`,
+        parameters: [{ name: "pages", type: "array", required: true }],
+        description: "E2E test pipe (IN list)",
+        allowed_roles: ["admin", "viewer"],
+      });
+      expect(created.error).toBeNull();
+      createdPipes.push(inPipe);
+
+      // The array renders to `page IN ('/home', '/about', 'o''brien')` — every
+      // element escaped (#317). The single quote in `o'brien` must stay inside
+      // its literal; if escaping regressed, ClickHouse would error here.
+      const result = await wh.pipe(inPipe, { pages: ["/home", "/about", "o'brien"] });
+      expect(result.error).toBeNull();
+
+      const rows = result.data ?? [];
+      expect(rows).toBeInstanceOf(Array);
+      if (rows.length > 0) {
+        expect(rows[0]).toHaveProperty("page");
+        expect(rows[0]).toHaveProperty("views");
+      }
+    });
+
     it("deletes a pipe", async () => {
       const result = await wh.pipes.delete(pipeName);
       expect(result.error).toBeNull();

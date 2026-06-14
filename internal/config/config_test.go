@@ -33,7 +33,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "./data", cfg.DataDir)
 	assert.Equal(t, 60, cfg.Schema.RefreshInterval)
 	assert.False(t, cfg.OTel.Enabled)
-	assert.Equal(t, "127.0.0.1:4317", cfg.OTel.Addr)
 	assert.True(t, cfg.OTel.Traces.Enabled)
 	assert.InEpsilon(t, 1.0, cfg.OTel.Traces.SampleRate, 0.0001)
 	assert.True(t, cfg.OTel.Metrics.Enabled)
@@ -66,6 +65,43 @@ auth:
 	assert.Equal(t, "https", cfg.ClickHouse.HTTPScheme)
 	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
+}
+
+func TestLoad_QueryLimits_Defaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	// Only the result-LIMIT default lives in WaveHouse config now; server-wide
+	// resource limits (memory, rows scanned, time) are ClickHouse's job.
+	assert.Equal(t, 10000, cfg.Query.DefaultMaxRows)
+}
+
+func TestLoad_QueryLimits_FromYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yamlContent := `
+query:
+  default_max_rows: 25000
+`
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, 25000, cfg.Query.DefaultMaxRows)
+}
+
+func TestValidate_NegativeQueryDefaultMaxRows(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Server:     Server{Port: 8080},
+		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+		Schema:     Schema{RefreshInterval: 60},
+		Query:      Query{DefaultMaxRows: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_max_rows")
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {
@@ -199,7 +235,6 @@ func TestValidate_TracesSampleRateOutOfRange(t *testing.T) {
 				Schema:     Schema{RefreshInterval: 60},
 				OTel: OTel{
 					Enabled: true,
-					Addr:    "127.0.0.1:4317",
 					Traces:  OTelTraces{Enabled: true, SampleRate: tc.rate},
 					Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
 				},
@@ -219,7 +254,6 @@ func TestValidate_LogsSampleRateOutOfRange(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
-			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
 			Logs:    OTelLogs{Enabled: true, SampleRate: 1.5},
 		},
@@ -247,27 +281,6 @@ func TestValidate_SampleRatesIgnoredWhenObservabilityDisabled(t *testing.T) {
 	assert.NoError(t, cfg.Validate())
 }
 
-func TestValidate_RejectsEmptyOTelAddrWhenEnabled(t *testing.T) {
-	t.Parallel()
-	// Empty addr → OTLP gRPC exporters dial lazily against "" and surface
-	// failures only later as opaque SDK error-handler noise. Catch at config
-	// load instead with an explicit message.
-	cfg := Config{
-		Server:     Server{Port: 8080},
-		ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: time.Duration(30) * time.Second},
-		Schema:     Schema{RefreshInterval: 60},
-		OTel: OTel{
-			Enabled: true,
-			Addr:    "",
-			Traces:  OTelTraces{Enabled: true, SampleRate: 0.10},
-			Logs:    OTelLogs{Enabled: true, SampleRate: 0.10},
-		},
-	}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "otel.addr")
-}
-
 func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 	t.Parallel()
 	// Same idea one level down — when the master switch is on but the individual
@@ -278,7 +291,6 @@ func TestValidate_SampleRatesIgnoredWhenSignalDisabled(t *testing.T) {
 		Schema:     Schema{RefreshInterval: 60},
 		OTel: OTel{
 			Enabled: true,
-			Addr:    "127.0.0.1:4317",
 			Traces:  OTelTraces{Enabled: false, SampleRate: 99},
 			Logs:    OTelLogs{Enabled: false, SampleRate: -1},
 		},

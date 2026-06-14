@@ -1,0 +1,204 @@
+---
+title: "Behind a reverse proxy"
+description: "Running WaveHouse behind nginx, Caddy, or a Cloudflare Tunnel: TLS, request-body limits, SSE buffering and timeouts, header/auth forwarding, and health probes."
+sidebar:
+  order: 12
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+WaveHouse serves plain HTTP on `:8080` and is meant to run **behind a reverse proxy, CDN, or tunnel** for any internet-facing deployment. It deliberately does *not* terminate TLS, manage certificates, rate-limit by IP, or mitigate slow-connection attacks — those are the proxy's job, and pushing them out keeps WaveHouse from growing a second, redundant set of knobs you'd have to tune in two places. This page covers everything that behaves differently behind a proxy: TLS, request-body limits, Server-Sent Events, header forwarding, and health probes.
+
+## Division of responsibility
+
+WaveHouse and your proxy are layers of one system, not substitutes. The proxy owns the network edge; WaveHouse owns auth and ships fixed safety backstops so a missing or loose proxy setting can't take it down.
+
+| Concern | WaveHouse | Your reverse proxy |
+| --- | --- | --- |
+| TLS termination / certificates | ✗ (plain HTTP on `:8080`) | ✓ |
+| Per-IP rate limiting, connection caps | ✗ | ✓ |
+| Slow-loris / slow-body mitigation | ✗ | ✓ |
+| Request-body size limit | Fixed internal backstop (1 MiB control / 16 MiB ingest) | Tunable outer limit |
+| Authentication (JWT) | ✓ (validates / resolves role) | Pass through |
+| CORS | ✓ (`server.cors_allowed_origins`) | Pass through (don't double it) |
+| Health probes | ✓ (serves `/livez`, `/readyz`, `/v1/health`) | Route / expose appropriately |
+
+:::note[Defense in depth, not either/or]
+The body-size caps below exist in **both** layers on purpose. Your proxy limit is the tunable first line you size to your deployment; WaveHouse's in-code cap is the backstop that guarantees the server can't be trivially OOM'd even if the proxy limit is missing (Caddy and Cloudflare don't cap by default), too loose, or bypassed by something reaching `:8080` directly.
+:::
+
+## TLS
+
+WaveHouse speaks plain HTTP and has no certificate management. Terminate TLS at the proxy and forward cleartext to `http://<wavehouse-host>:8080`.
+
+:::caution[`WH_CH_HTTP_SCHEME` is a different setting]
+The `clickhouse.http_scheme` / `WH_CH_HTTP_SCHEME` option in the [Configuration reference](/configuration) controls TLS on the **WaveHouse → ClickHouse** hop, not the inbound edge. It has nothing to do with terminating TLS for your clients — that's the proxy's job.
+:::
+
+## Request-body size limits
+
+WaveHouse caps the inbound request body it will decode, as a memory-safety backstop:
+
+| Endpoints | Cap | Over-cap response |
+| --- | --- | --- |
+| `POST /v1/query`, `GET/POST /v1/pipes/{name}` (control plane) | **1 MiB** | `413 {"error":"request body exceeded 1048576 bytes"}` |
+| `POST /v1/ingest`, `POST /v1/admin/query` (data plane) | **16 MiB** | `413 {"error":"request body exceeded 16777216 bytes"}` |
+
+These caps are **fixed and not configurable** — they aren't a tuning knob, they're an invariant. A JSON request body amplifies roughly an order of magnitude when decoded into memory (a large array of small values explodes into Go's in-memory representation), so an *uncapped* decoder on a public endpoint is a single-request out-of-memory vector. A query or pipe-parameter body is bounded by nature — a real one is far under 1 MiB even with a large `in`-list — so the control-plane cap is generous headroom that never binds legitimate use.
+
+Set your own **outer** limit at the proxy, sized to your real needs:
+
+- **nginx** — `client_max_body_size 16m;`
+- **Caddy** — `request_body { max_size 16MB }` (Caddy has **no** body limit by default)
+- **Cloudflare** — a plan-based upload limit applies (100 MB on Free/Pro); it can't be lowered below the plan on those tiers.
+
+The effective limit is the smaller of the proxy's and WaveHouse's. For ingest, WaveHouse's 16 MiB is the ceiling — raising the proxy above it won't help, because the server rejects first. **For genuinely large uploads, use the streaming-friendly NDJSON form** (`Content-Type: application/x-ndjson`, one JSON object per line): WaveHouse reads it record-by-record, so the batch size is unbounded while each line stays small. See [Batch Ingest](/api#batch-ingest).
+
+## Server-Sent Events (SSE)
+
+`GET /v1/stream` is a long-lived `text/event-stream` connection (see the [API reference](/api#get-v1stream--server-sent-events-stream)). Proxies break SSE in two classic ways — fix both.
+
+### 1. Disable response buffering
+
+A proxy that buffers the upstream response will hold events until a buffer fills or the connection closes, so clients receive nothing in real time — the whole point of the stream is lost. WaveHouse flushes after every event, but the proxy has to forward immediately too.
+
+- **nginx** — WaveHouse sets `X-Accel-Buffering: no` on the stream response, so nginx won't buffer it out of the box (nginx strips the header before it reaches the client). Adding `proxy_buffering off;` on the stream location is an equivalent belt-and-braces if you'd rather set it explicitly.
+- **Caddy** — `flush_interval -1` on the `reverse_proxy` for the stream route.
+- **Cloudflare** — passes `text/event-stream` through without buffering.
+
+### 2. Raise idle timeouts (no heartbeat yet)
+
+:::caution[Quiet streams can be dropped — WaveHouse does not yet send keepalive heartbeats]
+WaveHouse writes a single `: connected` comment when the stream opens, then sends nothing until an event arrives. There is **no periodic keepalive heartbeat** ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)). On a quiet table, an intermediary's idle timeout will reset the connection — Cloudflare's edge dropped quiet streams about every two minutes in dogfooding.
+
+Until #226 lands, mitigate by:
+
+- **Browsers:** none needed — `EventSource` auto-reconnects and resumes via `Last-Event-ID` gap-fill, so users don't notice.
+- **Server-side consumers (`curl`, backend services):** wrap the stream in a reconnect loop, and **raise the proxy's read/idle timeout** for the `/v1/stream` route so a slow table doesn't trigger needless reconnects.
+:::
+
+- **nginx** — `proxy_read_timeout 3600s;` on the `/v1/stream` location.
+- **Caddy** — `reverse_proxy` has no response timeout by default, so quiet streams already survive; nothing extra needed unless you've set one globally.
+- **Cloudflare** — the edge idle timeout is not configurable on standard plans; rely on reconnect (above) until #226 ships heartbeats.
+
+### 3. Forward the token, `since`, and `Last-Event-ID`
+
+A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped from the URL after extraction so it can't leak into logs; an `Authorization` header still takes precedence). Make sure your proxy:
+
+- forwards the query string (`token`, `since`) — most do by default;
+- forwards the `Last-Event-ID` request header so reconnects resume from the right point (it's already allow-listed in WaveHouse's CORS preflight);
+- does not log the full URL with `token` in it.
+
+## Header and auth forwarding
+
+- **`Authorization`** — forward verbatim. WaveHouse validates the JWT and resolves the role from it.
+- **`X-Forwarded-For` / `X-Forwarded-Proto` / `Host`** — set these for your own logs and any upstream that reads them. WaveHouse does not currently derive a client IP from `X-Forwarded-For` (see the caution below); forwarding it is good hygiene and is what the trusted-proxy client-IP work ([#333](https://github.com/Wave-RF/WaveHouse/issues/333)) will consume.
+
+:::caution[Don't expose `:8080` directly]
+WaveHouse does **not** derive a client IP from forwarded headers — it does no per-IP logic (rate limiting and IP allow/deny are the proxy's job) and does not trust `X-Forwarded-For` / `X-Real-IP` / `True-Client-IP` to rewrite the connection's source address. So a forged forwarded header has no effect on WaveHouse, and `r.RemoteAddr` (what OpenTelemetry records as the peer) is the honest immediate peer — your proxy, when one is in front. Still, don't expose `:8080` to untrusted clients: bind WaveHouse to a private interface or firewall the port so the proxy is the only path in. Capturing the real client IP in WaveHouse's own traces and logs — trusted-proxy-aware, so it can't be spoofed — is tracked in [#333](https://github.com/Wave-RF/WaveHouse/issues/333).
+:::
+
+- **CORS** — WaveHouse applies its own CORS from `server.cors_allowed_origins`. Let one layer own CORS: either pass it through the proxy untouched (recommended), or strip it from WaveHouse and do it at the proxy — not both, or browsers see duplicate `Access-Control-Allow-Origin` headers and reject the response.
+
+## Health probes
+
+WaveHouse serves Kubernetes-convention probes on `:8080` (full behavior in [Deployment → Health Checks](/deployment#health-checks)):
+
+- **`/livez`** — liveness; sticky-200 after first successful boot. Does not touch ClickHouse.
+- **`/readyz`** — readiness; issues a ClickHouse `Ping` on **every** call. Point your load balancer's (internal) health check here so it routes around an instance whose ClickHouse is unreachable.
+- **`/healthz`** — permanent alias of `/livez`.
+- **`/v1/health`** — the SDK's content-free liveness ping; mirrors `/livez` (200 once booted) and never touches ClickHouse.
+
+:::caution[Recommended: keep the bare probe paths off the public vhost]
+Expose only **`/v1/health`** (and your API) to the internet — route `/livez`, `/readyz`, and `/healthz` on a private/internal listener, not the public proxy. Your orchestrator still reaches them the internal way regardless: kubelet probes the container directly on `:8080`, and a load balancer health-checks the backend — neither goes through the public proxy. Two reasons to keep them internal: `/readyz` pings ClickHouse on every call, so a public `/readyz` lets an unauthenticated flood turn into a per-request backend ping; and the probes leak boot/readiness state. `/v1/health` is the safe public liveness endpoint because it answers the same "is this server up" question without touching ClickHouse — it's what the SDK's `wh.sys.health()` calls.
+:::
+
+## Timeouts and slow links
+
+A slow *legitimate* client (think an IoT device on a satellite link) and a slow-loris *attacker* are indistinguishable at the byte level, so no read/body timeout at any layer cleanly separates them. WaveHouse intentionally sets no aggressive inbound read timeout so it can durably accept slow uploads. If you add a `client_body_timeout` (or similar) at the proxy to shed abusive connections, know that too tight a value also kills legitimate slow uploads. The durable way to keep slow-link abuse out is **authentication plus per-source quotas**, not duration limits.
+
+## Example configurations
+
+Minimal, SSE-aware configs. Adjust hostnames, certificate paths, and the upstream address for your setup.
+
+<Tabs>
+<TabItem label="nginx">
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name wavehouse.example.com;
+
+    # ssl_certificate     /etc/ssl/wavehouse.crt;
+    # ssl_certificate_key /etc/ssl/wavehouse.key;
+
+    # Outer body limit. WaveHouse's own backstop is 1 MiB (query/pipes) and
+    # 16 MiB (ingest); this can only make the effective limit tighter.
+    client_max_body_size 16m;
+
+    # SSE: stream events immediately, and tolerate quiet streams (no heartbeat
+    # yet — see #226) by not closing the idle connection too soon.
+    location /v1/stream {
+        proxy_pass            http://127.0.0.1:8080;
+        proxy_http_version    1.1;
+        proxy_set_header      Connection "";
+        proxy_buffering       off;
+        proxy_read_timeout    3600s;
+        proxy_set_header      Host $host;
+        proxy_set_header      X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header      X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        proxy_pass       http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+</TabItem>
+<TabItem label="Caddy">
+
+```text
+# Caddyfile
+wavehouse.example.com {
+    # TLS is automatic.
+
+    # Outer body limit (WaveHouse backstop is 1 MiB control / 16 MiB ingest).
+    request_body {
+        max_size 16MB
+    }
+
+    # SSE: disable buffering so events flush immediately. Caddy has no default
+    # response timeout, so quiet streams already survive.
+    reverse_proxy /v1/stream* 127.0.0.1:8080 {
+        flush_interval -1
+    }
+
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+</TabItem>
+<TabItem label="Cloudflare Tunnel">
+
+```yaml
+# cloudflared config.yml — no inbound ports opened; the tunnel dials out.
+tunnel: <TUNNEL-ID>
+credentials-file: /etc/cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: wavehouse.example.com
+    service: http://localhost:8080
+  - service: http_status:404
+```
+
+Cloudflare terminates TLS at its edge and forwards to the tunnel. Two caveats:
+
+- A plan-based upload size limit applies (100 MB on Free/Pro) — it can't be lowered below the plan on those tiers, and WaveHouse's own caps still apply underneath.
+- The edge resets idle connections (quiet SSE streams dropped roughly every two minutes in testing). Browser `EventSource` auto-reconnects; server-side consumers should reconnect until heartbeats land ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)).
+
+</TabItem>
+</Tabs>

@@ -12,8 +12,11 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 )
 
-// DefaultMaxRows is applied when no explicit LIMIT is specified and no policy MaxRows is set.
-// This prevents unbounded queries from consuming excessive memory.
+// DefaultMaxRows is the fallback result LIMIT applied when no explicit LIMIT is
+// specified and no policy MaxRows is set — preventing an unbounded read. It is
+// the default value of the operator-facing query.default_max_rows config
+// knob (passed into Build), and the guard Build falls back to when that knob is
+// misconfigured to 0.
 const DefaultMaxRows = 10000
 
 // BuildResult holds the generated SQL and bound parameters.
@@ -42,7 +45,7 @@ type BuildResult struct {
 // role's allow/deny set); an explicit Columns list projects exactly those (where
 // "*" is a literal column name, not a wildcard); the two are mutually exclusive.
 // A query with neither, and no aggregations, selects nothing → ErrEmptyProjection.
-func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perms *policy.ResolvedPermissions, bucketSeconds int) (*BuildResult, error) {
+func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perms *policy.ResolvedPermissions, bucketSeconds, defaultMaxRows int) (*BuildResult, error) {
 	if chsql.BindUnsafe(table) {
 		return nil, fmt.Errorf("unsupported table name (contains '?'): %s", table)
 	}
@@ -120,11 +123,18 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 		sql += " ORDER BY " + strings.Join(orderParts, ", ")
 	}
 
-	// LIMIT — apply explicit or default maximum.
-	if q.Limit > 0 && q.Limit <= DefaultMaxRows {
+	// LIMIT — apply the caller's explicit limit, capped at the configured
+	// default maximum (query.default_max_rows). A misconfigured
+	// non-positive default falls back to the DefaultMaxRows constant so a read
+	// can never be left unbounded or clamped to LIMIT 0.
+	maxRows := defaultMaxRows
+	if maxRows <= 0 {
+		maxRows = DefaultMaxRows
+	}
+	if q.Limit > 0 && q.Limit <= maxRows {
 		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
 	} else {
-		sql += fmt.Sprintf(" LIMIT %d", DefaultMaxRows)
+		sql += fmt.Sprintf(" LIMIT %d", maxRows)
 	}
 
 	return &BuildResult{SQL: sql, Params: params}, nil
