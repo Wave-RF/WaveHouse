@@ -61,8 +61,10 @@ func (vm *VersionManager) QueryKey(sha string, deps []Namespace) string {
 	// namespace versions are read together (consistent for that dep), but we don't
 	// hold the lock across all deps. A concurrent bump can land between deps, but the
 	// key is already a racy snapshot (versions can move between building it and using
-	// it), so cross-dep consistency buys nothing. Crucially, the sort/join run with
-	// no lock held.
+	// it), so cross-dep consistency buys nothing. A stale snapshot is harmless: the
+	// worst case is a version moves after we read it, so the next Get/Set simply
+	// misses and recomputes — never stale or wrong data. Crucially, the sort/join
+	// run with no lock held.
 	for i, d := range deps {
 		vm.mu.RLock()
 		nsKey := vm.namespaceKeyLocked(d.Table, d.Scope)

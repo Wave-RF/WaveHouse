@@ -47,6 +47,7 @@ func TestIdentifierField(t *testing.T) {
 		" default.users, alias: x":     "default.users",
 		" default.`weird,name`":        "default.`weird,name`",
 		" default.`weird,name`, id: 9": "default.`weird,name`",
+		" default.`a\\`b`, id: 9":      "default.`a\\`b`", // escaped backtick stays inside the quoted name
 		"":                             "",
 	}
 	for in, want := range tests {
@@ -61,6 +62,7 @@ func TestSplitQualified(t *testing.T) {
 		{"events", "", "events"},
 		{"`db`.`weird.name`", "db", "weird.name"}, // dot inside backticks stays in the table
 		{"`a.b`", "", "a.b"},                      // quoted, dot inside ticks, no qualifier
+		{"`a\\`.b`", "", "a`.b"},                  // escaped backtick before a dot, all one name
 	}
 	for _, c := range cases {
 		db, table := splitQualified(c.in)

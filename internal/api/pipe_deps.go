@@ -106,12 +106,17 @@ func parseQueryTreeTables(lines []string) []string {
 // everything up to the first comma that is not inside backticks, trimmed. The
 // dump separates a node's fields with ", " and quotes identifiers containing
 // special characters with backticks, so a naive comma split would truncate a
-// quoted name that itself contains a comma.
+// quoted name that itself contains a comma. A backslash-escaped backtick (\`)
+// inside a quoted name does not end the quoting.
 func identifierField(s string) string {
 	s = strings.TrimSpace(s)
 	inTick := false
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
+		case '\\':
+			if inTick {
+				i++ // skip the escaped char (\` or \\) so it can't flip inTick
+			}
 		case '`':
 			inTick = !inTick
 		case ',':
@@ -156,12 +161,17 @@ func filterKnownTables(raw []string, database string, registry *discovery.Schema
 // identifier into its parts, tolerating the backtick quoting ClickHouse uses for
 // names with special characters. Only the first dot outside backticks separates
 // the database qualifier, so a quoted table name containing dots stays intact. A
-// bare name returns db "".
+// backslash-escaped backtick (\`) inside a quoted part does not end the quoting.
+// A bare name returns db "".
 func splitQualified(s string) (db, table string) {
 	s = strings.TrimSpace(s)
 	inTick := false
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
+		case '\\':
+			if inTick {
+				i++ // skip the escaped char (\` or \\) so it can't flip inTick
+			}
 		case '`':
 			inTick = !inTick
 		case '.':

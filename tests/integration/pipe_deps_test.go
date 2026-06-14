@@ -53,6 +53,23 @@ func executePipe(t *testing.T, h *api.PipesHandler, name string) string {
 	return w.Header().Get("X-Cache")
 }
 
+// newPipesHandler builds a PipesHandler wired to real ClickHouse and the shared
+// schema registry with dependency resolution enabled (Registry + Database set).
+// c may be nil for tests that only exercise Put()-time resolution.
+func newPipesHandler(e *testEnv, c cache.Cache) *api.PipesHandler {
+	h := api.NewPipesHandler(
+		pipes.NewMemoryStore(),
+		policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}),
+		e.chConn,
+		c,
+		30*time.Second,
+		testutil.NopLogger(),
+	)
+	h.Registry = e.registry
+	h.Database = testCHDatabase
+	return h
+}
+
 // TestPipeDeps_ResolveThroughViewAndInvalidate is the gate for the EXPLAIN QUERY
 // TREE resolver: a pipe that reads a *view* must still have its underlying base
 // table recorded as a dependency (static SQL parsing could not do this), and a
@@ -84,16 +101,7 @@ func TestPipeDeps_ResolveThroughViewAndInvalidate(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = localCache.Close() })
 
-	h := api.NewPipesHandler(
-		pipes.NewMemoryStore(),
-		policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}),
-		e.chConn,
-		localCache,
-		30*time.Second,
-		testutil.NopLogger(),
-	)
-	h.Registry = e.registry
-	h.Database = testCHDatabase
+	h := newPipesHandler(e, localCache)
 
 	// PUT runs resolution against real ClickHouse.
 	putPipe(t, h, "via_view", fmt.Sprintf("SELECT id, val FROM %s", view))
@@ -125,16 +133,7 @@ func TestPipeDeps_DirectTableResolves(t *testing.T) {
 
 	base := createTable(t, "id String, n UInt64", "ORDER BY id")
 
-	h := api.NewPipesHandler(
-		pipes.NewMemoryStore(),
-		policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}),
-		e.chConn,
-		nil, // no cache needed; this test only checks resolution at Put()
-		30*time.Second,
-		testutil.NopLogger(),
-	)
-	h.Registry = e.registry
-	h.Database = testCHDatabase
+	h := newPipesHandler(e, nil) // no cache; this test only checks Put()-time resolution
 
 	putPipe(t, h, "direct", fmt.Sprintf("SELECT id, n FROM %s", base))
 
