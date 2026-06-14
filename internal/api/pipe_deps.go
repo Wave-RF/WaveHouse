@@ -13,10 +13,10 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/query"
 )
 
-// pipeResolveTimeout bounds the EXPLAIN round-trip a pipe Put() makes to resolve
-// its table dependencies, so a slow or stuck ClickHouse can't hang pipe
-// creation. Generous because EXPLAIN QUERY TREE only analyzes (it scans no data)
-// and Put() is a rare admin write, not a per-request cost.
+// pipeResolveTimeout bounds the EXPLAIN + view-expansion round-trips a pipe Put()
+// makes to resolve its table dependencies, so a slow or stuck ClickHouse can't
+// hang pipe creation. Generous because EXPLAIN QUERY TREE only analyzes (it scans
+// no data) and Put() is a rare admin write, not a per-request cost.
 const pipeResolveTimeout = 10 * time.Second
 
 // resolvePipeDeps resolves the ingested base tables a pipe reads, for cache
@@ -35,11 +35,12 @@ func (h *PipesHandler) resolvePipeDeps(ctx context.Context, q *pipes.NamedQuery)
 }
 
 // resolvePipeTables binds the pipe with dummy parameters, asks ClickHouse to
-// resolve the query — through views and aliases — to the tables it actually
-// reads via EXPLAIN QUERY TREE, then keeps only the names the schema registry
+// resolve the query to the tables it actually reads — resolving aliases,
+// subqueries, and JOINs via EXPLAIN QUERY TREE and expanding any view to its base
+// tables via collectReadTables — then keeps only the names the schema registry
 // knows in the configured database (i.e. tables the ingest worker writes and can
-// therefore version-invalidate). Any failure returns nil so the caller degrades
-// to TTL-only with no error surfaced.
+// therefore version-invalidate). Any failure returns nil/empty so the caller
+// degrades to TTL-only with no error surfaced.
 func resolvePipeTables(ctx context.Context, conn driver.Conn, registry *discovery.SchemaRegistry, database string, q *pipes.NamedQuery) []string {
 	if conn == nil || registry == nil || q == nil {
 		return nil
@@ -48,19 +49,82 @@ func resolvePipeTables(ctx context.Context, conn driver.Conn, registry *discover
 	if err != nil {
 		return nil
 	}
-	raw, err := explainQueryTreeTables(ctx, conn, boundSQL)
+	raw := collectReadTables(ctx, conn, registry, database, boundSQL, map[string]struct{}{})
+	return filterKnownTables(raw, database, registry)
+}
+
+// maxViewExpansions backstops view→view expansion against a pathological chain;
+// the visited set already prevents cycles, this just bounds total work.
+const maxViewExpansions = 32
+
+// collectReadTables runs EXPLAIN QUERY TREE over sql and returns the raw
+// `database.table` identifiers it references, recursively expanding any normal
+// VIEW to the tables in its own definition. EXPLAIN QUERY TREE does NOT inline a
+// normal view — it reports the view itself as the table read (verified on
+// ClickHouse 26) — so a pipe that reads a view would otherwise resolve to nothing
+// once the view is filtered out. We expand views ourselves via
+// system.tables.as_select. visited guards against view cycles and repeated work;
+// identifiers in another database and non-view unknowns are returned as-is for
+// filterKnownTables to drop.
+func collectReadTables(ctx context.Context, conn driver.Conn, registry *discovery.SchemaRegistry, database, sql string, visited map[string]struct{}) []string {
+	if len(visited) > maxViewExpansions {
+		return nil
+	}
+	refs, err := explainQueryTreeTables(ctx, conn, sql)
 	if err != nil {
 		return nil
 	}
-	return filterKnownTables(raw, database, registry)
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r)
+		db, table := splitQualified(r)
+		if table == "" || (db != "" && db != database) {
+			continue // another database — outside the ingest universe
+		}
+		if registry.Get(table) != nil {
+			continue // a known base table, not a view to expand
+		}
+		if _, seen := visited[table]; seen {
+			continue
+		}
+		visited[table] = struct{}{}
+		if as := viewAsSelect(ctx, conn, database, table); as != "" {
+			out = append(out, collectReadTables(ctx, conn, registry, database, as, visited)...)
+		}
+	}
+	return out
+}
+
+// viewAsSelect returns the defining SELECT of a view in the configured database,
+// or "" if name is not a view (a base table has an empty as_select). It is how we
+// expand a view to its underlying tables, since EXPLAIN QUERY TREE does not inline
+// views. Best-effort: any error (e.g. an older server without the column) returns
+// "", so the view simply stays unresolved (TTL-only).
+func viewAsSelect(ctx context.Context, conn driver.Conn, database, name string) string {
+	rows, err := conn.Query(ctx,
+		"SELECT as_select FROM system.tables WHERE database = ? AND name = ? AND as_select != ''",
+		database, name)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return ""
+	}
+	var as string
+	if err := rows.Scan(&as); err != nil {
+		return ""
+	}
+	return as
 }
 
 // explainQueryTreeTables runs EXPLAIN QUERY TREE over sql and returns the raw
 // `database.table` identifiers it references. Running the analyzer's passes
-// (run_passes = 1 runs them all) resolves views and aliases down to their
-// underlying tables, which static SQL parsing cannot do — the whole reason this
-// goes through ClickHouse rather than parsing the FROM clause. Read-only, so it
-// is safe to issue for any pipe (pipes are read queries).
+// (run_passes = 1) resolves aliases and finds tables inside subqueries, CTEs, and
+// JOINs — which static FROM-clause parsing cannot do, the whole reason this goes
+// through ClickHouse. It does NOT inline a normal view (the view is reported as
+// the table read); collectReadTables handles view expansion. Read-only, so it is
+// safe to issue for any pipe (pipes are read queries).
 func explainQueryTreeTables(ctx context.Context, conn driver.Conn, sql string) ([]string, error) {
 	rows, err := conn.Query(ctx, "EXPLAIN QUERY TREE run_passes = 1 "+sql)
 	if err != nil {
@@ -84,9 +148,11 @@ func explainQueryTreeTables(ctx context.Context, conn driver.Conn, sql string) (
 
 // parseQueryTreeTables pulls table identifiers out of an EXPLAIN QUERY TREE dump.
 // After the analyzer passes run, every table the query reads — including those
-// reached through views and aliases — appears as a TABLE node carrying a
-// `table_name: <database>.<table>` field. We collect those raw identifiers; the
-// database qualifier and backtick quoting are handled by filterKnownTables.
+// reached through aliases, subqueries, CTEs, and JOINs — appears as a TABLE node
+// carrying a `table_name: <database>.<table>` field (a referenced view appears as
+// its own TABLE node; collectReadTables expands it). We collect those raw
+// identifiers; the database qualifier and backtick quoting are handled by
+// filterKnownTables.
 func parseQueryTreeTables(lines []string) []string {
 	const marker = "table_name:"
 	var out []string
