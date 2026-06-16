@@ -35,6 +35,80 @@
       if (t && typeof t.focus === "function") t.focus();
     }
 
+    // ---- PNG export ----
+    // Build-time assets live at /diagrams/<slug>/<index>-<theme>.png (see
+    // src/integrations/diagram-png.mjs). The build script and this code index
+    // diagrams by the SAME selector + DOM order, so the URL maps 1:1 to the
+    // open diagram. The lightbox is the only place we expose copy/download —
+    // inline diagrams stay button-free.
+    function diagramSlug() {
+      return location.pathname.replace(/^\/+|\/+$/g, "") || "index";
+    }
+    function pngTheme() {
+      return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    }
+    function pngUrl() {
+      return `/diagrams/${overlay.__whSlug}/${overlay.__whIndex}-${pngTheme()}.png`;
+    }
+
+    let toastTimer = null;
+    function showToast(msg, isError) {
+      const el = overlay.querySelector(".wh-zoom__toast");
+      el.textContent = msg;
+      el.classList.toggle("is-error", !!isError);
+      el.hidden = false;
+      window.clearTimeout(toastTimer);
+      toastTimer = window.setTimeout(() => (el.hidden = true), 1600);
+    }
+
+    function saveBlob(blob, name) {
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+    }
+
+    async function grabPng(mode) {
+      const name = `wavehouse-${overlay.__whSlug}-diagram-${overlay.__whIndex + 1}.png`;
+      try {
+        const res = await fetch(pngUrl());
+        if (!res.ok) throw new Error(String(res.status));
+        const blob = await res.blob();
+        // Copy uses the async-clipboard image API; where it's missing (e.g.
+        // Firefox) fall back to a download so the button still does something.
+        if (mode === "copy" && navigator.clipboard && window.ClipboardItem) {
+          await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
+          showToast("Copied to clipboard");
+        } else {
+          saveBlob(blob, name);
+          showToast("Downloaded PNG");
+        }
+      } catch {
+        showToast("PNG unavailable", true);
+      }
+    }
+
+    // Reveal copy/download only once the PNG is confirmed present for the
+    // current theme. The `astro dev` HMR server runs no build hook, so it has
+    // none (a full `make dev-docs` build does). Copy also needs the
+    // clipboard-image API, else it just duplicates download — hide it then.
+    function refreshPngButtons() {
+      const copyBtn = overlay.querySelector(".wh-zoom__copy");
+      const dlBtn = overlay.querySelector(".wh-zoom__dl");
+      copyBtn.hidden = true;
+      dlBtn.hidden = true;
+      fetch(pngUrl(), { method: "HEAD" })
+        .then((r) => {
+          dlBtn.hidden = !r.ok;
+          copyBtn.hidden = !(r.ok && navigator.clipboard && window.ClipboardItem);
+        })
+        .catch(() => {});
+    }
+
     function buildOverlay() {
       overlay = document.createElement("div");
       overlay.className = "wh-zoom";
@@ -43,27 +117,53 @@
       overlay.setAttribute("aria-modal", "true");
       overlay.setAttribute("aria-label", "Enlarged diagram");
       overlay.innerHTML =
+        '<div class="wh-zoom__tools">' +
         '<button class="wh-zoom__one" type="button" hidden aria-pressed="false" ' +
         'aria-label="Toggle natural size (pan to explore)">1:1</button>' +
+        // Copy + download the build-time PNG of this diagram. Hidden until
+        // open() confirms the PNG exists (the `astro dev` HMR server runs no
+        // build hook, so it has none), so they never dangle as dead controls.
+        '<button class="wh-zoom__copy" type="button" hidden aria-label="Copy diagram as PNG">' +
+        '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" fill="none" ' +
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<rect x="9" y="9" width="11" height="11" rx="2"/>' +
+        '<path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg></button>' +
+        '<button class="wh-zoom__dl" type="button" hidden aria-label="Download diagram as PNG">' +
+        '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" fill="none" ' +
+        'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M5 21h14"/></svg></button>' +
         '<button class="wh-zoom__close" type="button" aria-label="Close enlarged diagram">' +
         '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" ' +
         'stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
         '<path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
+        "</div>" +
+        '<div class="wh-zoom__toast" role="status" aria-live="polite" hidden></div>' +
         '<div class="wh-zoom__stage"></div>';
       overlay.addEventListener("click", (e) => {
-        if (e.target.closest(".wh-zoom__one")) {
-          const btn = e.target.closest(".wh-zoom__one");
-          if (overlay.__whSetMode) overlay.__whSetMode(btn.getAttribute("aria-pressed") !== "true");
+        const oneBtn = e.target.closest(".wh-zoom__one");
+        if (oneBtn) {
+          if (overlay.__whSetMode) overlay.__whSetMode(oneBtn.getAttribute("aria-pressed") !== "true");
           return;
         }
-        // Backdrop / stage padding click closes; clicks on the SVG itself don't.
-        if (!e.target.closest("svg") || e.target.closest(".wh-zoom__close")) close();
+        // Copy / download act on the PNG and must NOT fall through to the
+        // close test below (their icon <svg> would otherwise confuse it).
+        if (e.target.closest(".wh-zoom__copy")) return void grabPng("copy");
+        if (e.target.closest(".wh-zoom__dl")) return void grabPng("download");
+        if (e.target.closest(".wh-zoom__close")) return void close();
+        // Backdrop / stage padding click closes; clicks on the diagram don't.
+        // (Toolbar icon clicks already returned above.)
+        if (!e.target.closest("svg")) close();
       });
       document.body.appendChild(overlay);
     }
 
     function open(svg) {
       if (!overlay) buildOverlay();
+      // Identify which build-time PNG backs this diagram (slug + DOM index),
+      // then probe so the copy/download buttons only show when it exists.
+      overlay.__whSlug = diagramSlug();
+      overlay.__whIndex = [...document.querySelectorAll(DIAGRAM)].indexOf(svg);
+      refreshPngButtons();
       const stage = overlay.querySelector(".wh-zoom__stage");
       stage.replaceChildren();
       // The stage is reused across opens — a prior 1:1 pan session leaves
@@ -237,11 +337,15 @@
   .wh-zoom__stage > svg {
     display: block;
   }
-  .wh-zoom__close,
-  .wh-zoom__one {
+  .wh-zoom__tools {
     position: fixed;
     top: clamp(0.5rem, 2vw, 1.25rem);
     right: clamp(0.5rem, 2vw, 1.25rem);
+    z-index: 1;
+    display: flex;
+    gap: 0.5rem;
+  }
+  .wh-zoom__tools button {
     width: 2.5rem;
     height: 2.5rem;
     display: grid;
@@ -254,35 +358,56 @@
     transition: background 0.12s ease, transform 0.12s ease,
       border-color 0.12s ease;
   }
+  /* `display: grid` above outranks the UA `[hidden]` rule — restore hiding
+     explicitly (higher specificity) so hidden controls actually disappear. */
+  .wh-zoom__tools button[hidden] {
+    display: none;
+  }
   .wh-zoom__one {
-    right: calc(clamp(0.5rem, 2vw, 1.25rem) + 3.1rem);
     font-family: var(--sl-font-mono);
     font-size: 0.75rem;
     font-weight: 650;
     letter-spacing: 0.02em;
   }
-  .wh-zoom__one[hidden] {
-    display: none;
-  }
   .wh-zoom__one[aria-pressed="true"] {
     border-color: var(--wh-accent, #06b0bf);
     color: var(--wh-accent-text, var(--wh-accent-hi, #1dc9d8));
   }
-  .wh-zoom__close:hover,
-  .wh-zoom__one:hover {
+  .wh-zoom__tools button:hover {
     background: var(--wh-surface-2, #1b1f26);
     transform: scale(1.05);
   }
-  .wh-zoom__close:focus-visible,
-  .wh-zoom__one:focus-visible {
+  .wh-zoom__tools button:focus-visible {
     outline: 2px solid var(--wh-accent-text, var(--wh-accent-hi));
     outline-offset: 2px;
+  }
+  /* Brief confirmation under the toolbar (Copied / Downloaded / unavailable). */
+  .wh-zoom__toast {
+    position: fixed;
+    top: calc(clamp(0.5rem, 2vw, 1.25rem) + 3rem);
+    right: clamp(0.5rem, 2vw, 1.25rem);
+    z-index: 1;
+    padding: 0.4rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--wh-border, rgba(255, 255, 255, 0.14));
+    background: var(--wh-surface, #14171c);
+    color: var(--wh-ink, #f1f3f7);
+    font-size: 0.8rem;
+    font-weight: 500;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+  }
+  .wh-zoom__toast[hidden] {
+    display: none;
+  }
+  .wh-zoom__toast.is-error {
+    border-color: color-mix(in oklab, #e5484d 55%, var(--wh-border, #444));
   }
   @media (prefers-reduced-motion: reduce) {
     .wh-zoom {
       transition: none;
     }
-    .wh-zoom__close {
+    .wh-zoom__tools button {
       transition: none;
     }
   }

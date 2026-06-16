@@ -11,6 +11,7 @@ import starlightImageZoom from "starlight-image-zoom";
 import starlightLinksValidator from "starlight-links-validator";
 import { mermaidTheme } from "./src/config/mermaid-theme.mjs";
 import { sidebar } from "./src/config/sidebar.ts";
+import { diagramPng } from "./src/integrations/diagram-png.mjs";
 
 // Color-agnostic Mermaid plugin (astro-themed-mermaid pkg) + WaveHouse's palette
 // (src/config/mermaid-theme). Diagram colors are defined once in global.css
@@ -170,5 +171,9 @@ export default defineConfig({
       ],
     }),
     mermaid.integration,
+    // After build, rasterize each rendered diagram to a light + dark PNG under
+    // dist/diagrams/ (Copy/Download in the zoom lightbox). Runs last so it sees
+    // the finished HTML; reuses the Chromium rehype-mermaid already pulled in.
+    diagramPng(),
   ],
 });
