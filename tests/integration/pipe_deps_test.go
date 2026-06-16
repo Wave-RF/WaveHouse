@@ -160,9 +160,9 @@ func TestPipeDeps_ResolveThroughRegistryKnownViewResolvesToBase(t *testing.T) {
 
 	saved := h.Store.Get("via_known_view")
 	require.NotNil(t, saved)
-	assert.Contains(t, saved.ResolvedTables, base,
-		"a pipe reading a registry-known view must still resolve to its base table %q, "+
-			"not stop at the view; got %v", base, saved.ResolvedTables)
+	assert.Equal(t, []string{base}, saved.ResolvedTables,
+		"a pipe reading a registry-known view must resolve to exactly its base table %q "+
+			"(view expanded, view name dropped); got %v", base, saved.ResolvedTables)
 }
 
 // TestPipeDeps_DirectTableResolves covers the plain case: a pipe reading a base

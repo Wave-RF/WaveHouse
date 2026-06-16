@@ -71,15 +71,14 @@ func resolvePipeTables(ctx context.Context, conn driver.Conn, registry *discover
 // the visited set already prevents cycles, this just bounds total work.
 const maxViewExpansions = 32
 
-// collectReadTables runs EXPLAIN QUERY TREE over sql and returns the raw
-// `database.table` identifiers it references, recursively expanding any normal
-// VIEW to the tables in its own definition. EXPLAIN QUERY TREE does NOT inline a
-// normal view — it reports the view itself as the table read (verified on
-// ClickHouse 26) — so a pipe that reads a view would otherwise resolve to nothing
-// once the view is filtered out. We expand views ourselves via
-// system.tables.as_select. visited guards against view cycles and repeated work;
-// identifiers in another database and non-view unknowns are returned as-is for
-// filterKnownTables to drop.
+// collectReadTables runs EXPLAIN QUERY TREE over sql and returns the
+// `database.table` identifiers it reads, replacing any view with the base tables in
+// its own definition rather than the view name. EXPLAIN QUERY TREE does NOT inline a
+// view — it reports the view itself as the table read (verified on ClickHouse 26) —
+// so we expand views via system.tables.as_select and recurse. A view is never an
+// ingest target, so its name is dropped: only the base tables it reads can be real
+// dependencies. visited guards against view cycles and repeated work; other-database
+// identifiers and non-base-table names are left for filterKnownTables to drop.
 func collectReadTables(ctx context.Context, conn driver.Conn, database, sql string, visited map[string]struct{}) []string {
 	if len(visited) > maxViewExpansions {
 		return nil
@@ -90,25 +89,20 @@ func collectReadTables(ctx context.Context, conn driver.Conn, database, sql stri
 	}
 	out := make([]string, 0, len(refs))
 	for _, r := range refs {
-		out = append(out, r)
 		db, table := splitQualified(r)
 		if table == "" || (db != "" && db != database) {
-			continue // another database — outside the ingest universe
+			out = append(out, r) // another database / unparseable — filterKnownTables drops it
+			continue
 		}
 		if _, seen := visited[table]; seen {
 			continue
 		}
 		visited[table] = struct{}{}
-		// Expand any view to its definition and recurse — and deliberately do NOT
-		// shortcut on schema-registry membership ("known, so a base table, stop").
-		// The registry is built from system.columns, which lists views and
-		// materialized views too, so once auto-refresh has discovered a view it would
-		// be treated as terminal and never expanded — keying the pipe on the view/MV
-		// name instead of the ingest-written source table, so an ingest would never
-		// invalidate the cached result. viewAsSelect is the authority here: "" for a
-		// base table, the defining SELECT for a view.
+
 		if as := viewAsSelect(ctx, conn, database, table); as != "" {
 			out = append(out, collectReadTables(ctx, conn, database, as, visited)...)
+		} else {
+			out = append(out, r)
 		}
 	}
 	return out
