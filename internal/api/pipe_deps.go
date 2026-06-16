@@ -63,7 +63,7 @@ func resolvePipeTables(ctx context.Context, conn driver.Conn, registry *discover
 	if err != nil {
 		return nil
 	}
-	raw := collectReadTables(ctx, conn, registry, database, boundSQL, map[string]struct{}{})
+	raw := collectReadTables(ctx, conn, database, boundSQL, map[string]struct{}{})
 	return filterKnownTables(raw, database, registry)
 }
 
@@ -80,7 +80,7 @@ const maxViewExpansions = 32
 // system.tables.as_select. visited guards against view cycles and repeated work;
 // identifiers in another database and non-view unknowns are returned as-is for
 // filterKnownTables to drop.
-func collectReadTables(ctx context.Context, conn driver.Conn, registry *discovery.SchemaRegistry, database, sql string, visited map[string]struct{}) []string {
+func collectReadTables(ctx context.Context, conn driver.Conn, database, sql string, visited map[string]struct{}) []string {
 	if len(visited) > maxViewExpansions {
 		return nil
 	}
@@ -95,15 +95,20 @@ func collectReadTables(ctx context.Context, conn driver.Conn, registry *discover
 		if table == "" || (db != "" && db != database) {
 			continue // another database — outside the ingest universe
 		}
-		if registry.Get(table) != nil {
-			continue // a known base table, not a view to expand
-		}
 		if _, seen := visited[table]; seen {
 			continue
 		}
 		visited[table] = struct{}{}
+		// Expand any view to its definition and recurse — and deliberately do NOT
+		// shortcut on schema-registry membership ("known, so a base table, stop").
+		// The registry is built from system.columns, which lists views and
+		// materialized views too, so once auto-refresh has discovered a view it would
+		// be treated as terminal and never expanded — keying the pipe on the view/MV
+		// name instead of the ingest-written source table, so an ingest would never
+		// invalidate the cached result. viewAsSelect is the authority here: "" for a
+		// base table, the defining SELECT for a view.
 		if as := viewAsSelect(ctx, conn, database, table); as != "" {
-			out = append(out, collectReadTables(ctx, conn, registry, database, as, visited)...)
+			out = append(out, collectReadTables(ctx, conn, database, as, visited)...)
 		}
 	}
 	return out

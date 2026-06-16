@@ -126,6 +126,45 @@ func TestPipeDeps_ResolveThroughViewAndInvalidate(t *testing.T) {
 		"a write to the resolved base table should have invalidated the cached pipe result")
 }
 
+// TestPipeDeps_ResolveThroughRegistryKnownViewResolvesToBase is the regression guard
+// for the bug where the resolver stopped at a registry-known view. The sibling test
+// above deliberately leaves the view out of the registry; in production, schema
+// auto-refresh eventually discovers it (the registry is built from system.columns,
+// which lists views/MVs), and the resolver must STILL expand it to the base table —
+// not treat the registry hit as terminal and key the pipe on the view name, which the
+// ingest path never bumps (→ stale).
+func TestPipeDeps_ResolveThroughRegistryKnownViewResolvesToBase(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	base := createTable(t, "id String, val Float64", "ORDER BY id")
+
+	view := base + "_v"
+	require.NoError(t, e.chConn.Exec(ctx,
+		fmt.Sprintf("CREATE VIEW %s AS SELECT id, val FROM %s", view, base)))
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = e.chConn.Exec(dctx, "DROP VIEW IF EXISTS "+view)
+	})
+
+	// The distinguishing step: refresh AFTER creating the view, so the registry now
+	// knows the view — the production condition the sibling test avoids.
+	require.NoError(t, e.registry.Refresh(ctx))
+	require.NotNil(t, e.registry.Get(view),
+		"precondition: the view must be registry-known for this regression to be meaningful")
+
+	h := newPipesHandler(e, nil) // Put()-time resolution only
+
+	putPipe(t, h, "via_known_view", fmt.Sprintf("SELECT id, val FROM %s", view))
+
+	saved := h.Store.Get("via_known_view")
+	require.NotNil(t, saved)
+	assert.Contains(t, saved.ResolvedTables, base,
+		"a pipe reading a registry-known view must still resolve to its base table %q, "+
+			"not stop at the view; got %v", base, saved.ResolvedTables)
+}
+
 // TestPipeDeps_DirectTableResolves covers the plain case: a pipe reading a base
 // table directly resolves to exactly that table.
 func TestPipeDeps_DirectTableResolves(t *testing.T) {
