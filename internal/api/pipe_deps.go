@@ -25,13 +25,27 @@ const pipeResolveTimeout = 10 * time.Second
 // caching. Because the table set depends only on the SQL (not on per-request
 // parameter values), resolving here at Put() — a rare admin write — keeps it off
 // the per-request read path and means it is computed once per definition.
+//
+// Resolution runs once and is not repeated, so a table created (or a view redefined)
+// after the pipe is saved is not picked up until the pipe is next saved; until then
+// the pipe stays TTL-only for that table.
 func (h *PipesHandler) resolvePipeDeps(ctx context.Context, q *pipes.NamedQuery) []string {
 	if h.Registry == nil || h.CHConn == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, pipeResolveTimeout)
 	defer cancel()
-	return resolvePipeTables(ctx, h.CHConn, h.Registry, h.Database, q)
+	tables := resolvePipeTables(ctx, h.CHConn, h.Registry, h.Database, q)
+	// Surface the outcome: an operator can otherwise not tell which pipes are
+	// write-invalidated and which silently fell back to TTL-only — because resolution
+	// failed, or because the pipe reads only things WaveHouse has no change signal for
+	// (views, table functions, other databases, system tables).
+	if len(tables) == 0 {
+		h.logger.InfoContext(ctx, "pipe has no invalidatable table dependencies; results cache TTL-only", "pipe", q.Name)
+	} else {
+		h.logger.DebugContext(ctx, "pipe table dependencies resolved", "pipe", q.Name, "tables", tables)
+	}
+	return tables
 }
 
 // resolvePipeTables binds the pipe with dummy parameters, asks ClickHouse to
@@ -152,7 +166,9 @@ func explainQueryTreeTables(ctx context.Context, conn driver.Conn, sql string) (
 // carrying a `table_name: <database>.<table>` field (a referenced view appears as
 // its own TABLE node; collectReadTables expands it). We collect those raw
 // identifiers; the database qualifier and backtick quoting are handled by
-// filterKnownTables.
+// filterKnownTables. A table function (merge, remote, cluster, s3, url, numbers) or a
+// dictionary (dictGet) is not a TABLE node, so its read targets are not resolved and
+// a pipe that reads only through one falls back to TTL-only.
 func parseQueryTreeTables(lines []string) []string {
 	const marker = "table_name:"
 	var out []string

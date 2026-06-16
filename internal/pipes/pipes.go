@@ -233,6 +233,11 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 // leaving {{name:default}} placeholders to bind to the author's default. Returns
 // the bound SQL, or an error if binding fails (e.g. a placeholder it could not
 // cover), in which case the caller should skip resolution (TTL-only).
+//
+// A bare inline {{name}} — no declared parameter and no default — binds to a string
+// dummy, so a pipe that uses one where a string is invalid (e.g. LIMIT {{n}}) fails
+// to analyze and falls back to TTL-only; declare the parameter's type, or give it a
+// numeric default ({{n:10}}), so its dependencies resolve.
 func DummyBind(q *NamedQuery) (string, error) {
 	supplied := make(map[string]any)
 	for _, p := range q.Parameters {
@@ -374,6 +379,9 @@ func (s *Store) refresh(ctx context.Context) error {
 }
 
 // loadFromDirectory scans a directory for .sql files and bootstraps them into KV.
+// Pipes bootstrapped here are stored without table-dependency resolution (that runs
+// in the API Put handler, which holds the ClickHouse connection), so they cache
+// TTL-only until next saved via the API.
 func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

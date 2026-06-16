@@ -141,3 +141,110 @@ func TestPipeDeps_DirectTableResolves(t *testing.T) {
 	require.NotNil(t, saved)
 	assert.Equal(t, []string{base}, saved.ResolvedTables)
 }
+
+// TestPipeDeps_ResolveThroughMaterializedViewAndInvalidate verifies that a pipe
+// reading a materialized view resolves to the view's *source* ingest table — the one
+// the ingest worker writes and version-bumps — not the MV's storage target, so an
+// ingest invalidates the cached pipe result. Resolution expands the MV via
+// system.tables.as_select; only src is in the registry, so recovering it proves the
+// expansion saw through the MV to the source.
+func TestPipeDeps_ResolveThroughMaterializedViewAndInvalidate(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	// src is the ingested base table the registry knows and the worker can bump.
+	src := createTable(t, "id String, val Float64", "ORDER BY id")
+
+	// target holds the MV's materialized rows; the pipe reads the MV by name, which
+	// physically reads target. Neither target nor the MV is refreshed into the
+	// registry — so, exactly as in the plain-view test, only the source can survive
+	// filtering, and recovering it proves resolution saw through the MV to src.
+	target := src + "_mvtarget"
+	require.NoError(t, e.chConn.Exec(ctx,
+		fmt.Sprintf("CREATE TABLE %s (id String, val Float64) ENGINE = MergeTree ORDER BY id", target)))
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = e.chConn.Exec(dctx, "DROP TABLE IF EXISTS "+target)
+	})
+
+	mv := src + "_mv"
+	require.NoError(t, e.chConn.Exec(ctx,
+		fmt.Sprintf("CREATE MATERIALIZED VIEW %s TO %s AS SELECT id, val FROM %s", mv, target, src)))
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = e.chConn.Exec(dctx, "DROP VIEW IF EXISTS "+mv)
+	})
+
+	// Insert AFTER the MV exists so the row actually materializes into target (an MV
+	// only captures inserts that happen after its creation).
+	require.NoError(t, e.chConn.Exec(ctx,
+		fmt.Sprintf("INSERT INTO %s (id, val) VALUES ('a', 1.5)", src)))
+
+	localCache, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = localCache.Close() })
+
+	h := newPipesHandler(e, localCache)
+
+	// PUT runs resolution against real ClickHouse.
+	putPipe(t, h, "via_mv", fmt.Sprintf("SELECT id, val FROM %s", mv))
+
+	saved := h.Store.Get("via_mv")
+	require.NotNil(t, saved)
+	assert.Contains(t, saved.ResolvedTables, src,
+		"a pipe reading materialized view %q should resolve to its source ingest table %q "+
+			"(the table the ingest worker bumps); got %v", mv, src, saved.ResolvedTables)
+
+	// MISS, then HIT once cached.
+	assert.Equal(t, "MISS", executePipe(t, h, "via_mv"))
+	localCache.Wait()
+	assert.Equal(t, "HIT", executePipe(t, h, "via_mv"))
+
+	// Simulate the ingest worker bumping the source table's version. Because the pipe
+	// was keyed on src (resolved through the MV), this must orphan the cached entry.
+	_, err = localCache.Invalidate(ctx, []cache.Namespace{{Table: query.SafeEncodeNATS(src)}})
+	require.NoError(t, err)
+	localCache.Wait()
+
+	assert.Equal(t, "MISS", executePipe(t, h, "via_mv"),
+		"a write to the resolved source table should have invalidated the MV-backed pipe result")
+}
+
+// TestPipeDeps_UnionBranchTablesBothResolve verifies that a pipe reading more than one
+// base table records ALL of them as dependencies — here two tables via a UNION — so a
+// write to either invalidates the cached result. Parameters bind as values, so the
+// gating WHEREs don't change which tables are read.
+func TestPipeDeps_UnionBranchTablesBothResolve(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	// Two ingested base tables the registry knows and the worker can bump.
+	t1 := createTable(t, "id String, val Float64", "ORDER BY id")
+	t2 := createTable(t, "id String, val Float64", "ORDER BY id")
+
+	// "read t1 if flag else t2", expressed in pure SQL via parameter-gated WHEREs. flag is
+	// a declared number param so DummyBind renders a bare 0, not a quoted string.
+	sqlTmpl := fmt.Sprintf(
+		"SELECT id, val FROM %s WHERE {{flag}} = 1 UNION ALL SELECT id, val FROM %s WHERE {{flag}} = 0",
+		t1, t2)
+
+	h := newPipesHandler(e, nil) // Put()-time resolution only; no cache needed
+
+	body, _ := json.Marshal(map[string]any{
+		"sql":        sqlTmpl,
+		"parameters": []map[string]any{{"name": "flag", "type": "number", "required": true}},
+	})
+	r := withPipeName(httptest.NewRequestWithContext(ctx, http.MethodPut, "/v1/pipes/union_branch", bytes.NewReader(body)), "union_branch")
+	w := httptest.NewRecorder()
+	h.Put(w, r)
+	require.Equal(t, http.StatusOK, w.Code, "put body: %s", w.Body.String())
+
+	saved := h.Store.Get("union_branch")
+	require.NotNil(t, saved)
+
+	assert.Subset(t, saved.ResolvedTables, []string{t1, t2},
+		"a pipe reading two tables via UNION should record BOTH (%s, %s) as deps; got %v",
+		t1, t2, saved.ResolvedTables)
+}
