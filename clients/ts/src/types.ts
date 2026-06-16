@@ -184,6 +184,8 @@ export interface Pipe {
   parameters?: ParamDef[];
   description?: string;
   allowed_roles?: string[];
+  /** Server-owned, read-only: the base tables this pipe reads (resolved through views) that drive cache invalidation. Set by the server; ignored on create/update. */
+  resolved_tables?: string[];
 }
 
 export interface ParamDef {

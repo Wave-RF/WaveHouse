@@ -126,61 +126,6 @@ func TestPipeDeps_ResolveThroughViewAndInvalidate(t *testing.T) {
 		"a write to the resolved base table should have invalidated the cached pipe result")
 }
 
-// TestPipeDeps_ResolveThroughRegistryKnownViewResolvesToBase is the regression guard
-// for the bug where the resolver stopped at a registry-known view. The sibling test
-// above deliberately leaves the view out of the registry; in production, schema
-// auto-refresh eventually discovers it (the registry is built from system.columns,
-// which lists views/MVs), and the resolver must STILL expand it to the base table —
-// not treat the registry hit as terminal and key the pipe on the view name, which the
-// ingest path never bumps (→ stale).
-func TestPipeDeps_ResolveThroughRegistryKnownViewResolvesToBase(t *testing.T) {
-	e := env(t)
-	ctx := context.Background()
-
-	base := createTable(t, "id String, val Float64", "ORDER BY id")
-
-	view := base + "_v"
-	require.NoError(t, e.chConn.Exec(ctx,
-		fmt.Sprintf("CREATE VIEW %s AS SELECT id, val FROM %s", view, base)))
-	t.Cleanup(func() {
-		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = e.chConn.Exec(dctx, "DROP VIEW IF EXISTS "+view)
-	})
-
-	// The distinguishing step: refresh AFTER creating the view, so the registry now
-	// knows the view — the production condition the sibling test avoids.
-	require.NoError(t, e.registry.Refresh(ctx))
-	require.NotNil(t, e.registry.Get(view),
-		"precondition: the view must be registry-known for this regression to be meaningful")
-
-	h := newPipesHandler(e, nil) // Put()-time resolution only
-
-	putPipe(t, h, "via_known_view", fmt.Sprintf("SELECT id, val FROM %s", view))
-
-	saved := h.Store.Get("via_known_view")
-	require.NotNil(t, saved)
-	assert.Equal(t, []string{base}, saved.ResolvedTables,
-		"a pipe reading a registry-known view must resolve to exactly its base table %q "+
-			"(view expanded, view name dropped); got %v", base, saved.ResolvedTables)
-}
-
-// TestPipeDeps_DirectTableResolves covers the plain case: a pipe reading a base
-// table directly resolves to exactly that table.
-func TestPipeDeps_DirectTableResolves(t *testing.T) {
-	e := env(t)
-
-	base := createTable(t, "id String, n UInt64", "ORDER BY id")
-
-	h := newPipesHandler(e, nil) // no cache; this test only checks Put()-time resolution
-
-	putPipe(t, h, "direct", fmt.Sprintf("SELECT id, n FROM %s", base))
-
-	saved := h.Store.Get("direct")
-	require.NotNil(t, saved)
-	assert.Equal(t, []string{base}, saved.ResolvedTables)
-}
-
 // TestPipeDeps_ResolveThroughMaterializedViewAndInvalidate verifies that a pipe
 // reading a materialized view resolves to the view's *source* ingest table — the one
 // the ingest worker writes and version-bumps — not the MV's storage target, so an
@@ -251,39 +196,102 @@ func TestPipeDeps_ResolveThroughMaterializedViewAndInvalidate(t *testing.T) {
 		"a write to the resolved source table should have invalidated the MV-backed pipe result")
 }
 
-// TestPipeDeps_UnionBranchTablesBothResolve verifies that a pipe reading more than one
-// base table records ALL of them as dependencies — here two tables via a UNION — so a
-// write to either invalidates the cached result. Parameters bind as values, so the
-// gating WHEREs don't change which tables are read.
-func TestPipeDeps_UnionBranchTablesBothResolve(t *testing.T) {
-	e := env(t)
-	ctx := context.Background()
+// TestPipeDeps_Resolution exercises Put()-time dependency resolution against real
+// ClickHouse: each case creates its schema, PUTs a pipe, and asserts the base tables
+// the resolver recorded on the NamedQuery. The cache round-trip — that an ingest bump
+// actually orphans the cached entry — is covered by the two *AndInvalidate tests above,
+// which need a live cache and so don't share this Put-and-assert shape.
+func TestPipeDeps_Resolution(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup creates the per-case schema (tables, and any view + registry refresh) and
+		// returns the pipe SQL, any declared parameters, and the base tables the resolver
+		// is expected to record.
+		setup func(t *testing.T, e *testEnv) (sql string, params []map[string]any, want []string)
+		// subset asserts ResolvedTables ⊇ want (the pipe may read more); otherwise exact
+		// equality is required.
+		subset bool
+	}{
+		{
+			name: "direct table resolves to exactly that table",
+			setup: func(t *testing.T, e *testEnv) (string, []map[string]any, []string) {
+				base := createTable(t, "id String, n UInt64", "ORDER BY id")
+				return fmt.Sprintf("SELECT id, n FROM %s", base), nil, []string{base}
+			},
+		},
+		{
+			// Regression guard: once schema auto-refresh has discovered a view (the registry
+			// is built from system.columns, which lists views/MVs), the resolver must STILL
+			// expand it to the base table — not treat the registry hit as terminal and key the
+			// pipe on the view name, which the ingest path never bumps (→ stale). The sibling
+			// ResolveThroughViewAndInvalidate test deliberately leaves the view out of the
+			// registry; here we refresh AFTER creating it, reproducing the production condition.
+			name: "registry-known view resolves to base, view name dropped",
+			setup: func(t *testing.T, e *testEnv) (string, []map[string]any, []string) {
+				ctx := context.Background()
+				base := createTable(t, "id String, val Float64", "ORDER BY id")
 
-	// Two ingested base tables the registry knows and the worker can bump.
-	t1 := createTable(t, "id String, val Float64", "ORDER BY id")
-	t2 := createTable(t, "id String, val Float64", "ORDER BY id")
+				view := base + "_v"
+				require.NoError(t, e.chConn.Exec(ctx,
+					fmt.Sprintf("CREATE VIEW %s AS SELECT id, val FROM %s", view, base)))
+				t.Cleanup(func() {
+					dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = e.chConn.Exec(dctx, "DROP VIEW IF EXISTS "+view)
+				})
 
-	// "read t1 if flag else t2", expressed in pure SQL via parameter-gated WHEREs. flag is
-	// a declared number param so DummyBind renders a bare 0, not a quoted string.
-	sqlTmpl := fmt.Sprintf(
-		"SELECT id, val FROM %s WHERE {{flag}} = 1 UNION ALL SELECT id, val FROM %s WHERE {{flag}} = 0",
-		t1, t2)
+				require.NoError(t, e.registry.Refresh(ctx))
+				require.NotNil(t, e.registry.Get(view),
+					"precondition: the view must be registry-known for this regression to be meaningful")
 
-	h := newPipesHandler(e, nil) // Put()-time resolution only; no cache needed
+				return fmt.Sprintf("SELECT id, val FROM %s", view), nil, []string{base}
+			},
+		},
+		{
+			// A pipe reading two tables via UNION must record BOTH as deps, so a write to
+			// either invalidates the cached result. Parameters bind as values, so the gating
+			// WHEREs don't change which tables are read; flag is a declared number param so
+			// DummyBind renders a bare 0, not a quoted string.
+			name:   "union branch records both tables",
+			subset: true,
+			setup: func(t *testing.T, e *testEnv) (string, []map[string]any, []string) {
+				t1 := createTable(t, "id String, val Float64", "ORDER BY id")
+				t2 := createTable(t, "id String, val Float64", "ORDER BY id")
+				sql := fmt.Sprintf(
+					"SELECT id, val FROM %s WHERE {{flag}} = 1 UNION ALL SELECT id, val FROM %s WHERE {{flag}} = 0",
+					t1, t2)
+				params := []map[string]any{{"name": "flag", "type": "number", "required": true}}
+				return sql, params, []string{t1, t2}
+			},
+		},
+	}
 
-	body, _ := json.Marshal(map[string]any{
-		"sql":        sqlTmpl,
-		"parameters": []map[string]any{{"name": "flag", "type": "number", "required": true}},
-	})
-	r := withPipeName(httptest.NewRequestWithContext(ctx, http.MethodPut, "/v1/pipes/union_branch", bytes.NewReader(body)), "union_branch")
-	w := httptest.NewRecorder()
-	h.Put(w, r)
-	require.Equal(t, http.StatusOK, w.Code, "put body: %s", w.Body.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := env(t)
+			sql, params, want := tt.setup(t, e)
 
-	saved := h.Store.Get("union_branch")
-	require.NotNil(t, saved)
+			h := newPipesHandler(e, nil) // Put()-time resolution only; no cache needed
 
-	assert.Subset(t, saved.ResolvedTables, []string{t1, t2},
-		"a pipe reading two tables via UNION should record BOTH (%s, %s) as deps; got %v",
-		t1, t2, saved.ResolvedTables)
+			reqBody := map[string]any{"sql": sql}
+			if len(params) > 0 {
+				reqBody["parameters"] = params
+			}
+			body, _ := json.Marshal(reqBody)
+			r := withPipeName(httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/pipes/p", bytes.NewReader(body)), "p")
+			w := httptest.NewRecorder()
+			h.Put(w, r)
+			require.Equal(t, http.StatusOK, w.Code, "put body: %s", w.Body.String())
+
+			saved := h.Store.Get("p")
+			require.NotNil(t, saved)
+			if tt.subset {
+				assert.Subset(t, saved.ResolvedTables, want,
+					"expected ResolvedTables ⊇ %v; got %v", want, saved.ResolvedTables)
+			} else {
+				assert.Equal(t, want, saved.ResolvedTables,
+					"expected ResolvedTables == %v; got %v", want, saved.ResolvedTables)
+			}
+		})
+	}
 }

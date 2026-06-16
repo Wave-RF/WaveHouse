@@ -171,6 +171,8 @@ curl -X POST http://localhost:8080/v1/pipes/top_pages \
 
 The response is a JSON array of rows. Results flow through the shared in-process L1 cache (Ristretto) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response.
 
+Those cached results are also version-invalidated: when WaveHouse ingests into any base table the pipe reads — resolved through views and materialized views at the time the pipe is created or updated — the next call re-runs the query (`X-Cache: MISS`). Pipes whose dependencies can't be resolved (no schema registry wired, or SQL the resolver can't expand) fall back to plain TTL expiry.
+
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | No pipe registered under that name |
