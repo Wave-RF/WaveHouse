@@ -51,3 +51,5 @@ await wh.pipes.set('top_pages', {
 // Delete
 await wh.pipes.delete('old_pipe');
 ```
+
+The pipe object returned by `get()` and `list()` also carries a read-only `resolved_tables` field — the base tables the pipe reads, resolved by the server (through views and materialized views) to drive cache invalidation. It is server-derived and ignored on `set()`.

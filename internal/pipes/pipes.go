@@ -266,6 +266,8 @@ func dummyForType(t string) any {
 		return 0
 	case "boolean":
 		return false
+	case "array":
+		return []any{nil}
 	default: // "string" and anything unrecognized
 		return "x"
 	}

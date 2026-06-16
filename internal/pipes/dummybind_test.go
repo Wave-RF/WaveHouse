@@ -34,6 +34,18 @@ func TestDummyBind_BooleanFormalParam(t *testing.T) {
 	assert.Equal(t, "SELECT * FROM t WHERE active = 0", sql)
 }
 
+func TestDummyBind_ArrayFormalParam(t *testing.T) {
+	t.Parallel()
+
+	q := &NamedQuery{
+		SQL:        "SELECT * FROM clicks WHERE page IN {{pages}}",
+		Parameters: []ParamDef{{Name: "pages", Type: "array", Required: true}},
+	}
+	sql, err := DummyBind(q)
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT * FROM clicks WHERE page IN (NULL)", sql)
+}
+
 func TestDummyBind_BareInlineParamGetsDummy(t *testing.T) {
 	t.Parallel()
 	// {{c}} has no formal definition and no inline default — DummyBind must still
