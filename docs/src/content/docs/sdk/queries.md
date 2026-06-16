@@ -188,7 +188,7 @@ clicks.select('page').count('*', 'total').orderBy('total', 'desc')
 clicks.select().limit(100)
 ```
 
-If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automatically to prevent unbounded result sets. The server also enforces a maximum of 10,000 rows (`DefaultMaxRows`).
+If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automatically to prevent unbounded result sets. The server also enforces the configured maximum (`query.default_max_rows`, default 10,000 rows).
 
 #### `.timeRange(column, since, until?)`
 

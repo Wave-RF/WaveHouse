@@ -38,7 +38,17 @@ type RolePermissions struct {
 	AllowedAggregations []string          `json:"allowed_aggregations,omitempty" yaml:"allowed_aggregations,omitempty"`
 	DeniedAggregations  []string          `json:"denied_aggregations,omitempty" yaml:"denied_aggregations,omitempty"`
 	MaxRows             int               `json:"max_rows,omitempty" yaml:"max_rows,omitempty"`
-	MaxExecutionTimeMs  int               `json:"max_execution_time_ms,omitempty" yaml:"max_execution_time_ms,omitempty"`
+	// MaxExecutionTime, MaxRowsToRead, and MaxMemoryUsage are enforced
+	// server-side by ClickHouse (the max_execution_time / max_rows_to_read /
+	// max_memory_usage settings, #316), not just as a client-side context
+	// deadline. They cap wall-clock time, rows scanned, and peak query memory so
+	// a heavy aggregation can't exhaust the box within the time budget.
+	// MaxExecutionTime and MaxMemoryUsage are human-readable scalars ("5s",
+	// "4GiB") to match clickhouse.query_timeout; MaxRowsToRead is a plain count
+	// (int64, since it can exceed 2^31 on a large table).
+	MaxExecutionTime Millis   `json:"max_execution_time,omitempty" yaml:"max_execution_time,omitempty"`
+	MaxRowsToRead    int64    `json:"max_rows_to_read,omitempty" yaml:"max_rows_to_read,omitempty"`
+	MaxMemoryUsage   ByteSize `json:"max_memory_usage,omitempty" yaml:"max_memory_usage,omitempty"`
 }
 
 // Filter represents a single comparison operation.
@@ -61,7 +71,9 @@ type ResolvedPermissions struct {
 	AllowedAggregations []string
 	DeniedAggregations  []string
 	MaxRows             int
-	MaxExecutionTimeMs  int
+	MaxExecutionTime    Millis
+	MaxRowsToRead       int64
+	MaxMemoryUsage      ByteSize
 }
 
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
@@ -153,7 +165,9 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		AllowedAggregations: perms.AllowedAggregations,
 		DeniedAggregations:  perms.DeniedAggregations,
 		MaxRows:             perms.MaxRows,
-		MaxExecutionTimeMs:  perms.MaxExecutionTimeMs,
+		MaxExecutionTime:    perms.MaxExecutionTime,
+		MaxRowsToRead:       perms.MaxRowsToRead,
+		MaxMemoryUsage:      perms.MaxMemoryUsage,
 	}
 
 	// Resolve filters into WHERE clause. A bind-unsafe filter column can't be
@@ -419,8 +433,14 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if perms.MaxRows < 0 {
 		return fmt.Errorf("table %q, op %q, role %q: max_rows must be non-negative", table, op, role)
 	}
-	if perms.MaxExecutionTimeMs < 0 {
-		return fmt.Errorf("table %q, op %q, role %q: max_execution_time_ms must be non-negative", table, op, role)
+	if perms.MaxExecutionTime < 0 {
+		return fmt.Errorf("table %q, op %q, role %q: max_execution_time must be non-negative", table, op, role)
+	}
+	if perms.MaxRowsToRead < 0 {
+		return fmt.Errorf("table %q, op %q, role %q: max_rows_to_read must be non-negative", table, op, role)
+	}
+	if perms.MaxMemoryUsage < 0 {
+		return fmt.Errorf("table %q, op %q, role %q: max_memory_usage must be non-negative", table, op, role)
 	}
 	// Filter and check column names are interpolated into SQL (backtick-quoted) at
 	// query time, so a '?' in one would shift clickhouse-go's positional value

@@ -29,6 +29,20 @@ type Config struct {
 	Pipes      Pipes      `yaml:"pipes"`
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
+	Query      Query      `yaml:"query"`
+}
+
+// Query holds query-shaping defaults. Server-wide *resource* limits (memory,
+// rows scanned, execution time) deliberately live in ClickHouse itself — its
+// settings profiles and quotas, see docs/configuration — so they apply
+// uniformly to every query (including raw admin SQL) and compose with the
+// per-role caps WaveHouse adds via per-query settings. This block holds only
+// the result-shaping default that is genuinely WaveHouse's to own.
+type Query struct {
+	// DefaultMaxRows is the result LIMIT applied to a structured query when the
+	// caller and policy specify none — the visible, tunable form of what used to
+	// be the hard-coded query.DefaultMaxRows. 0 falls back to that constant.
+	DefaultMaxRows int `yaml:"default_max_rows" env:"WH_QUERY_DEFAULT_MAX_ROWS" env-default:"10000"`
 }
 
 // OTel configures the OpenTelemetry pipeline. `enabled` is the master switch;
@@ -185,6 +199,14 @@ func (c *Config) Validate() error {
 
 	if c.ClickHouse.QueryTimeout <= time.Duration(0) {
 		return fmt.Errorf("clickhouse.query_timeout must be > 0, got %s", c.ClickHouse.QueryTimeout)
+	}
+
+	// query.default_max_rows is the fallback result LIMIT. 0 (or a directly-built
+	// config that omits it) means "use the built-in query.DefaultMaxRows" — the
+	// builder substitutes the constant for any non-positive value — so only a
+	// negative value is an error.
+	if c.Query.DefaultMaxRows < 0 {
+		return fmt.Errorf("query.default_max_rows must be non-negative, got %d", c.Query.DefaultMaxRows)
 	}
 
 	if c.MQ.GapWindowMinutes < 0 {
