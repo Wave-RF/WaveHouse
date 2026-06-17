@@ -56,7 +56,7 @@ The effective limit is the smaller of the proxy's and WaveHouse's. For ingest, W
 
 ## Server-Sent Events (SSE)
 
-`GET /v1/stream` is a long-lived `text/event-stream` connection (see the [API reference](/api#get-v1stream--server-sent-events-stream)). Proxies break SSE in two classic ways — fix both.
+`GET /v1/stream` is a long-lived `text/event-stream` connection (see the [API reference](/api#get-v1stream--server-sent-events-stream)). Proxies classically break SSE two ways — response buffering, which you must disable, and idle timeouts, which WaveHouse's keepalive heartbeat now handles for you.
 
 ### 1. Disable response buffering
 
@@ -66,20 +66,17 @@ A proxy that buffers the upstream response will hold events until a buffer fills
 - **Caddy** — `flush_interval -1` on the `reverse_proxy` for the stream route.
 - **Cloudflare** — passes `text/event-stream` through without buffering.
 
-### 2. Raise idle timeouts (no heartbeat yet)
+### 2. Keepalive heartbeats and idle timeouts
 
-:::caution[Quiet streams can be dropped — WaveHouse does not yet send keepalive heartbeats]
-WaveHouse writes a single `: connected` comment when the stream opens, then sends nothing until an event arrives. There is **no periodic keepalive heartbeat** ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)). On a quiet table, an intermediary's idle timeout will reset the connection — Cloudflare's edge dropped quiet streams about every two minutes in dogfooding.
+WaveHouse sends a periodic SSE comment heartbeat — `: heartbeat`, every 15 seconds — on an otherwise-quiet stream (alongside the `: connected` comment on open), so the connection keeps producing bytes between events and an intermediary's idle timeout never trips on a slow table. Fifteen seconds sits comfortably under common proxy and tunnel idle timeouts (nginx's default `proxy_read_timeout` is 60s; Cloudflare's edge is ~100s). The timer resets on every delivered event, so a busy stream never sends a redundant heartbeat, and the comment is invisible to clients — `EventSource` and any spec-compliant parser ignore SSE comment lines, and `curl` simply prints them.
 
-Until #226 lands, mitigate by:
+This resolved [#226](https://github.com/Wave-RF/WaveHouse/issues/226): before it, a quiet stream sent nothing after `: connected`, so an intermediary's idle timeout reset the connection — Cloudflare's edge dropped quiet streams about every two minutes in dogfooding. Browsers masked it (`EventSource` auto-reconnects and resumes via `Last-Event-ID` gap-fill); `curl` and backend consumers saw repeated drops, each re-running gap-fill.
 
-- **Browsers:** none needed — `EventSource` auto-reconnects and resumes via `Last-Event-ID` gap-fill, so users don't notice.
-- **Server-side consumers (`curl`, backend services):** wrap the stream in a reconnect loop, and **raise the proxy's read/idle timeout** for the `/v1/stream` route so a slow table doesn't trigger needless reconnects.
-:::
+Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer required, though it's harmless if you'd rather not lean on the heartbeat's margin:
 
-- **nginx** — `proxy_read_timeout 3600s;` on the `/v1/stream` location.
-- **Caddy** — `reverse_proxy` has no response timeout by default, so quiet streams already survive; nothing extra needed unless you've set one globally.
-- **Cloudflare** — the edge idle timeout is not configurable on standard plans; rely on reconnect (above) until #226 ships heartbeats.
+- **nginx** — optionally `proxy_read_timeout 3600s;` on the `/v1/stream` location.
+- **Caddy** — `reverse_proxy` has no response timeout by default, so nothing is needed.
+- **Cloudflare** — the edge idle timeout isn't configurable on standard plans; the heartbeat is what keeps a quiet stream alive.
 
 ### 3. Forward the token, `since`, and `Last-Event-ID`
 
@@ -136,8 +133,9 @@ server {
     # 16 MiB (ingest); this can only make the effective limit tighter.
     client_max_body_size 16m;
 
-    # SSE: stream events immediately, and tolerate quiet streams (no heartbeat
-    # yet — see #226) by not closing the idle connection too soon.
+    # SSE: stream events immediately (buffering off). The long read timeout is
+    # optional — WaveHouse's 15s keepalive heartbeat (#226) keeps quiet streams
+    # alive on its own — but harmless.
     location /v1/stream {
         proxy_pass            http://127.0.0.1:8080;
         proxy_http_version    1.1;
@@ -198,7 +196,7 @@ ingress:
 Cloudflare terminates TLS at its edge and forwards to the tunnel. Two caveats:
 
 - A plan-based upload size limit applies (100 MB on Free/Pro) — it can't be lowered below the plan on those tiers, and WaveHouse's own caps still apply underneath.
-- The edge resets idle connections (quiet SSE streams dropped roughly every two minutes in testing). Browser `EventSource` auto-reconnects; server-side consumers should reconnect until heartbeats land ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)).
+- The edge resets idle connections after ~100s, but WaveHouse's 15-second keepalive heartbeat ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)) keeps even a quiet SSE stream alive, so they're no longer dropped — no reconnect loop needed just to survive a slow table.
 
 </TabItem>
 </Tabs>

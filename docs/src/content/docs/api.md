@@ -516,7 +516,7 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 | ------ | ----------- |
 | `Last-Event-ID` | RFC 3339 timestamp of the last received event. If present, overrides the `since` query parameter for automatic reconnection (standard `EventSource` behavior). |
 
-**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`.
+**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and, on a quiet connection, emits a `: heartbeat` comment every 15 seconds to keep proxies from closing it; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
 
 ```text
 id: 2026-03-24T12:00:00.123Z
@@ -532,8 +532,8 @@ Each SSE connection is bound to a single `?table=`; to consume multiple tables, 
 
 **CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
 
-:::caution[Behind a proxy: disable buffering, raise idle timeouts]
-SSE needs proxy-specific configuration. Disable response buffering (or the proxy holds events until a buffer fills), and raise the idle/read timeout for this route: WaveHouse sends a single `: connected` comment on open and then **no periodic heartbeat** ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so a quiet stream can be reset by an intermediary's idle timeout. Browser `EventSource` auto-reconnects (resuming via `Last-Event-ID`); server-side consumers should reconnect. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
+:::caution[Behind a proxy: disable response buffering]
+SSE needs one bit of proxy configuration: disable response buffering, or the proxy holds events until a buffer fills and clients receive nothing in real time. Idle timeouts are handled for you — the `: heartbeat` comment above keeps a quiet stream alive under typical proxy/tunnel idle windows ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so raising the idle/read timeout is now optional. Browser `EventSource` still auto-reconnects (resuming via `Last-Event-ID`) if a connection drops. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
 :::
 
 **curl example:**

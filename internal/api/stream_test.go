@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,4 +203,32 @@ func TestExtractEventTimestamp(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
+	t.Parallel()
+	// A short interval keeps the test fast; production uses defaultHeartbeatInterval.
+	h := &StreamHandler{Hub: NewHub(), heartbeatInterval: 20 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)
+	w := httptest.NewRecorder()
+
+	// Handle blocks in its select loop until the context is cancelled. Run it in
+	// a goroutine, let a few heartbeat intervals elapse on an otherwise-idle
+	// stream, then cancel and join before reading the buffer — so the test never
+	// touches w concurrently with the handler.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Handle(w, req)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := w.Body.String()
+	assert.Contains(t, body, ": connected\n\n", "handshake comment should be sent on open")
+	assert.GreaterOrEqual(t, strings.Count(body, ": heartbeat\n\n"), 1,
+		"an idle stream should emit at least one heartbeat comment; body=%q", body)
 }
