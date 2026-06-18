@@ -207,8 +207,12 @@ func TestExtractEventTimestamp(t *testing.T) {
 
 func TestSSE_EmitsHeartbeatsWhenIdle(t *testing.T) {
 	t.Parallel()
-	// A short interval keeps the test fast; production uses defaultHeartbeatInterval.
-	h := &StreamHandler{Hub: NewHub(), heartbeatInterval: 20 * time.Millisecond}
+	// A short interval keeps the test fast; production tuning lives in config.
+	// One bucket so the (sole) idle connection is pushed on every tick.
+	hb := NewHeartbeater(1, 20*time.Millisecond)
+	go hb.Run(t.Context())
+
+	h := &StreamHandler{Hub: NewHub(), Heartbeater: hb}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stream?table=clicks", nil)

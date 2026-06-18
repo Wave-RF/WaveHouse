@@ -18,20 +18,12 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// defaultHeartbeatInterval is how often an idle SSE stream emits a comment
-// heartbeat so a quiet connection isn't reset by a reverse proxy or tunnel on
-// its idle timeout (nginx defaults to 60s, Cloudflare's edge to ~100s). Kept
-// well under those so several heartbeats land per window. See issue #226.
-const defaultHeartbeatInterval = 15 * time.Second
-
 // StreamHandler handles GET /v1/stream
 type StreamHandler struct {
 	Hub         *Hub
 	JS          jetstream.JetStream
 	PolicyStore *policy.Store
-	// heartbeatInterval overrides defaultHeartbeatInterval when > 0. Set only in
-	// tests so they don't have to wait a real heartbeat period.
-	heartbeatInterval time.Duration
+	Heartbeater *Heartbeater
 }
 
 func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
@@ -128,25 +120,24 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	tracer := otel.Tracer("wavehouse-api")
 
-	// Heartbeat: periodically emit an SSE comment so a quiet stream isn't
-	// idle-closed by a proxy/tunnel between events. It's reset on every
-	// delivered event, so an active stream never pays for a redundant one.
-	// See issue #226.
-	interval := h.heartbeatInterval
-	if interval <= 0 {
-		interval = defaultHeartbeatInterval
+	// Register with the shared heartbeat wheel: a single goroutine periodically
+	// pushes a `: heartbeat` comment to this connection's hbCh so a quiet stream
+	// isn't idle-closed by a proxy/tunnel between events.
+	c := &conn{hbCh: make(chan []byte, 1)}
+	if h.Heartbeater != nil {
+		h.Heartbeater.Add(c)
+		defer h.Heartbeater.Remove(c)
 	}
-	heartbeat := time.NewTicker(interval)
-	defer heartbeat.Stop()
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-heartbeat.C:
-			// A write error means the connection is already gone (the heartbeat
-			// doubles as a liveness probe on otherwise-quiet streams); stop.
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+		case raw := <-c.hbCh:
+			// Heartbeat bytes from the wheel, written verbatim. A write error
+			// means the connection is already gone (this doubles as a liveness
+			// probe on otherwise-quiet streams); stop.
+			if _, err := w.Write(raw); err != nil {
 				return
 			}
 			flusher.Flush()
@@ -173,9 +164,6 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			id := extractEventTimestamp(out)
 			_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 			flusher.Flush()
-			// A real delivery already kept the connection warm; restart the
-			// idle clock so heartbeats fire only on genuinely quiet streams.
-			heartbeat.Reset(interval)
 			pushSpan.End()
 		}
 	}

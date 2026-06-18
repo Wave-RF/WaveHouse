@@ -516,7 +516,7 @@ Opens a persistent SSE connection for real-time event streaming. Supports histor
 | ------ | ----------- |
 | `Last-Event-ID` | RFC 3339 timestamp of the last received event. If present, overrides the `since` query parameter for automatic reconnection (standard `EventSource` behavior). |
 
-**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and, on a quiet connection, emits a `: heartbeat` comment every 15 seconds to keep proxies from closing it; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
+**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and, on a quiet connection, emits a `: heartbeat` comment periodically (about every 15 seconds by default) to keep proxies from closing it; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
 
 ```text
 id: 2026-03-24T12:00:00.123Z

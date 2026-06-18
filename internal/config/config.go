@@ -30,6 +30,7 @@ type Config struct {
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
 	Query      Query      `yaml:"query"`
+	Stream     Stream     `yaml:"stream"`
 }
 
 // Query holds query-shaping defaults. Server-wide *resource* limits (memory,
@@ -102,6 +103,11 @@ type Server struct {
 	Port               int      `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
 	ShutdownTimeout    int      `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 	CORSAllowedOrigins []string `yaml:"cors_allowed_origins" env:"WH_SERVER_CORS_ALLOWED_ORIGINS" env-default:"*"`
+}
+
+type Stream struct {
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" env:"WH_STREAM_HEARTBEAT_INTERVAL" env-default:"5s"`
+	HeartbeatBuckets  int           `yaml:"heartbeat_buckets" env:"WH_STREAM_HEARTBEAT_BUCKETS" env-default:"3"`
 }
 
 type ClickHouse struct {
@@ -191,6 +197,13 @@ func (c *Config) Validate() error {
 
 	if c.Server.ShutdownTimeout < 0 {
 		return fmt.Errorf("server.shutdown_timeout must be non-negative")
+	}
+
+	if c.Stream.HeartbeatInterval < 0 {
+		return fmt.Errorf("stream.heartbeat_interval must be non-negative, got %s", c.Stream.HeartbeatInterval)
+	}
+	if c.Stream.HeartbeatBuckets < 0 {
+		return fmt.Errorf("stream.heartbeat_buckets must be non-negative, got %d", c.Stream.HeartbeatBuckets)
 	}
 
 	if c.Schema.RefreshInterval < 1 {

@@ -359,6 +359,10 @@ func run() int {
 	streamHandler := api.NewStreamHandler(hub, js)
 	streamHandler.PolicyStore = policyStore
 
+	heartbeater := api.NewHeartbeater(cfg.Stream.HeartbeatBuckets, cfg.Stream.HeartbeatInterval)
+	go heartbeater.Run(ctx)
+	streamHandler.Heartbeater = heartbeater
+
 	// Build the auth middleware up front so a misconfigured/unreachable JWKS
 	// endpoint fails startup loudly rather than booting into a degraded state.
 	authMW, err := auth.Middleware(auth.Config{
