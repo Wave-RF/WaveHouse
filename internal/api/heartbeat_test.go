@@ -34,12 +34,13 @@ func TestConnSet_PushIsNonBlockingAndDropsWhenFull(t *testing.T) {
 	s := newConnSet()
 	c := &conn{hbCh: make(chan []byte, 1)}
 	s.Add(c)
+	payload := []byte("payload")
 
 	// First push fills the 1-slot buffer; the second must drop rather than block.
-	s.Push(heartbeatComment)
-	s.Push(heartbeatComment)
+	s.Push(payload)
+	s.Push(payload)
 
-	assert.Equal(t, heartbeatComment, <-c.hbCh)
+	assert.Equal(t, payload, <-c.hbCh)
 	select {
 	case <-c.hbCh:
 		t.Fatal("second push should have been dropped while the buffer was full")
@@ -47,25 +48,31 @@ func TestConnSet_PushIsNonBlockingAndDropsWhenFull(t *testing.T) {
 	}
 }
 
-func TestNewHeartbeater_ClampsInvalidValues(t *testing.T) {
+func TestNewHeartbeater(t *testing.T) {
 	t.Parallel()
-	hb := NewHeartbeater(0, 0)
-	assert.Len(t, hb.buckets, defaultHeartbeatBuckets, "non-positive buckets falls back to default")
-	assert.Equal(t, defaultHeartbeatInterval, hb.interval, "non-positive interval falls back to default")
-
-	hb = NewHeartbeater(-3, -time.Second)
-	assert.Len(t, hb.buckets, defaultHeartbeatBuckets)
-	assert.Equal(t, defaultHeartbeatInterval, hb.interval)
-}
-
-func TestNewHeartbeater_UsesProvidedValues(t *testing.T) {
-	t.Parallel()
-	// Valid (positive) values — i.e. what config passes in — are used as-is. The
-	// default consts are the fallback for invalid input only, never an override:
-	// these assertions would fail if the consts (5s, 3) were used instead.
-	hb := NewHeartbeater(4, 10*time.Second)
-	assert.Len(t, hb.buckets, 4, "bucket count must come from the provided (config) value")
-	assert.Equal(t, 10*time.Second, hb.interval, "interval must come from the provided (config) value")
+	// Valid (positive) values — what config passes in — are used as-is; the
+	// default consts are the fallback for non-positive input only, never an
+	// override (the first case would fail if the consts were used instead).
+	// Config validation rejects negatives, so 0 is the only live fallback path.
+	tests := []struct {
+		name         string
+		buckets      int
+		interval     time.Duration
+		wantBuckets  int
+		wantInterval time.Duration
+	}{
+		{"valid values used as-is", 4, 10 * time.Second, 4, 10 * time.Second},
+		{"zero falls back to defaults", 0, 0, defaultHeartbeatBuckets, defaultHeartbeatInterval},
+		{"negative falls back to defaults", -3, -time.Second, defaultHeartbeatBuckets, defaultHeartbeatInterval},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hb := NewHeartbeater(tt.buckets, tt.interval)
+			assert.Len(t, hb.buckets, tt.wantBuckets)
+			assert.Equal(t, tt.wantInterval, hb.interval)
+		})
+	}
 }
 
 func TestHeartbeater_AddPlacesConnInLastToFireBucket(t *testing.T) {
@@ -98,7 +105,7 @@ func TestHeartbeater_PushesHeartbeatToIdleConnection(t *testing.T) {
 
 	select {
 	case got := <-c.hbCh:
-		assert.Equal(t, heartbeatComment, got)
+		assert.Equal(t, hb.comment, got)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected a heartbeat within a rotation")
 	}

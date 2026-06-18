@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-var heartbeatComment = []byte(": heartbeat\n\n")
-
 const (
 	defaultHeartbeatInterval = 5 * time.Second
 	defaultHeartbeatBuckets  = 3
@@ -78,8 +76,8 @@ func (s *connSet) Push(b []byte) {
 
 type Heartbeater struct {
 	interval time.Duration
-	buckets  []Bucket
-
+	comment []byte
+	buckets []Bucket
 	mu   sync.Mutex // guards hand
 	hand int
 }
@@ -95,7 +93,11 @@ func NewHeartbeater(buckets int, interval time.Duration) *Heartbeater {
 	for i := range ring {
 		ring[i] = newConnSet()
 	}
-	return &Heartbeater{interval: interval, buckets: ring}
+	return &Heartbeater{
+		interval: interval,
+		comment:  []byte(": heartbeat\n\n"),
+		buckets:  ring,
+	}
 }
 
 // Add registers a connection in the bucket that will be pushed last, giving it a
@@ -136,7 +138,7 @@ func (hb *Heartbeater) Run(ctx context.Context) {
 			hb.hand = (hb.hand + 1) % len(hb.buckets)
 			hb.mu.Unlock()
 
-			front.Push(heartbeatComment)
+			front.Push(hb.comment)
 		}
 	}
 }
