@@ -76,10 +76,10 @@ func (s *connSet) Push(b []byte) {
 
 type Heartbeater struct {
 	interval time.Duration
-	comment []byte
-	buckets []Bucket
-	mu   sync.Mutex // guards hand
-	hand int
+	comment  []byte
+	buckets  []Bucket
+	mu       sync.Mutex // guards hand
+	hand     int
 }
 
 func NewHeartbeater(buckets int, interval time.Duration) *Heartbeater {
