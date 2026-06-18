@@ -76,7 +76,6 @@ func (s *connSet) Push(b []byte) {
 	}
 }
 
-
 type Heartbeater struct {
 	interval time.Duration
 	buckets  []Bucket
