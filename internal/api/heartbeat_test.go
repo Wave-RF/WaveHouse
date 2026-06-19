@@ -93,6 +93,46 @@ func TestHeartbeater_AddPlacesConnInLastToFireBucket(t *testing.T) {
 	assert.Equal(t, 0, hb.buckets[2].Len(), "Remove takes the conn back out of its bucket")
 }
 
+func TestHeartbeater_RotatesOneBucketPerTick(t *testing.T) {
+	t.Parallel()
+	// A long interval keeps Run's ticker quiet; we step the wheel by hand so the
+	// rotation is deterministic.
+	const buckets = 3
+	hb := NewHeartbeater(buckets, time.Hour)
+
+	// Place one connection directly in each bucket so every bucket is identifiable.
+	// A roomy buffer means a (buggy) double-push would be observed, not dropped.
+	conns := make([]*conn, buckets)
+	for i := range conns {
+		conns[i] = &conn{hbCh: make(chan []byte, 4)}
+		hb.buckets[i].Add(conns[i])
+	}
+
+	// Each tick pushes exactly the bucket under the hand, then advances it, so one
+	// full rotation pings every connection exactly once — the keepalive load is
+	// spread across ticks instead of hitting every connection at the same instant.
+	for range buckets {
+		before := make([]int, buckets)
+		for i, c := range conns {
+			before[i] = len(c.hbCh)
+		}
+
+		hb.tick()
+
+		gained := 0
+		for i, c := range conns {
+			delta := len(c.hbCh) - before[i]
+			assert.LessOrEqual(t, delta, 1, "bucket %d got more than one heartbeat in one tick", i)
+			gained += delta
+		}
+		assert.Equal(t, 1, gained, "exactly one bucket is pushed per tick")
+	}
+
+	for i, c := range conns {
+		assert.Equal(t, 1, len(c.hbCh), "bucket %d is pinged exactly once per rotation", i)
+	}
+}
+
 func TestHeartbeater_PushesHeartbeatToIdleConnection(t *testing.T) {
 	t.Parallel()
 	// One bucket + tiny interval: the lone connection is pushed on every tick.

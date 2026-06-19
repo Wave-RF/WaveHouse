@@ -133,12 +133,16 @@ func (hb *Heartbeater) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hb.mu.Lock()
-			front := hb.buckets[hb.hand]
-			hb.hand = (hb.hand + 1) % len(hb.buckets)
-			hb.mu.Unlock()
-
-			front.Push(hb.comment)
+			hb.tick()
 		}
 	}
+}
+
+func (hb *Heartbeater) tick() {
+	hb.mu.Lock()
+	front := hb.buckets[hb.hand]
+	hb.hand = (hb.hand + 1) % len(hb.buckets)
+	hb.mu.Unlock()
+
+	front.Push(hb.comment)
 }

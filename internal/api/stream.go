@@ -159,6 +159,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 			out := h.applyStreamPolicy(envelope.Payload, role, claims)
 			if out == nil {
+				pushSpan.End()
 				continue
 			}
 			id := extractEventTimestamp(out)
