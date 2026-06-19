@@ -43,8 +43,8 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `stream.heartbeat_interval` | `WH_STREAM_HEARTBEAT_INTERVAL` | `5s` | How often the shared heartbeat ticker fires, pushing a `: heartbeat` keepalive comment to one bucket of idle `GET /v1/stream` connections. |
-| `stream.heartbeat_buckets` | `WH_STREAM_HEARTBEAT_BUCKETS` | `3` | How many buckets the ticker spreads connections across, so each tick wakes only ~1/N of idle streams instead of all at once. |
+| `stream.heartbeat_interval` | `WH_STREAM_HEARTBEAT_INTERVAL` | `5s` | How often the shared heartbeat ticker fires, pushing a `: heartbeat` keepalive comment to one bucket of live `GET /v1/stream` connections. |
+| `stream.heartbeat_buckets` | `WH_STREAM_HEARTBEAT_BUCKETS` | `3` | How many buckets the ticker spreads connections across, so each tick wakes only ~1/N of live streams instead of all at once. |
 
 The **effective per-connection heartbeat period is `heartbeat_interval × heartbeat_buckets`** (default 5s × 3 = 15s) — a connection is pinged once per full rotation of the ring. Keep that product comfortably under your reverse proxy or tunnel's idle timeout (nginx's default `proxy_read_timeout` is 60s; Cloudflare's edge is ~100s) so quiet streams aren't dropped — see [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse). More buckets smooth the keepalive write load over time without changing the period. A value of `0` falls back to the default; a negative value is rejected at startup.
 
