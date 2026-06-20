@@ -15,10 +15,12 @@
 // where global.css is applied and a theme is set, i.e. against the BUILT page
 // in a real browser. We reuse the Chromium that rehype-mermaid already needs.
 //
-// Output: dist/diagrams/<slug>/<index>-<theme>.png, where <slug> is the page
-// path and <index> is the diagram's position among
+// Output: dist/diagrams/<slug>/<index>-<theme>[-transparent].png, where <slug>
+// is the page path and <index> is the diagram's position among
 // `.sl-markdown-content svg[aria-roledescription]` — the exact selector the
 // lightbox uses, so both sides agree on which PNG belongs to which diagram.
+// Each diagram is emitted twice per theme: the solid surface card (default) and
+// a transparent-background variant for dropping onto a slide deck.
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -46,7 +48,16 @@ const MAX_DIM = 2400; // cap a diagram's CSS-px long edge so files stay sane
 // Same selector the lightbox indexes by — keep these in lockstep.
 const DIAGRAM = ".sl-markdown-content svg[aria-roledescription]";
 // Bump to invalidate every cached PNG after a change to the render routine.
-const RENDER_VERSION = "1";
+const RENDER_VERSION = "3";
+
+// Each diagram is rasterized once per variant: the default solid "surface card"
+// and a transparent-background version (drops cleanly onto any slide backdrop).
+// The transparent file carries a `-transparent` suffix; the lightbox toggle
+// (src/components/MermaidZoom.astro) picks between the two.
+const VARIANTS = [
+  { suffix: "", transparent: false },
+  { suffix: "-transparent", transparent: true },
+];
 
 const CONTENT_TYPES = {
   ".css": "text/css",
@@ -121,9 +132,9 @@ async function run({ dir, pages, logger }) {
       const cached =
         entry &&
         entry.hash === hash &&
-        Array.from({ length: entry.count }, (_, i) =>
-          join(cacheDir, `${hash}-${i}-${theme}.png`),
-        ).every(existsSync);
+        Array.from({ length: entry.count }).every((_, i) =>
+          VARIANTS.every((v) => existsSync(join(cacheDir, `${hash}-${i}-${theme}${v.suffix}.png`))),
+        );
       if (cached) toCopy.push({ ...page, theme, hash, count: entry.count });
       else toRender.push({ ...page, theme, hash });
     }
@@ -131,10 +142,12 @@ async function run({ dir, pages, logger }) {
 
   for (const job of toCopy) {
     for (let i = 0; i < job.count; i++) {
-      await place(
-        join(cacheDir, `${job.hash}-${i}-${job.theme}.png`),
-        join(distDir, "diagrams", job.slug, `${i}-${job.theme}.png`),
-      );
+      for (const v of VARIANTS) {
+        await place(
+          join(cacheDir, `${job.hash}-${i}-${job.theme}${v.suffix}.png`),
+          join(distDir, "diagrams", job.slug, `${i}-${job.theme}${v.suffix}.png`),
+        );
+      }
     }
   }
 
@@ -178,10 +191,15 @@ async function run({ dir, pages, logger }) {
             await page.evaluate(() => document.fonts?.ready);
             const count = await page.$$eval(DIAGRAM, (els) => els.length);
             for (let i = 0; i < count; i++) {
-              const buf = await capture(page, i);
-              await write(join(distDir, "diagrams", job.slug, `${i}-${theme}.png`), buf);
-              await write(join(cacheDir, `${job.hash}-${i}-${theme}.png`), buf);
-              made++;
+              for (const v of VARIANTS) {
+                const buf = await capture(page, i, { transparent: v.transparent });
+                await write(
+                  join(distDir, "diagrams", job.slug, `${i}-${theme}${v.suffix}.png`),
+                  buf,
+                );
+                await write(join(cacheDir, `${job.hash}-${i}-${theme}${v.suffix}.png`), buf);
+                made++;
+              }
             }
             // In-memory only; the whole manifest is flushed to disk once after
             // every theme finishes (a mid-run kill just re-renders next build).
@@ -199,24 +217,25 @@ async function run({ dir, pages, logger }) {
     await write(manifestPath, JSON.stringify(manifest, null, 2));
   }
 
-  const reused = toCopy.reduce((n, j) => n + j.count, 0);
+  const reused = toCopy.reduce((n, j) => n + j.count * VARIANTS.length, 0);
   logger.info(
-    `diagram PNGs: ${made} rendered, ${reused} cached → dist/diagrams/ (${THEMES.join(", ")})`,
+    `diagram PNGs: ${made} rendered, ${reused} cached → dist/diagrams/ (${THEMES.join(", ")} × solid+transparent)`,
   );
 }
 
-// Clone the index-th diagram into an opaque "surface card" (padding +
-// --wh-mermaid-surface background, like the zoom stage), sized to the diagram's
-// intrinsic dimensions, then clip a page screenshot to that card. Re-id the
-// clone (the SVG scopes its inline <style>/marker refs by root id) and render
-// it via the live page (not an isolated SVG screenshot) so foreignObject label
-// CSS + fonts apply. The card is appended to <body>, NOT the content column:
-// a transformed/contained content ancestor would become a `position: fixed`
-// containing block and offset the card off (0,0); the label CSS is svg-scoped,
-// so moving the clone to <body> doesn't change its look.
-async function capture(page, index) {
+// Clone the index-th diagram into a padded "surface card" (--wh-mermaid-surface
+// background by default, like the zoom stage; transparent for the export
+// variant), sized to the diagram's intrinsic dimensions, then clip a page
+// screenshot to that card. Re-id the clone (the SVG scopes its inline
+// <style>/marker refs by root id) and render it via the live page (not an
+// isolated SVG screenshot) so foreignObject label CSS + fonts apply. The card
+// is appended to <body>, NOT the content column: a transformed/contained
+// content ancestor would become a `position: fixed` containing block and offset
+// the card off (0,0); the label CSS is svg-scoped, so moving the clone to
+// <body> doesn't change its look.
+async function capture(page, index, { transparent = false } = {}) {
   const box = await page.evaluate(
-    ({ index, selector, PAD, MAX_DIM }) => {
+    ({ index, selector, PAD, MAX_DIM, transparent }) => {
       const svg = document.querySelectorAll(selector)[index];
       const id = svg.getAttribute("id");
       let markup = svg.outerHTML;
@@ -233,8 +252,8 @@ async function capture(page, index) {
       card.id = "__wh_pngshot";
       card.style.cssText =
         `position:fixed;left:0;top:0;z-index:2147483647;padding:${PAD}px;` +
-        "background:var(--wh-mermaid-surface);display:inline-block;" +
-        "box-sizing:content-box;line-height:0;margin:0;border:0;";
+        (transparent ? "background:transparent;" : "background:var(--wh-mermaid-surface);") +
+        "display:inline-block;box-sizing:content-box;line-height:0;margin:0;border:0;";
       card.innerHTML = markup;
       const clone = card.firstElementChild;
       clone.style.maxWidth = "none";
@@ -243,6 +262,26 @@ async function capture(page, index) {
       clone.style.width = `${Math.round(natW * scale)}px`;
       clone.style.height = `${Math.round(natH * scale)}px`;
       document.body.appendChild(card);
+      // Transparent variant: the card sits at (0,0), under the page's own
+      // chrome (sticky header, fixed sidebar) — which paint their own (often
+      // translucent) backgrounds and text that would bleed through the
+      // transparent card. Neutralize the <html>/<body> background and remove
+      // every other top-level element from the render with display:none, so the
+      // clip captures only the diagram clone. display:none — NOT visibility:
+      // hidden — because Starlight's fixed `.sidebar-pane` re-asserts
+      // `visibility: visible` on itself, overriding an inherited `hidden` and
+      // leaking the nav into the corner; a display:none ancestor can't be
+      // undone by a descendant. Paired with screenshot({ omitBackground }) the
+      // surround renders fully clear; the diagram's fills/edges/labels are
+      // untouched (its colors come from :root vars, not from siblings). All of
+      // this is reverted in the cleanup pass after the screenshot.
+      if (transparent) {
+        document.documentElement.style.background = "transparent";
+        document.body.style.background = "transparent";
+        for (const el of document.body.children) {
+          if (el !== card) el.style.display = "none";
+        }
+      }
       // Clip to the card's MEASURED rect (normally (0,0) but resilient to any
       // residual offset) rather than assuming top-left.
       const r = card.getBoundingClientRect();
@@ -253,7 +292,7 @@ async function capture(page, index) {
         height: Math.ceil(r.height),
       };
     },
-    { index, selector: DIAGRAM, PAD, MAX_DIM },
+    { index, selector: DIAGRAM, PAD, MAX_DIM, transparent },
   );
 
   // Grow the viewport if the card overflows it, else the clip is truncated.
@@ -266,8 +305,15 @@ async function capture(page, index) {
       height: Math.max(vp.height, needH),
     });
   }
-  const buf = await page.screenshot({ type: "png", clip: box });
-  await page.evaluate(() => document.getElementById("__wh_pngshot")?.remove());
+  const buf = await page.screenshot({ type: "png", clip: box, omitBackground: transparent });
+  await page.evaluate((transparent) => {
+    document.getElementById("__wh_pngshot")?.remove();
+    if (transparent) {
+      document.documentElement.style.removeProperty("background");
+      document.body.style.removeProperty("background");
+      for (const el of document.body.children) el.style.removeProperty("display");
+    }
+  }, transparent);
   return buf;
 }
 
