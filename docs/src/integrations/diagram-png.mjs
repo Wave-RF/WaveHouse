@@ -48,7 +48,7 @@ const MAX_DIM = 2400; // cap a diagram's CSS-px long edge so files stay sane
 // Same selector the lightbox indexes by — keep these in lockstep.
 const DIAGRAM = ".sl-markdown-content svg[aria-roledescription]";
 // Bump to invalidate every cached PNG after a change to the render routine.
-const RENDER_VERSION = "3";
+const RENDER_VERSION = "4";
 
 // Each diagram is rasterized once per variant: the default solid "surface card"
 // and a transparent-background version (drops cleanly onto any slide backdrop).
@@ -265,22 +265,25 @@ async function capture(page, index, { transparent = false } = {}) {
       // Transparent variant: the card sits at (0,0), under the page's own
       // chrome (sticky header, fixed sidebar) — which paint their own (often
       // translucent) backgrounds and text that would bleed through the
-      // transparent card. Neutralize the <html>/<body> background and remove
-      // every other top-level element from the render with display:none, so the
-      // clip captures only the diagram clone. display:none — NOT visibility:
-      // hidden — because Starlight's fixed `.sidebar-pane` re-asserts
-      // `visibility: visible` on itself, overriding an inherited `hidden` and
-      // leaking the nav into the corner; a display:none ancestor can't be
-      // undone by a descendant. Paired with screenshot({ omitBackground }) the
-      // surround renders fully clear; the diagram's fills/edges/labels are
-      // untouched (its colors come from :root vars, not from siblings). All of
-      // this is reverted in the cleanup pass after the screenshot.
+      // transparent card. Inject a scoped stylesheet that clears the
+      // <html>/<body> background and removes every other top-level element from
+      // the render (`body > *` except the card), so the clip captures only the
+      // diagram clone. display:none — NOT visibility:hidden — because
+      // Starlight's fixed `.sidebar-pane` re-asserts `visibility: visible` on
+      // itself, overriding an inherited `hidden` and leaking the nav into the
+      // corner; a display:none ancestor can't be undone by a descendant. Doing
+      // it via one stylesheet (rather than mutating each child's inline style)
+      // leaves the page's own inline styles untouched — cleanup just drops the
+      // <style>. Paired with screenshot({ omitBackground }) the surround renders
+      // fully clear; the diagram's fills/edges/labels are untouched (their
+      // colors come from :root vars, not from siblings).
       if (transparent) {
-        document.documentElement.style.background = "transparent";
-        document.body.style.background = "transparent";
-        for (const el of document.body.children) {
-          if (el !== card) el.style.display = "none";
-        }
+        const style = document.createElement("style");
+        style.id = "__wh_pngshot_style";
+        style.textContent =
+          "html,body{background:transparent !important}" +
+          "body>*:not(#__wh_pngshot){display:none !important}";
+        document.head.appendChild(style);
       }
       // Clip to the card's MEASURED rect (normally (0,0) but resilient to any
       // residual offset) rather than assuming top-left.
@@ -306,14 +309,10 @@ async function capture(page, index, { transparent = false } = {}) {
     });
   }
   const buf = await page.screenshot({ type: "png", clip: box, omitBackground: transparent });
-  await page.evaluate((transparent) => {
+  await page.evaluate(() => {
     document.getElementById("__wh_pngshot")?.remove();
-    if (transparent) {
-      document.documentElement.style.removeProperty("background");
-      document.body.style.removeProperty("background");
-      for (const el of document.body.children) el.style.removeProperty("display");
-    }
-  }, transparent);
+    document.getElementById("__wh_pngshot_style")?.remove();
+  });
   return buf;
 }
 
