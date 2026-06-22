@@ -13,11 +13,11 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",
-    "@astrojs/starlight": "^0.38.3",
+    "@astrojs/starlight": "^0.40.0",
     "@astrojs/starlight-tailwind": "^5.0.0",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
-    "@tailwindcss/vite": "^4.3.0",
+    "@tailwindcss/vite": "^4.3.1",
     "@wave-rf/astro-themed-mermaid": "^0.3.1",
     "@wave-rf/cloudflare-md-router": "^0.2.1",
     "@wave-rf/starlight-llm-tools": "^0.3.1",
@@ -30,13 +30,13 @@
     "remark-math": "^6.0.0",
     "sharp": "^0.34.2",
     "starlight-image-zoom": "^0.14.1",
-    "starlight-links-validator": "^0.24.0",
-    "tailwindcss": "^4.3.0",
+    "starlight-links-validator": "^0.24.1",
+    "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240208.0",
-    "playwright": "^1.59.1",
+    "playwright": "^1.61.0",
     "wrangler": "^4.81.0"
   },
   "engines": {
