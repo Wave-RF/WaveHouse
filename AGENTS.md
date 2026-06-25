@@ -26,7 +26,7 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Thirteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
+Fourteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware (from `auth/`), ingest/query/structured-query/SSE/schema/DLQ/policy/pipes handlers, Hub
 - **`auth/`** — JWT auth middleware: HMAC **or** JWKS verification with `alg` pinned to the active verifier, role extraction from a configurable claim path; always runs, never rejects (bad token → empty role + stashed reason)
@@ -41,6 +41,7 @@ Thirteen internal packages under `internal/` (plus `internal/testutil/` for shar
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
 - **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
 - **`query/`** — Structured query AST types + SQL builder with schema validation, permission injection, timestamp bucketing
+- **`stream/`** — SSE fan-out primitives: `Subscriber` (per-connection outbound frame queue, `Send`/`Frames`), the `Bucket` fan-out set (`subscriberSet`, reused by #294's delivery path), and the `Heartbeater` keepalive wheel
 
 ## Key Design Decisions
 
@@ -399,6 +400,7 @@ internal/observability/ → OpenTelemetry pipeline (traces/metrics/logs provider
 internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstrap)
 internal/policy/        → Access control policies (types, evaluation, NATS KV store)
 internal/query/         → Structured query AST + SQL builder
+internal/stream/        → SSE fan-out primitives (Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests
 tests/integration/      → Go integration tests (//go:build integration; ClickHouse testcontainer)

@@ -27,6 +27,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
 // Pre-populated build info variables, set via ldflags in the Makefile.
@@ -359,7 +360,7 @@ func run() int {
 	streamHandler := api.NewStreamHandler(hub, js)
 	streamHandler.PolicyStore = policyStore
 
-	heartbeater := api.NewHeartbeater(cfg.Stream.HeartbeatBuckets, cfg.Stream.HeartbeatInterval)
+	heartbeater := stream.NewHeartbeater(cfg.Stream.KeepaliveInterval, cfg.Stream.KeepaliveBuckets)
 	go heartbeater.Run(ctx)
 	streamHandler.Heartbeater = heartbeater
 

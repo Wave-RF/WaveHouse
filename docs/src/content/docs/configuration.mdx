@@ -43,10 +43,10 @@ The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate 
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `stream.heartbeat_interval` | `WH_STREAM_HEARTBEAT_INTERVAL` | `5s` | How often the shared heartbeat ticker fires, pushing a `: heartbeat` keepalive comment to one bucket of live `GET /v1/stream` connections. |
-| `stream.heartbeat_buckets` | `WH_STREAM_HEARTBEAT_BUCKETS` | `3` | How many buckets the ticker spreads connections across, so each tick wakes only ~1/N of live streams instead of all at once. |
+| `stream.keepalive_interval` | `WH_STREAM_KEEPALIVE_INTERVAL` | `30s` | Effective per-connection keepalive period — the longest a quiet `GET /v1/stream` connection goes without a write before the server sends a `:` keepalive comment. Keep it under your proxy/tunnel idle timeout. |
+| `stream.keepalive_buckets` | `WH_STREAM_KEEPALIVE_BUCKETS` | `3` | Advanced load-spreading knob: connections are spread across N buckets so each internal tick (`keepalive_interval ÷ keepalive_buckets`) nudges only ~1/N of live streams instead of all at once. Most deployments leave this at `3`. |
 
-The **effective per-connection heartbeat period is `heartbeat_interval × heartbeat_buckets`** (default 5s × 3 = 15s) — a connection is pinged once per full rotation of the ring. Keep that product comfortably under your reverse proxy or tunnel's idle timeout (nginx's default `proxy_read_timeout` is 60s; Cloudflare's edge is ~100s) so quiet streams aren't dropped — see [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse). Each tick wakes only one bucket, so more buckets spread the write load across more ticks **but also lengthen the period** (it's the product above): raising `heartbeat_buckets` alone pushes the period out, so lower `heartbeat_interval` proportionally if you want more buckets at the same period. A value of `0` falls back to the default; a negative value is rejected at startup.
+`keepalive_interval` is the number you tune: the **maximum time a connection can sit idle before it's nudged**. The default **30s** clears the common 55–60s proxy/load-balancer idle windows (nginx and ingress-nginx `proxy_read_timeout`, AWS ALB, Heroku) with roughly 2× safety margin, and comfortably clears Cloudflare's ~100s edge. Lower it if you front WaveHouse with something tighter — Azure Application Gateway (20s) or CloudFront (30s) — see [Behind a reverse proxy → Idle timeouts](/reverse-proxy#idle-timeouts-by-provider) for a per-provider table. `keepalive_buckets` only changes how the writes are *spread in time*, not the period: the wheel fires one bucket every `keepalive_interval ÷ keepalive_buckets`, so a full rotation always spans exactly `keepalive_interval` regardless of bucket count. A value of `0` for either falls back to the default; a negative value is rejected at startup.
 
 ### ClickHouse
 
@@ -221,8 +221,8 @@ server:
     - "*"
 
 stream:
-  heartbeat_interval: 5s   # effective keepalive period = interval × buckets (default 15s)
-  heartbeat_buckets: 3     # keep interval × buckets under your proxy's idle window
+  keepalive_interval: 30s  # max idle time before a keepalive; keep under your proxy's idle window
+  keepalive_buckets: 3     # advanced: spread keepalive writes across N buckets
 
 clickhouse:
   addr: localhost:9000
@@ -294,8 +294,8 @@ WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
 WH_SERVER_CORS_ALLOWED_ORIGINS=*
 
-WH_STREAM_HEARTBEAT_INTERVAL=5s
-WH_STREAM_HEARTBEAT_BUCKETS=3
+WH_STREAM_KEEPALIVE_INTERVAL=30s
+WH_STREAM_KEEPALIVE_BUCKETS=3
 
 WH_CH_ADDR=localhost:9000
 WH_CH_HTTP_PORT=8123

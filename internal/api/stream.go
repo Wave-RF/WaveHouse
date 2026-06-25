@@ -12,6 +12,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"go.opentelemetry.io/otel"
@@ -23,7 +24,7 @@ type StreamHandler struct {
 	Hub         *Hub
 	JS          jetstream.JetStream
 	PolicyStore *policy.Store
-	Heartbeater *Heartbeater
+	Heartbeater *stream.Heartbeater
 }
 
 func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
@@ -120,28 +121,35 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	tracer := otel.Tracer("wavehouse-api")
 
-	// Register with the shared heartbeat wheel: a single goroutine periodically
-	// pushes a `: heartbeat` comment to this connection's hbCh so a quiet stream
-	// isn't idle-closed by a proxy/tunnel between events.
-	c := &conn{hbCh: make(chan []byte, 1)}
+	// Register with the shared keepalive wheel: a single goroutine periodically
+	// pushes a minimal `:` comment to this subscriber so a quiet stream isn't
+	// idle-closed by a proxy/tunnel between events.
+	sub := stream.NewSubscriber()
 	if h.Heartbeater != nil {
-		h.Heartbeater.Add(c)
-		defer h.Heartbeater.Remove(c)
+		h.Heartbeater.Add(sub)
+		defer h.Heartbeater.Remove(sub)
 	}
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case raw := <-c.hbCh:
-			// Heartbeat bytes from the wheel, written verbatim. A write error
-			// means the connection is already gone (this doubles as a liveness
-			// probe on otherwise-quiet streams); stop.
+		case raw := <-sub.Frames():
+			// Ready-to-write bytes off the subscriber's outbound queue, written
+			// verbatim — the generic byte-pump. Today the keepalive wheel is the
+			// only producer (`:` comments); once #294 projects + serializes events
+			// upstream they flow through this same queue and the `ch` case below
+			// folds into here. A write error means the connection is already gone
+			// (this doubles as a liveness probe on otherwise-quiet streams); stop.
 			if _, err := w.Write(raw); err != nil {
 				return
 			}
 			flusher.Flush()
 		case data := <-ch:
+			// Bespoke per-subscriber transform path: raw MQ envelopes still need
+			// unmarshal + policy projection + serialization here, which is why this
+			// can't yet share the byte-pump above. Collapsing it into Frames() by
+			// projecting once per (role, table) upstream is the core of #294.
 			var envelope struct {
 				TraceHeaders map[string]string `json:"trace_headers"`
 				Payload      []byte            `json:"payload"`

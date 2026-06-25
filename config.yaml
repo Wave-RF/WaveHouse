@@ -54,13 +54,14 @@ clickhouse:
 query:
   default_max_rows: 10000          # fallback result LIMIT (<=0 falls back to 10000)
 
-# Server-Sent Events keepalive for GET /v1/stream. A shared ticker pushes a
-# ": heartbeat" comment so idle streams survive reverse-proxy/tunnel idle
-# timeouts. Effective per-connection period = heartbeat_interval × heartbeat_buckets
-# (default 15s); keep it under your proxy's idle timeout. See docs/reverse-proxy.
+# Server-Sent Events keepalive for GET /v1/stream. A shared ticker pushes a ":"
+# comment to idle streams so they survive reverse-proxy/tunnel idle timeouts.
+# keepalive_interval is the effective per-connection period; keep it under your
+# proxy's idle window (30s clears the common 55-60s nginx/ALB/Heroku timeouts).
+# See docs/reverse-proxy for per-provider timeout values.
 stream:
-  heartbeat_interval: 5s           # how often the shared ticker fires (0 falls back to 5s)
-  heartbeat_buckets: 3             # connections spread across N buckets (0 falls back to 3)
+  keepalive_interval: 30s          # max idle time before a keepalive (0 falls back to 30s)
+  keepalive_buckets: 3             # spread writes across N buckets (advanced; 0 falls back to 3)
 
 mq:
   gap_window_minutes: 15

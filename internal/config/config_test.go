@@ -104,7 +104,7 @@ func TestValidate_NegativeQueryDefaultMaxRows(t *testing.T) {
 	assert.Contains(t, err.Error(), "default_max_rows")
 }
 
-func TestValidate_HeartbeatValues(t *testing.T) {
+func TestValidate_KeepaliveValues(t *testing.T) {
 	t.Parallel()
 	base := func() Config {
 		return Config{
@@ -117,19 +117,19 @@ func TestValidate_HeartbeatValues(t *testing.T) {
 	t.Run("negative interval is rejected", func(t *testing.T) {
 		t.Parallel()
 		cfg := base()
-		cfg.Stream.HeartbeatInterval = -time.Second
+		cfg.Stream.KeepaliveInterval = -time.Second
 		err := cfg.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "heartbeat_interval")
+		assert.Contains(t, err.Error(), "keepalive_interval")
 	})
 
 	t.Run("negative buckets is rejected", func(t *testing.T) {
 		t.Parallel()
 		cfg := base()
-		cfg.Stream.HeartbeatBuckets = -1
+		cfg.Stream.KeepaliveBuckets = -1
 		err := cfg.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "heartbeat_buckets")
+		assert.Contains(t, err.Error(), "keepalive_buckets")
 	})
 
 	t.Run("zero means use default, not an error", func(t *testing.T) {
