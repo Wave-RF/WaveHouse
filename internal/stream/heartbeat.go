@@ -29,8 +29,7 @@ type Heartbeater struct {
 // NewHeartbeater builds the keepalive wheel. period is the effective
 // per-connection interval (stream.keepalive_interval); buckets spreads that work
 // across it, so the per-tick interval is period/buckets and one rotation spans
-// the period. Non-positive inputs fall back to the package defaults (config
-// rejects negatives, so 0 — "unset" — is the only live fallback path).
+// the period. Non-positive inputs fall back to the package defaults.
 func NewHeartbeater(period time.Duration, buckets int) *Heartbeater {
 	if buckets < 1 {
 		buckets = defaultKeepaliveBuckets

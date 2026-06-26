@@ -135,8 +135,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		case raw := <-sub.Frames():
 			// Pre-serialized bytes written verbatim — the generic byte-pump. Today
-			// only the keepalive wheel feeds this; #294 routes projected events here
-			// too and the ch case below folds in. A write error means the client is
+			// only the keepalive wheel feeds this. A write error means the client is
 			// gone (also a liveness probe on idle streams).
 			n, err := w.Write(raw)
 			if err != nil {
@@ -145,15 +144,16 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			h.Metrics.FrameSent(stream.KindKeepalive, n)
 		case data := <-ch:
-			// Live hub event: unmarshal + policy-project + serialize per subscriber.
-			// #294 moves this projection upstream so events arrive pre-serialized on
-			// Frames() and this case folds into the one above.
+			// Live hub event: unmarshal, policy-project, and serialize per subscriber.
 			out := h.applyStreamPolicy(data, role, claims)
 			if out == nil {
 				continue
 			}
 			id := extractEventTimestamp(out)
-			n, _ := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			n, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			if err != nil {
+				return
+			}
 			flusher.Flush()
 			h.Metrics.FrameSent(stream.KindEvent, n)
 		}

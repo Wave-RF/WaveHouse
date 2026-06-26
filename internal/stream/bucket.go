@@ -3,9 +3,8 @@ package stream
 import "sync"
 
 // Bucket is a concurrency-safe set of subscribers that a single Push fans one
-// byte slice out to. It is the reusable fan-out primitive: the keepalive wheel
-// holds a ring of them for load-spreading; #294 will hold one per (role, table)
-// column-set so a projected frame is built once and Push'd to every member.
+// byte slice out to — the reusable fan-out primitive the keepalive wheel's ring
+// is built from.
 type Bucket interface {
 	Add(sub *Subscriber)
 	Remove(sub *Subscriber)

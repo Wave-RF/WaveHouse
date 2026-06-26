@@ -28,8 +28,9 @@ func TestHub_SubscribeAndBroadcast(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assert.Contains(t, string(msg), "clicks")
-		assert.Contains(t, string(msg), "/home")
+		// Exact bytes: Broadcast forwards Data raw, so this also guards against a
+		// regression that re-wraps it in an envelope.
+		assert.Equal(t, payload, msg)
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for broadcast")
 	}
