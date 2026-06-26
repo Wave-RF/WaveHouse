@@ -15,10 +15,26 @@
 // where global.css is applied and a theme is set, i.e. against the BUILT page
 // in a real browser. We reuse the Chromium that rehype-mermaid already needs.
 //
-// Output: dist/diagrams/<slug>/<index>-<theme>.png, where <slug> is the page
-// path and <index> is the diagram's position among
-// `.sl-markdown-content svg[aria-roledescription]` — the exact selector the
-// lightbox uses, so both sides agree on which PNG belongs to which diagram.
+// How a diagram is captured: we navigate to the built page (so its stylesheet
+// + fonts load and a theme is set), read each diagram's SVG markup, then render
+// that SVG ALONE — we replace the page <body> with just the diagram on a padded
+// card and screenshot it. Rendering into an emptied body (rather than over the
+// live page) means no site chrome — header, sidebar — sits behind the card, so
+// the transparent variant needs no per-element hiding and no knowledge of the
+// host theme's DOM. The diagram keeps its look because its colors come from
+// :root custom properties and its label fonts from document @font-face — both
+// in <head>, which we leave intact.
+//
+// Output: dist/diagrams/<slug>/<index>-<theme>[-transparent].png, where <slug>
+// is the page path and <index> is the diagram's position among the configured
+// selector — the exact selector the lightbox uses, so both sides agree on which
+// PNG belongs to which diagram. Each diagram is emitted once per variant (solid
+// surface card by default + a transparent-background version for slide decks).
+//
+// Everything host-specific (the diagram selector, theme names + how the theme
+// is applied, the surface CSS variable, sizing, variants) is a config option
+// with WaveHouse defaults, so the integration can be lifted into a standalone
+// package without code changes — only `diagramPng({...})` overrides.
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -39,14 +55,33 @@ const require = createRequire(import.meta.url);
 // regardless of where `astro build` is invoked from.
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-const THEMES = ["light", "dark"];
-const SCALE = 2; // retina; crisp when dropped into a deck
-const PAD = 28; // surface padding around the diagram (matches the zoom card feel)
-const MAX_DIM = 2400; // cap a diagram's CSS-px long edge so files stay sane
-// Same selector the lightbox indexes by — keep these in lockstep.
-const DIAGRAM = ".sl-markdown-content svg[aria-roledescription]";
 // Bump to invalidate every cached PNG after a change to the render routine.
-const RENDER_VERSION = "1";
+const RENDER_VERSION = "5";
+
+// Defaults are WaveHouse/Starlight-specific; every one is overridable via
+// `diagramPng({...})` so this integration can move to a standalone package.
+const DEFAULTS = {
+  // CSS selector that matches each rendered diagram on a built page. The
+  // lightbox MUST index by the same selector + DOM order (see MermaidZoom.astro).
+  selector: ".sl-markdown-content svg[aria-roledescription]",
+  // Theme names to render, one PNG set each.
+  themes: ["light", "dark"],
+  // How the host site selects a theme before first paint: the attribute set on
+  // <html> and the localStorage key it reads (Starlight uses both).
+  themeAttr: "data-theme",
+  themeStorageKey: "starlight-theme",
+  // CSS custom property holding the solid card background (the "surface" look).
+  surfaceVar: "--wh-mermaid-surface",
+  scale: 2, // retina; crisp when dropped into a deck
+  pad: 28, // surface padding around the diagram (matches the zoom card feel)
+  maxDim: 2400, // cap a diagram's CSS-px long edge so files stay sane
+  // Each diagram is rasterized once per variant. The transparent file carries a
+  // `-transparent` suffix; the lightbox toggle picks between the two.
+  variants: [
+    { suffix: "", transparent: false },
+    { suffix: "-transparent", transparent: true },
+  ],
+};
 
 const CONTENT_TYPES = {
   ".css": "text/css",
@@ -64,8 +99,12 @@ const CONTENT_TYPES = {
   ".otf": "font/otf",
 };
 
-/** @returns {import('astro').AstroIntegration} */
-export function diagramPng() {
+/**
+ * @param {Partial<typeof DEFAULTS>} [options]
+ * @returns {import('astro').AstroIntegration}
+ */
+export function diagramPng(options = {}) {
+  const cfg = { ...DEFAULTS, ...options };
   return {
     name: "wh-diagram-png",
     hooks: {
@@ -75,7 +114,7 @@ export function diagramPng() {
           return;
         }
         try {
-          await run({ dir, pages, logger });
+          await run({ dir, pages, logger, cfg });
         } catch (err) {
           // A browser hiccup must not fail the whole docs build — the site is
           // already written; we just don't get fresh PNGs this run.
@@ -86,7 +125,7 @@ export function diagramPng() {
   };
 }
 
-async function run({ dir, pages, logger }) {
+async function run({ dir, pages, logger, cfg }) {
   const distDir = fileURLToPath(dir);
 
   // Resolve routes → HTML files, keep only the ones that actually have a
@@ -115,15 +154,17 @@ async function run({ dir, pages, logger }) {
   const toCopy = [];
   const toRender = [];
   for (const page of diagramPages) {
-    for (const theme of THEMES) {
+    for (const theme of cfg.themes) {
       const hash = diagramHash(page.html, theme);
       const entry = manifest[`${page.slug}|${theme}`];
       const cached =
         entry &&
         entry.hash === hash &&
-        Array.from({ length: entry.count }, (_, i) =>
-          join(cacheDir, `${hash}-${i}-${theme}.png`),
-        ).every(existsSync);
+        Array.from({ length: entry.count }).every((_, i) =>
+          cfg.variants.every((v) =>
+            existsSync(join(cacheDir, `${hash}-${i}-${theme}${v.suffix}.png`)),
+          ),
+        );
       if (cached) toCopy.push({ ...page, theme, hash, count: entry.count });
       else toRender.push({ ...page, theme, hash });
     }
@@ -131,10 +172,12 @@ async function run({ dir, pages, logger }) {
 
   for (const job of toCopy) {
     for (let i = 0; i < job.count; i++) {
-      await place(
-        join(cacheDir, `${job.hash}-${i}-${job.theme}.png`),
-        join(distDir, "diagrams", job.slug, `${i}-${job.theme}.png`),
-      );
+      for (const v of cfg.variants) {
+        await place(
+          join(cacheDir, `${job.hash}-${i}-${job.theme}${v.suffix}.png`),
+          join(distDir, "diagrams", job.slug, `${i}-${job.theme}${v.suffix}.png`),
+        );
+      }
     }
   }
 
@@ -143,25 +186,28 @@ async function run({ dir, pages, logger }) {
     const { chromium } = require("playwright");
     const browser = await chromium.launch();
     try {
-      for (const theme of THEMES) {
+      for (const theme of cfg.themes) {
         const jobs = toRender.filter((j) => j.theme === theme);
         if (jobs.length === 0) continue;
         const ctx = await browser.newContext({
           viewport: { width: 1800, height: 1200 },
-          deviceScaleFactor: SCALE,
-          colorScheme: theme,
+          deviceScaleFactor: cfg.scale,
+          colorScheme: theme === "light" || theme === "dark" ? theme : undefined,
         });
-        // Starlight reads the theme from localStorage + the [data-theme] attr;
-        // set both before first paint so global.css's light/dark branch (and
-        // thus the diagram colors) is correct.
-        await ctx.addInitScript((t) => {
-          try {
-            localStorage.setItem("starlight-theme", t);
-          } catch {
-            /* private mode, etc. */
-          }
-          document.documentElement.setAttribute("data-theme", t);
-        }, theme);
+        // Set the theme the way the host site does (localStorage + the [attr]
+        // on <html>) before first paint, so global.css's per-theme branch — and
+        // thus the diagram colors — is correct.
+        await ctx.addInitScript(
+          ({ t, attr, key }) => {
+            try {
+              localStorage.setItem(key, t);
+            } catch {
+              /* private mode, etc. */
+            }
+            document.documentElement.setAttribute(attr, t);
+          },
+          { t: theme, attr: cfg.themeAttr, key: cfg.themeStorageKey },
+        );
         const page = await ctx.newPage();
         // `load`, not `networkidle`: some pages hold a long-lived connection
         // (the home page's live-stats SSE) that never goes idle. Diagrams are
@@ -176,16 +222,24 @@ async function run({ dir, pages, logger }) {
           try {
             await page.goto(pathToFileURL(job.file).href, { waitUntil: "load" });
             await page.evaluate(() => document.fonts?.ready);
-            const count = await page.$$eval(DIAGRAM, (els) => els.length);
-            for (let i = 0; i < count; i++) {
-              const buf = await capture(page, i);
-              await write(join(distDir, "diagrams", job.slug, `${i}-${theme}.png`), buf);
-              await write(join(cacheDir, `${job.hash}-${i}-${theme}.png`), buf);
-              made++;
+            // Read every diagram's markup + intrinsic size NOW, before the first
+            // render empties the body (rendering one diagram destroys the others
+            // in the DOM, so we can't re-read per index).
+            const diagrams = await extractDiagrams(page, cfg.selector);
+            for (let i = 0; i < diagrams.length; i++) {
+              for (const v of cfg.variants) {
+                const buf = await renderPng(page, diagrams[i], v, cfg);
+                await write(
+                  join(distDir, "diagrams", job.slug, `${i}-${theme}${v.suffix}.png`),
+                  buf,
+                );
+                await write(join(cacheDir, `${job.hash}-${i}-${theme}${v.suffix}.png`), buf);
+                made++;
+              }
             }
             // In-memory only; the whole manifest is flushed to disk once after
             // every theme finishes (a mid-run kill just re-renders next build).
-            manifest[`${job.slug}|${theme}`] = { hash: job.hash, count };
+            manifest[`${job.slug}|${theme}`] = { hash: job.hash, count: diagrams.length };
           } catch (err) {
             // One stubborn page shouldn't sink the rest of the export.
             logger.warn(`diagram PNGs: ${job.slug} [${theme}] skipped — ${err?.message || err}`);
@@ -199,42 +253,48 @@ async function run({ dir, pages, logger }) {
     await write(manifestPath, JSON.stringify(manifest, null, 2));
   }
 
-  const reused = toCopy.reduce((n, j) => n + j.count, 0);
+  const reused = toCopy.reduce((n, j) => n + j.count * cfg.variants.length, 0);
   logger.info(
-    `diagram PNGs: ${made} rendered, ${reused} cached → dist/diagrams/ (${THEMES.join(", ")})`,
+    `diagram PNGs: ${made} rendered, ${reused} cached → dist/diagrams/ (${cfg.themes.join(", ")} × solid+transparent)`,
   );
 }
 
-// Clone the index-th diagram into an opaque "surface card" (padding +
-// --wh-mermaid-surface background, like the zoom stage), sized to the diagram's
-// intrinsic dimensions, then clip a page screenshot to that card. Re-id the
-// clone (the SVG scopes its inline <style>/marker refs by root id) and render
-// it via the live page (not an isolated SVG screenshot) so foreignObject label
-// CSS + fonts apply. The card is appended to <body>, NOT the content column:
-// a transformed/contained content ancestor would become a `position: fixed`
-// containing block and offset the card off (0,0); the label CSS is svg-scoped,
-// so moving the clone to <body> doesn't change its look.
-async function capture(page, index) {
-  const box = await page.evaluate(
-    ({ index, selector, PAD, MAX_DIM }) => {
-      const svg = document.querySelectorAll(selector)[index];
-      const id = svg.getAttribute("id");
-      let markup = svg.outerHTML;
-      if (id) markup = markup.split(id).join(`${id}-pngshot`);
-
+// Read each diagram's SVG outerHTML + intrinsic size from the live (still-intact)
+// page. Must run before any renderPng() call, which empties the <body>.
+function extractDiagrams(page, selector) {
+  return page.evaluate((selector) => {
+    return [...document.querySelectorAll(selector)].map((svg) => {
       const vb = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
       const rect = svg.getBoundingClientRect();
-      const natW = vb.length === 4 && vb[2] ? vb[2] : rect.width;
-      const natH = vb.length === 4 && vb[3] ? vb[3] : rect.height;
+      return {
+        markup: svg.outerHTML,
+        natW: vb.length === 4 && vb[2] ? vb[2] : rect.width,
+        natH: vb.length === 4 && vb[3] ? vb[3] : rect.height,
+      };
+    });
+  }, selector);
+}
+
+// Render ONE diagram to PNG: drop its SVG onto a padded card (surface bg, or
+// transparent for the export variant), replace the whole <body> with just that
+// card, and screenshot it. Replacing the body — rather than overlaying the live
+// page — means no site chrome sits behind the card, so the transparent variant
+// is simply `omitBackground` with nothing to hide and no host-DOM assumptions.
+// <head> is untouched, so the diagram's themed fills (:root custom properties)
+// and label fonts (@font-face) still resolve; the SVG's own scoped <style>
+// carries the rest, so it looks identical to the inline diagram.
+async function renderPng(page, diagram, { transparent }, cfg) {
+  const box = await page.evaluate(
+    ({ markup, natW, natH, transparent, pad, maxDim, surfaceVar }) => {
       const long = Math.max(natW, natH);
-      const scale = long > MAX_DIM ? MAX_DIM / long : 1;
+      const scale = long > maxDim ? maxDim / long : 1;
 
       const card = document.createElement("div");
       card.id = "__wh_pngshot";
       card.style.cssText =
-        `position:fixed;left:0;top:0;z-index:2147483647;padding:${PAD}px;` +
-        "background:var(--wh-mermaid-surface);display:inline-block;" +
-        "box-sizing:content-box;line-height:0;margin:0;border:0;";
+        `position:fixed;left:0;top:0;padding:${pad}px;` +
+        (transparent ? "background:transparent;" : `background:var(${surfaceVar});`) +
+        "display:inline-block;box-sizing:content-box;line-height:0;margin:0;border:0;";
       card.innerHTML = markup;
       const clone = card.firstElementChild;
       clone.style.maxWidth = "none";
@@ -242,7 +302,14 @@ async function capture(page, index) {
       clone.style.display = "block";
       clone.style.width = `${Math.round(natW * scale)}px`;
       clone.style.height = `${Math.round(natH * scale)}px`;
-      document.body.appendChild(card);
+
+      // The card is now the ENTIRE body — no chrome behind it. Reset the
+      // html/body background too: their opaque themed bg would otherwise show
+      // through a transparent card (it's a no-op behind the opaque solid card).
+      document.documentElement.style.background = "transparent";
+      document.body.style.cssText = "margin:0;padding:0;background:transparent;";
+      document.body.replaceChildren(card);
+
       // Clip to the card's MEASURED rect (normally (0,0) but resilient to any
       // residual offset) rather than assuming top-left.
       const r = card.getBoundingClientRect();
@@ -253,7 +320,15 @@ async function capture(page, index) {
         height: Math.ceil(r.height),
       };
     },
-    { index, selector: DIAGRAM, PAD, MAX_DIM },
+    {
+      markup: diagram.markup,
+      natW: diagram.natW,
+      natH: diagram.natH,
+      transparent,
+      pad: cfg.pad,
+      maxDim: cfg.maxDim,
+      surfaceVar: cfg.surfaceVar,
+    },
   );
 
   // Grow the viewport if the card overflows it, else the clip is truncated.
@@ -266,9 +341,7 @@ async function capture(page, index) {
       height: Math.max(vp.height, needH),
     });
   }
-  const buf = await page.screenshot({ type: "png", clip: box });
-  await page.evaluate(() => document.getElementById("__wh_pngshot")?.remove());
-  return buf;
+  return page.screenshot({ type: "png", clip: box, omitBackground: transparent });
 }
 
 // Pages load over file://, so their absolute asset hrefs (/_astro/*, /fonts/*,
@@ -300,7 +373,7 @@ function diagramHash(html, theme) {
   const svgs = html.match(/<svg\b[^>]*aria-roledescription[\s\S]*?<\/svg>/g) || [];
   const css = html.match(/\/_astro\/[^"']+\.css/g) || [];
   return createHash("sha1")
-    .update(`${RENDER_VERSION}|${theme}|${css.join(",")}|${svgs.join(" ")}`)
+    .update(`${RENDER_VERSION}|${theme}|${css.join(",")}|${svgs.join(" ")}`)
     .digest("hex")
     .slice(0, 16);
 }
