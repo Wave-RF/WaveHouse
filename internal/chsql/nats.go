@@ -1,4 +1,4 @@
-package query
+package chsql
 
 import (
 	"bytes"
@@ -8,6 +8,10 @@ import (
 
 // SafeEncodeNATS converts any ClickHouse table name into a safe, single NATS token.
 // It preserves alphanumerics and underscores, but percent-encodes everything else.
+// It is the single encoder shared by every side of cache invalidation — the ingest
+// worker (write side), the pipe/structured-query handlers (read side), and the
+// schema registry's dependency cascade — so all three build identical namespace
+// keys for the same table.
 func SafeEncodeNATS(raw string) string {
 	var buf bytes.Buffer
 	for i := 0; i < len(raw); i++ {

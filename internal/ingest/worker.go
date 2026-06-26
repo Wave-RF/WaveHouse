@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel/trace"
@@ -464,7 +464,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 	// every scope — and there's nothing more to add. Otherwise invalidate each
 	// distinct scope. Doing this here (we already loop the batch once, and know it's
 	// one table) keeps Cache.Invalidate a simple one-pass bump.
-	encodedTable := query.SafeEncodeNATS(tableName)
+	encodedTable := chsql.SafeEncodeNATS(tableName)
 	seenScopes := make(map[string]struct{}, len(msgs))
 	namespaces := make([]cache.Namespace, 0, len(msgs))
 
@@ -479,7 +479,7 @@ func (w *IngestWorker) handleSuccess(ctx context.Context, tableName string, msgs
 		seenScopes[pm.scope] = struct{}{}
 		namespaces = append(namespaces, cache.Namespace{
 			Table: encodedTable,
-			Scope: query.SafeEncodeNATS(pm.scope),
+			Scope: chsql.SafeEncodeNATS(pm.scope),
 		})
 	}
 

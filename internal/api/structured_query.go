@@ -12,6 +12,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
@@ -150,12 +151,12 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 
 	// TODO: impl scope
 	scope := ""
-	safeTableName := query.SafeEncodeNATS(table)
+	safeTableName := chsql.SafeEncodeNATS(table)
 	// A structured query reads one table, so it depends on a single namespace.
 	// Encode the scope the way the ingest worker does (worker.go handleSuccess) so
 	// the read and invalidation sides build identical namespace keys once scope is
 	// implemented; SafeEncodeNATS("") is "", so this is a no-op while scope is empty.
-	deps := []cache.Namespace{{Table: safeTableName, Scope: query.SafeEncodeNATS(scope)}}
+	deps := []cache.Namespace{{Table: safeTableName, Scope: chsql.SafeEncodeNATS(scope)}}
 
 	// Try cache.
 	if h.Cache != nil {

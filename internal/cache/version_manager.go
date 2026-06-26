@@ -17,6 +17,7 @@ type VersionManager struct {
 
 	tableVersions     map[string]uint64 // <table>                         -> table_version
 	namespaceVersions map[string]uint64 // <table>.<table_version>.<scope> -> namespace_version
+	dependents        map[string][]string
 
 	conn *nats.Conn
 }
@@ -27,8 +28,31 @@ func NewVersionManager(conn *nats.Conn) *VersionManager {
 	return &VersionManager{
 		tableVersions:     make(map[string]uint64),
 		namespaceVersions: make(map[string]uint64),
+		dependents:        make(map[string][]string),
 		conn:              conn,
 	}
+}
+
+// SetDependents installs the base-table -> dependent-view cascade (NATS-encoded on
+// both sides), replacing any prior one. Called on each schema refresh. A nil map
+// clears the cascade. The slice values are retained as-is; the caller must not
+// mutate them afterward (the registry hands over a fresh map each refresh).
+func (vm *VersionManager) SetDependents(dependents map[string][]string) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	if dependents == nil {
+		dependents = make(map[string][]string)
+	}
+	vm.dependents = dependents
+}
+
+// DependentsOf returns the view namespaces a write to table must also bump. Nil
+// when table feeds no views. Read under the lock; the returned slice is owned by
+// the manager and must not be mutated.
+func (vm *VersionManager) DependentsOf(table string) []string {
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
+	return vm.dependents[table]
 }
 
 type Namespace struct {
@@ -61,10 +85,8 @@ func (vm *VersionManager) QueryKey(sha string, deps []Namespace) string {
 	// namespace versions are read together (consistent for that dep), but we don't
 	// hold the lock across all deps. A concurrent bump can land between deps, but the
 	// key is already a racy snapshot (versions can move between building it and using
-	// it), so cross-dep consistency buys nothing. A stale snapshot is harmless: the
-	// worst case is a version moves after we read it, so the next Get/Set simply
-	// misses and recomputes — never stale or wrong data. Crucially, the sort/join
-	// run with no lock held.
+	// it), so cross-dep consistency buys nothing. Crucially, the sort/join run with
+	// no lock held.
 	for i, d := range deps {
 		vm.mu.RLock()
 		nsKey := vm.namespaceKeyLocked(d.Table, d.Scope)

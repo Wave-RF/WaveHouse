@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -79,9 +79,9 @@ func makeEnvelope(t *testing.T, tableName, scope string, data map[string]any) []
 // so the subject and envelope can't silently drift from the producer's contract.
 func newIngestMsg(t *testing.T, table, scope string, data map[string]any) *testutil.MockJetStreamMsg {
 	t.Helper()
-	subj := "ingest." + query.SafeEncodeNATS(table)
+	subj := "ingest." + chsql.SafeEncodeNATS(table)
 	if scope != "" {
-		subj += "." + query.SafeEncodeNATS(scope)
+		subj += "." + chsql.SafeEncodeNATS(scope)
 	}
 	return &testutil.MockJetStreamMsg{
 		MsgSubject: subj,

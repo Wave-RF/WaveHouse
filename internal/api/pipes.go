@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -17,24 +19,30 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+const maxPipeDeps = 50000
+
+type resolvedDeps struct {
+	tables []string
+	// fallback is set when EXPLAIN couldn't be used (a write/DDL pipe, a
+	// missing table, an unreachable ClickHouse), in which case the pipe OVER-resolves
+	// to every base table so any write evicts it — never an under-resolution. Cached
+	// per pipe SQL template and cleared on schema refresh.
+	fallback bool
+}
+
 // PipesHandler handles named query pipe endpoints.
 type PipesHandler struct {
-	Store       *pipes.Store
-	PolicyStore *policy.Store // resolves empty role to default_role; may be nil
-	CHConn      driver.Conn
-	Cache       cache.Cache
-
-	// Registry and Database, when set, let Put() resolve each pipe's ingested
-	// base-table dependencies (via CHConn) so writes to those tables invalidate
-	// the pipe's cached results. They are plain fields rather than constructor
-	// arguments to avoid churning the many NewPipesHandler call sites; when either
-	// is unset, resolution is skipped and pipes fall back to TTL-only caching.
-	Registry *discovery.SchemaRegistry
-	Database string
-
+	Store           *pipes.Store
+	PolicyStore     *policy.Store // resolves empty role to default_role; may be nil
+	CHConn          driver.Conn
+	Cache           cache.Cache
 	sf              singleflight.Group
 	maxQueryTimeout time.Duration
 	logger          *slog.Logger
+	Registry        *discovery.SchemaRegistry
+	resolveTablesFn func(ctx context.Context, sql string) ([]string, error)
+	pipeDeps        map[string]*resolvedDeps
+	pipeDepsMu      sync.Mutex
 
 	// maxRequestBytes optionally overrides the default inbound request body
 	// cap (maxControlBodyBytes) for the body-decoding paths (Put, Execute).
@@ -45,7 +53,21 @@ type PipesHandler struct {
 }
 
 func NewPipesHandler(store *pipes.Store, policyStore *policy.Store, conn driver.Conn, c cache.Cache, queryTimeout time.Duration, logger *slog.Logger) *PipesHandler {
-	return &PipesHandler{Store: store, PolicyStore: policyStore, CHConn: conn, Cache: c, maxQueryTimeout: queryTimeout, logger: logger}
+	h := &PipesHandler{
+		Store:           store,
+		PolicyStore:     policyStore,
+		CHConn:          conn,
+		Cache:           c,
+		maxQueryTimeout: queryTimeout,
+		logger:          logger,
+		pipeDeps:        make(map[string]*resolvedDeps),
+	}
+	// Resolve a pipe's tables by asking ClickHouse (EXPLAIN QUERY TREE). Overridable
+	// in tests; the database comes from the Registry (set by main post-construction).
+	h.resolveTablesFn = func(ctx context.Context, sql string) ([]string, error) {
+		return discovery.ResolveTables(ctx, h.CHConn, h.Registry.Database(), sql)
+	}
+	return h
 }
 
 // List returns all named queries (admin endpoint).
@@ -89,12 +111,6 @@ func (h *PipesHandler) Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Name = name
-
-	// Dependencies are server-derived from the SQL, never trusted from client
-	// input — overwrite whatever the request body carried. Resolution is
-	// best-effort: if it can't run or fails, ResolvedTables is nil and the pipe
-	// caches TTL-only (see resolvePipeDeps).
-	q.ResolvedTables = h.resolvePipeDeps(r.Context(), &q)
 
 	if err := h.Store.Put(r.Context(), &q); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -184,12 +200,10 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache. The pipe depends on the namespaces of the ingested tables it reads,
-	// resolved at Put() time (q.ResolvedTables). A write to any of them invalidates
-	// this result. When the set is unknown (resolution unavailable or failed) deps
-	// is nil, so the result is keyed by sha alone (TTL-only) — the prior behavior.
-	deps := pipeDeps(q.ResolvedTables)
 	cacheKey := queryCacheKey(sql, params)
+
+	deps := h.resolveDeps(r.Context(), sql)
+
 	if h.Cache != nil {
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -199,13 +213,11 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute with singleflight.
 	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), h.maxQueryTimeout)
 		defer cancel()
 
 		start := time.Now()
-
 		rows, err := executeCHQuery(queryCtx, h.CHConn, sql, params)
 		queryDuration := time.Since(start)
 		if err != nil {
@@ -219,10 +231,8 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 
-		ttl := cache.QueryTimeToTTL(queryDuration)
-
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, ttl)
+			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, cache.QueryTimeToTTL(queryDuration))
 		}
 		return data, nil
 	})
@@ -234,4 +244,73 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
 	_, _ = w.Write(v.([]byte))
+}
+
+// resolveDeps returns the cache namespaces a pipe's result depends on, by asking
+// ClickHouse which tables the bound query reads (EXPLAIN QUERY TREE, via
+// resolveTablesFn), cached per pipe SQL template. A table EXPLAIN reports is folded
+// as its own versioned namespace; a write to it — or, for a view, a write to the
+// view's base via the cascade — evicts the result. When ClickHouse can't analyze the
+// query (a write/DDL pipe, a missing table, an unreachable server) the pipe
+// OVER-resolves to every base table, so any write evicts it: coarse, but never a
+// stale read. A table function (s3()/numbers()) or a cross-database table is simply
+// absent from the list — those pipes are unsupported and may go stale (documented).
+//
+// TODO: impl scope (per-tenant cache invalidation) — each dep is whole-table for now.
+func (h *PipesHandler) resolveDeps(ctx context.Context, boundSQL string) []cache.Namespace {
+	if h.Registry == nil {
+		return nil // dependency tracking disabled (no schema registry): TTL-only
+	}
+
+	h.pipeDepsMu.Lock()
+	rd, ok := h.pipeDeps[boundSQL]
+	h.pipeDepsMu.Unlock()
+	if !ok {
+		rd = h.resolvePipe(ctx, boundSQL)
+		h.pipeDepsMu.Lock()
+		// Bound the per-bound-query cache: a high-cardinality parameter could
+		// otherwise grow it without limit between schema refreshes. On overflow drop
+		// the whole map; entries simply re-resolve (one EXPLAIN) on next execution.
+		if len(h.pipeDeps) >= maxPipeDeps {
+			h.pipeDeps = make(map[string]*resolvedDeps)
+		}
+		h.pipeDeps[boundSQL] = rd
+		h.pipeDepsMu.Unlock()
+	}
+
+	names := rd.tables
+	if rd.fallback {
+		names = h.Registry.AllBaseTables() // over-resolve: any write evicts
+	}
+	deps := make([]cache.Namespace, 0, len(names))
+	for _, name := range names {
+		deps = append(deps, cache.Namespace{Table: chsql.SafeEncodeNATS(name)})
+	}
+	return deps
+}
+
+// resolvePipe asks ClickHouse for the bound query's tables. An error (a write/DDL
+// pipe, a missing table, an unreachable ClickHouse) yields a fallback marker so the
+// caller over-resolves rather than risk an under-resolution.
+func (h *PipesHandler) resolvePipe(ctx context.Context, boundSQL string) *resolvedDeps {
+	if h.resolveTablesFn == nil {
+		return &resolvedDeps{fallback: true}
+	}
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tables, err := h.resolveTablesFn(rctx, boundSQL)
+	if err != nil {
+		h.logger.DebugContext(ctx, "pipe dependency resolution failed; over-resolving to all tables", "error", err)
+		return &resolvedDeps{fallback: true}
+	}
+	return &resolvedDeps{tables: tables}
+}
+
+// ClearResolvedDeps drops every pipe's cached table resolution so each re-resolves
+// against the current schema on its next execution. main wires this to a schema
+// refresh, so a developer's "edit pipe/schema -> refresh" picks up the change.
+func (h *PipesHandler) ClearResolvedDeps() {
+	h.pipeDepsMu.Lock()
+	h.pipeDeps = make(map[string]*resolvedDeps)
+	h.pipeDepsMu.Unlock()
 }

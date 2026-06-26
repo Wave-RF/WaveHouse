@@ -187,6 +187,30 @@ func run() int {
 	bootState := api.NewBootState(nil)
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
+
+	// TODO: this is where we can switch between ristretto, redis, tiered (both), etc.
+	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
+	if err != nil {
+		logger.Error("cache init", "error", err)
+		return 1
+	}
+	defer func() { _ = l1.Close() }()
+
+	var pipesHandler *api.PipesHandler
+	registry.SetOnRefresh(func(snap discovery.DependencySnapshot) {
+		l1.SetDependents(snap.Cascade)
+		if len(snap.ChangedViews) > 0 {
+			nss := make([]cache.Namespace, len(snap.ChangedViews))
+			for i, v := range snap.ChangedViews {
+				nss[i] = cache.Namespace{Table: v}
+			}
+			_, _ = l1.Invalidate(ctx, nss)
+		}
+		if pipesHandler != nil {
+			pipesHandler.ClearResolvedDeps()
+		}
+	})
+
 	if err := registry.Refresh(ctx); err != nil {
 		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
 		bootState.Set(fmt.Errorf("schema discovery: %w", err))
@@ -251,16 +275,6 @@ func run() int {
 		}
 	}
 
-	// L1 cache only in standalone mode.
-	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
-	if err != nil {
-		logger.Error("cache init", "error", err)
-		return 1
-	}
-	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
-	cache := l1
-	defer func() { _ = cache.Close() }()
-
 	// Policy store (NATS KV + optional file bootstrap).
 	policyStore, err := policy.NewStore(ctx, embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
 	if err != nil {
@@ -290,7 +304,7 @@ func run() int {
 	ingestCleanup, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		cache,
+		l1,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.HTTPScheme,
@@ -371,12 +385,12 @@ func run() int {
 		return 1
 	}
 
-	// Pipes resolve their ingested table dependencies at Put() time via the schema
-	// registry + ClickHouse connection, so writes invalidate cached pipe results;
-	// set as fields (see PipesHandler) rather than constructor args.
-	pipesHandler := api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger)
+	// Pipes resolve their cache dependencies through the schema registry's
+	// dependency tree, so wire the registry beyond NewPipesHandler's core args.
+	pipesHandler = api.NewPipesHandler(pipesStore, policyStore, chConn, l1, cfg.ClickHouse.QueryTimeout, logger)
 	pipesHandler.Registry = registry
-	pipesHandler.Database = cfg.ClickHouse.Database
+
+	structuredQueryHandler := api.NewStructuredQueryHandler(chConn, l1, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger)
 
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
@@ -388,7 +402,7 @@ func run() int {
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           pipesHandler,
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
+		StructuredQuery: structuredQueryHandler,
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
 		Logger:          logger,

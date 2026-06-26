@@ -155,7 +155,9 @@ func TestRetryRefresh_SucceedsOnFirstAttempt(t *testing.T) {
 	// regression (the misbehaviour would sleep `initialBackoff` = 1h).
 	assert.Less(t, time.Since(start), 250*time.Millisecond, "should not have slept")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&attempts), "onAttempt should only fire on failure")
-	assert.Equal(t, int32(1), conn.calls.Load(), "exactly one Query call expected")
+	// A successful Refresh makes two queries: system.columns (schema) + system.tables
+	// (the materialized-view -> source dependency map).
+	assert.Equal(t, int32(2), conn.calls.Load(), "two Query calls on a successful Refresh")
 }
 
 // TestRetryRefresh_RetriesUntilSuccess verifies the loop keeps trying through
@@ -173,7 +175,9 @@ func TestRetryRefresh_RetriesUntilSuccess(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(3), conn.calls.Load(), "two failures + one success")
+	// Two failed attempts (1 query each — system.columns errors before the
+	// dependency query) + the succeeding attempt's two queries (columns + tables).
+	assert.Equal(t, int32(4), conn.calls.Load(), "two failures + one success")
 	require.Len(t, captured, 2)
 	assert.ErrorIs(t, captured[0], errFirst)
 	assert.ErrorIs(t, captured[1], errSecond)

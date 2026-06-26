@@ -715,7 +715,7 @@ Returns all registered named query pipes.
 
 #### `GET /v1/admin/pipes/{name}` — Get Named Pipe
 
-Returns a specific named pipe definition. The response also includes `resolved_tables` — a server-owned, read-only list of the base tables the pipe reads (resolved through views and materialized views) that drive cache invalidation when those tables are written. It is set by the dependency resolver and **ignored on `PUT`**.
+Returns a specific named pipe definition.
 
 #### `PUT /v1/admin/pipes/{name}` — Create/Update Named Pipe
 

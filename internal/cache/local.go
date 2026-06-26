@@ -58,20 +58,41 @@ func (l *LocalCache) Set(_ context.Context, sha string, deps []Namespace, value 
 // scope at once); a non-empty Scope bumps just that scope plus the whole-table
 // view. Returns the number of namespaces processed.
 //
-// This bumps exactly what it's given. A whole-table bump already subsumes every
-// per-scope bump for the same table (the table version is embedded in every
-// namespace key), so a caller that knows a whole-table bump is coming should drop
-// the now-redundant scope entries itself — the ingest worker does this as it
-// builds the batch, where it already loops once and knows it's a single table.
+// Each written table also fans out to its dependent views (SetDependents): a write
+// to a base table whole-table-bumps every view reading it, so a pipe that folds a
+// VIEW's namespace directly is evicted without the read path ever walking the view
+// graph. The fan-out is whole-table (the view's result depends on the table, not a
+// scope) and deduped, so a view fed by several written tables bumps once.
+//
+// This bumps exactly what it's given (plus the fan-out). A whole-table bump already
+// subsumes every per-scope bump for the same table (the table version is embedded
+// in every namespace key), so a caller that knows a whole-table bump is coming
+// should drop the now-redundant scope entries itself — the ingest worker does this
+// as it builds the batch, where it already loops once and knows it's a single table.
 func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint64, error) {
+	bumpedViews := make(map[string]struct{})
 	for _, ns := range namespaces {
 		if ns.Scope == "" {
 			l.versionManager.BumpTable(ns.Table)
 		} else {
 			l.versionManager.BumpNamespace(ns.Table, ns.Scope)
 		}
+		for _, view := range l.versionManager.DependentsOf(ns.Table) {
+			if _, done := bumpedViews[view]; done {
+				continue
+			}
+			bumpedViews[view] = struct{}{}
+			l.versionManager.BumpTable(view)
+		}
 	}
 	return uint64(len(namespaces)), nil
+}
+
+// SetDependents installs the base-table -> dependent-view cascade used by
+// Invalidate to fan a base-table write out to the views reading it. The schema
+// registry pushes a fresh map on every content-changed refresh.
+func (l *LocalCache) SetDependents(dependents map[string][]string) {
+	l.versionManager.SetDependents(dependents)
 }
 
 // Wait blocks until all buffered writes have been applied.

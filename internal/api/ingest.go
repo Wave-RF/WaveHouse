@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -409,9 +409,9 @@ func (h *IngestHandler) processRecord(
 		return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "marshal failed"}
 	}
 
-	subject := "ingest." + query.SafeEncodeNATS(table)
+	subject := "ingest." + chsql.SafeEncodeNATS(table)
 	if scope != "" {
-		subject += "." + query.SafeEncodeNATS(scope)
+		subject += "." + chsql.SafeEncodeNATS(scope)
 	}
 
 	h.logger.DebugContext(ctx, "publishing event to NATS", "subject", subject, "table", table, "scope", scope)

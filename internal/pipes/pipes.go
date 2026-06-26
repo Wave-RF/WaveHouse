@@ -13,28 +13,18 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 const kvBucket = "WAVEHOUSE_PIPES"
 
-// NamedQuery is a pre-defined SQL template with parameter support.
 type NamedQuery struct {
 	Name         string     `json:"name"`
 	SQL          string     `json:"sql"`
 	Parameters   []ParamDef `json:"parameters,omitempty"`
 	Description  string     `json:"description,omitempty"`
 	AllowedRoles []string   `json:"allowed_roles,omitempty"` // empty = admin role only (fails closed)
-
-	// ResolvedTables is the set of ingested base tables this pipe reads, resolved
-	// from SQL when the pipe is created/updated (see internal/api/pipe_deps.go). It
-	// is server-owned — set by the resolver, never trusted from client input — and
-	// drives version-based cache invalidation: a write to any of these tables
-	// invalidates this pipe's cached results. Empty means dependencies are unknown
-	// (no resolver wired, or resolution failed), so the pipe falls back to TTL-only
-	// invalidation. The table set depends only on the SQL, not on the parameter
-	// values supplied per request, so it is resolved once per definition.
-	ResolvedTables []string `json:"resolved_tables,omitempty"`
 }
 
 // ParamDef describes a query parameter.
@@ -225,54 +215,6 @@ func BindParams(q *NamedQuery, supplied map[string]any) (string, []any, error) {
 	return sql, nil, nil
 }
 
-// DummyBind binds q's SQL with type-appropriate placeholder values for every
-// parameter, producing runnable SQL for dependency resolution — where only the
-// set of tables the query reads matters, and that set is independent of the
-// parameter values. It supplies a typed dummy for each declared parameter and a
-// string dummy for any bare inline {{name}} placeholder that has no default,
-// leaving {{name:default}} placeholders to bind to the author's default. Returns
-// the bound SQL, or an error if binding fails (e.g. a placeholder it could not
-// cover), in which case the caller should skip resolution (TTL-only).
-//
-// A bare inline {{name}} — no declared parameter and no default — binds to a string
-// dummy, so a pipe that uses one where a string is invalid (e.g. LIMIT {{n}}) fails
-// to analyze and falls back to TTL-only; declare the parameter's type, or give it a
-// numeric default ({{n:10}}), so its dependencies resolve.
-func DummyBind(q *NamedQuery) (string, error) {
-	supplied := make(map[string]any)
-	for _, p := range q.Parameters {
-		supplied[p.Name] = dummyForType(p.Type)
-	}
-	for _, m := range inlineParamRe.FindAllStringSubmatch(q.SQL, -1) {
-		name, inlineDefault := m[1], m[2]
-		if _, ok := supplied[name]; ok {
-			continue
-		}
-		if inlineDefault != "" {
-			continue // BindParams will substitute the author's inline default
-		}
-		supplied[name] = "x"
-	}
-	sql, _, err := BindParams(q, supplied)
-	return sql, err
-}
-
-// dummyForType returns a placeholder value of the declared parameter type. The
-// concrete value is irrelevant to which tables a query reads; the type only has
-// to keep the bound SQL analyzable (a string where a string is expected, etc.).
-func dummyForType(t string) any {
-	switch strings.ToLower(t) {
-	case "number":
-		return 0
-	case "boolean":
-		return false
-	case "array":
-		return []any{nil}
-	default: // "string" and anything unrecognized
-		return "x"
-	}
-}
-
 // formatParamValue converts a Go value to a safe SQL literal for inline
 // substitution. Scalars are escaped (strings single-quoted with `'` and `\`
 // doubled, numbers emitted bare). A JSON array becomes a parenthesized,
@@ -295,9 +237,7 @@ func formatParamValue(v any) (string, error) {
 		if isNumericLiteral(val) {
 			return val, nil
 		}
-		escaped := strings.ReplaceAll(val, `\`, `\\`)
-		escaped = strings.ReplaceAll(escaped, `'`, `''`)
-		return "'" + escaped + "'", nil
+		return chsql.QuoteString(val), nil
 	case float64:
 		// JSON numbers are float64; if it's a whole number, format as integer.
 		if val == float64(int64(val)) {
@@ -381,9 +321,6 @@ func (s *Store) refresh(ctx context.Context) error {
 }
 
 // loadFromDirectory scans a directory for .sql files and bootstraps them into KV.
-// Pipes bootstrapped here are stored without table-dependency resolution (that runs
-// in the API Put handler, which holds the ClickHouse connection), so they cache
-// TTL-only until next saved via the API.
 func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

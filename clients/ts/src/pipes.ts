@@ -82,7 +82,7 @@ export class PipesNamespace {
   /** Create or update a pipe. */
   async set(
     name: string,
-    def: Omit<Pipe, "name" | "resolved_tables">,
+    def: Omit<Pipe, "name">,
     opts?: { signal?: AbortSignal },
   ): Promise<Result<void>> {
     const { error } = await request<{ ok: boolean }>(this._ctx, {

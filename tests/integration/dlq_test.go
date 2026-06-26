@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +50,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailure(t *testing.T) {
 	// A table name that intentionally doesn't exist in ClickHouse. Per-test
 	// suffix keeps tests independent if more DLQ tests get added later.
 	rawTableName := fmt.Sprintf("nonexistent_table_%d", time.Now().UnixNano())
-	safeTableName := query.SafeEncodeNATS(rawTableName)
+	safeTableName := chsql.SafeEncodeNATS(rawTableName)
 
 	evt := map[string]any{
 		"table_name":         rawTableName,
@@ -94,7 +94,7 @@ func TestDLQ_PopulatedOnIngestWorkerFailureWithBadName(t *testing.T) {
 	// Per-test suffix keeps tests independent if more DLQ tests get added later.
 
 	rawTableName := fmt.Sprintf("no table.!@#&*()_=/_`%d", time.Now().UnixNano())
-	safeTableName := query.SafeEncodeNATS(rawTableName)
+	safeTableName := chsql.SafeEncodeNATS(rawTableName)
 
 	evt := map[string]any{
 		"table_name":         rawTableName,

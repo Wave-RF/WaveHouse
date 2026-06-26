@@ -41,3 +41,17 @@ func QuoteIdent(name string) string {
 func BindUnsafe(name string) bool {
 	return strings.ContainsRune(name, '?')
 }
+
+// stringEscaper escapes a ClickHouse string-literal body: a backslash becomes
+// `\\` and a single quote becomes `”` (ClickHouse accepts the doubled quote). A
+// single left-to-right pass, so neither replacement re-processes the other's
+// output.
+var stringEscaper = strings.NewReplacer(`\`, `\\`, `'`, `''`)
+
+// QuoteString renders a value as a single-quoted ClickHouse string literal, safe
+// to inline into SQL text. It is the value twin of QuoteIdent, for the paths that
+// must emit a literal rather than bind a positional `?` — notably pipe parameter
+// substitution, which inlines values into the SQL string (see pipes.BindParams).
+func QuoteString(s string) string {
+	return "'" + stringEscaper.Replace(s) + "'"
+}

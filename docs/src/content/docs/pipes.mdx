@@ -119,7 +119,7 @@ Pipe execution is gated by `allowed_roles` — a plain allowlist, evaluated inde
 
 To make a pipe public, list the role that `default_role` resolves to. For example, with `default_role: viewer`, a pipe with `"allowed_roles": ["viewer"]` is reachable with no token at all.
 
-This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/admin/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** (or via a claim-templated predicate) rather than assuming policy column masking applies.
+This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/admin/*` gate so non-admin callers can run them. The pipe's SQL is **not** re-checked against the table policy's column or row rules — neither the projection nor the rows are filtered by policy — so **scope the data in the pipe's SQL itself** (and in any views it reads) rather than assuming policy column masking or row security applies. Row security can't be applied reliably to opaque SQL that may read arbitrary views (a view over a table without the filter column can't be filtered, and would fail silently), so it is deliberately left to the pipe author.
 
 ## Creating and managing pipes
 
@@ -171,7 +171,21 @@ curl -X POST http://localhost:8080/v1/pipes/top_pages \
 
 The response is a JSON array of rows. Results flow through the shared in-process L1 cache (Ristretto) with singleflight coalescing, so concurrent identical calls hit ClickHouse once; an `X-Cache: HIT` or `X-Cache: MISS` header tells you which path served the response.
 
-Those cached results are also version-invalidated: when WaveHouse ingests into any base table the pipe reads — resolved through views and materialized views at the time the pipe is created or updated — the next call re-runs the query (`X-Cache: MISS`). Pipes whose dependencies can't be resolved (no schema registry wired, or SQL the resolver can't expand) fall back to plain TTL expiry.
+A cached pipe result is keyed by its SQL and parameter values (every allowed caller shares one entry — pipes apply no per-role filtering), and is **invalidated by writes to the tables it reads**. WaveHouse never parses your SQL to find those tables — it **asks ClickHouse**, running `EXPLAIN QUERY TREE` the first time a pipe runs with a given set of parameter values and reading the table list off ClickHouse's own analysis. That result is cached and reused for the same parameters, so the extra round-trip happens once per parameter combination. Working off the pre-optimization query tree, it captures a table even when the query is answered from metadata (`SELECT count() FROM t` still tracks `t`) or reads a currently-empty table — neither of which a runtime signal like `system.query_log` or the post-optimization `EXPLAIN PLAN` would report. It also tracks reads that aren't plain `FROM` clauses: a `joinGet()` of a `Join`-engine table, and a `dictGet()` of a dictionary (mapped to the ClickHouse table backing it).
+
+Each table EXPLAIN reports carries its **own cache version**, folded into the key — a write to it evicts the result. Views and materialized views are versioned just like base tables. The link between a view and its base is precomputed: the schema registry resolves each view's definition (again via EXPLAIN) **once when the schema is discovered** into a *cascade* — each base table mapped to the views that read it, recursively through chained views — so a write to a base table also bumps every dependent view's version, evicting a pipe reading the view. (For a materialized view, the source table is what ingest bumps and from which ClickHouse maintains the view.) A view redefined in place (same sources, new body) is evicted on the next schema refresh, along with the views built on top of it.
+
+Resolution is **precise per parameter binding, and where it can't be precise it over-resolves — never under**. For a parameter-gated `UNION`, ClickHouse folds the bound predicate: with `?source=web`, the `… UNION ALL … WHERE {{source}} = 'mobile'` arm becomes constant-false and reads nothing, so `mobile_events` is dropped from the dependency set — a write to it does **not** evict the `source=web` result (that arm can't read `mobile_events` regardless of its data, so this is precise, not stale). The `source=mobile` result is resolved and cached separately, depending only on `mobile_events`. The pruning is deliberately conservative: it drops an arm only when ClickHouse proves its filter constant-false, so anything it can't prove dead stays tracked. And if WaveHouse can't get an answer from ClickHouse at all — the query references a table that doesn't exist yet, or ClickHouse is briefly unreachable — the pipe **over-resolves to every table** so any write evicts it: again never stale, just coarse until it re-resolves.
+
+:::caution[Unsupported pipes — run, but may go stale]
+Pipes are stored and run **as-is** — WaveHouse never rejects one. But some pipes can't be cache-tracked, and **their cached results may go stale**. WaveHouse doesn't block them; it's the developer's call:
+
+- **Writes / DDL** (`INSERT`, `CREATE`, `DROP`, …). A pipe is meant to be a read. A write pipe runs but doesn't go through the ingest path, and its result over-resolves (any write evicts it) — not a supported pattern.
+- **Table functions** (`s3()`, `numbers()`, `url()`, …). Their data lives outside ClickHouse's tables, so there's no table to version. A pipe reading `s3()` is cached and only its non-function tables are tracked; a change to the external source won't evict it until the TTL expires.
+- **Parameterized table names** (`FROM {{tbl}}`, `FROM events_{{year}}`). The table varies per parameter value, which WaveHouse can't track without parsing the SQL — unsupported.
+
+Pipe dependencies re-resolve on a **schema refresh** (`POST /v1/schema/refresh`, plus the periodic tick), so after you create/edit a pipe or change the schema, a refresh re-pins everything against the current ClickHouse state.
+:::
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |

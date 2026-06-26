@@ -134,6 +134,42 @@ func TestLocalCache_Invalidate(t *testing.T) {
 	assert.Zero(t, ttlAfter)
 }
 
+// SetDependents installs the base-table -> dependent-view cascade: a write to a
+// base table must orphan an entry keyed by a VIEW namespace (what a pipe reading
+// the view folds), even though the view itself is never written. A write to an
+// unrelated table must not.
+func TestLocalCache_Invalidate_CascadesToDependentViews(t *testing.T) {
+	t.Parallel()
+	c, err := NewLocal(1 << 20)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	// A pipe reads a view, so its result is keyed by the VIEW's namespace.
+	viewDeps := []Namespace{{Table: "page_views_mv"}}
+	c.SetDependents(map[string][]string{"page_views": {"page_views_mv"}})
+
+	require.NoError(t, c.Set(ctx, "pipe", viewDeps, []byte("v1"), 10*time.Second))
+	c.Wait()
+	val, _, err := c.Get(ctx, "pipe", viewDeps)
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), val)
+
+	// A write to an unrelated table leaves the view-keyed entry intact.
+	_, err = c.Invalidate(ctx, []Namespace{{Table: "other"}})
+	require.NoError(t, err)
+	still, _, err := c.Get(ctx, "pipe", viewDeps)
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), still, "an unrelated write must not cascade")
+
+	// A write to the BASE table cascades to the view and orphans the entry.
+	_, err = c.Invalidate(ctx, []Namespace{{Table: "page_views"}})
+	require.NoError(t, err)
+	after, _, err := c.Get(ctx, "pipe", viewDeps)
+	assert.NoError(t, err)
+	assert.Nil(t, after, "a base-table write must cascade-invalidate the view-keyed entry")
+}
+
 // Invalidate with an empty-scope namespace bumps the whole table, which must
 // orphan that table's scoped entries too — not just the whole-table view.
 func TestLocalCache_Invalidate_WholeTable(t *testing.T) {
