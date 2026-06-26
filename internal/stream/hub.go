@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"encoding/json"
 	"sync"
 
@@ -149,18 +150,15 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 }
 
 // ReplayFrame projects a single gap-fill event for one role into a ready-to-write
-// replay frame, or ok=false to skip it (denied table / invalid payload). The
-// handler's per-connection replay path uses this; the live path uses Broadcast,
-// which projects once per role instead of once per connection. A nil store passes
-// the event through unfiltered (matching Hub construction semantics).
-func ReplayFrame(store *policy.Store, role string, raw []byte) (Frame, bool) {
+// replay frame, or ok=false to skip it (denied table / invalid payload). It is a
+// method so replay shares the Hub's policy store with the live fan-out — the
+// handler can't accidentally project replay against a different (or nil) policy.
+// The per-connection replay path uses this; the live path uses Broadcast, which
+// projects once per role instead of once per connection.
+func (h *Hub) ReplayFrame(role string, raw []byte) (Frame, bool) {
 	var evt ingest.EventMessage
 	decoded := json.Unmarshal(raw, &evt) == nil && evt.TableName != ""
-	var p *policy.Policy
-	filter := store != nil
-	if filter {
-		p = store.Get()
-	}
+	p, filter := h.snapshotPolicy()
 	wire, ok := project(p, filter, role, &evt, raw, decoded)
 	if !ok {
 		return Frame{}, false
@@ -180,8 +178,11 @@ func ReplayFrame(store *policy.Store, role string, raw []byte) (Frame, bool) {
 // claims into account.
 func project(p *policy.Policy, filter bool, role string, evt *ingest.EventMessage, raw []byte, decoded bool) (wire []byte, ok bool) {
 	if !decoded {
-		// Not an EventMessage — pass valid JSON through unchanged, skip otherwise.
-		if !json.Valid(raw) {
+		// Without a decoded EventMessage there's no table to evaluate policy against,
+		// so fail closed whenever policy is configured: a malformed-but-valid-JSON
+		// payload on ingest.<table> must not bypass column filtering. Pass through
+		// only when no policy store is wired at all (the legacy/test passthrough).
+		if filter || !json.Valid(raw) {
 			return nil, false
 		}
 		return wireFrame("", raw), true
@@ -225,15 +226,17 @@ func filterColumns(data map[string]any, perms *policy.ResolvedPermissions) map[s
 
 // wireFrame assembles one SSE event frame: an "id:" line carrying the event's
 // received_timestamp (blank when unknown — e.g. a passthrough payload) so the
-// client can resume via Last-Event-ID, then a "data:" line, terminated by a blank
-// line. Matches the handler's historical fmt.Fprintf("id: %s\ndata: %s\n\n").
+// client can resume via Last-Event-ID, then the payload as one or more "data:"
+// lines, terminated by a blank line. Each newline in the payload starts a fresh
+// "data:" line, per the SSE spec — a compact JSON event (the normal case) has none,
+// so this stays "id: <ts>\ndata: <json>\n\n", but a multi-line passthrough payload
+// can't emit a bare continuation line. The result grows by append rather than a
+// pre-sized make, so a large payload length can't overflow an allocation size.
 func wireFrame(id string, payload []byte) []byte {
-	const prefix, mid, suffix = "id: ", "\ndata: ", "\n\n"
-	b := make([]byte, 0, len(prefix)+len(id)+len(mid)+len(payload)+len(suffix))
-	b = append(b, prefix...)
-	b = append(b, id...)
-	b = append(b, mid...)
-	b = append(b, payload...)
-	b = append(b, suffix...)
-	return b
+	b := append([]byte("id: "), id...)
+	for _, line := range bytes.Split(payload, []byte{'\n'}) {
+		b = append(b, "\ndata: "...)
+		b = append(b, line...)
+	}
+	return append(b, "\n\n"...)
 }

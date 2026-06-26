@@ -8,7 +8,6 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/nats-io/nats.go/jetstream"
@@ -18,7 +17,6 @@ import (
 type StreamHandler struct {
 	Hub         *stream.Hub
 	JS          jetstream.JetStream
-	PolicyStore *policy.Store
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
 }
@@ -98,7 +96,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
 		sendReplay := func(data []byte) bool {
-			f, ok := stream.ReplayFrame(h.PolicyStore, role, data)
+			f, ok := h.Hub.ReplayFrame(role, data)
 			if !ok {
 				return true // filtered for this role — skip
 			}

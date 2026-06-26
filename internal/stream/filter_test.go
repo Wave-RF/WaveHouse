@@ -7,26 +7,43 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestFilterColumns_NilPerms(t *testing.T) {
+func TestFilterColumns(t *testing.T) {
 	t.Parallel()
-	data := map[string]any{"a": 1, "b": 2}
-	assert.Equal(t, data, filterColumns(data, nil), "nil perms returns the original data")
-}
-
-func TestFilterColumns_NilData(t *testing.T) {
-	t.Parallel()
-	assert.Nil(t, filterColumns(nil, &policy.ResolvedPermissions{Allowed: true}))
-}
-
-func TestFilterColumns_AllowList(t *testing.T) {
-	t.Parallel()
-	data := map[string]any{"page": "/home", "secret": "xyz", "button": "signup"}
-	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "button"}}
-	result := filterColumns(data, perms)
-
-	assert.Equal(t, "/home", result["page"])
-	assert.Equal(t, "signup", result["button"])
-	assert.NotContains(t, result, "secret")
+	tests := []struct {
+		name  string
+		data  map[string]any
+		perms *policy.ResolvedPermissions
+		want  map[string]any
+	}{
+		{
+			name: "nil perms returns the original data",
+			data: map[string]any{"a": 1, "b": 2},
+			want: map[string]any{"a": 1, "b": 2},
+		},
+		{
+			name:  "nil data returns nil",
+			perms: &policy.ResolvedPermissions{Allowed: true},
+			want:  nil,
+		},
+		{
+			name:  "allow list keeps only allowed columns",
+			data:  map[string]any{"page": "/home", "secret": "xyz", "button": "signup"},
+			perms: &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"page", "button"}},
+			want:  map[string]any{"page": "/home", "button": "signup"},
+		},
+		{
+			name:  "deny list drops denied columns",
+			data:  map[string]any{"page": "/home", "secret_col": "xyz"},
+			perms: &policy.ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret_col"}},
+			want:  map[string]any{"page": "/home"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, filterColumns(tt.data, tt.perms))
+		})
+	}
 }
 
 func TestFilterColumns_DoesNotMutateOriginal(t *testing.T) {
@@ -34,18 +51,5 @@ func TestFilterColumns_DoesNotMutateOriginal(t *testing.T) {
 	data := map[string]any{"a": 1, "b": 2, "c": 3}
 	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"a"}}
 	_ = filterColumns(data, perms)
-
-	assert.Contains(t, data, "a")
-	assert.Contains(t, data, "b")
-	assert.Contains(t, data, "c")
-}
-
-func TestFilterColumns_DenyList(t *testing.T) {
-	t.Parallel()
-	data := map[string]any{"page": "/home", "secret_col": "xyz"}
-	perms := &policy.ResolvedPermissions{Allowed: true, DenyColumns: []string{"secret_col"}}
-	result := filterColumns(data, perms)
-
-	assert.Contains(t, result, "page")
-	assert.NotContains(t, result, "secret_col")
+	assert.Len(t, data, 3, "the input map must be left unmodified")
 }

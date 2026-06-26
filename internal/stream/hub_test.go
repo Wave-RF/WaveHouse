@@ -64,9 +64,11 @@ func TestHub_ProjectsOncePerRole_FanOutToAllSubscribers(t *testing.T) {
 
 	fa, fb := recvFrame(t, a), recvFrame(t, b)
 	assert.Equal(t, KindEvent, fa.Kind)
-	assert.Equal(t, fa.Data, fb.Data, "both subscribers receive identical frame bytes")
+	require.Equal(t, fa.Data, fb.Data, "both subscribers receive identical frame bytes")
 	// Same role ⇒ one serialization shared across the bucket: identical backing array.
+	// require these before indexing &...Data[0] so an empty buffer can't panic.
 	require.NotEmpty(t, fa.Data)
+	require.NotEmpty(t, fb.Data)
 	assert.Same(t, &fa.Data[0], &fb.Data[0], "the frame is serialized once and shared, not re-projected per subscriber")
 	assert.True(t, strings.HasPrefix(string(fa.Data), "id: 2026-06-26T00:00:00Z\ndata: "), "id line carries received_timestamp")
 }
@@ -124,24 +126,50 @@ func TestHub_TopicIsolation(t *testing.T) {
 	}
 }
 
-func TestHub_PassthroughAndInvalidPayloads(t *testing.T) {
+func TestHub_PassthroughAndFailClosed(t *testing.T) {
 	t.Parallel()
-	hub := NewHub(nil, nil)
-	const topic = "ingest.custom"
-	sub := NewSubscriber()
-	hub.Add(topic, "public", sub)
+	tests := []struct {
+		name     string
+		store    *policy.Store
+		payload  string
+		wantData string // "" ⇒ expect no frame (event skipped)
+	}{
+		{
+			name:     "non-EventMessage JSON passes through unchanged when no policy is wired",
+			store:    nil,
+			payload:  `{"custom":"data","value":42}`,
+			wantData: "id: \ndata: {\"custom\":\"data\",\"value\":42}\n\n",
+		},
+		{
+			name:    "invalid JSON is skipped",
+			store:   nil,
+			payload: "not json",
+		},
+		{
+			name:    "non-EventMessage is dropped (fail closed) when a policy store is wired",
+			store:   policy.NewMemoryStore(&policy.Policy{}),
+			payload: `{"custom":"data","value":42}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hub := NewHub(tt.store, nil)
+			const topic = "ingest.custom"
+			sub := NewSubscriber()
+			hub.Add(topic, "public", sub)
+			hub.Broadcast(topic, []byte(tt.payload))
 
-	// Non-EventMessage JSON (no table_name) passes through unchanged with a blank id.
-	hub.Broadcast(topic, []byte(`{"custom":"data","value":42}`))
-	f := recvFrame(t, sub)
-	assert.Equal(t, "id: \ndata: {\"custom\":\"data\",\"value\":42}\n\n", string(f.Data))
-
-	// Invalid JSON is skipped entirely.
-	hub.Broadcast(topic, []byte("not json"))
-	select {
-	case f := <-sub.Frames():
-		t.Fatalf("invalid JSON must be skipped, got %q", f.Data)
-	default:
+			if tt.wantData == "" {
+				select {
+				case f := <-sub.Frames():
+					t.Fatalf("expected no frame, got %q", f.Data)
+				default:
+				}
+				return
+			}
+			assert.Equal(t, tt.wantData, string(recvFrame(t, sub).Data))
+		})
 	}
 }
 
@@ -199,26 +227,38 @@ func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
 	assert.Equal(t, int64(1), sumByName(rm, "wavehouse_sse_dropped_frames_total"))
 }
 
-func TestReplayFrame_ProjectsAndSkips(t *testing.T) {
+func TestHub_ReplayFrame(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {AllowColumns: []string{"page"}}}},
 		},
 	}
-	store := policy.NewMemoryStore(p)
+	hub := NewHub(policy.NewMemoryStore(p), nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home", "secret": "x"})
 
-	f, ok := ReplayFrame(store, "viewer", raw)
-	require.True(t, ok)
-	assert.Equal(t, KindReplay, f.Kind)
-	inner := frameData(t, f)["data"].(map[string]any)
-	assert.Equal(t, "/home", inner["page"])
-	assert.NotContains(t, inner, "secret")
-
-	// A role with no access is skipped.
-	_, ok = ReplayFrame(store, "stranger", raw)
-	assert.False(t, ok)
+	tests := []struct {
+		name string
+		role string
+		want bool // whether a frame is produced (vs. skipped)
+	}{
+		{"allowed role projects with column filter", "viewer", true},
+		{"role without table access is skipped", "stranger", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f, ok := hub.ReplayFrame(tt.role, raw)
+			require.Equal(t, tt.want, ok)
+			if !tt.want {
+				return
+			}
+			assert.Equal(t, KindReplay, f.Kind)
+			inner := frameData(t, f)["data"].(map[string]any)
+			assert.Equal(t, "/home", inner["page"])
+			assert.NotContains(t, inner, "secret")
+		})
+	}
 }
 
 func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
@@ -242,6 +282,26 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, 0, hub.Len(topic), "every subscriber is removed")
+}
+
+func TestWireFrame(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		id      string
+		payload string
+		want    string
+	}{
+		{"compact payload is one data line", "2026-06-26T00:00:00Z", `{"a":1}`, "id: 2026-06-26T00:00:00Z\ndata: {\"a\":1}\n\n"},
+		{"blank id (passthrough)", "", `{"a":1}`, "id: \ndata: {\"a\":1}\n\n"},
+		{"newline in payload starts a fresh data line", "", "line1\nline2", "id: \ndata: line1\ndata: line2\n\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, string(wireFrame(tt.id, []byte(tt.payload))))
+		})
+	}
 }
 
 // sumByName totals all datapoints of an Int64 sum instrument across kinds.

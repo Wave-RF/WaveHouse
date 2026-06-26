@@ -355,7 +355,6 @@ func run() int {
 	healthHandler.Boot = bootState
 
 	streamHandler := api.NewStreamHandler(streamHub, js)
-	streamHandler.PolicyStore = policyStore
 	streamHandler.Metrics = sseMetrics
 
 	// Shared keepalive wheel: one goroutine nudges idle streams so proxies don't
