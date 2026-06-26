@@ -23,6 +23,10 @@
     const DIAGRAM = ".sl-markdown-content svg[aria-roledescription]";
     let overlay = null;
     let lastTrigger = null;
+    // Which build-time PNG variant Copy/Download target: the solid surface card
+    // (false) or the transparent-background export (true). Sticky across opens
+    // so a user exporting a whole deck flips it once. See diagram-png.mjs.
+    let exportTransparent = false;
 
     function close() {
       if (!overlay) return;
@@ -36,10 +40,10 @@
     }
 
     // ---- PNG export ----
-    // Build-time assets live at /diagrams/<slug>/<index>-<theme>.png (see
-    // src/integrations/diagram-png.mjs). The build script and this code index
-    // diagrams by the SAME selector + DOM order, so the URL maps 1:1 to the
-    // open diagram. The lightbox is the only place we expose copy/download —
+    // Build-time assets live at /diagrams/<slug>/<index>-<theme>[-transparent].png
+    // (see src/integrations/diagram-png.mjs). The build script and this code
+    // index diagrams by the SAME selector + DOM order, so the URL maps 1:1 to
+    // the open diagram. The lightbox is the only place we expose copy/download —
     // inline diagrams stay button-free.
     function diagramSlug() {
       return location.pathname.replace(/^\/+|\/+$/g, "") || "index";
@@ -47,8 +51,9 @@
     function pngTheme() {
       return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
     }
-    function pngUrl() {
-      return `/diagrams/${overlay.__whSlug}/${overlay.__whIndex}-${pngTheme()}.png`;
+    function pngUrl(transparent) {
+      const suffix = transparent ? "-transparent" : "";
+      return `/diagrams/${overlay.__whSlug}/${overlay.__whIndex}-${pngTheme()}${suffix}.png`;
     }
 
     let toastTimer = null;
@@ -73,9 +78,10 @@
     }
 
     async function grabPng(mode) {
-      const name = `wavehouse-${overlay.__whSlug}-diagram-${overlay.__whIndex + 1}.png`;
+      const suffix = exportTransparent ? "-transparent" : "";
+      const name = `wavehouse-${overlay.__whSlug}-diagram-${overlay.__whIndex + 1}${suffix}.png`;
       try {
-        const res = await fetch(pngUrl());
+        const res = await fetch(pngUrl(exportTransparent));
         if (!res.ok) throw new Error(String(res.status));
         const blob = await res.blob();
         // Copy uses the async-clipboard image API; where it's missing (e.g.
@@ -99,14 +105,30 @@
     function refreshPngButtons() {
       const copyBtn = overlay.querySelector(".wh-zoom__copy");
       const dlBtn = overlay.querySelector(".wh-zoom__dl");
+      const bgBtn = overlay.querySelector(".wh-zoom__bg");
       copyBtn.hidden = true;
       dlBtn.hidden = true;
-      fetch(pngUrl(), { method: "HEAD" })
+      bgBtn.hidden = true;
+      // Probe the solid base (always built alongside the transparent variant),
+      // so the toolbar reveals consistently regardless of the export toggle.
+      fetch(pngUrl(false), { method: "HEAD" })
         .then((r) => {
           dlBtn.hidden = !r.ok;
           copyBtn.hidden = !(r.ok && navigator.clipboard && window.ClipboardItem);
+          bgBtn.hidden = !r.ok;
         })
         .catch(() => {});
+    }
+
+    // The export-bg toggle only changes which PNG copy/download fetch — the
+    // live SVG preview is identical either way. To make the choice visible,
+    // transparent mode swaps the stage backing to a checkerboard, so the user
+    // previews exactly what the exported file will look like.
+    function applyExportBg() {
+      const stage = overlay.querySelector(".wh-zoom__stage");
+      const bgBtn = overlay.querySelector(".wh-zoom__bg");
+      stage.classList.toggle("is-transparent", exportTransparent);
+      bgBtn.setAttribute("aria-pressed", String(exportTransparent));
     }
 
     function buildOverlay() {
@@ -120,6 +142,15 @@
         '<div class="wh-zoom__tools">' +
         '<button class="wh-zoom__one" type="button" hidden aria-pressed="false" ' +
         'aria-label="Toggle natural size (pan to explore)">1:1</button>' +
+        // Toggle the EXPORTED background between the solid surface card and a
+        // transparent backdrop (for slide decks). Hidden until the PNG exists;
+        // pressed state + checkerboard stage preview the transparent result.
+        '<button class="wh-zoom__bg" type="button" hidden aria-pressed="false" ' +
+        'aria-label="Toggle transparent background for copy and download">' +
+        '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true">' +
+        '<rect x="3" y="3" width="18" height="18" rx="2" fill="none" ' +
+        'stroke="currentColor" stroke-width="2"/>' +
+        '<path d="M4 4h8v8H4zM12 12h8v8h-8z" fill="currentColor"/></svg></button>' +
         // Copy + download the build-time PNG of this diagram. Hidden until
         // open() confirms the PNG exists (the `astro dev` HMR server runs no
         // build hook, so it has none), so they never dangle as dead controls.
@@ -145,6 +176,13 @@
           if (overlay.__whSetMode) overlay.__whSetMode(oneBtn.getAttribute("aria-pressed") !== "true");
           return;
         }
+        // Flip which PNG variant copy/download target (and preview it).
+        if (e.target.closest(".wh-zoom__bg")) {
+          exportTransparent = !exportTransparent;
+          applyExportBg();
+          showToast(exportTransparent ? "Export: transparent background" : "Export: solid background");
+          return;
+        }
         // Copy / download act on the PNG and must NOT fall through to the
         // close test below (their icon <svg> would otherwise confuse it).
         if (e.target.closest(".wh-zoom__copy")) return void grabPng("copy");
@@ -164,6 +202,7 @@
       overlay.__whSlug = diagramSlug();
       overlay.__whIndex = [...document.querySelectorAll(DIAGRAM)].indexOf(svg);
       refreshPngButtons();
+      applyExportBg();
       const stage = overlay.querySelector(".wh-zoom__stage");
       stage.replaceChildren();
       // The stage is reused across opens — a prior 1:1 pan session leaves
@@ -337,6 +376,18 @@
   .wh-zoom__stage > svg {
     display: block;
   }
+  /* Transparent-export preview: swap the surface backing for a checkerboard so
+     the user sees exactly what the exported PNG will look like. Affects only
+     the on-screen preview; the diagram's own colors are unchanged. */
+  .wh-zoom__stage.is-transparent {
+    background-color: #fff;
+    background-image: linear-gradient(45deg, #c4c8ce 25%, transparent 25%),
+      linear-gradient(-45deg, #c4c8ce 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #c4c8ce 75%),
+      linear-gradient(-45deg, transparent 75%, #c4c8ce 75%);
+    background-size: 22px 22px;
+    background-position: 0 0, 0 11px, 11px -11px, -11px 0;
+  }
   .wh-zoom__tools {
     position: fixed;
     top: clamp(0.5rem, 2vw, 1.25rem);
@@ -369,7 +420,8 @@
     font-weight: 650;
     letter-spacing: 0.02em;
   }
-  .wh-zoom__one[aria-pressed="true"] {
+  .wh-zoom__one[aria-pressed="true"],
+  .wh-zoom__bg[aria-pressed="true"] {
     border-color: var(--wh-accent, #06b0bf);
     color: var(--wh-accent-text, var(--wh-accent-hi, #1dc9d8));
   }
