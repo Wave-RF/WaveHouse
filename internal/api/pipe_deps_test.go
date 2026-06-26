@@ -46,37 +46,49 @@ func TestResolveDeps_Explain(t *testing.T) {
 			return []string{"events", "users"}, nil
 		case "INSERT INTO events VALUES (1)": // a write → EXPLAIN errors
 			return nil, errors.New("syntax error")
+		case "SELECT * FROM mystery": // resolves to a name the registry doesn't know
+			return []string{"mystery_view"}, nil
 		default:
 			return []string{}, nil
 		}
 	}
 
-	// resolves to the reported tables
-	assert.Equal(t, []string{"events"},
-		pipeDepNames(h.resolveDeps(ctx, "SELECT * FROM events")))
+	// resolves to the reported tables; all known → not TTL-floored
+	deps, unresolved := h.resolveDeps(ctx, "SELECT * FROM events")
+	assert.Equal(t, []string{"events"}, pipeDepNames(deps))
+	assert.False(t, unresolved, "a known base table must not floor the TTL")
 
 	// cached: a second call with the same bound query doesn't re-run EXPLAIN
 	before := calls
-	_ = h.resolveDeps(ctx, "SELECT * FROM events")
+	_, _ = h.resolveDeps(ctx, "SELECT * FROM events")
 	assert.Equal(t, before, calls, "resolveTablesFn must be cached per bound query")
 
 	// multi-table
-	assert.Equal(t, []string{"events", "users"},
-		pipeDepNames(h.resolveDeps(ctx, "SELECT * FROM events JOIN users ON 1")))
+	deps, _ = h.resolveDeps(ctx, "SELECT * FROM events JOIN users ON 1")
+	assert.Equal(t, []string{"events", "users"}, pipeDepNames(deps))
 
-	// fallback: an un-analyzable query over-resolves to ALL base tables (never stale)
-	assert.Equal(t, []string{"events", "orders", "users"},
-		pipeDepNames(h.resolveDeps(ctx, "INSERT INTO events VALUES (1)")))
+	// fallback: an un-analyzable query over-resolves to ALL base tables (never stale,
+	// and every base table is version-maintained, so it is NOT TTL-floored)
+	deps, unresolved = h.resolveDeps(ctx, "INSERT INTO events VALUES (1)")
+	assert.Equal(t, []string{"events", "orders", "users"}, pipeDepNames(deps))
+	assert.False(t, unresolved, "the all-base-tables over-resolve must not floor the TTL")
+
+	// a resolved dep the registry doesn't know (an unfoldable view) → TTL-floored
+	deps, unresolved = h.resolveDeps(ctx, "SELECT * FROM mystery")
+	assert.Equal(t, []string{"mystery_view"}, pipeDepNames(deps))
+	assert.True(t, unresolved, "an unknown/unfoldable dep must floor the TTL")
 
 	// ClearResolvedDeps forces re-resolution
 	callsBefore := calls
 	h.ClearResolvedDeps()
-	_ = h.resolveDeps(ctx, "SELECT * FROM events")
+	_, _ = h.resolveDeps(ctx, "SELECT * FROM events")
 	assert.Greater(t, calls, callsBefore, "ClearResolvedDeps must force re-resolution")
 
 	// no registry → tracking disabled (TTL-only), no deps
 	hNil := &PipesHandler{Cache: lc, logger: testutil.NopLogger(), pipeDeps: map[string]*resolvedDeps{}}
-	assert.Empty(t, hNil.resolveDeps(ctx, "SELECT 1"))
+	nilDeps, nilUnresolved := hNil.resolveDeps(ctx, "SELECT 1")
+	assert.Empty(t, nilDeps)
+	assert.False(t, nilUnresolved)
 }
 
 // End-to-end through the real LocalCache: a write to a resolved table evicts the
@@ -93,7 +105,7 @@ func TestResolveDeps_Explain_Invalidation(t *testing.T) {
 
 	ns := func(n string) cache.Namespace { return cache.Namespace{Table: chsql.SafeEncodeNATS(n)} }
 	evicts := func(write string) bool {
-		deps := h.resolveDeps(ctx, "SELECT * FROM events")
+		deps, _ := h.resolveDeps(ctx, "SELECT * FROM events")
 		require.NoError(t, lc.Set(ctx, "sha", deps, []byte("v"), time.Hour))
 		lc.Wait()
 		_, _ = lc.Invalidate(ctx, []cache.Namespace{ns(write)})

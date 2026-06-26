@@ -28,6 +28,16 @@ type resolvedDeps struct {
 	// to every base table so any write evicts it — never an under-resolution. Cached
 	// per pipe SQL template and cleared on schema refresh.
 	fallback bool
+	// unresolved is set when EXPLAIN succeeded but at least one resolved dependency
+	// can't be reliably version-invalidated — an unfoldable view (unparsed
+	// definition, or a cross-database/unknown source) or an unknown name, per
+	// SchemaRegistry.IsKnown. The refresh-time cascade never bumps such a name's
+	// version, so trusting it would serve stale; the Execute path TTL-floors the
+	// result instead (cache.UnresolvedDepsTTLCap). A table function or cross-database
+	// table referenced directly is absent from tables entirely (not flagged here) and
+	// stays documented-stale. Distinct from fallback, whose all-base-tables set is
+	// fully known and version-maintained.
+	unresolved bool
 }
 
 // PipesHandler handles named query pipe endpoints.
@@ -202,7 +212,7 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	cacheKey := queryCacheKey(sql, params)
 
-	deps := h.resolveDeps(r.Context(), sql)
+	deps, depsUnresolved := h.resolveDeps(r.Context(), sql)
 
 	if h.Cache != nil {
 		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
@@ -232,7 +242,14 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, cache.QueryTimeToTTL(queryDuration))
+			ttl := cache.QueryTimeToTTL(queryDuration)
+			if depsUnresolved {
+				// A resolved dependency can't be reliably version-invalidated (an
+				// unfoldable view): floor the TTL so the result self-expires rather
+				// than serving stale on a write the cascade never bumps.
+				ttl = min(ttl, cache.UnresolvedDepsTTLCap)
+			}
+			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, ttl)
 		}
 		return data, nil
 	})
@@ -256,10 +273,15 @@ func (h *PipesHandler) Execute(w http.ResponseWriter, r *http.Request) {
 // stale read. A table function (s3()/numbers()) or a cross-database table is simply
 // absent from the list — those pipes are unsupported and may go stale (documented).
 //
+// The second return reports whether the result must be TTL-floored: true when a
+// resolved dependency can't be reliably version-invalidated (an unfoldable view or
+// unknown name — see resolvedDeps.unresolved), so the caller caps the cache TTL
+// rather than trust an unmaintained version.
+//
 // TODO: impl scope (per-tenant cache invalidation) — each dep is whole-table for now.
-func (h *PipesHandler) resolveDeps(ctx context.Context, boundSQL string) []cache.Namespace {
+func (h *PipesHandler) resolveDeps(ctx context.Context, boundSQL string) ([]cache.Namespace, bool) {
 	if h.Registry == nil {
-		return nil // dependency tracking disabled (no schema registry): TTL-only
+		return nil, false // dependency tracking disabled (no schema registry): TTL-only
 	}
 
 	h.pipeDepsMu.Lock()
@@ -286,7 +308,7 @@ func (h *PipesHandler) resolveDeps(ctx context.Context, boundSQL string) []cache
 	for _, name := range names {
 		deps = append(deps, cache.Namespace{Table: chsql.SafeEncodeNATS(name)})
 	}
-	return deps
+	return deps, rd.unresolved
 }
 
 // resolvePipe asks ClickHouse for the bound query's tables. An error (a write/DDL
@@ -303,7 +325,19 @@ func (h *PipesHandler) resolvePipe(ctx context.Context, boundSQL string) *resolv
 		h.logger.DebugContext(ctx, "pipe dependency resolution failed; over-resolving to all tables", "error", err)
 		return &resolvedDeps{fallback: true}
 	}
-	return &resolvedDeps{tables: tables}
+	rd := &resolvedDeps{tables: tables}
+	// A resolved dep whose version isn't reliably maintained (an unfoldable view, an
+	// unknown name) makes the whole result untrustworthy to version invalidation, so
+	// mark it for a TTL floor. Registry is non-nil here (resolveDeps guards it).
+	if h.Registry != nil {
+		for _, t := range tables {
+			if !h.Registry.IsKnown(t) {
+				rd.unresolved = true
+				break
+			}
+		}
+	}
+	return rd
 }
 
 // ClearResolvedDeps drops every pipe's cached table resolution so each re-resolves
