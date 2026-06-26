@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -11,16 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func unwrapTestMessage(t *testing.T, data []byte) []byte {
-	var envelope struct {
-		TraceHeaders map[string]string `json:"trace_headers"`
-		Payload      []byte            `json:"payload"`
-	}
-	err := json.Unmarshal(data, &envelope)
-	require.NoError(t, err, "failed to unmarshal hub envelope")
-	return envelope.Payload
-}
 
 func TestHub_SubscribeAndBroadcast(t *testing.T) {
 	t.Parallel()
@@ -39,9 +28,8 @@ func TestHub_SubscribeAndBroadcast(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		payload := unwrapTestMessage(t, msg)
-		assert.Contains(t, string(payload), "clicks")
-		assert.Contains(t, string(payload), "/home")
+		assert.Contains(t, string(msg), "clicks")
+		assert.Contains(t, string(msg), "/home")
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for broadcast")
 	}
@@ -119,8 +107,7 @@ func TestHub_MultipleSubscribers(t *testing.T) {
 	for i, ch := range chs {
 		select {
 		case msg := <-ch:
-			payload := unwrapTestMessage(t, msg)
-			assert.Contains(t, string(payload), "topic", "subscriber %d", i)
+			assert.Contains(t, string(msg), "topic", "subscriber %d", i)
 		case <-time.After(time.Second):
 			t.Fatalf("subscriber %d did not receive", i)
 		}

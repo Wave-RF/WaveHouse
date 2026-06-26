@@ -2,11 +2,10 @@ package stream
 
 import "sync"
 
-// Bucket is a concurrency-safe set of subscribers that a single Push fans a
-// shared byte slice out to. It is the reusable fan-out primitive: the keepalive
-// wheel holds a ring of Buckets for load-spreading, and #294's delivery path will
-// hold one Bucket per (role, table) column-set so a projected frame is built once
-// and Push'd to every member.
+// Bucket is a concurrency-safe set of subscribers that a single Push fans one
+// byte slice out to. It is the reusable fan-out primitive: the keepalive wheel
+// holds a ring of them for load-spreading; #294 will hold one per (role, table)
+// column-set so a projected frame is built once and Push'd to every member.
 type Bucket interface {
 	Add(sub *Subscriber)
 	Remove(sub *Subscriber)
@@ -45,10 +44,10 @@ func (s *subscriberSet) Len() int {
 }
 
 func (s *subscriberSet) Push(b []byte) {
-	// Snapshot under the read lock, then send outside it: holding the lock across
-	// the whole fan-out would serialize it against Add/Remove for no reason. A
-	// subscriber removed between the snapshot and the Send still receives on its
-	// never-closed, buffered queue — no panic, Send just buffers-or-drops.
+	// Snapshot under the read lock, then Send outside it — holding the lock across
+	// the fan-out would serialize it against Add/Remove for no reason. A subscriber
+	// removed mid-fan-out still has a live buffered queue, so its Send just
+	// buffers-or-drops; no panic.
 	s.mu.RLock()
 	targets := make([]*Subscriber, 0, len(s.subs))
 	for sub := range s.subs {

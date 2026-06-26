@@ -14,9 +14,6 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/nats-io/nats.go/jetstream"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 // StreamHandler handles GET /v1/stream
@@ -25,6 +22,7 @@ type StreamHandler struct {
 	JS          jetstream.JetStream
 	PolicyStore *policy.Store
 	Heartbeater *stream.Heartbeater
+	Metrics     *stream.Metrics
 }
 
 func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
@@ -77,6 +75,10 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	flusher.Flush()
 
+	h.Metrics.ConnOpened()
+	connectedAt := time.Now()
+	defer func() { h.Metrics.ConnClosed(time.Since(connectedAt)) }()
+
 	// Subscribe for live events.
 	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...
 	h.Hub.Subscribe(topic, ch)
@@ -119,11 +121,8 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tracer := otel.Tracer("wavehouse-api")
-
-	// Register with the shared keepalive wheel: a single goroutine periodically
-	// pushes a minimal `:` comment to this subscriber so a quiet stream isn't
-	// idle-closed by a proxy/tunnel between events.
+	// Register with the shared keepalive wheel so a quiet stream isn't idle-closed
+	// by a proxy/tunnel between events.
 	sub := stream.NewSubscriber()
 	if h.Heartbeater != nil {
 		h.Heartbeater.Add(sub)
@@ -135,45 +134,28 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case raw := <-sub.Frames():
-			// Ready-to-write bytes off the subscriber's outbound queue, written
-			// verbatim — the generic byte-pump. Today the keepalive wheel is the
-			// only producer (`:` comments); once #294 projects + serializes events
-			// upstream they flow through this same queue and the `ch` case below
-			// folds into here. A write error means the connection is already gone
-			// (this doubles as a liveness probe on otherwise-quiet streams); stop.
-			if _, err := w.Write(raw); err != nil {
+			// Pre-serialized bytes written verbatim — the generic byte-pump. Today
+			// only the keepalive wheel feeds this; #294 routes projected events here
+			// too and the ch case below folds in. A write error means the client is
+			// gone (also a liveness probe on idle streams).
+			n, err := w.Write(raw)
+			if err != nil {
 				return
 			}
 			flusher.Flush()
+			h.Metrics.FrameSent(stream.KindKeepalive, n)
 		case data := <-ch:
-			// Bespoke per-subscriber transform path: raw MQ envelopes still need
-			// unmarshal + policy projection + serialization here, which is why this
-			// can't yet share the byte-pump above. Collapsing it into Frames() by
-			// projecting once per (role, table) upstream is the core of #294.
-			var envelope struct {
-				TraceHeaders map[string]string `json:"trace_headers"`
-				Payload      []byte            `json:"payload"`
-			}
-			if err := json.Unmarshal(data, &envelope); err != nil {
-				continue
-			}
-
-			parentCtx := otel.GetTextMapPropagator().Extract(
-				context.Background(),
-				propagation.MapCarrier(envelope.TraceHeaders),
-			)
-
-			_, pushSpan := tracer.Start(parentCtx, "SSE.PushEvent")
-
-			out := h.applyStreamPolicy(envelope.Payload, role, claims)
+			// Live hub event: unmarshal + policy-project + serialize per subscriber.
+			// #294 moves this projection upstream so events arrive pre-serialized on
+			// Frames() and this case folds into the one above.
+			out := h.applyStreamPolicy(data, role, claims)
 			if out == nil {
-				pushSpan.End()
 				continue
 			}
 			id := extractEventTimestamp(out)
-			_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			n, _ := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
 			flusher.Flush()
-			pushSpan.End()
+			h.Metrics.FrameSent(stream.KindEvent, n)
 		}
 	}
 }

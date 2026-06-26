@@ -41,7 +41,7 @@ Fourteen internal packages under `internal/` (plus `internal/testutil/` for shar
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
 - **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
 - **`query/`** — Structured query AST types + SQL builder with schema validation, permission injection, timestamp bucketing
-- **`stream/`** — SSE fan-out primitives: `Subscriber` (per-connection outbound frame queue, `Send`/`Frames`), the `Bucket` fan-out set (`subscriberSet`, reused by #294's delivery path), and the `Heartbeater` keepalive wheel
+- **`stream/`** — SSE fan-out primitives: `Subscriber` (per-connection outbound frame queue, `Send`/`Frames`), the `Bucket` fan-out set (`subscriberSet`, reused by #294's delivery path), the `Heartbeater` keepalive wheel, and `Metrics` (the `wavehouse_sse_*` stream instruments)
 
 ## Key Design Decisions
 

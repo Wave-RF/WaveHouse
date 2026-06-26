@@ -11,11 +11,8 @@ import (
 
 func TestNewHeartbeater(t *testing.T) {
 	t.Parallel()
-	// period is the effective per-connection keepalive interval; the per-tick
-	// interval is period/buckets so one full rotation spans exactly the period.
-	// Positive values (what config passes in) are used as-is; the default consts
-	// are the fallback for non-positive input only. Config validation rejects
-	// negatives, so 0 — meaning "unset" — is the only live fallback path.
+	// period/buckets is the per-tick interval; non-positive inputs fall back to
+	// the package defaults. See NewHeartbeater.
 	defaultTick := defaultKeepaliveInterval / defaultKeepaliveBuckets
 	tests := []struct {
 		name        string
