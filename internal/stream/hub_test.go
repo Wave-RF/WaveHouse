@@ -1,0 +1,266 @@
+package stream
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Wave-RF/WaveHouse/internal/ingest"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+)
+
+// rawEvent marshals an EventMessage the way the ingest path publishes it.
+func rawEvent(t *testing.T, table, ts string, data map[string]any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(ingest.EventMessage{TableName: table, ReceivedTimestamp: ts, Data: data})
+	require.NoError(t, err)
+	return raw
+}
+
+// recvFrame returns the next frame buffered for sub, failing if none is ready.
+func recvFrame(t *testing.T, sub *Subscriber) Frame {
+	t.Helper()
+	select {
+	case f := <-sub.Frames():
+		return f
+	case <-time.After(time.Second):
+		t.Fatal("expected a frame, got none")
+		return Frame{}
+	}
+}
+
+// frameData parses the JSON object on the "data:" line of an SSE frame.
+func frameData(t *testing.T, f Frame) map[string]any {
+	t.Helper()
+	var out map[string]any
+	for line := range strings.SplitSeq(string(f.Data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "data: "); ok {
+			require.NoError(t, json.Unmarshal([]byte(rest), &out))
+			return out
+		}
+	}
+	t.Fatalf("no data line in frame %q", f.Data)
+	return nil
+}
+
+func TestHub_ProjectsOncePerRole_FanOutToAllSubscribers(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil) // nil store ⇒ passthrough, no filtering
+	const topic = "ingest.clicks"
+
+	a, b := NewSubscriber(), NewSubscriber()
+	hub.Add(topic, "public", a)
+	hub.Add(topic, "public", b)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home"}))
+
+	fa, fb := recvFrame(t, a), recvFrame(t, b)
+	assert.Equal(t, KindEvent, fa.Kind)
+	assert.Equal(t, fa.Data, fb.Data, "both subscribers receive identical frame bytes")
+	// Same role ⇒ one serialization shared across the bucket: identical backing array.
+	require.NotEmpty(t, fa.Data)
+	assert.Same(t, &fa.Data[0], &fb.Data[0], "the frame is serialized once and shared, not re-projected per subscriber")
+	assert.True(t, strings.HasPrefix(string(fa.Data), "id: 2026-06-26T00:00:00Z\ndata: "), "id line carries received_timestamp")
+}
+
+func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
+	t.Parallel()
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Select: map[string]policy.RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}}, // only "page"
+					// "blocked" has no entry ⇒ denied.
+				},
+			},
+		},
+	}
+	hub := NewHub(policy.NewMemoryStore(p), nil)
+	const topic = "ingest.clicks"
+
+	viewer := NewSubscriber()
+	blocked := NewSubscriber()
+	hub.Add(topic, "viewer", viewer)
+	hub.Add(topic, "blocked", blocked)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+		map[string]any{"page": "/home", "secret": "hidden"}))
+
+	data := frameData(t, recvFrame(t, viewer))
+	inner := data["data"].(map[string]any)
+	assert.Equal(t, "/home", inner["page"])
+	assert.NotContains(t, inner, "secret", "denied column stripped before serialization")
+
+	// The denied role gets nothing pushed.
+	select {
+	case f := <-blocked.Frames():
+		t.Fatalf("denied role must receive no frame, got %q", f.Data)
+	default:
+	}
+}
+
+func TestHub_TopicIsolation(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil)
+	clicks, views := NewSubscriber(), NewSubscriber()
+	hub.Add("ingest.clicks", "public", clicks)
+	hub.Add("ingest.views", "public", views)
+
+	hub.Broadcast("ingest.clicks", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
+
+	assert.NotEmpty(t, recvFrame(t, clicks).Data)
+	select {
+	case <-views.Frames():
+		t.Fatal("a subscriber on another topic must not receive the event")
+	default:
+	}
+}
+
+func TestHub_PassthroughAndInvalidPayloads(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil)
+	const topic = "ingest.custom"
+	sub := NewSubscriber()
+	hub.Add(topic, "public", sub)
+
+	// Non-EventMessage JSON (no table_name) passes through unchanged with a blank id.
+	hub.Broadcast(topic, []byte(`{"custom":"data","value":42}`))
+	f := recvFrame(t, sub)
+	assert.Equal(t, "id: \ndata: {\"custom\":\"data\",\"value\":42}\n\n", string(f.Data))
+
+	// Invalid JSON is skipped entirely.
+	hub.Broadcast(topic, []byte("not json"))
+	select {
+	case f := <-sub.Frames():
+		t.Fatalf("invalid JSON must be skipped, got %q", f.Data)
+	default:
+	}
+}
+
+func TestHub_AddRemoveGCsBucketsAndTopics(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil)
+	const topic = "ingest.clicks"
+	sub := NewSubscriber()
+
+	hub.Add(topic, "public", sub)
+	assert.Equal(t, 1, hub.Len(topic))
+
+	hub.Remove(topic, "public", sub)
+	assert.Equal(t, 0, hub.Len(topic))
+
+	hub.mu.RLock()
+	_, topicExists := hub.topics[topic]
+	hub.mu.RUnlock()
+	assert.False(t, topicExists, "an empty topic is garbage-collected")
+
+	// Removing an already-gone registration is a no-op.
+	assert.NotPanics(t, func() { hub.Remove(topic, "public", sub) })
+}
+
+func TestHub_BroadcastNoSubscribers_NoOp(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil)
+	assert.NotPanics(t, func() {
+		hub.Broadcast("ingest.nobody", rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)}))
+	})
+}
+
+func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
+	// No t.Parallel(): NewMetrics binds the global meter provider, swapped here.
+	savedMP := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		_ = mp.Shutdown(context.Background())
+		otel.SetMeterProvider(savedMP)
+	})
+
+	hub := NewHub(nil, NewMetrics())
+	const topic = "ingest.clicks"
+	sub := newSubscriber(1) // cap-1: the second undrained broadcast drops
+	hub.Add(topic, "public", sub)
+
+	raw := rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)})
+	hub.Broadcast(topic, raw) // fills the queue
+	hub.Broadcast(topic, raw) // dropped
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	assert.Equal(t, int64(1), sumByName(rm, "wavehouse_sse_dropped_frames_total"))
+}
+
+func TestReplayFrame_ProjectsAndSkips(t *testing.T) {
+	t.Parallel()
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {AllowColumns: []string{"page"}}}},
+		},
+	}
+	store := policy.NewMemoryStore(p)
+	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z", map[string]any{"page": "/home", "secret": "x"})
+
+	f, ok := ReplayFrame(store, "viewer", raw)
+	require.True(t, ok)
+	assert.Equal(t, KindReplay, f.Kind)
+	inner := frameData(t, f)["data"].(map[string]any)
+	assert.Equal(t, "/home", inner["page"])
+	assert.NotContains(t, inner, "secret")
+
+	// A role with no access is skipped.
+	_, ok = ReplayFrame(store, "stranger", raw)
+	assert.False(t, ok)
+}
+
+func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(nil, nil)
+	const topic = "ingest.clicks"
+	raw := rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)})
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(role string) {
+			defer wg.Done()
+			for range 50 {
+				sub := NewSubscriber()
+				hub.Add(topic, role, sub)
+				hub.Broadcast(topic, raw)
+				hub.Remove(topic, role, sub)
+			}
+		}([]string{"public", "viewer"}[i%2])
+	}
+	wg.Wait()
+	assert.Equal(t, 0, hub.Len(topic), "every subscriber is removed")
+}
+
+// sumByName totals all datapoints of an Int64 sum instrument across kinds.
+func sumByName(rm metricdata.ResourceMetrics, name string) int64 {
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			if md.Name != name {
+				continue
+			}
+			sum, ok := md.Data.(metricdata.Sum[int64])
+			if !ok {
+				return 0
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	return 0
+}

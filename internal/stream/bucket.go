@@ -2,14 +2,16 @@ package stream
 
 import "sync"
 
-// Bucket is a concurrency-safe set of subscribers that a single Push fans one
-// byte slice out to — the reusable fan-out primitive the keepalive wheel's ring
-// is built from.
+// Bucket is a concurrency-safe set of subscribers. Push fans one Frame out to
+// every member fire-and-forget (the keepalive wheel's primitive); Snapshot exposes
+// the members so the event Hub can fan out while inspecting each Send result (to
+// count drops and, later, evict).
 type Bucket interface {
 	Add(sub *Subscriber)
 	Remove(sub *Subscriber)
 	Len() int
-	Push(b []byte)
+	Push(f Frame)
+	Snapshot() []*Subscriber
 }
 
 // subscriberSet is the concrete Bucket: a concurrency-safe set of subscribers.
@@ -42,19 +44,23 @@ func (s *subscriberSet) Len() int {
 	return len(s.subs)
 }
 
-func (s *subscriberSet) Push(b []byte) {
-	// Snapshot under the read lock, then Send outside it — holding the lock across
-	// the fan-out would serialize it against Add/Remove for no reason. A subscriber
-	// removed mid-fan-out still has a live buffered queue, so its Send just
-	// buffers-or-drops; no panic.
+// Snapshot copies the current members under the read lock so callers can fan out
+// without holding it — a subscriber removed mid-fan-out still has a live buffered
+// queue, so its Send just buffers-or-drops; no panic.
+func (s *subscriberSet) Snapshot() []*Subscriber {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	targets := make([]*Subscriber, 0, len(s.subs))
 	for sub := range s.subs {
 		targets = append(targets, sub)
 	}
-	s.mu.RUnlock()
+	return targets
+}
 
-	for _, sub := range targets {
-		sub.Send(b)
+// Push fans one frame out to every member fire-and-forget. Snapshot-then-Send so
+// the fan-out never holds the lock against Add/Remove.
+func (s *subscriberSet) Push(f Frame) {
+	for _, sub := range s.Snapshot() {
+		sub.Send(f)
 	}
 }
