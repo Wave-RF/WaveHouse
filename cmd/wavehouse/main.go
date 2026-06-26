@@ -27,6 +27,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
 // Pre-populated build info variables, set via ldflags in the Makefile.
@@ -372,6 +373,13 @@ func run() int {
 
 	streamHandler := api.NewStreamHandler(hub, js)
 	streamHandler.PolicyStore = policyStore
+	streamHandler.Metrics = stream.NewMetrics()
+
+	// Shared keepalive wheel: one goroutine nudges idle streams so proxies don't
+	// idle-close them. Runs for the process lifetime.
+	heartbeater := stream.NewHeartbeater(cfg.Stream.KeepaliveInterval, cfg.Stream.KeepaliveBuckets)
+	streamHandler.Heartbeater = heartbeater
+	go heartbeater.Run(ctx)
 
 	// Build the auth middleware up front so a misconfigured/unreachable JWKS
 	// endpoint fails startup loudly rather than booting into a degraded state.

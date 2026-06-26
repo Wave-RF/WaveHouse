@@ -104,6 +104,53 @@ func TestValidate_NegativeQueryDefaultMaxRows(t *testing.T) {
 	assert.Contains(t, err.Error(), "default_max_rows")
 }
 
+func TestValidate_KeepaliveValues(t *testing.T) {
+	t.Parallel()
+	base := func() Config {
+		return Config{
+			Server:     Server{Port: 8080},
+			ClickHouse: ClickHouse{HTTPScheme: "http", QueryTimeout: 30 * time.Second},
+			Schema:     Schema{RefreshInterval: 60},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config) // tweak the otherwise-valid base config
+		wantErr string        // substring expected in the error; "" means no error
+	}{
+		{
+			name:    "negative interval is rejected",
+			mutate:  func(c *Config) { c.Stream.KeepaliveInterval = -time.Second },
+			wantErr: "keepalive_interval",
+		},
+		{
+			name:    "negative buckets is rejected",
+			mutate:  func(c *Config) { c.Stream.KeepaliveBuckets = -1 },
+			wantErr: "keepalive_buckets",
+		},
+		{
+			name:    "zero means use default, not an error",
+			mutate:  func(*Config) {}, // Stream left at zero values
+			wantErr: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestLoad_EnvOverridesYAML(t *testing.T) {
 	dir := t.TempDir()
 	yamlContent := `

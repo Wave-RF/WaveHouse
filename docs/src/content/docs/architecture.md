@@ -61,7 +61,8 @@ internal/
 ├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
 ├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
 ├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
-└── query/       Structured query AST, SQL builder, and timestamp bucketing
+├── query/       Structured query AST, SQL builder, and timestamp bucketing
+└── stream/      SSE fan-out primitives (Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel)
 ```
 
 ### `api/` — HTTP Layer
@@ -75,12 +76,21 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`.
 - **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
-- **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`.
+- **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`. Each connection registers with the shared keepalive wheel (the `stream/` package) so idle streams keep emitting `:` keepalive comments and survive reverse-proxy idle timeouts.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
 - **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
 - **health.go** — Liveness (`/livez`), readiness (`/readyz`), and a content-free `Online` ping (`/v1/health`, the SDK's public liveness check); `/healthz` is a permanent alias of `/livez`, and `/health`/`/ready` are deprecated aliases. All three consult an optional `BootState` so they can return 503 while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/livez` returns 200 and stays there. `/readyz` additionally pings ClickHouse each call; `/v1/health` deliberately does not.
+
+### `stream/` — SSE keepalive & fan-out
+
+The SSE fan-out primitives shared by the streaming API, factored out of `api/` so the delivery-path throughput work ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)) can reuse them. One abstraction per file.
+
+- **subscriber.go** — `Subscriber`, the per-connection handle. It owns a single ready-to-write outbound queue: producers fan bytes in with `Send` (non-blocking, drop-on-full), and the API handler writes whatever arrives on `Frames()` to the client verbatim. Today the only producer is the keepalive wheel and the only frames are `:` comments; #294 routes projected event frames through the same `Send`/`Frames` queue (and grows the handle with drop metrics), at which point the handler's keepalive and event cases collapse into one byte-pump.
+- **bucket.go** — `Bucket`, the reusable fan-out primitive: a concurrency-safe set of subscribers that one `Push` delivers a shared byte slice to (snapshot-under-read-lock, then `Send` to each). The keepalive wheel holds a ring of them for load-spreading; #294 holds one per (role, table) column-set so a projected frame is built once and Push'd to every member instead of re-projected per subscriber.
+- **heartbeat.go** — The keepalive wheel (`Heartbeater`). A single process-wide ticker fans a minimal `:` comment across the ring of `Bucket`s, waking ~1/N of live streams per tick so the writes don't synchronize. The effective per-connection keepalive period is `stream.keepalive_interval` (the wheel ticks every `keepalive_interval ÷ keepalive_buckets`, so one rotation spans the interval); the owning handler goroutine does the actual write, so the shared ticker never touches a `ResponseWriter` directly.
+- **metrics.go** — `Metrics`, the SSE instrument set: `wavehouse_sse_active_streams` (open streams), `wavehouse_sse_stream_duration_seconds` (lifetime), and `wavehouse_sse_frames_sent_total` / `wavehouse_sse_bytes_sent_total` (labeled by `kind`: `keepalive`, `event`, `replay`). Nil-safe, so the handler holds one unconditionally and tests skip wiring it; recorded at the handler's connect/disconnect and write sites (the live keepalive/event cases and the gap-fill replay path). Separate from `observability.RegisterSystemMetrics`, which covers only the NATS/Pebble system gauges. Streams are observed through these metrics rather than per-event traces (the router excludes `/v1/stream` from the HTTP tracer).
 
 ### `auth/` — Authentication
 
