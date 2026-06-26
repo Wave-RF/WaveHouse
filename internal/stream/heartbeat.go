@@ -43,11 +43,15 @@ func NewHeartbeater(period time.Duration, buckets int) *Heartbeater {
 	if period <= 0 {
 		period = defaultKeepaliveInterval
 	}
+	if period < time.Duration(buckets) {
+		// Sub-nanosecond-per-tick: integer division would round the tick to zero.
+		// Collapse the ring to one bucket so the effective period stays ≈ period
+		// instead of ballooning to period × buckets.
+		buckets = 1
+	}
 	tick := period / time.Duration(buckets)
 	if tick <= 0 {
-		// Pathological: period smaller than the bucket count (sub-nanosecond per
-		// tick). Collapse to one write of the whole ring per period so NewTicker
-		// never panics on a zero duration.
+		// Defensive: NewTicker must never see a non-positive duration.
 		tick = period
 	}
 	ring := make([]Bucket, buckets)

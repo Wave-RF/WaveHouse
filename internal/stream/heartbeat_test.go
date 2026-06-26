@@ -26,6 +26,7 @@ func TestNewHeartbeater(t *testing.T) {
 	}{
 		{"derives tick from period and buckets", 30 * time.Second, 3, 3, 10 * time.Second},
 		{"single bucket: tick equals period", 9 * time.Second, 1, 1, 9 * time.Second},
+		{"sub-nanosecond period clamps ring to one bucket", 2 * time.Nanosecond, 3, 1, 2 * time.Nanosecond},
 		{"zero falls back to defaults", 0, 0, defaultKeepaliveBuckets, defaultTick},
 		{"negative falls back to defaults", -time.Second, -3, defaultKeepaliveBuckets, defaultTick},
 	}

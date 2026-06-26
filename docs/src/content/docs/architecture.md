@@ -61,7 +61,8 @@ internal/
 ├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
 ├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
 ├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
-└── query/       Structured query AST, SQL builder, and timestamp bucketing
+├── query/       Structured query AST, SQL builder, and timestamp bucketing
+└── stream/      SSE fan-out primitives (Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel)
 ```
 
 ### `api/` — HTTP Layer

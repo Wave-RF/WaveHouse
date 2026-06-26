@@ -68,11 +68,11 @@ A proxy that buffers the upstream response will hold events until a buffer fills
 
 ### 2. Keepalive and idle timeouts
 
-WaveHouse sends a minimal SSE keepalive comment — a bare `:` line — on every stream (alongside the `: connected` comment on open), so even an otherwise-quiet connection keeps producing bytes between events and an intermediary's idle timeout never trips on a slow table. By default each connection is nudged at least every **30 seconds** ([`stream.keepalive_interval`](/configuration#streaming-sse)), comfortably under the common 55–60s proxy and load-balancer idle windows (nginx's default `proxy_read_timeout` is 60s) and Cloudflare's ~100s edge. A single shared ticker drives keepalives for every connection; the comment is invisible to clients — `EventSource` and any spec-compliant parser ignore SSE comment lines, and `curl` simply prints them.
+WaveHouse sends a minimal SSE keepalive comment — a bare `:` line — on every stream (alongside the `: connected` comment on open), so even an otherwise-quiet connection keeps producing bytes between events and an intermediary's idle timeout never trips on a slow table. By default each connection is nudged at least every **30 seconds** ([`stream.keepalive_interval`](/configuration#streaming-sse)), comfortably under the common 55–60s proxy and load-balancer idle windows (nginx's default `proxy_read_timeout` is 60s) and Cloudflare's ~120s edge. A single shared ticker drives keepalives for every connection; the comment is invisible to clients — `EventSource` and any spec-compliant parser ignore SSE comment lines, and `curl` simply prints them.
 
 This resolved [#226](https://github.com/Wave-RF/WaveHouse/issues/226): before it, a quiet stream sent nothing after `: connected`, so an intermediary's idle timeout reset the connection — Cloudflare's edge dropped quiet streams about every two minutes in dogfooding. Browsers masked it (`EventSource` auto-reconnects and resumes via `Last-Event-ID` gap-fill); `curl` and backend consumers saw repeated drops, each re-running gap-fill.
 
-**Why a keepalive works without raising any timeout:** nearly every proxy idle timeout is a *read* timeout measured as time-since-the-last-byte from the upstream, and **any** byte — including a keepalive comment — resets it. So WaveHouse only has to write more often than the tightest such timeout in the path; it does not need to be anywhere near as frequent as the events themselves. The exceptions are absolute, total-duration caps that traffic does *not* reset (some serverless and managed-LB request limits) — a keepalive can't save a stream from those, so they need an operator config change or a client reconnect. Both kinds are tabulated in [Idle timeouts by provider](#idle-timeouts-by-provider) below. Pick a [`keepalive_interval`](/configuration#streaming-sse) safely under the tightest idle timeout your traffic crosses; the 30s default already clears the common self-hosted and CDN cases.
+**Why a keepalive works without raising any timeout:** nearly every proxy idle timeout is a *read* timeout measured as time-since-the-last-byte from the upstream, and **any** byte — including a keepalive comment — resets it. So WaveHouse only has to write more often than the tightest such timeout in the path; it does not need to be anywhere near as frequent as the events themselves. The exceptions are absolute, total-duration caps that traffic does *not* reset (some serverless and managed-LB request limits) — a keepalive can't save a stream from those, so they need an operator config change or a client reconnect. Both kinds are tabulated in [Idle timeouts by provider](#idle-timeouts-by-provider) below. Pick a [`keepalive_interval`](/configuration#streaming-sse) safely under the tightest idle timeout your traffic crosses; the 30s default already clears the common self-hosted and reverse-proxy cases (a handful of CDNs and gateways are tighter — see the table).
 
 Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer required, though it's harmless if you'd rather not lean on the keepalive's margin:
 
@@ -91,7 +91,7 @@ A browser `EventSource` can't set request headers, so the JWT can be passed as a
 
 ## Idle timeouts by provider
 
-A reference for picking [`stream.keepalive_interval`](/configuration#streaming-sse). These defaults change over time — each row links its source so you can re-check. The **30s default clears every "reset-by-traffic" row below except the sub-30s rows** (Azure Application Gateway 20s, CloudFront 30s, Fastly ~10s); if your edge is one of those, lower the interval. (Absolute caps like API Gateway's 29s aren't fixable by any keepalive — see the second table.) Values are defaults for a streaming/`text/event-stream` response and may differ on enterprise tiers.
+A reference for picking [`stream.keepalive_interval`](/configuration#streaming-sse). These defaults change over time — each row links its source so you can re-check. The **30s default clears every "reset-by-traffic" row below except the 30s-and-tighter rows** (Azure Application Gateway 20s, Azure Front Door 30s, CloudFront 30s, Fastly ~10s); if your edge is one of those, lower the interval. (Absolute caps like API Gateway's 29s aren't fixable by any keepalive — see the second table.) Values are defaults for a streaming/`text/event-stream` response and may differ on enterprise tiers.
 
 ### Reset-by-traffic idle timeouts — a keepalive handles these
 
@@ -100,27 +100,25 @@ The timer resets on every byte from the upstream, so a keepalive fired more ofte
 | Layer | Default | How to change it | Source |
 | --- | --- | --- | --- |
 | **nginx** `proxy_read_timeout` | **60s** | `proxy_read_timeout 3600s;` on the stream location | [nginx docs](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout) |
-| **ingress-nginx** (Kubernetes) | **60s** | `nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"` annotation | [ingress-nginx annotations](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/) |
-| **Apache** `mod_proxy` `ProxyTimeout` | **60s** (falls back to core `Timeout`) | `ProxyTimeout 3600` | [httpd mod_proxy](https://httpd.apache.org/docs/current/mod/mod_proxy.html#proxytimeout) |
-| **HAProxy** `timeout server` / `timeout client` | no built-in (example configs ship **~50s**) | raise both, e.g. `timeout server 1h` (note: `timeout tunnel` is WebSocket-only, not SSE) | [HAProxy docs](https://docs.haproxy.org/2.8/configuration.html#4.2-timeout%20server) |
-| **Caddy** `reverse_proxy` | none (streaming flushed) | only buffering matters: `flush_interval -1` | [Caddy reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) |
-| **Traefik** | none by default | — | [Traefik services](https://doc.traefik.io/traefik/routing/services/) |
+| **ingress-nginx** (Kubernetes) | **60s** | `nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"` annotation | [ingress-nginx ConfigMap](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/configmap/#proxy-read-timeout) |
+| **Apache** `mod_proxy` `ProxyTimeout` | **60s** (inherits core `Timeout`) | `ProxyTimeout 3600` | [Apache core `Timeout`](https://httpd.apache.org/docs/current/mod/core.html#timeout) |
+| **HAProxy** `timeout server` / `timeout client` | no built-in default (unset = infinite + startup warning); examples ship **~50s** | set both, e.g. `timeout server 1h` (`timeout tunnel` is WebSocket-only, not SSE) | [HAProxy docs](https://docs.haproxy.org/2.8/configuration.html#4.2-timeout%20server) |
+| **Caddy** `reverse_proxy` | none (streaming auto-flushed) | only buffering matters: `flush_interval -1` | [Caddy reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) |
+| **Traefik** | no response-write timeout (`writeTimeout` 0); streams flushed immediately | nothing needed for SSE | [Traefik entrypoints](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/) |
 | **Envoy / Istio** `stream_idle_timeout` | **5m** (300s) | the *idle* timeout a keepalive resets — but also set the route `timeout: 0`, see note below | [Envoy timeouts](https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts) |
-| **AWS ALB / Classic ELB** idle | **60s** | `idle_timeout.timeout_seconds` (1–4000) | [ALB attributes](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html#connection-idle-timeout) |
-| **AWS NLB** idle | **350s** | configurable 60–6000s | [NLB idle timeout](https://aws.amazon.com/blogs/networking-and-content-delivery/introducing-nlb-tcp-configurable-idle-timeout/) |
-| **AWS CloudFront** origin read | **30s** (max **120s**) | Origin "Response timeout" 1–120s | [CloudFront origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/distribution-web-values-specify.html#DownloadDistValuesOriginResponseTimeout) |
-| **Azure Application Gateway** request timeout | **20s** | backend HTTP setting (1–86400s) | [App Gateway HTTP settings](https://learn.microsoft.com/en-us/azure/application-gateway/configuration-http-settings) |
-| **Azure Front Door** origin response | **60s** (classic 30s) | 16–240s | [Front Door origin](https://learn.microsoft.com/en-us/azure/frontdoor/how-to-configure-origin) |
-| **Azure Load Balancer** (L4) | **240s** (4 min) | 4–100 min | [Azure LB idle](https://learn.microsoft.com/en-us/azure/load-balancer/load-balancer-tcp-idle-timeout) |
+| **AWS ALB / Classic ELB** idle | **60s** (range 1–4000s) | `idle_timeout.timeout_seconds` | [ALB idle timeout](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html#connection-idle-timeout) |
+| **AWS NLB** idle | **350s** (TCP; range 60–6000s) | configurable per listener | [NLB idle timeout](https://docs.aws.amazon.com/elasticloadbalancing/latest/network/network-load-balancers.html#connection-idle-timeout) |
+| **AWS CloudFront** origin read | **30s** (max **120s**) | Origin "Response timeout" 1–120s | [CloudFront origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html#DownloadDistValuesOriginResponseTimeout) |
+| **Azure Application Gateway** request timeout | **20s** (range 1–86400s) | backend HTTP setting | [App Gateway backend settings](https://learn.microsoft.com/en-us/azure/application-gateway/configuration-http-settings#request-timeout) |
+| **Azure Front Door** origin response | **30s** (range 16–240s) | Standard/Premium only | [Front Door timeout](https://learn.microsoft.com/en-us/troubleshoot/azure/front-door/troubleshoot-issues) |
+| **Azure Load Balancer** (L4) | **240s** (4 min; range 4–100 min) | rule idle-timeout setting | [Azure LB idle](https://learn.microsoft.com/en-us/azure/load-balancer/load-balancer-tcp-idle-timeout) |
 | **Heroku** router | **55s** rolling window | not configurable — keep `keepalive_interval` < 55s | [Heroku request timeout](https://devcenter.heroku.com/articles/request-timeout) |
-| **Cloudflare** (proxied) | **~100s** (524 error) | Enterprise: up to 6000s; otherwise rely on the keepalive | [Cloudflare 524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/) |
-| **Cloudflare Tunnel** (`cloudflared`) | **~90s** keep-alive (observed cuts ~125s) | `--proxy-keepalive-timeout` origin config | [cloudflared parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/origin-parameters/) |
-| **Fastly** `between_bytes_timeout` | **~10s** (first-byte 15s) | raise `between_bytes_timeout` on the backend | [Fastly between-bytes](https://www.fastly.com/documentation/reference/vcl/variables/backend-connection/bereq-between-bytes-timeout/) |
-| **Akamai** read timeout | **120s** | property "Read Timeout" behavior | [Akamai read timeout](https://techdocs.akamai.com/property-mgr/docs/read-timeout) |
-| **Mobile / CGNAT** (cellular) | median **~35–65s** NAT mapping | out of your control — a keepalive is the only fix | [RFC 6888](https://www.rfc-editor.org/rfc/rfc6888.html) |
+| **Cloudflare** (proxied) | **~120s** (524 error) | Enterprise only; otherwise rely on the keepalive | [Cloudflare connection limits](https://developers.cloudflare.com/fundamentals/reference/connection-limits/) |
+| **Cloudflare Tunnel** (`cloudflared`) | **~120s** edge idle reset (same mechanism as a 524; the ~125s we observed) | Enterprise only — the origin `keepAliveTimeout` (90s) is a *different*, idle-pool setting that won't keep a stream open | [Cloudflare connection limits](https://developers.cloudflare.com/fundamentals/reference/connection-limits/) |
+| **Fastly** `first_byte_timeout` / `between_bytes_timeout` | **15s** / **~10s** | raise on the backend | [Fastly first-byte timeout](https://www.fastly.com/documentation/reference/vcl/variables/backend-connection/bereq-first-byte-timeout/) |
 
 :::note[OS TCP keepalive doesn't substitute for this]
-Linux's `tcp_keepalive_time` defaults to **7200s (2 hours)**, is off per-socket unless the app opts in, and its probes don't reliably reset L7 proxy read timers. The application-level SSE comment is the right tool — that's what `keepalive_interval` controls.
+Linux's [`tcp_keepalive_time`](https://man7.org/linux/man-pages/man7/tcp.7.html) defaults to **7200s (2 hours)**, is off per-socket unless the app opts in, and its probes don't reliably reset L7 proxy read timers. The application-level SSE comment is the right tool — that's what `keepalive_interval` controls.
 :::
 
 ### Absolute / total-duration caps — a keepalive does **not** help
@@ -130,11 +128,11 @@ These limit the *whole* request regardless of traffic, so no keepalive extends t
 | Layer | Cap | What to do | Source |
 | --- | --- | --- | --- |
 | **Envoy / Istio** route `timeout` | **15s** (total) | set the route `timeout: 0` for `/v1/stream` | [Envoy timeouts](https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts) |
-| **GCP** external ALB backend service | **30s** (complete-response) | raise the backend service timeout (up to 86400s) | [GCP backend service](https://cloud.google.com/load-balancing/docs/backend-service#timeout-setting) |
-| **GCP Cloud Run** request timeout | **300s** (max 3600s) | raise the service request timeout, then reconnect | [Cloud Run timeout](https://cloud.google.com/run/docs/configuring/request-timeout) |
-| **AWS API Gateway** (REST) | **29s** (hard) | use response-streaming mode or a different front door for SSE | [API Gateway quotas](https://docs.aws.amazon.com/apigateway/latest/developerguide/limits.html) |
+| **GCP** external ALB backend service | **30s** (complete-response) | raise the backend service timeout (recommended max 86400s) | [GCP backend service](https://docs.cloud.google.com/load-balancing/docs/backend-service#timeout-setting) |
+| **GCP Cloud Run** request timeout | **300s** (max 3600s) | raise the service request timeout, then reconnect | [Cloud Run timeout](https://docs.cloud.google.com/run/docs/configuring/request-timeout) |
+| **AWS API Gateway** (REST) | **29s** default max (raisable for Regional/private since 2024; hard for edge-optimized) | response-streaming mode, raise the timeout, or a different front door | [API Gateway quotas](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table.html) |
 | **Vercel** functions | edge: 25s to first byte, ~300s stream; serverless up to 800s | rely on client reconnect; not an idle timeout | [Vercel limits](https://vercel.com/docs/functions/limitations) |
-| **Railway** | 5m idle (reset) + **15m hard cap** | keepalive handles the 5m idle; reconnect past 15m | [Railway SSE](https://docs.railway.com/reference/errors/application-failed-to-respond) |
+| **Railway** | 5m idle (reset) + **15m hard cap** | keepalive handles the 5m idle; reconnect past 15m | [Railway SSE](https://docs.railway.com/guides/sse-vs-websockets) |
 
 ## Header and auth forwarding
 
@@ -246,7 +244,7 @@ ingress:
 Cloudflare terminates TLS at its edge and forwards to the tunnel. Two caveats:
 
 - A plan-based upload size limit applies (100 MB on Free/Pro) — it can't be lowered below the plan on those tiers, and WaveHouse's own caps still apply underneath.
-- The edge resets idle connections after ~100s, but WaveHouse's keepalive comment (~30s by default, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)) keeps even a quiet SSE stream alive, so they're no longer dropped — no reconnect loop needed just to survive a slow table.
+- The edge resets idle connections after ~120s, but WaveHouse's keepalive comment (~30s by default, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)) keeps even a quiet SSE stream alive, so they're no longer dropped — no reconnect loop needed just to survive a slow table.
 
 </TabItem>
 </Tabs>

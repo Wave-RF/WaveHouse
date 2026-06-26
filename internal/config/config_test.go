@@ -114,29 +114,41 @@ func TestValidate_KeepaliveValues(t *testing.T) {
 		}
 	}
 
-	t.Run("negative interval is rejected", func(t *testing.T) {
-		t.Parallel()
-		cfg := base()
-		cfg.Stream.KeepaliveInterval = -time.Second
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "keepalive_interval")
-	})
-
-	t.Run("negative buckets is rejected", func(t *testing.T) {
-		t.Parallel()
-		cfg := base()
-		cfg.Stream.KeepaliveBuckets = -1
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "keepalive_buckets")
-	})
-
-	t.Run("zero means use default, not an error", func(t *testing.T) {
-		t.Parallel()
-		cfg := base() // Stream left at zero values
-		assert.NoError(t, cfg.Validate())
-	})
+	tests := []struct {
+		name    string
+		mutate  func(*Config) // tweak the otherwise-valid base config
+		wantErr string        // substring expected in the error; "" means no error
+	}{
+		{
+			name:    "negative interval is rejected",
+			mutate:  func(c *Config) { c.Stream.KeepaliveInterval = -time.Second },
+			wantErr: "keepalive_interval",
+		},
+		{
+			name:    "negative buckets is rejected",
+			mutate:  func(c *Config) { c.Stream.KeepaliveBuckets = -1 },
+			wantErr: "keepalive_buckets",
+		},
+		{
+			name:    "zero means use default, not an error",
+			mutate:  func(*Config) {}, // Stream left at zero values
+			wantErr: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {
