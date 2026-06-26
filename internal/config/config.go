@@ -30,6 +30,7 @@ type Config struct {
 	OTel       OTel       `yaml:"otel"`
 	Prometheus Prometheus `yaml:"prometheus"`
 	Query      Query      `yaml:"query"`
+	Stream     Stream     `yaml:"stream"`
 }
 
 // Query holds query-shaping defaults. Server-wide *resource* limits (memory,
@@ -102,6 +103,18 @@ type Server struct {
 	Port               int      `yaml:"port" env:"WH_SERVER_PORT" env-default:"8080"`
 	ShutdownTimeout    int      `yaml:"shutdown_timeout" env:"WH_SERVER_SHUTDOWN_TIMEOUT" env-default:"10"`
 	CORSAllowedOrigins []string `yaml:"cors_allowed_origins" env:"WH_SERVER_CORS_ALLOWED_ORIGINS" env-default:"*"`
+}
+
+type Stream struct {
+	// KeepaliveInterval is the effective per-connection SSE keepalive period: the
+	// longest a quiet GET /v1/stream connection goes without a write before the
+	// server sends a ":" keepalive comment. Keep it under your proxy/tunnel idle
+	// timeout (default 30s clears the common 55–60s nginx/ALB/Heroku window).
+	KeepaliveInterval time.Duration `yaml:"keepalive_interval" env:"WH_STREAM_KEEPALIVE_INTERVAL" env-default:"30s"`
+	// KeepaliveBuckets spreads keepalive writes across the interval so the server
+	// nudges ~1/N of connections per tick instead of all at once. Advanced knob;
+	// most deployments never change it.
+	KeepaliveBuckets int `yaml:"keepalive_buckets" env:"WH_STREAM_KEEPALIVE_BUCKETS" env-default:"3"`
 }
 
 type ClickHouse struct {
@@ -191,6 +204,13 @@ func (c *Config) Validate() error {
 
 	if c.Server.ShutdownTimeout < 0 {
 		return fmt.Errorf("server.shutdown_timeout must be non-negative")
+	}
+
+	if c.Stream.KeepaliveInterval < 0 {
+		return fmt.Errorf("stream.keepalive_interval must be non-negative, got %s", c.Stream.KeepaliveInterval)
+	}
+	if c.Stream.KeepaliveBuckets < 0 {
+		return fmt.Errorf("stream.keepalive_buckets must be non-negative, got %d", c.Stream.KeepaliveBuckets)
 	}
 
 	if c.Schema.RefreshInterval < 1 {

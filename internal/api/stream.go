@@ -12,10 +12,8 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/nats-io/nats.go/jetstream"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 // StreamHandler handles GET /v1/stream
@@ -23,6 +21,8 @@ type StreamHandler struct {
 	Hub         *Hub
 	JS          jetstream.JetStream
 	PolicyStore *policy.Store
+	Heartbeater *stream.Heartbeater
+	Metrics     *stream.Metrics
 }
 
 func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
@@ -75,6 +75,10 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	flusher.Flush()
 
+	h.Metrics.ConnOpened()
+	connectedAt := time.Now()
+	defer func() { h.Metrics.ConnClosed(time.Since(connectedAt)) }()
+
 	// Subscribe for live events.
 	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...
 	h.Hub.Subscribe(topic, ch)
@@ -89,64 +93,68 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		sinceStr = r.URL.Query().Get("since")
 	}
 	if sinceStr != "" {
+		// One send path for both timestamp formats: project, write, and count the
+		// replayed frame. A write error means the client is gone, so stop the
+		// gap-fill and let the deferred cleanup unwind.
+		sendReplay := func(data []byte) bool {
+			out := h.applyStreamPolicy(data, role, claims)
+			if out == nil {
+				return true // filtered for this role — skip
+			}
+			id := extractEventTimestamp(out)
+			n, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			if err != nil {
+				return false
+			}
+			flusher.Flush()
+			h.Metrics.FrameSent(stream.KindReplay, n)
+			return true
+		}
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
-			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-				out := h.applyStreamPolicy(data, role, claims)
-				if out == nil {
-					return true // skip this message
-				}
-				id := extractEventTimestamp(out)
-				_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
-				flusher.Flush()
-				return true
-			})
-		} else if parseErr := err; parseErr != nil {
-			// Try RFC3339 without nanos as fallback.
+			h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+		} else if err != nil {
+			// Fall back to RFC3339 without nanos.
 			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-					out := h.applyStreamPolicy(data, role, claims)
-					if out == nil {
-						return true
-					}
-					id := extractEventTimestamp(out)
-					_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
-					flusher.Flush()
-					return true
-				})
+				h.replayFromNATS(r.Context(), ts, topic, sendReplay)
 			}
 		}
 	}
 
-	tracer := otel.Tracer("wavehouse-api")
+	// Register with the shared keepalive wheel so a quiet stream isn't idle-closed
+	// by a proxy/tunnel between events.
+	sub := stream.NewSubscriber()
+	if h.Heartbeater != nil {
+		h.Heartbeater.Add(sub)
+		defer h.Heartbeater.Remove(sub)
+	}
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case raw := <-sub.Frames():
+			// Pre-serialized bytes written verbatim — the generic byte-pump. Today
+			// only the keepalive wheel feeds this. A write error means the client is
+			// gone (also a liveness probe on idle streams).
+			n, err := w.Write(raw)
+			if err != nil {
+				return
+			}
+			flusher.Flush()
+			h.Metrics.FrameSent(stream.KindKeepalive, n)
 		case data := <-ch:
-			var envelope struct {
-				TraceHeaders map[string]string `json:"trace_headers"`
-				Payload      []byte            `json:"payload"`
-			}
-			if err := json.Unmarshal(data, &envelope); err != nil {
-				continue
-			}
-
-			parentCtx := otel.GetTextMapPropagator().Extract(
-				context.Background(),
-				propagation.MapCarrier(envelope.TraceHeaders),
-			)
-
-			_, pushSpan := tracer.Start(parentCtx, "SSE.PushEvent")
-
-			out := h.applyStreamPolicy(envelope.Payload, role, claims)
+			// Live hub event: unmarshal, policy-project, and serialize per subscriber.
+			out := h.applyStreamPolicy(data, role, claims)
 			if out == nil {
 				continue
 			}
 			id := extractEventTimestamp(out)
-			_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			n, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			if err != nil {
+				return
+			}
 			flusher.Flush()
-			pushSpan.End()
+			h.Metrics.FrameSent(stream.KindEvent, n)
 		}
 	}
 }

@@ -39,6 +39,15 @@ export WH_CONFIG=/etc/wavehouse/config.yaml
 
 The server speaks **plain HTTP** — there is no inbound-TLS setting. Terminate TLS at a [reverse proxy](/reverse-proxy#tls) for internet-facing deployments. (The `clickhouse.http_scheme` option below is the *outbound* WaveHouse → ClickHouse hop, unrelated to your clients' TLS.)
 
+### Streaming (SSE)
+
+| YAML Key | Env Var | Default | Description |
+| --- | --- | ------- | ----------- |
+| `stream.keepalive_interval` | `WH_STREAM_KEEPALIVE_INTERVAL` | `30s` | Effective per-connection keepalive period — the longest a quiet `GET /v1/stream` connection goes without a write before the server sends a `:` keepalive comment. Keep it under your proxy/tunnel idle timeout. |
+| `stream.keepalive_buckets` | `WH_STREAM_KEEPALIVE_BUCKETS` | `3` | Advanced load-spreading knob: connections are spread across N buckets so each internal tick (`keepalive_interval ÷ keepalive_buckets`) nudges only ~1/N of live streams instead of all at once. Most deployments leave this at `3`. |
+
+`keepalive_interval` is the number you tune: the **maximum time a connection can sit idle before it's nudged**. The default **30s** clears the common 55–60s proxy/load-balancer idle windows (nginx and ingress-nginx `proxy_read_timeout`, AWS ALB, Heroku) with roughly 2× safety margin, and comfortably clears Cloudflare's ~120s edge. Lower it if you front WaveHouse with something tighter — Azure Application Gateway (20s) or CloudFront (30s) — see [Behind a reverse proxy → Idle timeouts](/reverse-proxy#idle-timeouts-by-provider) for a per-provider table. `keepalive_buckets` only changes how the writes are *spread in time*, not the period: the wheel fires one bucket every `keepalive_interval ÷ keepalive_buckets`, so a full rotation always spans exactly `keepalive_interval` regardless of bucket count. A value of `0` for either falls back to the default; a negative value is rejected at startup.
+
 ### ClickHouse
 
 | YAML Key | Env Var | Default | Description |
@@ -211,6 +220,10 @@ server:
   cors_allowed_origins:
     - "*"
 
+stream:
+  keepalive_interval: 30s  # max idle time before a keepalive; keep under your proxy's idle window
+  keepalive_buckets: 3     # advanced: spread keepalive writes across N buckets
+
 clickhouse:
   addr: localhost:9000
   http_port: 8123
@@ -280,6 +293,9 @@ WH_DATA_DIR=./data
 WH_SERVER_PORT=8080
 WH_SERVER_SHUTDOWN_TIMEOUT=10
 WH_SERVER_CORS_ALLOWED_ORIGINS=*
+
+WH_STREAM_KEEPALIVE_INTERVAL=30s
+WH_STREAM_KEEPALIVE_BUCKETS=3
 
 WH_CH_ADDR=localhost:9000
 WH_CH_HTTP_PORT=8123
