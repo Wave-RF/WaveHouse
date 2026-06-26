@@ -11,8 +11,9 @@ import (
 
 // Frame kinds for the "kind" attribute on the frame and byte counters.
 const (
-	KindKeepalive = "keepalive"
-	KindEvent     = "event"
+	KindKeepalive = "keepalive" // wheel keepalive comment
+	KindEvent     = "event"     // live event off the hub
+	KindReplay    = "replay"    // historical event from gap-fill on (re)connect
 )
 
 // Metrics records SSE stream activity: how many streams are open, how long they
@@ -58,8 +59,8 @@ func (m *Metrics) ConnClosed(d time.Duration) {
 	m.duration.Record(context.Background(), d.Seconds())
 }
 
-// FrameSent records one frame of the given kind (KindKeepalive or KindEvent) and
-// its size in bytes.
+// FrameSent records one frame of the given kind (a Kind* constant) and its size
+// in bytes.
 func (m *Metrics) FrameSent(kind string, n int) {
 	if m == nil {
 		return

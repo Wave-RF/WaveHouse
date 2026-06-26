@@ -93,30 +93,29 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		sinceStr = r.URL.Query().Get("since")
 	}
 	if sinceStr != "" {
+		// One send path for both timestamp formats: project, write, and count the
+		// replayed frame. A write error means the client is gone, so stop the
+		// gap-fill and let the deferred cleanup unwind.
+		sendReplay := func(data []byte) bool {
+			out := h.applyStreamPolicy(data, role, claims)
+			if out == nil {
+				return true // filtered for this role — skip
+			}
+			id := extractEventTimestamp(out)
+			n, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			if err != nil {
+				return false
+			}
+			flusher.Flush()
+			h.Metrics.FrameSent(stream.KindReplay, n)
+			return true
+		}
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
-			h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-				out := h.applyStreamPolicy(data, role, claims)
-				if out == nil {
-					return true // skip this message
-				}
-				id := extractEventTimestamp(out)
-				_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
-				flusher.Flush()
-				return true
-			})
-		} else if parseErr := err; parseErr != nil {
-			// Try RFC3339 without nanos as fallback.
+			h.replayFromNATS(r.Context(), ts, topic, sendReplay)
+		} else if err != nil {
+			// Fall back to RFC3339 without nanos.
 			if ts, err := time.Parse(time.RFC3339, sinceStr); err == nil && h.JS != nil {
-				h.replayFromNATS(r.Context(), ts, topic, func(data []byte) bool {
-					out := h.applyStreamPolicy(data, role, claims)
-					if out == nil {
-						return true
-					}
-					id := extractEventTimestamp(out)
-					_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
-					flusher.Flush()
-					return true
-				})
+				h.replayFromNATS(r.Context(), ts, topic, sendReplay)
 			}
 		}
 	}
