@@ -79,6 +79,12 @@ type ResolvedPermissions struct {
 // claimTemplateRe matches {{ jwt.claim.path }} templates.
 var claimTemplateRe = regexp.MustCompile(`\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}`)
 
+// wholeClaimRe matches a value that is EXACTLY one {{ jwt.path }} reference with
+// no surrounding text (anchored, unlike claimTemplateRe). It lets the _in
+// resolver pull an array-valued claim through whole — col IN (its elements) —
+// rather than stringifying it as resolveTemplate would.
+var wholeClaimRe = regexp.MustCompile(`^\{\{\s*jwt\.([a-zA-Z0-9_.]+)\s*\}\}$`)
+
 // ResolveRole maps an empty/absent role to the policy's default_role, so a
 // request with no role — a token without a role claim, or no token at all when
 // public access is configured — is evaluated as the configured default.
@@ -194,8 +200,13 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	if len(perms.Check) > 0 {
 		resolved.CheckClauses = make(map[string]any, len(perms.Check))
 		for col, f := range perms.Check {
-			if f.Eq != nil {
+			switch {
+			case f.Eq != nil:
 				resolved.CheckClauses[col] = resolveTemplate(*f.Eq, claims)
+			case f.In != nil:
+				// A []any value marks a set-membership check (vs a scalar required
+				// value); ingest enforces "inserted value must be one of these".
+				resolved.CheckClauses[col] = resolveInValues(*f.In, claims)
 			}
 		}
 	}
@@ -232,6 +243,19 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 			clauses = append(clauses, fmt.Sprintf("%s < ?", qcol))
 			params = append(params, val)
 		}
+		if f.In != nil {
+			vals := resolveInValues(*f.In, claims)
+			if len(vals) == 0 {
+				// An empty/unresolvable set fails closed: a row filter scoped to no
+				// values matches no rows, never widening to all of them (the #224
+				// fail-open). `IN ()` is not valid SQL, so emit a constant false.
+				clauses = append(clauses, "1 = 0")
+			} else {
+				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
+				clauses = append(clauses, fmt.Sprintf("%s IN (%s)", qcol, placeholders))
+				params = append(params, vals...)
+			}
+		}
 	}
 	return clauses, params
 }
@@ -252,6 +276,32 @@ func resolveTemplate(tmpl string, claims map[string]any) string {
 		}
 		return fmt.Sprint(val)
 	})
+}
+
+// resolveInValues resolves a templated _in value into the set of bound values
+// for a `col IN (?, …)` predicate. When the template is a single bare claim
+// reference and that claim is a JSON array, every element becomes one value —
+// the multi-tenant case, where a token's tenant_ids list scopes the predicate.
+// A scalar claim (or any template with surrounding text) yields a single value,
+// matching resolveTemplate. Elements are stringified like the other operators so
+// policy filters stay uniformly string-valued. Returns nil when the claim is
+// absent so the caller can fail the predicate closed.
+func resolveInValues(tmpl string, claims map[string]any) []any {
+	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
+		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
+		case nil:
+			return nil
+		case []any:
+			out := make([]any, 0, len(v))
+			for _, e := range v {
+				out = append(out, fmt.Sprint(e))
+			}
+			return out
+		default:
+			return []any{fmt.Sprint(v)}
+		}
+	}
+	return []any{resolveTemplate(tmpl, claims)}
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.
@@ -450,10 +500,18 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
 		}
+		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so none is
+		// rejected here — only the bind-unsafe column name above.
 	}
-	for col := range perms.Check {
+	for col, f := range perms.Check {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q contains '?' (unsupported)", table, op, role, col)
+		}
+		// The check/insert path honors only _eq (a required value) and _in (a
+		// required set); the comparison operators have no insert-time semantics and
+		// no auto-inject, so reject them loudly at config load (#224).
+		if f.Neq != nil || f.Gt != nil || f.Lt != nil {
+			return fmt.Errorf("table %q, op %q, role %q: check column %q uses _neq/_gt/_lt, which check does not honor (use _eq or _in)", table, op, role, col)
 		}
 	}
 	return nil

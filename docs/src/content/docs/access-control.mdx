@@ -195,8 +195,9 @@ Supported comparison operators:
 | `_neq` | `col != ?` | not equals |
 | `_gt` | `col > ?` | greater than |
 | `_lt` | `col < ?` | less than |
+| `_in` | `col IN (?, …)` | one of a set |
 
-> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in [#224](https://github.com/Wave-RF/WaveHouse/issues/224)) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
+`_in` scopes a column to a **set** of values. Unlike the other operators, its value is a single claim that resolves to a JSON **array**: `tenant_id: { _in: "{{ jwt.app_metadata.tenant_ids }}" }` with a token claim `tenant_ids: ["a", "b"]` produces `tenant_id IN ('a', 'b')`. This is the multi-tenant case — the allowed set rides on the signed token. A scalar claim yields a one-element set; a missing or empty claim matches **no rows** (fail-closed: an empty allowed-set sees nothing, never everything).
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 
@@ -211,7 +212,7 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 ## Insert checks
 
-`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It only supports `_eq`.
+`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected at config load**.
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
@@ -249,8 +250,8 @@ insert:
 
 For each checked column, on `POST /v1/ingest?table={table}`:
 
-- **If the request body includes the column**, its value must equal the claim-derived value, or the insert is rejected with `403 check failed for column "x"`. A `writer` cannot forge a row for another user or tenant.
-- **If the request body omits the column**, WaveHouse **auto-injects** the claim-derived value before publishing. So clients can send just the business fields (`page`, `score`) and let the policy stamp `user_id` and `tenant_id` from the token.
+- **If the request body includes the column**, its value must satisfy the check — equal the claim-derived value (`_eq`), or be one of the claim-derived set (`_in`) — or the insert is rejected with `403 check failed for column "x"`. A `writer` cannot forge a row for another user or tenant.
+- **If the request body omits the column**, an `_eq` check **auto-injects** the claim-derived value before publishing, so clients can send just the business fields (`page`, `score`) and let the policy stamp `user_id` and `tenant_id` from the token. An `_in` check has no single value to stamp, so an omitted column is **rejected** — the writer must name a value within their allowed set.
 
 This pairs naturally with a matching `filter` on the `select` side: `check` stamps the tenant on write, `filter` scopes reads to that tenant.
 
@@ -496,8 +497,8 @@ Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
 | ----- | ---- | ---------- | ----------- |
 | `allow_columns` | string[] | select, insert | Allowlist of columns. Empty or `["*"]` = all columns (minus `deny_columns`). |
 | `deny_columns` | string[] | select, insert | Blocklist of columns. Always wins over `allow_columns`. |
-| `filter` | map | select | Row-level `WHERE` predicates (`_eq`/`_neq`/`_gt`/`_lt`), ANDed together. Values support `{{ jwt.path }}` templating. |
-| `check` | map | insert | Required insert values (`_eq` only). Enforced if present in the body, auto-injected if absent. Supports templating. |
+| `filter` | map | select | Row-level `WHERE` predicates (`_eq`/`_neq`/`_gt`/`_lt`/`_in`), ANDed together. `_in` takes a single array-valued claim → `col IN (…)`. Values support `{{ jwt.path }}` templating. |
+| `check` | map | insert | Required insert values (`_eq`, or `_in` for a claim-derived set; `_neq`/`_gt`/`_lt` are rejected). `_eq` is enforced if present and auto-injected if absent; `_in` requires the column be present and in-set. Supports templating. |
 | `allowed_aggregations` | string[] | select | Allowlist of aggregation functions. Empty = all (minus denied). Case-insensitive. |
 | `denied_aggregations` | string[] | select | Blocklist of aggregation functions. Always wins. |
 | `max_rows` | int | select | Caps the query `LIMIT`. `0` = no limit (the `query.default_max_rows` config default applies). Must be non-negative. |
