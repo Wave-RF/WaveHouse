@@ -16,10 +16,23 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/singleflight"
 )
 
 const maxPipeDeps = 50000
+
+var (
+	pipeFallbackCounter, _ = otel.Meter("wavehouse-pipes").Int64Counter(
+		"wavehouse_pipe_dep_resolution_fallback_total",
+		metric.WithDescription("Pipe executions served while over-resolving to all base tables because ClickHouse couldn't analyze the query (a write/DDL pipe, a missing table, an unreachable server)"),
+	)
+	pipeUnresolvedCounter, _ = otel.Meter("wavehouse-pipes").Int64Counter(
+		"wavehouse_pipe_dep_unresolved_total",
+		metric.WithDescription("Pipe executions TTL-floored because a resolved dependency can't be reliably version-invalidated (an unfoldable view, or a cross-database/unknown name)"),
+	)
+)
 
 type resolvedDeps struct {
 	tables []string
@@ -301,8 +314,14 @@ func (h *PipesHandler) resolveDeps(ctx context.Context, boundSQL string) ([]cach
 	}
 
 	names := rd.tables
-	if rd.fallback {
+	// fallback and unresolved are mutually exclusive: fallback is set when EXPLAIN
+	// can't run (resolvePipe returns early), unresolved only when it succeeds.
+	switch {
+	case rd.fallback:
 		names = h.Registry.AllBaseTables() // over-resolve: any write evicts
+		pipeFallbackCounter.Add(ctx, 1)
+	case rd.unresolved:
+		pipeUnresolvedCounter.Add(ctx, 1)
 	}
 	deps := make([]cache.Namespace, 0, len(names))
 	for _, name := range names {
@@ -333,6 +352,7 @@ func (h *PipesHandler) resolvePipe(ctx context.Context, boundSQL string) *resolv
 		for _, t := range tables {
 			if !h.Registry.IsKnown(t) {
 				rd.unresolved = true
+				h.logger.DebugContext(ctx, "pipe dependency can't be reliably version-invalidated; TTL-flooring result", "table", t)
 				break
 			}
 		}

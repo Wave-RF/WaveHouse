@@ -77,16 +77,10 @@ var tableCounter atomic.Uint64
 func createTable(t *testing.T, columns, tableOpts string) string {
 	t.Helper()
 
-	// Sanitize the test name into a valid CH identifier: lowercase, and replace every
-	// character that isn't a letter, digit, or underscore with '_'. An allowlist (not a
-	// denylist of a few known separators) so punctuation in a descriptive subtest name —
-	// commas, parens, colons — can't leak into the CREATE TABLE and cause a syntax error.
 	safe := strings.Map(func(r rune) rune {
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
 			return r
-		case r >= 'A' && r <= 'Z':
-			return r + ('a' - 'A')
 		default:
 			return '_'
 		}

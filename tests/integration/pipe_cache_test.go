@@ -278,3 +278,64 @@ func TestPipeCacheInvalidation_MaterializedViewSource(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "MISS", exec().Header().Get("X-Cache"))
 }
+
+// TestPipeCacheInvalidation_WeirdIdentifier proves the pipe dependency-invalidation
+// path operates on a table whose name a safe-identifier allowlist would reject — here
+// an embedded-dot name that also LOOKS like a qualified `db.table` reference, the most
+// load-bearing weird case for a feature that parses `db.table` out of EXPLAIN. It is
+// the pipe-path counterpart to the query builder's identifier_roundtrip_test.go: the
+// round-trip under test is that the dependency name EXPLAIN QUERY TREE reports, once
+// SafeEncodeNATS-encoded, equals the namespace an ingest write to that table bumps —
+// otherwise a write would silently fail to evict. createRawTable is required because
+// createTable sanitizes the dots away; dotted-name resolution itself is proven in
+// internal/discovery/fuzz_deps_test.go, and this carries it through the full Execute.
+func TestPipeCacheInvalidation_WeirdIdentifier(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	// Arbitrary, regex-hostile name: embedded dots so it reads as `a.b.c`. Legal in a
+	// quoted ClickHouse identifier; createRawTable quotes it correctly and seeds one row.
+	rawName := fmt.Sprintf("it_weird.dep.name_%d", tableCounter.Add(1))
+	table := createRawTable(t, rawName, map[string]string{"id": "row1"})
+
+	localCache, err := cache.NewLocal(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = localCache.Close() })
+	localCache.SetDependents(e.registry.Dependents())
+
+	store := pipes.NewMemoryStore(&pipes.NamedQuery{
+		Name:         "weird",
+		SQL:          fmt.Sprintf("SELECT count() AS c FROM %s.%s", chQuoteIdent(testCHDatabase), chQuoteIdent(table)),
+		AllowedRoles: []string{"viewer"},
+	})
+	h := api.NewPipesHandler(store, policy.NewMemoryStore(&policy.Policy{}), e.chConn, localCache, 30*time.Second, testutil.NopLogger())
+	h.Registry = e.registry
+
+	exec := func() *httptest.ResponseRecorder {
+		t.Helper()
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("name", "weird")
+		c := context.WithValue(context.Background(), chi.RouteCtxKey, rctx)
+		c = auth.WithRole(c, "viewer")
+		r := httptest.NewRequestWithContext(c, http.MethodGet, "/v1/pipes/weird/execute", nil)
+		w := httptest.NewRecorder()
+		h.Execute(w, r)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		localCache.Wait()
+		return w
+	}
+
+	// First call resolves the weird-named table via EXPLAIN and folds its namespace
+	// into the key; second call hits.
+	w := exec()
+	require.Equal(t, "MISS", w.Header().Get("X-Cache"))
+	require.Equal(t, `[{"c":1}]`, w.Body.String())
+	require.Equal(t, "HIT", exec().Header().Get("X-Cache"))
+
+	// A write to the weird-named table, encoded exactly as the ingest worker encodes
+	// it, must evict the cached result — proving the resolved dependency namespace
+	// equals SafeEncodeNATS(rawName) despite the dots.
+	_, err = localCache.Invalidate(ctx, []cache.Namespace{{Table: chsql.SafeEncodeNATS(table)}})
+	require.NoError(t, err)
+	require.Equal(t, "MISS", exec().Header().Get("X-Cache"))
+}
