@@ -355,6 +355,7 @@ func TestIsAggregationAllowed(t *testing.T) {
 		{"denied wins despite caller upper-case", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"sum"}}, "SUM", false},
 		{"denied wins despite caller mixed-case", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"sum"}}, "Sum", false},
 		{"allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, AllowedAggregations: []string{"count"}}, "COUNT", true},
+		{"denied beats allowed despite caller upper-case", &ResolvedPermissions{Allowed: true, DeniedAggregations: []string{"sum"}, AllowedAggregations: []string{"sum"}}, "SUM", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
