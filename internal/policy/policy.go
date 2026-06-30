@@ -433,6 +433,9 @@ func (rp *ResolvedPermissions) IsAggregationAllowed(fn string) bool {
 	if !rp.Allowed {
 		return false
 	}
+	// Normalize case once so both deny and allow checks are case-insensitive;
+	// otherwise a cased aggregation (SUM) bypasses a lowercase deny entry (sum).
+	fn = strings.ToLower(fn)
 	// Check deny list.
 	for _, d := range rp.DeniedAggregations {
 		if strings.ToLower(d) == fn {
@@ -443,7 +446,6 @@ func (rp *ResolvedPermissions) IsAggregationAllowed(fn string) bool {
 	if len(rp.AllowedAggregations) == 0 {
 		return true
 	}
-	fn = strings.ToLower(fn)
 	for _, a := range rp.AllowedAggregations {
 		if strings.ToLower(a) == fn {
 			return true
