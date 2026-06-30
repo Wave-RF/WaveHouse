@@ -513,6 +513,14 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		if f.Neq != nil || f.Gt != nil || f.Lt != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q uses _neq/_gt/_lt, which check does not honor (use _eq or _in)", table, op, role, col)
 		}
+		// _eq and _in are both honored, but they carry different required-value
+		// semantics (a single value vs. set membership) and Evaluate resolves only
+		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at config
+		// load rather than enforce an arbitrary branch (the same accept-but-ignore
+		// gap #224 closes).
+		if f.Eq != nil && f.In != nil {
+			return fmt.Errorf("table %q, op %q, role %q: check column %q sets both _eq and _in; use exactly one", table, op, role, col)
+		}
 	}
 	return nil
 }

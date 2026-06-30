@@ -755,6 +755,25 @@ func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
 	}
 }
 
+// TestValidate_RejectsMixedCheckOps: a check column may carry only one
+// required-value operator. Setting both _eq and _in is ambiguous — Evaluate's
+// switch honors _eq and silently drops _in — so it is rejected at config load
+// rather than enforcing an arbitrary branch (the accept-but-ignore gap #224
+// closes).
+func TestValidate_RejectsMixedCheckOps(t *testing.T) {
+	t.Parallel()
+	v := "{{ jwt.sub }}"
+	set := "{{ jwt.tenants }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Insert: map[string]RolePermissions{
+			"writer": {Check: map[string]Filter{"tenant_id": {Eq: &v, In: &set}}},
+		}},
+	}}
+	err := Validate(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "both _eq and _in")
+}
+
 // TestValidate_AllowsEnforcedOperators: every operator the engine enforces —
 // _eq/_neq/_gt/_lt/_in on filter, _eq/_in on check — passes validation, so the
 // guards don't over-reject a well-formed policy.

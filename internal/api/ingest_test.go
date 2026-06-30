@@ -436,6 +436,7 @@ func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "check failed")
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
@@ -456,6 +457,36 @@ func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Contains(t, w.Body.String(), "check failed")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed locks the typed-nil []any
+// path behind an _in check: when the claim itself is absent, resolveInValues
+// returns a typed-nil []any, which must still assert as []any in processRecord
+// (entering the membership branch) so the column is rejected — never treated as a
+// scalar _eq value and auto-injected. The sibling _Absent test omits the column
+// with the claim present; this one drops the claim too. Guards #224 fail-closed.
+func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	// The `orgs` claim is absent entirely, so the _in set resolves to a typed-nil
+	// []any; org_id is omitted too. The insert must be rejected (fail closed), not
+	// auto-injected with nil and published.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	assert.Nil(t, pub.LastMessage(), "an absent _in claim must not auto-inject or publish")
+	testutil.AssertJSONErrorResponse(t, w)
 }
 
 func TestIngest_Dedup_MissingIDField(t *testing.T) {
