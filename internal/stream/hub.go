@@ -230,11 +230,10 @@ func filterColumns(data map[string]any, perms *policy.ResolvedPermissions) map[s
 // lines, terminated by a blank line. Each newline in the payload starts a fresh
 // "data:" line, per the SSE spec — a compact JSON event (the normal case) has none,
 // so this stays "id: <ts>\ndata: <json>\n\n", but a multi-line passthrough payload
-// can't emit a bare continuation line. The result grows by append rather than a
-// pre-sized make, so a large payload length can't overflow an allocation size.
+// can't emit a bare continuation line.
 func wireFrame(id string, payload []byte) []byte {
 	b := append([]byte("id: "), id...)
-	for _, line := range bytes.Split(payload, []byte{'\n'}) {
+	for line := range bytes.SplitSeq(payload, []byte{'\n'}) {
 		b = append(b, "\ndata: "...)
 		b = append(b, line...)
 	}

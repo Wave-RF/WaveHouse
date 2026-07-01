@@ -109,6 +109,45 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	}
 }
 
+func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
+	t.Parallel()
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Select: map[string]policy.RolePermissions{
+					"viewer": {AllowColumns: []string{"page"}},           // page only
+					"editor": {AllowColumns: []string{"page", "secret"}}, // page + secret
+				},
+			},
+		},
+	}
+	hub := NewHub(policy.NewMemoryStore(p), nil)
+	const topic = "ingest.clicks"
+
+	viewer, editor := NewSubscriber(), NewSubscriber()
+	hub.Add(topic, "viewer", viewer)
+	hub.Add(topic, "editor", editor)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+		map[string]any{"page": "/home", "secret": "hidden"}))
+
+	fv, fe := recvFrame(t, viewer), recvFrame(t, editor)
+	vdata := frameData(t, fv)["data"].(map[string]any)
+	edata := frameData(t, fe)["data"].(map[string]any)
+
+	assert.Equal(t, "/home", vdata["page"])
+	assert.NotContains(t, vdata, "secret", "viewer's denied column is stripped")
+	assert.Equal(t, "/home", edata["page"])
+	assert.Equal(t, "hidden", edata["secret"], "editor sees a column the viewer can't")
+
+	// The frame is built once PER ROLE, not once globally: the two roles' projections
+	// differ, so their frames are serialized independently (distinct backing arrays).
+	require.NotEmpty(t, fv.Data)
+	require.NotEmpty(t, fe.Data)
+	assert.NotSame(t, &fv.Data[0], &fe.Data[0], "distinct roles get independently serialized frames")
+	assert.NotEqual(t, fv.Data, fe.Data, "distinct role projections produce distinct bytes")
+}
+
 func TestHub_TopicIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil)
