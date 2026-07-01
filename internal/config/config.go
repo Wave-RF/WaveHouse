@@ -133,8 +133,9 @@ type MQ struct {
 }
 
 type Dedupe struct {
-	Enabled bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
-	IDField string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
+	Enabled   bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
+	IDField   string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
+	RequireID bool   `yaml:"require_id" env:"WH_DEDUPE_REQUIRE_ID" env-default:"false"`
 }
 
 type Cache struct {
