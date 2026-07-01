@@ -416,6 +416,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	testutil.AssertJSONErrorResponse(t, w)
 	assert.Nil(t, pub.LastMessage(), "must not publish a row missing the dedupe id under require_id")
 
 	w = httptest.NewRecorder()
