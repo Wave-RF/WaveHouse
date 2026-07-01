@@ -129,7 +129,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 | --- | --- | ------- | ----------- |
 | `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
 | `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
-| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Default (`false`): the row is published un-deduped, logged at `WARN`, and counted by `wavehouse_ingest_dedupe_missing_id_total`. Set `true` to reject such a row instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. |
+| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. Default (`false`): it is then published un-deduped. Set `true` to reject it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. |
 
 ### Cache
 
