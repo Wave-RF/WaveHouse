@@ -49,7 +49,8 @@ func TestFilterColumns(t *testing.T) {
 func TestFilterColumns_DoesNotMutateOriginal(t *testing.T) {
 	t.Parallel()
 	data := map[string]any{"a": 1, "b": 2, "c": 3}
+	original := map[string]any{"a": 1, "b": 2, "c": 3}
 	perms := &policy.ResolvedPermissions{Allowed: true, AllowColumns: []string{"a"}}
 	_ = filterColumns(data, perms)
-	assert.Len(t, data, 3, "the input map must be left unmodified")
+	assert.Equal(t, original, data, "the input map must be left unmodified (keys and values)")
 }
