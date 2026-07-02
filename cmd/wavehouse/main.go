@@ -121,10 +121,7 @@ func run() int {
 		} else {
 			promHandler = ph
 			defer func() {
-				// Bound shutdown so an unreachable collector doesn't hang
-				// process exit. The OTel SDK's batch processors don't fully
-				// honor the context deadline during gRPC retry/backoff.
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 				_ = otelShutdown(ctx)
 			}()

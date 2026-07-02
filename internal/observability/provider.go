@@ -77,12 +77,16 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	var shutdownFuncs []func(context.Context) error
 
 	shutdown := func(ctx context.Context) error {
-		var err error
-		for _, fn := range shutdownFuncs {
-			err = errors.Join(err, fn(ctx))
+		errs := make([]error, len(shutdownFuncs))
+		var wg sync.WaitGroup
+		for i, fn := range shutdownFuncs {
+			wg.Go(func() {
+				errs[i] = fn(ctx)
+			})
 		}
+		wg.Wait()
 		shutdownFuncs = nil
-		return err
+		return errors.Join(errs...)
 	}
 
 	// On any setup error we run partial shutdown to release whatever was
