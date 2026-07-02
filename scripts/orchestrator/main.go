@@ -239,10 +239,13 @@ func run() error {
 		}
 	case <-time.After(10 * time.Second):
 		// A clean graceful exit with no OTel collector running (the e2e
-		// default) now shuts the traces/metrics/logs providers down
-		// concurrently, capped at ~3s total — well inside this budget.
-		// It was ~15s while those flushes ran serially, which is why this was
-		// temporarily bumped to 30s. Fast exits are unaffected (whDone fires).
+		// default) bounds its telemetry-provider shutdown to a ~3s deadline
+		// (see cmd/wavehouse + observability.InitProvider), so SIGINT→exit
+		// lands well inside this budget. It was ~15s while those flushes ran
+		// serially and unbounded, which is why this was temporarily bumped to
+		// 30s. Fast exits are unaffected (whDone fires). Killing here would
+		// SIGKILL the cover binary before it flushes GOCOVERDIR, zeroing e2e
+		// coverage — the budget must stay above the bounded shutdown time.
 		log.Println("  wavehouse did not exit within 10s — killing")
 		_ = whCmd.Process.Kill()
 		<-whDone

@@ -57,12 +57,15 @@ func TestInitProvider_Shutdown(t *testing.T) {
 	assert.NoError(t, shutdown(shutdownCtx))
 }
 
-// TestInitProvider_ShutdownParallelBounded is the #288 regression guard. With
+// TestInitProvider_ShutdownParallelBounded is the #288 regression guard: with
 // an unreachable collector and buffered telemetry in every signal, shutdown
-// must fan the traces/metrics/logs providers out concurrently so the total
-// stays within one gRPC backoff window. Run serially the traces flush eats the
-// whole budget and then the logs BatchProcessor ignores the already-expired
-// context, stacking well past it.
+// must stay bounded by its context deadline. That needs two things together —
+// fanning the traces/metrics/logs providers out concurrently (so their flushes
+// overlap instead of summing) AND returning when the deadline passes even
+// though the experimental logs SDK's BatchProcessor.Shutdown ignores ctx and
+// blocks for the exporter's full ~10s timeout during gRPC backoff. Drop either
+// and the shutdown overruns the budget: serial stacks the flushes, and a plain
+// wg.Wait blocks on the logs straggler.
 func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	// Pin a definitely-unreachable collector so every exporter spends the
 	// shutdown budget in gRPC retry/backoff. t.Setenv also enforces
@@ -104,9 +107,9 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	_ = shutdown(shutdownCtx) // flush errors expected — collector is unreachable
 	elapsed := time.Since(start)
 
-	// Serial shutdown blows past the 2s budget (traces eats it, then logs
-	// ignores the dead ctx for several more seconds); parallel comes in at ~2s.
-	// Generous 3s ceiling keeps this stable in CI.
+	// A correctly bounded shutdown returns at the ~2s deadline; an
+	// unconcurrent or unbounded one overruns by several seconds while the
+	// logs flush drags on. Generous 3s ceiling keeps this stable in CI.
 	assert.Less(t, elapsed, 3*time.Second,
-		"OTel providers must shut down concurrently, not serially (#288); took %s", elapsed)
+		"OTel shutdown must stay bounded by its context deadline (#288); took %s", elapsed)
 }

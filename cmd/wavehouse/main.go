@@ -121,6 +121,10 @@ func run() int {
 		} else {
 			promHandler = ph
 			defer func() {
+				// Bound shutdown so an unreachable collector can't hang exit:
+				// otelShutdown honors this deadline internally (see
+				// observability.InitProvider), returning even when a provider's
+				// flush is stuck in gRPC backoff.
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 				_ = otelShutdown(ctx)
