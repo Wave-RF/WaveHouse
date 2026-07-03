@@ -84,15 +84,12 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
   },
 ];
 
-// Curated top-level destinations for the site header (src/components/Header.astro).
-// A deliberately small subset of the sidebar above — the sidebar still carries
-// the full tree — colocated here so header and sidebar share one file as the
-// single source of truth for navigation. Root-absolute hrefs match the internal
-// link convention used across the docs (index.mdx hero, LinkCards).
+// Top-level link(s) for the site header (src/components/Header.astro), colocated
+// with the sidebar so header and sidebar share one file as the single source of
+// truth for navigation. A single "Docs" entry into the doc tree: the splash
+// homepage hides the sidebar, so this is the way in from there; every doc page
+// already carries the full sidebar. Root-absolute href matches the internal link
+// convention used across the docs (index.mdx hero, LinkCards).
 export const headerNav: { label: string; href: string }[] = [
-  { label: "Getting Started", href: "/getting-started" },
-  { label: "Why WaveHouse?", href: "/why-wavehouse" },
-  { label: "Architecture", href: "/architecture" },
-  { label: "API", href: "/api" },
-  { label: "SDK", href: "/sdk" },
+  { label: "Docs", href: "/getting-started" },
 ];
