@@ -43,20 +43,6 @@ const title =
       color 0.15s ease;
   }
 
-  /* Once the wordmark sits beside it (>30rem), the mark is taller than the
-     text, so centering leaves its bottom dipping below the baseline. Nudge it
-     up — visual only, no layout shift, so the wordmark and header nav stay put
-     — to sit its bottom on the shared text baseline (value optically tuned).
-     At <=30rem only the mark shows, so it stays centered with no nudge. */
-  @media (min-width: 30.0625rem) {
-    .wh-site-title__mark {
-      transform: translateY(-0.25rem);
-    }
-    .wh-site-title:hover .wh-site-title__mark {
-      transform: translateY(-0.25rem) rotate(-2deg);
-    }
-  }
-
   @media (max-width: 30rem) {
     .wh-site-title__text {
       display: none;
