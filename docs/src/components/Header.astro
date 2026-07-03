@@ -192,10 +192,11 @@ const ctaHref = "/getting-started";
   }
   .wh-header-nav__link {
     color: var(--wh-ink-muted);
-    /* Match the wordmark's font-size so, centered on the same header line, the
-       link's baseline lands exactly on the "WaveHouse" text baseline (the logo
-       itself is untouched — this only sizes the nav link). */
-    font-size: 1.0625rem;
+    /* Smaller than the "WaveHouse" wordmark (1.0625rem). Both are centered on
+       the same header line, so the shorter link would otherwise sit slightly
+       high; drop it by half the size gap to land its bottom on the wordmark's. */
+    font-size: 0.875rem;
+    transform: translateY(calc((1.0625rem - 0.875rem) / 2));
     font-weight: 500;
     line-height: 1;
     text-decoration: none;
