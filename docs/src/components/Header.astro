@@ -151,20 +151,29 @@ const ctaHref = "/getting-started";
     border-inline-end: 1px solid var(--sl-color-gray-5);
   }
 
-  /* Search: collapse Starlight's search box to a compact icon button (the
-     "Search" label + ⌘K hint are already `md:`-only, so hide them at every
-     width) that opens the same modal, ClickHouse-style. */
+  /* Search. Doc pages show Starlight's expanded "Search … ⌘K" box; the splash
+     homepage collapses it to a compact icon. Either way it opens the same
+     modal. */
   .wh-search {
     align-items: center;
   }
-  /* Doc pages: keep Starlight's expanded search box, sized to a comfortable
-     width. */
-  .wh-search :global(button[data-open-modal]) {
-    width: 22rem;
-    max-width: 100%;
+  /* Expand to the box only from 50rem up — the same breakpoint that reveals the
+     controls. Below it the label + ⌘K are already hidden (md:-only), so forcing
+     a width would leave a wide, near-empty button overflowing the narrow header
+     beside the logo; letting it size to its icon keeps it compact there.
+     min-width:0 + max-width let it shrink rather than overflow if the desktop
+     row gets tight. */
+  @media (min-width: 50rem) {
+    .wh-search {
+      min-width: 0;
+    }
+    .wh-search :global(button[data-open-modal]) {
+      width: 22rem;
+      max-width: 100%;
+    }
   }
-  /* Splash: collapse to a compact icon button (its "Search" label + ⌘K hint
-     are already md-only) that opens the same modal, ClickHouse-style. */
+  /* Splash homepage: collapse to a compact icon button at every width (label +
+     ⌘K hidden), ClickHouse-style. */
   :global(body:has(.wh-hero)) .wh-search :global(button[data-open-modal] > span),
   :global(body:has(.wh-hero)) .wh-search :global(button[data-open-modal] > kbd) {
     display: none;
