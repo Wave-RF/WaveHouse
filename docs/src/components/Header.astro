@@ -1,0 +1,143 @@
+---
+// Override of Starlight's default Header — a faithful copy plus a site-nav
+// column. We override the whole Header (rather than stuffing links into
+// SiteTitle, whose .title-wrapper has `overflow: clip`) so the nav can be its
+// own grid item; every other control stays wired through its
+// `virtual:starlight/components/*` import, so the SiteTitle/Search/Theme
+// overrides and the Pagefind-search logic keep working untouched. The outer
+// <header class="header"> (PageFrame — fixed position + glass background) is
+// not ours and stays as-is.
+//
+// On @astrojs/starlight upgrades, re-diff this file against the upstream
+// default Header: the layout markup and CSS here are a copy and can drift
+// when Starlight changes its own Header internals.
+//
+// The nav is hidden below Starlight's `md` (50rem): on doc pages the sidebar
+// (a hamburger drawer under 50rem) already carries navigation, so this fills
+// the one real gap — the splash homepage, which hides the sidebar — on desktop.
+import config from "virtual:starlight/user-config";
+
+import LanguageSelect from "virtual:starlight/components/LanguageSelect";
+import Search from "virtual:starlight/components/Search";
+import SiteTitle from "virtual:starlight/components/SiteTitle";
+import SocialIcons from "virtual:starlight/components/SocialIcons";
+import ThemeSelect from "virtual:starlight/components/ThemeSelect";
+import { headerNav } from "../config/sidebar.ts";
+
+// Mirror of the package default: only render Search when Pagefind is enabled or
+// the Search component has been overridden.
+const shouldRenderSearch =
+  config.pagefind ||
+  config.components.Search !== "@astrojs/starlight/components/Search.astro";
+
+// Highlight the active destination. trailingSlash is "never", so a trailing
+// slash shouldn't appear — strip a stray one before comparing, just in case.
+const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
+---
+
+<div class="header">
+  <div class="title-wrapper sl-flex">
+    <SiteTitle />
+  </div>
+  <nav class="wh-header-nav sl-hidden md:sl-flex print:hidden" aria-label="Primary">
+    {
+      headerNav.map(({ label, href }) => (
+        <a
+          href={href}
+          class="wh-header-nav__link"
+          aria-current={currentPath === href ? "page" : undefined}
+        >
+          {label}
+        </a>
+      ))
+    }
+  </nav>
+  <div class="sl-flex print:hidden">
+    {shouldRenderSearch && <Search />}
+  </div>
+  <div class="sl-hidden md:sl-flex print:hidden right-group">
+    <div class="sl-flex social-icons">
+      <SocialIcons />
+    </div>
+    <ThemeSelect />
+    <LanguageSelect />
+  </div>
+</div>
+
+<style>
+  /* Copied from Starlight's default Header, unlayered so it authoritatively
+     styles this component's own inner .header row. */
+  .header {
+    display: flex;
+    gap: var(--sl-nav-gap);
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+  }
+
+  .title-wrapper {
+    /* Prevent long titles overflowing and covering the search and menu buttons on narrow viewports. */
+    overflow: clip;
+    /* Avoid clipping focus ring around link inside title wrapper. */
+    padding: 0.25rem;
+    margin: -0.25rem;
+    min-width: 0;
+  }
+
+  .right-group,
+  .social-icons {
+    gap: 1rem;
+    align-items: center;
+  }
+  .social-icons::after {
+    content: "";
+    height: 2rem;
+    border-inline-end: 1px solid var(--sl-color-gray-5);
+  }
+
+  /* Site nav — brand-token styling so it reads as part of the header controls. */
+  .wh-header-nav {
+    align-items: center;
+    gap: 1.25rem;
+  }
+  .wh-header-nav__link {
+    position: relative;
+    color: var(--wh-ink-muted);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: color 0.15s ease;
+  }
+  .wh-header-nav__link:hover {
+    color: var(--wh-ink);
+  }
+  .wh-header-nav__link[aria-current="page"] {
+    color: var(--wh-accent-text);
+    font-weight: 600;
+  }
+  /* Accent underline on the active link — a quiet echo of the sidebar's
+     current-item treatment. */
+  .wh-header-nav__link[aria-current="page"]::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    bottom: -0.4rem;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--wh-accent);
+  }
+
+  /* Brand + nav grouped top-left, search fills the middle, controls right.
+     Replaces Starlight's sidebar-aligning title-column calc: with the nav in
+     play, that calc pushed the nav far from the brand on the sidebar-less
+     splash page. `auto auto 1fr auto` keeps brand and nav together everywhere. */
+  @media (min-width: 50rem) {
+    .header {
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      align-content: center;
+    }
+  }
+</style>

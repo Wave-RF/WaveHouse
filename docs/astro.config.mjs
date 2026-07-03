@@ -146,6 +146,7 @@ export default defineConfig({
         },
       },
       components: {
+        Header: "./src/components/Header.astro",
         Hero: "./src/components/Hero.astro",
         SiteTitle: "./src/components/SiteTitle.astro",
         Footer: "./src/components/Footer.astro",
