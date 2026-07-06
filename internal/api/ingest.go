@@ -372,6 +372,20 @@ func (h *IngestHandler) processRecord(
 			}
 		}
 		for col, requiredVal := range perms.CheckClauses {
+			// A []any value is an _in check: the inserted value must be present and
+			// one of the allowed set. Unlike the scalar _eq case there is no single
+			// value to auto-inject, so an absent column fails closed.
+			if set, isSet := requiredVal.([]any); isSet {
+				actual, ok := data[col]
+				if !ok || !valueInSet(actual, set) {
+					h.logger.WarnContext(ctx, "check clause failed", "column", col, "allowed", set, "actual", actual, "present", ok)
+					return false, &recordReject{
+						Status:  http.StatusForbidden,
+						Message: fmt.Sprintf("check failed for column %q", col),
+					}, nil
+				}
+				continue
+			}
 			if actual, ok := data[col]; ok {
 				if fmt.Sprint(actual) != fmt.Sprint(requiredVal) {
 					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
@@ -443,4 +457,17 @@ func (h *IngestHandler) processRecord(
 	}
 
 	return false, nil, nil
+}
+
+// valueInSet reports whether v matches any member of set, comparing by string
+// form to mirror the scalar check's fmt.Sprint equality — so a JSON number in
+// the insert body matches a stringified claim value the same way _eq does.
+func valueInSet(v any, set []any) bool {
+	vs := fmt.Sprint(v)
+	for _, s := range set {
+		if fmt.Sprint(s) == vs {
+			return true
+		}
+	}
+	return false
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,7 +194,7 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
 		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(NewHub(), nil),
+		SSE:         NewStreamHandler(stream.NewHub(nil, nil), nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
