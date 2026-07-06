@@ -33,6 +33,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
@@ -310,7 +311,8 @@ func waitForNativeReady(ctx context.Context, conn driver.Conn, timeout time.Dura
 func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discovery.SchemaRegistry, logger *slog.Logger) (*httptest.Server, error) {
 	js := embeddedMQ.JetStream()
 
-	hub := api.NewHub()
+	policyStore := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	streamHub := stream.NewHub(policyStore, nil)
 
 	deps := api.Dependencies{
 		Ingest: api.NewIngestHandler(registry, embeddedMQ, logger),
@@ -318,11 +320,11 @@ func buildServer(ch *chInstance, embeddedMQ *mq.EmbeddedNATS, registry *discover
 		// so the handler needs the HTTP URL + creds rather than the
 		// native-protocol driver.Conn other handlers use.
 		Query:       api.NewQueryHandler(ch.httpURL(), testCHUser, testCHPassword, testCHDatabase, time.Second*time.Duration(30)),
-		SSE:         api.NewStreamHandler(hub, js),
+		SSE:         api.NewStreamHandler(streamHub, js),
 		Health:      api.NewHealthHandler(ch.conn),
 		Schema:      api.NewSchemaHandler(registry),
 		DLQ:         api.NewDLQHandler(js, logger),
-		PolicyStore: policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}),
+		PolicyStore: policyStore,
 		AuthMW: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				next.ServeHTTP(w, r.WithContext(auth.WithRole(r.Context(), "admin")))

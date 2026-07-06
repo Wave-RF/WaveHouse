@@ -66,7 +66,7 @@ func TestHeartbeater_RotatesOneBucketPerTick(t *testing.T) {
 	// A roomy buffer means a (buggy) double-push would be observed, not dropped.
 	subs := make([]*Subscriber, buckets)
 	for i := range subs {
-		subs[i] = &Subscriber{out: make(chan []byte, 4)}
+		subs[i] = newSubscriber(4)
 		hb.buckets[i].Add(subs[i])
 	}
 
@@ -107,7 +107,7 @@ func TestHeartbeater_PushesKeepaliveToIdleSubscriber(t *testing.T) {
 
 	select {
 	case got := <-sub.Frames():
-		assert.Equal(t, hb.comment, got)
+		assert.Equal(t, Frame{Kind: KindKeepalive, Data: hb.comment}, got)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected a keepalive within a rotation")
 	}

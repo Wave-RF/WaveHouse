@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -252,7 +253,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	deps := Dependencies{
 		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -308,7 +309,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 	router := NewRouter(Dependencies{
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
@@ -380,7 +381,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -441,7 +442,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	deps := Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -492,7 +493,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -517,7 +518,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -614,7 +615,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	t.Parallel()
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),

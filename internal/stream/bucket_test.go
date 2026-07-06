@@ -31,9 +31,9 @@ func TestSubscriberSet_AddRemoveLen(t *testing.T) {
 func TestSubscriberSet_PushIsNonBlockingAndDropsWhenFull(t *testing.T) {
 	t.Parallel()
 	s := newSubscriberSet()
-	sub := NewSubscriber()
+	sub := newSubscriber(1) // cap-1 so the second push has nowhere to go
 	s.Add(sub)
-	payload := []byte("payload")
+	payload := Frame{Kind: KindEvent, Data: []byte("payload")}
 
 	// First push fills the 1-slot buffer; the second must drop rather than block.
 	s.Push(payload)
@@ -53,11 +53,12 @@ func TestSubscriberSet_PushAfterRemove_NoPanicNoBlock(t *testing.T) {
 	sub := NewSubscriber()
 	s.Add(sub)
 	s.Remove(sub)
+	frame := Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}
 
 	// Push after the subscriber is gone: it isn't in the snapshot, so nothing is
 	// sent and nothing panics (mirrors the wheel pushing a bucket a departed
 	// subscriber just left).
-	assert.NotPanics(t, func() { s.Push([]byte(":\n\n")) })
+	assert.NotPanics(t, func() { s.Push(frame) })
 	select {
 	case <-sub.out:
 		t.Fatal("a removed subscriber must not receive a push")
@@ -66,11 +67,11 @@ func TestSubscriberSet_PushAfterRemove_NoPanicNoBlock(t *testing.T) {
 
 	// The snapshot race: Remove lands after Push already snapshotted the
 	// subscriber, so the send still targets its never-closed, reader-less queue.
-	// That is bounded (cap-1 takes one, the rest hit default) and panic-free —
+	// That is bounded (the buffer fills, the rest hit default) and panic-free —
 	// never a send-on-closed-channel, because the queue is never closed.
 	assert.NotPanics(t, func() {
 		for range 5 {
-			sub.Send([]byte(":\n\n"))
+			sub.Send(frame)
 		}
 	})
 }
@@ -79,10 +80,11 @@ func TestSubscriberSet_PushToStoppedReader_DropsAndDoesNotStallWheel(t *testing.
 	t.Parallel()
 	s := newSubscriberSet()
 	// stuck never drains, so its cap-1 buffer fills and stays full; live keeps room.
-	stuck := NewSubscriber()
-	live := &Subscriber{out: make(chan []byte, 4)}
+	stuck := newSubscriber(1)
+	live := newSubscriber(4)
 	s.Add(stuck)
 	s.Add(live)
+	frame := Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}
 
 	// Many pushes against a wedged consumer must each return promptly — one stuck
 	// subscriber cannot stall the fan-out for a live peer (non-blocking sends).
@@ -90,7 +92,7 @@ func TestSubscriberSet_PushToStoppedReader_DropsAndDoesNotStallWheel(t *testing.
 	go func() {
 		defer close(done)
 		for range 100 {
-			s.Push([]byte(":\n\n"))
+			s.Push(frame)
 		}
 	}()
 	select {
