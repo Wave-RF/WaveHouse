@@ -28,7 +28,7 @@ flowchart TD
 
         QH["Query Handler"] --> Cache["Cache<br/>(Ristretto + singleflight)"]
 
-        SSH["SSE Handler"] --> Hub["Hub<br/>(broadcast fan-out)"]
+        SSH["SSE Handler"] --> Hub["Stream Hub<br/>(project once per role)"]
 
         SW["Active Sweeper"] -.->|purges old msgs| MQ
 
@@ -49,7 +49,7 @@ WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the 
 
 ```text
 internal/
-├── api/         HTTP layer (Chi router, handlers, middleware, Hub)
+├── api/         HTTP layer (Chi router, handlers, middleware)
 ├── auth/        JWT/JWKS authentication middleware (HMAC or JWKS, role extraction)
 ├── cache/       In-process Ristretto cache with singleflight coalescing
 ├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
@@ -62,7 +62,7 @@ internal/
 ├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
 ├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
 ├── query/       Structured query AST, SQL builder, and timestamp bucketing
-└── stream/      SSE fan-out primitives (Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel)
+└── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
 ```
 
 ### `api/` — HTTP Layer
@@ -76,21 +76,20 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` (or sending it as an explicit `null`) can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set (#219). The `id_field` and `require_id` are resolved per table (global defaults plus `dedupe.tables` overrides), and the dedup key is namespaced by table so equal id values in different tables never collide (#222).
 - **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
-- **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`. Each connection registers with the shared keepalive wheel (the `stream/` package) so idle streams keep emitting `:` keepalive comments and survive reverse-proxy idle timeouts.
-- **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
+- **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Each connection registers one `Subscriber` (the `stream/` package) with both the event `Hub` (under its `(topic, role)`) and the shared keepalive wheel, then drains both from a single byte-pump — so idle streams keep emitting `:` keepalive comments (surviving reverse-proxy idle timeouts) while live events arrive already projected and serialized. Per-event projection/serialization happens **once per role** in the `Hub`, not once per subscriber ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)). Gap-fill replay from NATS JetStream (`DeliverByStartTime`) stays per-connection (low-volume, one-time on connect).
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
 - **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
-- **hub.go** — In-process pub/sub for broadcasting MQ messages to connected streaming clients.
 - **health.go** — Liveness (`/livez`), readiness (`/readyz`), and a content-free `Online` ping (`/v1/health`, the SDK's public liveness check); `/healthz` is a permanent alias of `/livez`, and `/health`/`/ready` are deprecated aliases. All three consult an optional `BootState` so they can return 503 while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/livez` returns 200 and stays there. `/readyz` additionally pings ClickHouse each call; `/v1/health` deliberately does not.
 
 ### `stream/` — SSE keepalive & fan-out
 
-The SSE fan-out primitives shared by the streaming API, factored out of `api/` so the delivery-path throughput work ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)) can reuse them. One abstraction per file.
+The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)) lives next to the keepalive primitives it shares. One abstraction per file.
 
-- **subscriber.go** — `Subscriber`, the per-connection handle. It owns a single ready-to-write outbound queue: producers fan bytes in with `Send` (non-blocking, drop-on-full), and the API handler writes whatever arrives on `Frames()` to the client verbatim. Today the only producer is the keepalive wheel and the only frames are `:` comments; #294 routes projected event frames through the same `Send`/`Frames` queue (and grows the handle with drop metrics), at which point the handler's keepalive and event cases collapse into one byte-pump.
-- **bucket.go** — `Bucket`, the reusable fan-out primitive: a concurrency-safe set of subscribers that one `Push` delivers a shared byte slice to (snapshot-under-read-lock, then `Send` to each). The keepalive wheel holds a ring of them for load-spreading; #294 holds one per (role, table) column-set so a projected frame is built once and Push'd to every member instead of re-projected per subscriber.
+- **hub.go** — `Hub`, the event fan-out. Subscribers register under `(topic, role)`; `Broadcast` decodes each event once, applies each subscribed role's column policy once, builds one SSE frame per role, and fans it to every member of that role's `Bucket` — collapsing the prior per-subscriber `unmarshal → evaluate → filter → marshal` into one pass per distinct `(role, table)` output shape (the [#294](https://github.com/Wave-RF/WaveHouse/issues/294) lever; the measured ceiling was ~2 270 deliveries/s from re-projecting per subscriber). The `(topic, role)` key is sufficient because column visibility derives only from the role+table policy entry, never from JWT claims (claims feed only the row-level `WHERE`/`CHECK`, which the stream path does not apply). `ReplayFrame` shares the same projection for the handler's per-connection gap-fill.
+- **subscriber.go** — `Subscriber`, the per-connection handle. It owns a single ready-to-write outbound queue of `Frame`s (each tagged with its `kind`, so the handler labels the write where it happens): producers — the keepalive wheel and the event `Hub` — fan frames in with `Send` (non-blocking; a full queue drops and the `Hub` counts it), and the handler drains `Frames()` to the client verbatim. The queue is sized for buffering live events (cap 64, up from the keepalive-only cap 1; #152 will make it a knob), and an `Evicted()` channel is the seam the slow-consumer follow-up closes to disconnect a wedged consumer.
+- **bucket.go** — `Bucket`, the reusable fan-out primitive: a concurrency-safe set of subscribers. `Push` delivers a shared `Frame` to each fire-and-forget (the keepalive wheel's ring); `Snapshot` exposes the members so the event `Hub` can fan out while inspecting each `Send` result (to count drops). The `Hub` holds one `Bucket` per `(topic, role)` so a projected frame is built once and sent to every member instead of re-projected per subscriber.
 - **heartbeat.go** — The keepalive wheel (`Heartbeater`). A single process-wide ticker fans a minimal `:` comment across the ring of `Bucket`s, waking ~1/N of live streams per tick so the writes don't synchronize. The effective per-connection keepalive period is `stream.keepalive_interval` (the wheel ticks every `keepalive_interval ÷ keepalive_buckets`, so one rotation spans the interval); the owning handler goroutine does the actual write, so the shared ticker never touches a `ResponseWriter` directly.
-- **metrics.go** — `Metrics`, the SSE instrument set: `wavehouse_sse_active_streams` (open streams), `wavehouse_sse_stream_duration_seconds` (lifetime), and `wavehouse_sse_frames_sent_total` / `wavehouse_sse_bytes_sent_total` (labeled by `kind`: `keepalive`, `event`, `replay`). Nil-safe, so the handler holds one unconditionally and tests skip wiring it; recorded at the handler's connect/disconnect and write sites (the live keepalive/event cases and the gap-fill replay path). Separate from `observability.RegisterSystemMetrics`, which covers only the NATS/Pebble system gauges. Streams are observed through these metrics rather than per-event traces (the router excludes `/v1/stream` from the HTTP tracer).
+- **metrics.go** — `Metrics`, the SSE instrument set: `wavehouse_sse_active_streams` (open streams), `wavehouse_sse_stream_duration_seconds` (lifetime), `wavehouse_sse_frames_sent_total` / `wavehouse_sse_bytes_sent_total` (labeled by `kind`: `keepalive`, `event`, `replay`), and `wavehouse_sse_dropped_frames_total` (frames dropped to a full subscriber queue — the slow-consumer signal that was silent before #294). Nil-safe, so the handler holds one unconditionally and tests skip wiring it; one shared instance records both the handler's write sites and the `Hub`'s drop counts. Separate from `observability.RegisterSystemMetrics`, which covers only the NATS/Pebble system gauges. Streams are observed through these metrics rather than per-event traces (the router excludes `/v1/stream` from the HTTP tracer).
 
 ### `auth/` — Authentication
 
@@ -253,13 +252,16 @@ consistent.
 ```text
 Client GET /v1/stream
   → JWT auth middleware (always runs; token optional)
-  → If ?since= parameter provided:
+  → Register a Subscriber with the Stream Hub, keyed by (topic, role)
+  → If ?since= / Last-Event-ID provided:
     → Create ephemeral NATS consumer with DeliverByStartTime
-    → Send historical events from JetStream first
-  → Subscribe to Hub (in-process pub/sub)
-  → Stream live events as they arrive via MQ → Hub → client
-  → Every event (historical + live) passes per-role policy filtering:
-    denied tables skipped, denied columns stripped
+    → Send historical events (projected per-connection) first
+  → Live events: MQ → Hub.Broadcast → projected & serialized ONCE per role
+    → fan the finished frame to every Subscriber of that (topic, role)
+  → Handler drains keepalives + event frames from one byte-pump → client
+  → Per-role policy filtering (historical + live): denied tables skipped,
+    denied columns stripped. Live projection runs once per role (Hub.Broadcast);
+    replay shares the same column policy but projects per-connection
 ```
 
 ## Technology Stack

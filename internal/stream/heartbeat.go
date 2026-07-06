@@ -109,5 +109,5 @@ func (hb *Heartbeater) tick() {
 	hb.hand = (hb.hand + 1) % len(hb.buckets)
 	hb.mu.Unlock()
 
-	front.Push(hb.comment)
+	front.Push(Frame{Kind: KindKeepalive, Data: hb.comment})
 }

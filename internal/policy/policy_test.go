@@ -643,6 +643,173 @@ func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	assert.Contains(t, err.Error(), "contains '?'")
 }
 
+// TestResolveFilters_InArrayClaim: the headline #224 fix — an _in filter whose
+// value is a single array-valued claim expands to `col IN (?, …)` with one bound
+// param per element, scoping the role to that set instead of producing no
+// predicate (the former fail-open).
+func TestResolveFilters_InArrayClaim(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	claims := map[string]any{"tenants": []any{"a", "b", "c"}}
+	clauses, params := resolveFilters(filters, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
+	assert.Equal(t, []any{"a", "b", "c"}, params)
+}
+
+// TestResolveFilters_InScalarClaim: a non-array claim yields a single-element IN,
+// so _in degrades gracefully to the _eq case rather than erroring.
+func TestResolveFilters_InScalarClaim(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenant }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	claims := map[string]any{"tenant": "solo"}
+	clauses, params := resolveFilters(filters, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
+	assert.Equal(t, []any{"solo"}, params)
+}
+
+// TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
+// match no rows (a constant-false predicate) rather than widen to all rows — the
+// fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
+// resolveInValues reach this: an absent claim (navigateClaims returns nil → the
+// `case nil` branch) and a present-but-empty array (the `case []any` branch with
+// zero elements). Both must fail closed.
+func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	cases := map[string]map[string]any{
+		"absent claim":        nil,
+		"present empty array": {"tenants": []any{}},
+	}
+	for name, claims := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(filters, claims)
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
+// TestEvaluate_FilterInClause: end-to-end through Evaluate, an _in filter lands
+// in the role's WhereClause/WhereParams (exercising the bind-safe guard + IN
+// assembly), not just the resolveFilters unit.
+func TestEvaluate_FilterInClause(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.app_metadata.tenant_ids }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Select: map[string]RolePermissions{
+			"user": {Filter: map[string]Filter{"tenant_id": {In: &in}}},
+		}},
+	}}
+	claims := map[string]any{"app_metadata": map[string]any{"tenant_ids": []any{"t1", "t2"}}}
+	perms := Evaluate(p, "user", "clicks", "select", claims)
+	require.True(t, perms.Allowed)
+	assert.Contains(t, perms.WhereClause, "`tenant_id` IN (?,?)")
+	assert.Equal(t, []any{"t1", "t2"}, perms.WhereParams)
+}
+
+// TestEvaluate_CheckInResolvesToSet: an _in check resolves to a []any set in
+// CheckClauses (vs a scalar required value), which the ingest path enforces as
+// membership.
+func TestEvaluate_CheckInResolvesToSet(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Insert: map[string]RolePermissions{
+			"writer": {Check: map[string]Filter{"tenant_id": {In: &in}}},
+		}},
+	}}
+	claims := map[string]any{"tenants": []any{"a", "b"}}
+	perms := Evaluate(p, "writer", "clicks", "insert", claims)
+	require.True(t, perms.Allowed)
+	require.Contains(t, perms.CheckClauses, "tenant_id")
+	assert.Equal(t, []any{"a", "b"}, perms.CheckClauses["tenant_id"])
+}
+
+// TestValidate_AllowsFilterIn: _in is now enforced on the filter path (#224), so
+// a filter authored with it passes validation rather than being rejected.
+func TestValidate_AllowsFilterIn(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Select: map[string]RolePermissions{
+			"viewer": {Filter: map[string]Filter{"tenant_id": {In: &in}}},
+		}},
+	}}
+	require.NoError(t, Validate(p))
+}
+
+// TestValidate_RejectsComparisonCheckOps: check honors only _eq and _in; the
+// comparison operators have no insert-time semantics, so each stays a loud
+// config-load error (#224). _in and _eq are accepted (covered elsewhere).
+func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
+	t.Parallel()
+	v := "{{ jwt.sub }}"
+	cases := map[string]Filter{
+		"_neq": {Neq: &v},
+		"_gt":  {Gt: &v},
+		"_lt":  {Lt: &v},
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Insert: map[string]RolePermissions{
+					"writer": {Check: map[string]Filter{"user_id": f}},
+				}},
+			}}
+			err := Validate(p)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "does not honor")
+		})
+	}
+}
+
+// TestValidate_RejectsMixedCheckOps: a check column may carry only one
+// required-value operator. Setting both _eq and _in is ambiguous — Evaluate's
+// switch honors _eq and silently drops _in — so it is rejected at config load
+// rather than enforcing an arbitrary branch (the accept-but-ignore gap #224
+// closes).
+func TestValidate_RejectsMixedCheckOps(t *testing.T) {
+	t.Parallel()
+	v := "{{ jwt.sub }}"
+	set := "{{ jwt.tenants }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Insert: map[string]RolePermissions{
+			"writer": {Check: map[string]Filter{"tenant_id": {Eq: &v, In: &set}}},
+		}},
+	}}
+	err := Validate(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "both _eq and _in")
+}
+
+// TestValidate_AllowsEnforcedOperators: every operator the engine enforces —
+// _eq/_neq/_gt/_lt/_in on filter, _eq/_in on check — passes validation, so the
+// guards don't over-reject a well-formed policy.
+func TestValidate_AllowsEnforcedOperators(t *testing.T) {
+	t.Parallel()
+	v := "{{ jwt.sub }}"
+	set := "{{ jwt.tenants }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {
+			Select: map[string]RolePermissions{
+				"viewer": {Filter: map[string]Filter{"a": {Eq: &v}, "b": {Neq: &v}, "c": {Gt: &v}, "d": {Lt: &v}, "e": {In: &set}}},
+			},
+			Insert: map[string]RolePermissions{
+				"writer": {Check: map[string]Filter{"user_id": {Eq: &v}, "tenant_id": {In: &set}}},
+			},
+		},
+	}}
+	require.NoError(t, Validate(p))
+}
+
 // TestEvaluate_DeniesBindUnsafeFilterColumn: defense-in-depth — a bind-unsafe
 // filter column that somehow reaches Evaluate (which does not re-validate) denies
 // the role fail-closed rather than emitting a binding-shifted query.
