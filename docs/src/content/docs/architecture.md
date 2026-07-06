@@ -108,8 +108,8 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `dedupe/` — Deduplication (Optional)
 
-- **dedupe.go** — `Deduplicator` interface: `CheckAndMark(ctx, eventID) (bool, error)`.
-- **embedded.go** — Uses [Pebble](https://github.com/cockroachdb/pebble) (embedded key-value store). Key = event ID.
+- **dedupe.go** — `Deduplicator` interface: `CheckAndMark(ctx, table, eventID) (bool, error)`.
+- **embedded.go** — Uses [Pebble](https://github.com/cockroachdb/pebble) (embedded key-value store). Key is namespaced by table (`table` + NUL + event ID) so equal id values in different tables never collide (#222).
 
 ### `discovery/` — Schema Discovery & Validation
 
