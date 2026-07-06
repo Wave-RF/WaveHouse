@@ -332,6 +332,7 @@ func run() int {
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
+		ingestHandler.RequireID = cfg.Dedupe.RequireID
 	}
 
 	var dlqHandler *api.DLQHandler
