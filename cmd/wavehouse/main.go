@@ -120,10 +120,11 @@ func run() int {
 		} else {
 			promHandler = ph
 			defer func() {
-				// Bound shutdown so an unreachable collector doesn't hang
-				// process exit. The OTel SDK's batch processors don't fully
-				// honor the context deadline during gRPC retry/backoff.
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// Bound shutdown so an unreachable collector can't hang exit:
+				// otelShutdown honors this deadline internally (see
+				// observability.InitProvider), returning even when a provider's
+				// flush is stuck in gRPC backoff.
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 				_ = otelShutdown(ctx)
 			}()
@@ -329,6 +330,7 @@ func run() int {
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
+		ingestHandler.RequireID = cfg.Dedupe.RequireID
 	}
 
 	var dlqHandler *api.DLQHandler
