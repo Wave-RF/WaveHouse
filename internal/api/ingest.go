@@ -36,10 +36,10 @@ const maxReportedResults = 10000
 
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
-	Registry  *discovery.SchemaRegistry
-	Dedup     dedupe.Deduplicator // nil if dedup disabled
-	IDField   string              // default dedup key field name (e.g. "event_id"); DedupeTables overrides it per table
-	RequireID bool                // default strict mode: reject rows missing the id (dedupe.require_id); DedupeTables overrides it per table
+	Registry     *discovery.SchemaRegistry
+	Dedup        dedupe.Deduplicator // nil if dedup disabled
+	IDField      string              // default dedup key field name (e.g. "event_id"); DedupeTables overrides it per table
+	RequireID    bool                // default strict mode: reject rows missing the id (dedupe.require_id); DedupeTables overrides it per table
 	DedupeTables map[string]DedupeOverride
 	Publisher    mq.Publisher
 	PolicyStore  *policy.Store
