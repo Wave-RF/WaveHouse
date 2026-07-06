@@ -36,13 +36,14 @@ const maxReportedResults = 10000
 
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
-	Registry    *discovery.SchemaRegistry
-	Dedup       dedupe.Deduplicator // nil if dedup disabled
-	IDField     string              // dedup key field name (e.g. "event_id")
-	RequireID   bool                // reject rows missing IDField instead of publishing un-deduped (dedupe.require_id)
-	Publisher   mq.Publisher
-	PolicyStore *policy.Store
-	logger      *slog.Logger
+	Registry  *discovery.SchemaRegistry
+	Dedup     dedupe.Deduplicator // nil if dedup disabled
+	IDField   string              // default dedup key field name (e.g. "event_id"); DedupeTables overrides it per table
+	RequireID bool                // default strict mode: reject rows missing the id (dedupe.require_id); DedupeTables overrides it per table
+	DedupeTables map[string]DedupeOverride
+	Publisher    mq.Publisher
+	PolicyStore  *policy.Store
+	logger       *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
@@ -53,6 +54,28 @@ type IngestHandler struct {
 
 func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
 	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
+}
+
+type DedupeOverride struct {
+	IDField   *string
+	RequireID *bool
+}
+
+// dedupeFieldsFor resolves the effective dedupe id field and strict-mode flag
+// for a table: the IDField/RequireID defaults, with any per-table override from
+// DedupeTables applied. An empty id field means dedupe is skipped for the
+// table.
+func (h *IngestHandler) dedupeFieldsFor(table string) (idField string, requireID bool) {
+	idField, requireID = h.IDField, h.RequireID
+	if o, ok := h.DedupeTables[table]; ok {
+		if o.IDField != nil {
+			idField = *o.IDField
+		}
+		if o.RequireID != nil {
+			requireID = *o.RequireID
+		}
+	}
+	return idField, requireID
 }
 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
@@ -387,29 +410,40 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Optional deduplication.
-	if h.Dedup != nil && h.IDField != "" {
-		idVal, ok := data[h.IDField]
-		if !ok {
-			dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-			if h.RequireID {
-				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", h.IDField, "table", table)
-				return false, &recordReject{
-					Status:  http.StatusBadRequest,
-					Message: fmt.Sprintf("missing dedupe id field %q", h.IDField),
-				}, nil
-			}
-			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", h.IDField, "table", table)
-		} else {
-			eventID := fmt.Sprint(idVal)
-			dup, err := h.Dedup.CheckAndMark(ctx, eventID)
-			if err != nil {
-				h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
-				return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
-			}
-			if dup {
-				h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
-				return true, nil, nil
+	// Optional deduplication. The id field and strict-mode flag are resolved per
+	// table — global defaults with per-table overrides — and an empty id field
+	// skips dedupe for this table.
+	if h.Dedup != nil {
+		idField, requireID := h.dedupeFieldsFor(table)
+		if idField != "" {
+			// A present key with an explicit JSON null (ok == true, idVal == nil)
+			// carries no usable id — semantically the same as the field being
+			// absent. Treat it as missing so it isn't deduped on the
+			// fmt.Sprint(nil) sentinel "<nil>" (which collides every null-id row
+			// onto one key, dropping all but the first as duplicates) and so
+			// require_id still enforces.
+			idVal, ok := data[idField]
+			if !ok || idVal == nil {
+				dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+				if requireID {
+					h.logger.WarnContext(ctx, "dedupe id_field missing or null; rejecting", "id_field", idField, "table", table)
+					return false, &recordReject{
+						Status:  http.StatusBadRequest,
+						Message: fmt.Sprintf("missing dedupe id field %q", idField),
+					}, nil
+				}
+				h.logger.WarnContext(ctx, "dedupe id_field missing or null; publishing without idempotency", "id_field", idField, "table", table)
+			} else {
+				eventID := fmt.Sprint(idVal)
+				dup, err := h.Dedup.CheckAndMark(ctx, table, eventID)
+				if err != nil {
+					h.logger.ErrorContext(ctx, "dedupe check failed", "error", err, "event_id", eventID)
+					return false, nil, &requestAbort{Status: http.StatusInternalServerError, Message: "dedupe failed"}
+				}
+				if dup {
+					h.logger.InfoContext(ctx, "duplicate event skipped", "event_id", eventID)
+					return true, nil, nil
+				}
 			}
 		}
 	}

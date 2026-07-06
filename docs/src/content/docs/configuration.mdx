@@ -129,7 +129,24 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 | --- | --- | ------- | ----------- |
 | `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
 | `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
-| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. Default (`false`): it is then published un-deduped. Set `true` to reject it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. |
+| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row whose `id_field` is missing or an explicit JSON `null` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. Default (`false`): it is then published un-deduped. Set `true` to reject it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. |
+| `dedupe.tables` | *(YAML only)* | *(none)* | Per-table overrides of `id_field` / `require_id`, keyed by table name. A table absent here inherits the global defaults above; set a table's `id_field` to `""` to skip deduplication for it. |
+
+Each table's dedup keyspace is independent — the same id value ingested into two different tables is **not** treated as a collision. The flat `dedupe.*` settings are the defaults; `dedupe.tables` overrides them per table (YAML-only — there is no env var for per-table config):
+
+```yaml
+dedupe:
+  enabled: true
+  id_field: event_id        # default for tables not listed below
+  require_id: false
+  tables:
+    payments:
+      require_id: true      # payments must carry an id or be rejected
+    page_views:
+      id_field: view_id     # dedupe this table on view_id instead
+    audit_log:
+      id_field: ""          # skip dedupe for this table entirely
+```
 
 ### Cache
 

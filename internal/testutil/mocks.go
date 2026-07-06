@@ -97,16 +97,17 @@ func (m *MockDeduplicator) Stats() map[string]int64 {
 	}
 }
 
-func (m *MockDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool, error) {
+func (m *MockDeduplicator) CheckAndMark(_ context.Context, table, eventID string) (bool, error) {
 	if m.Err != nil {
 		return false, m.Err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.seen[eventID] {
+	key := table + "\x00" + eventID
+	if m.seen[key] {
 		return true, nil
 	}
-	m.seen[eventID] = true
+	m.seen[key] = true
 	return false, nil
 }
 

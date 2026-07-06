@@ -136,6 +136,15 @@ type Dedupe struct {
 	Enabled   bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
 	IDField   string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
 	RequireID bool   `yaml:"require_id" env:"WH_DEDUPE_REQUIRE_ID" env-default:"false"`
+	Tables map[string]DedupeTable `yaml:"tables"`
+}
+
+// DedupeTable overrides the global dedupe defaults for one table. A nil
+// field inherits the corresponding global default; an id_field of "" skips
+// deduplication for the table.
+type DedupeTable struct {
+	IDField   *string `yaml:"id_field"`
+	RequireID *bool   `yaml:"require_id"`
 }
 
 type Cache struct {

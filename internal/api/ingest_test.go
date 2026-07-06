@@ -425,6 +425,124 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	assert.NotNil(t, pub.LastMessage(), "a record carrying the id is still accepted")
 }
 
+// TestIngest_Dedup_NullIDField_RequireID_Rejects covers the null-id hole in
+// strict mode: an explicit JSON null is a present key but carries no usable id,
+// so require_id must reject it exactly like a missing field rather than let it
+// slip through and dedupe on the fmt.Sprint(nil) "<nil>" sentinel.
+func TestIngest_Dedup_NullIDField_RequireID_Rejects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.RequireID = true
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": nil}))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	testutil.AssertJSONErrorResponse(t, w)
+	assert.Nil(t, pub.LastMessage(), "must not publish a row whose dedupe id is an explicit null under require_id")
+}
+
+// TestIngest_Dedup_NullIDField_ObserveMode_PublishesEach is the regression for
+// the null-id collision: with require_id off, a null id is treated as missing
+// and published un-deduped, so two distinct null-id rows both publish. Before
+// the fix they collapsed onto the fmt.Sprint(nil) "<nil>" key and the second was
+// silently dropped as a duplicate.
+func TestIngest_Dedup_NullIDField_ObserveMode_PublishesEach(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+
+	for _, page := range []string{"/a", "/b"} {
+		w := httptest.NewRecorder()
+		h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": page, "event_id": nil}))
+		assert.Equal(t, http.StatusOK, w.Code)
+		var resp map[string]bool
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.False(t, resp["duplicate"], "a null-id row must not be treated as a duplicate")
+	}
+	assert.Len(t, pub.Messages, 2, "both null-id rows publish un-deduped; neither collapses onto the <nil> key")
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestIngest_Dedup_PerTable_RequireIDOverride verifies a per-table override of
+// require_id: strict mode is off by default, but the "clicks" table turns it on,
+// so a clicks row missing the id is rejected (#222).
+func TestIngest_Dedup_PerTable_RequireIDOverride(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.RequireID = false // global default: lenient
+	h.DedupeTables = map[string]DedupeOverride{
+		"clicks": {RequireID: ptr(true)}, // this table is strict
+	}
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"})) // no event_id
+	assert.Equal(t, http.StatusBadRequest, w.Code, "clicks overrides require_id=true, so a missing id is rejected")
+	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	assert.Nil(t, pub.LastMessage())
+}
+
+// TestIngest_Dedup_PerTable_IDFieldOverride verifies a per-table override of the
+// dedupe id field: "clicks" dedupes on org_id instead of the global event_id, so
+// two rows sharing an org_id collapse to one (#222).
+func TestIngest_Dedup_PerTable_IDFieldOverride(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.DedupeTables = map[string]DedupeOverride{
+		"clicks": {IDField: ptr("org_id")},
+	}
+
+	// Two rows share org_id (the overridden key) but carry different event_ids →
+	// the second is a duplicate because clicks keys on org_id, not event_id.
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/a", "org_id": "org-1", "event_id": "e1"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	w = httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/b", "org_id": "org-1", "event_id": "e2"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]bool
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp["duplicate"], "second row with the same org_id is a duplicate under the id_field override")
+	assert.Len(t, pub.Messages, 1)
+}
+
+// TestIngest_Dedup_PerTable_OptOut verifies that a per-table id_field of ""
+// disables dedupe for that table: two rows with the same event_id both publish
+// even though dedupe is globally enabled (#222).
+func TestIngest_Dedup_PerTable_OptOut(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.DedupeTables = map[string]DedupeOverride{
+		"clicks": {IDField: ptr("")}, // opt clicks out of dedupe
+	}
+
+	for _, n := range []string{"first", "second"} {
+		w := httptest.NewRecorder()
+		h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/" + n, "event_id": "same-id"}))
+		assert.Equal(t, http.StatusOK, w.Code)
+		var resp map[string]bool
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.False(t, resp["duplicate"], "dedupe is off for clicks, so no row is a duplicate")
+	}
+	assert.Len(t, pub.Messages, 2, "both rows publish; clicks is opted out of dedupe")
+}
+
 // TestIngest_NDJSON_RequireID_Rejects confirms strict mode is per-record: the
 // missing-id line fails while the rest of the batch is published.
 func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {

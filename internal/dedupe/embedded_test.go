@@ -24,17 +24,36 @@ func TestEmbeddedDeduplicator_FirstSeenThenDuplicate(t *testing.T) {
 	d := newEmbedded(t)
 	ctx := context.Background()
 
-	dup, err := d.CheckAndMark(ctx, "event-1")
+	dup, err := d.CheckAndMark(ctx, "clicks", "event-1")
 	require.NoError(t, err)
 	assert.False(t, dup, "first occurrence must not be a duplicate")
 
-	dup, err = d.CheckAndMark(ctx, "event-1")
+	dup, err = d.CheckAndMark(ctx, "clicks", "event-1")
 	require.NoError(t, err)
 	assert.True(t, dup, "second occurrence of the same id must be a duplicate")
 
-	dup, err = d.CheckAndMark(ctx, "event-2")
+	dup, err = d.CheckAndMark(ctx, "clicks", "event-2")
 	require.NoError(t, err)
 	assert.False(t, dup, "distinct ids are independent")
+}
+
+func TestEmbeddedDeduplicator_TableNamespacing(t *testing.T) {
+	t.Parallel()
+
+	d := newEmbedded(t)
+	ctx := context.Background()
+
+	dup, err := d.CheckAndMark(ctx, "clicks", "shared-id")
+	require.NoError(t, err)
+	assert.False(t, dup, "first table's id is new")
+
+	dup, err = d.CheckAndMark(ctx, "purchases", "shared-id")
+	require.NoError(t, err)
+	assert.False(t, dup, "same id value in a different table must not be a duplicate")
+
+	dup, err = d.CheckAndMark(ctx, "clicks", "shared-id")
+	require.NoError(t, err)
+	assert.True(t, dup, "same id in the same table is still a duplicate")
 }
 
 func TestEmbeddedDeduplicator_Stats(t *testing.T) {

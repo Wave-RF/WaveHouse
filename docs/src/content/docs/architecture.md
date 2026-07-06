@@ -74,7 +74,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
-- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set (#219).
+- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` (or sending it as an explicit `null`) can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set (#219). The `id_field` and `require_id` are resolved per table (global defaults plus `dedupe.tables` overrides), and the dedup key is namespaced by table so equal id values in different tables never collide (#222).
 - **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
 - **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Supports gap-fill from NATS JetStream using `DeliverByStartTime`. Each connection registers with the shared keepalive wheel (the `stream/` package) so idle streams keep emitting `:` keepalive comments and survive reverse-proxy idle timeouts.
 - **transform.go** — Shared `transformForClient` function: passes through `table_name`, `received_timestamp`, and `data` from the wire format.
@@ -169,7 +169,8 @@ Client POST /v1/ingest?table={table}
   → Policy column rules + check clauses (disallowed columns rejected;
     claim-derived values enforced or injected)
   → Optional deduplication check (configurable ID field; a row missing that
-    field is published un-deduped + logged/counted, or rejected under require_id)
+    field — or carrying it as an explicit null — is published un-deduped +
+    logged/counted, or rejected under require_id)
   → Publish to NATS JetStream (ingest.{table})
   → 200 OK returned immediately
   → (If NATS stream is full: 503 + Retry-After header)
