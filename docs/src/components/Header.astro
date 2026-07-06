@@ -2,8 +2,8 @@
 // Custom header overriding Starlight's default. The layout is our own — its
 // contents are held in a centered max-width column (matching the page content,
 // à la ClickHouse/Supabase) rather than spanning edge to edge: brand + primary
-// nav pinned left, controls + a "Get Started" call-to-action pinned right, with
-// a compact icon search among the right-hand controls. Every control is still
+// nav pinned left, controls pinned right, with a compact icon search among the
+// right-hand controls. Every control is still
 // Starlight's own built-in, pulled in through its `virtual:starlight/components/*`
 // import, so the SiteTitle/Search/Theme overrides and the Pagefind-search logic
 // keep working untouched. The outer <header class="header"> (PageFrame — fixed
@@ -36,10 +36,6 @@ const shouldRenderSearch =
 // (so a "/guides" link stays current on "/guides/foo"). trailingSlash is
 // "never", so strip a stray trailing slash before comparing, just in case.
 const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
-
-// Primary call-to-action. Points at the docs entry point for now; repoint if a
-// dedicated quickstart/install page lands.
-const ctaHref = "/getting-started";
 ---
 
 <div class="header">
@@ -83,7 +79,6 @@ const ctaHref = "/getting-started";
       </div>
       <ThemeSelect />
       <LanguageSelect />
-      <a class="wh-cta" href={ctaHref}>Get Started</a>
     </div>
   </div>
 </div>
@@ -209,39 +204,5 @@ const ctaHref = "/getting-started";
   .wh-header-nav__link[aria-current="page"] {
     color: var(--wh-accent-text);
     font-weight: 600;
-  }
-
-  /* Get Started CTA — the filled accent button that anchors the right side,
-     the way ClickHouse/Supabase headers do. */
-  .wh-cta {
-    align-items: center;
-    padding: 0.45rem 0.95rem;
-    border-radius: 0.5rem;
-    background: var(--wh-accent);
-    color: var(--wh-cta-fg, #fff);
-    font-size: 0.9375rem;
-    font-weight: 600;
-    line-height: 1;
-    text-decoration: none;
-    white-space: nowrap;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-  }
-  /* Hover: lift + accent-tinted shadow, keeping the fill constant so the
-     text/background contrast never changes on interaction. */
-  .wh-cta:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 14px -4px var(--wh-accent);
-  }
-  /* In dark theme --wh-accent resolves to a bright cyan; white text on it
-     fails contrast (~2.6:1), so switch to dark ink. Covers both explicit dark
-     (data-theme) and auto/OS dark (prefers-color-scheme), matching how
-     Starlight itself themes. */
-  :global([data-theme="dark"]) .wh-cta {
-    --wh-cta-fg: #052a30;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme="light"])) .wh-cta {
-      --wh-cta-fg: #052a30;
-    }
   }
 </style>
