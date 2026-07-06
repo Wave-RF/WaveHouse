@@ -671,17 +671,29 @@ func TestResolveFilters_InScalarClaim(t *testing.T) {
 	assert.Equal(t, []any{"solo"}, params)
 }
 
-// TestResolveFilters_InEmptyClaim_FailsClosed: an absent/empty claim makes the
-// set empty, which must match no rows (a constant-false predicate) rather than
-// widen to all rows — the fail-closed direction. `IN ()` is invalid SQL.
+// TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
+// match no rows (a constant-false predicate) rather than widen to all rows — the
+// fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
+// resolveInValues reach this: an absent claim (navigateClaims returns nil → the
+// `case nil` branch) and a present-but-empty array (the `case []any` branch with
+// zero elements). Both must fail closed.
 func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"
 	filters := map[string]Filter{"tenant_id": {In: &in}}
-	clauses, params := resolveFilters(filters, nil)
-	require.Len(t, clauses, 1)
-	assert.Equal(t, "1 = 0", clauses[0])
-	assert.Empty(t, params)
+	cases := map[string]map[string]any{
+		"absent claim":        nil,
+		"present empty array": {"tenants": []any{}},
+	}
+	for name, claims := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(filters, claims)
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
 }
 
 // TestEvaluate_FilterInClause: end-to-end through Evaluate, an _in filter lands
