@@ -179,10 +179,12 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
        at rest (plain muted looked like a static label), but held just under the
        wordmark's full ink so the brand stays dominant. */
     color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
-    /* Smaller than the "WaveHouse" wordmark (1.0625rem), but flex-centering on
-       the header line already lands it on the wordmark's baseline — no vertical
-       nudge (an earlier downward shift by the size gap left it sitting low). */
+    /* Smaller than the "WaveHouse" wordmark (1.0625rem). Flex-centering leaves
+       the link's baseline ~1.25px ABOVE the wordmark's, so nudge it down to sit
+       their bottoms flush. Value gauged against the rendered wordmark baseline
+       (canvas font metrics disagree with the browser's actual placement here). */
     font-size: 0.875rem;
+    transform: translateY(1.25px);
     font-weight: 500;
     line-height: 1;
     text-decoration: none;
