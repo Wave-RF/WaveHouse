@@ -31,7 +31,7 @@ flowchart TD
 
 Two things make this safe by default:
 
-- **Fail-closed.** A role only gets what the policy explicitly grants it. No policy entry for a table, operation, or role means *denied* — there is no implicit allow. If there is no policy at all (none seeded yet, or it was deleted), **every** request is denied, including the admin role.
+- **Fail-closed.** A role only gets what the policy explicitly grants it. No policy entry for a table, operation, or role means *denied* — there is no implicit allow. If there is no policy at all (none seeded yet, or it was deleted), **every token-based** request is denied, including the admin role — the lone exception is the [operator key](#operator-key), below.
 - **The empty role matches nothing.** A request with no role never matches a policy entry by accident. It is authorized only after `default_role` deliberately maps it to a concrete role, or via the admin role.
 
 ## Roles
@@ -64,11 +64,17 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
 - It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
-There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role).
+There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
 :::caution[A missing policy locks everyone out — including admin]
-`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies everyone, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is server-side — restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot, not an "admin" token over HTTP.
+`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies every **token-based** caller, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. The one credential that still works is the [operator key](#operator-key) — configure one to recover over HTTP; without it, recovery is server-side only (restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot).
 :::
+
+### Operator key
+
+`auth.operator_key` (config; presented in the `X-Operator-Key` header) is a static, role-free credential for the person running the deployment, meant for bootstrap and break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/admin/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
+
+Unlike `admin_role`, the operator key is honored **even when the policy is `nil`** (deleted, or never seeded), so it is the one HTTP path that can restore a wiped policy — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
 
 ## Anatomy of a policy
 
@@ -404,7 +410,7 @@ WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 </TabItem>
 </Tabs>
 
-Because a deleted policy is a total lockout (including admin), treat the bootstrap file as your recovery path: keep it in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
+Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
 
 ## A complete example
 

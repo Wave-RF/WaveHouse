@@ -236,9 +236,10 @@ func jsonRecoverer(next http.Handler) http.Handler {
 // configurable via admin_role, "admin" by default). The role established by the
 // auth middleware and the live policy are read per request, so an admin_role
 // change applies without a restart. A nil policy (none configured yet, or
-// deleted from KV) admits nobody — IsAdmin(nil) is false — so a fresh deployment
-// is bootstrapped from the policy file (loaded server-side), not by writing the
-// first policy over this gate.
+// deleted from KV) admits nobody via a role — IsAdmin(nil) is false — so a
+// role-based caller can't bootstrap by writing the first policy over this gate.
+// The exception is the operator key: auth.IsOperator passes this gate even under
+// a nil policy, so an operator can restore a wiped policy over HTTP (break-glass).
 //
 // Authentication is decoupled from this gate: a missing/invalid/expired token
 // resolves to an empty (non-admin) role and is denied here. Denials go through
@@ -251,8 +252,11 @@ func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) h
 			if store != nil {
 				p = store.Get()
 			}
+			// The operator key (X-Operator-Key) authorizes the admin surface
+			// independently of the policy, so it passes even when p is nil —
+			// the break-glass path for restoring a wiped policy over HTTP.
 			role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
-			if policy.IsAdmin(p, role) {
+			if auth.IsOperator(r.Context()) || policy.IsAdmin(p, role) {
 				next.ServeHTTP(w, r)
 				return
 			}

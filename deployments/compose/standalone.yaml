@@ -27,6 +27,11 @@ services:
       # without it, every request resolves to the policy default_role.
       # WH_AUTH_JWT_SECRET: "change-me"
       #
+      # Optional non-JWT operator credential: a request with a matching
+      # X-Operator-Key header gets full-access admin, works even if the policy
+      # is wiped (break-glass). Treat it as an admin secret.
+      # WH_AUTH_OPERATOR_KEY: "change-me-operator-key"
+      #
       # Seed a policy on first boot. WaveHouse is fail-closed: with no policy,
       # every request (even admin) is denied. dev-policy.yaml ships a permissive
       # "public" trial policy (read/write the demo tables, NOT admin) so the

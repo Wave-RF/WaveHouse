@@ -29,11 +29,19 @@ The `Authorization` header takes precedence when both are provided: the `?token=
 
 **Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/admin/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/admin/*` **and** the schema/DLQ endpoints are admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
 
+**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key`, presented in the `X-Operator-Key` header — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/admin/*` surface, without a JWT and independently of the token verifier.
+
+```text
+X-Operator-Key: <operator-key>
+```
+
+It is checked *before* the Bearer token (so it wins when both are present), compared in constant time, and — unlike a JWT bearing the `admin_role` — is honored **even when the policy is `nil`/deleted**, making it the only credential that can restore a wiped policy over HTTP. This deliberately bends "authentication is decoupled from authorization": a matching key both authenticates and authorizes in one step. It is disabled when empty (the default). See [Configuration — Authentication](/configuration#authentication) and [Access Control — Operator key](/access-control#operator-key).
+
 ### Roles & Access Control
 
 WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim`, default: `role`). Role handling:
 
-- **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match) — Full access to all tables, raw SQL, and admin endpoints. There is no separate `service` role.
+- **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match) — Full access to all tables, raw SQL, and admin endpoints. There is no separate `service` role, though the non-JWT operator key (above) reaches the same surface without a token.
 - **Other roles** — Access determined by the access control policy (see Admin endpoints below).
 
 Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).

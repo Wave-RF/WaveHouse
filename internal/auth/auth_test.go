@@ -5,16 +5,20 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const testOperatorKey = "op-secret-key"
 
 // captured records what the middleware established in the request context.
 type captured struct {
@@ -23,23 +27,33 @@ type captured struct {
 	claims     jwt.MapClaims
 	hasClaims  bool
 	authErr    error
+	isOperator bool
 	tokenInURL string
 }
 
 // run drives cfg's middleware over a request decorated by setup, returning what
 // the downstream handler observed. The middleware never rejects — it always
 // reaches the handler — so the interesting output is the captured context, not
-// the status code.
+// the status code. It uses no policy store or logger (the operator-key path is
+// exercised by runOp).
 func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 	t.Helper()
+	return runOp(t, cfg, nil, nil, setup)
+}
+
+// runOp is run with an explicit policy store and logger, so the operator-key
+// path (which reads the live admin role from the store) can be exercised.
+func runOp(t *testing.T, cfg Config, store *policy.Store, logger *slog.Logger, setup func(*http.Request)) captured {
+	t.Helper()
 	var c captured
-	mw, err := Middleware(cfg)
+	mw, err := Middleware(cfg, store, logger)
 	require.NoError(t, err)
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.called = true
 		c.role = RoleFromContext(r.Context())
 		c.claims, c.hasClaims = ClaimsFromContext(r.Context())
 		c.authErr = AuthErrorFromContext(r.Context())
+		c.isOperator = IsOperator(r.Context())
 		c.tokenInURL = r.URL.Query().Get("token")
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -54,6 +68,10 @@ func run(t *testing.T, cfg Config, setup func(*http.Request)) captured {
 
 func bearer(tok string) func(*http.Request) {
 	return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok) }
+}
+
+func operatorHeader(key string) func(*http.Request) {
+	return func(r *http.Request) { r.Header.Set("X-Operator-Key", key) }
 }
 
 func cfg() Config { return Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"} }
@@ -182,7 +200,7 @@ func TestMiddleware_JWKSUnreachableAtBoot_FailsLoud(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Middleware(Config{JWKSURL: srv.URL})
+	_, err := Middleware(Config{JWKSURL: srv.URL}, nil, nil)
 	require.Error(t, err, "an unreachable/erroring JWKS at boot must fail loudly")
 }
 
@@ -194,7 +212,7 @@ func TestMiddleware_JWKSReachableAtBoot_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mw, err := Middleware(Config{JWKSURL: srv.URL})
+	mw, err := Middleware(Config{JWKSURL: srv.URL}, nil, nil)
 	require.NoError(t, err, "a reachable JWKS endpoint must construct successfully")
 	require.NotNil(t, mw)
 }
@@ -222,6 +240,91 @@ func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
 	assert.True(t, errors.Is(c.authErr, errInvalidToken), "present-but-unverifiable token records invalid-token")
 }
 
+func TestMiddleware_OperatorKey_MatchGrantsOperatorAndAdminRole(t *testing.T) {
+	t.Parallel()
+	cfg := Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey}
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	c := runOp(t, cfg, store, testutil.NopLogger(), operatorHeader(testOperatorKey))
+	assert.True(t, c.isOperator, "a matching operator key sets the operator bit")
+	assert.Equal(t, "admin", c.role, "operator key stamps the live admin role")
+	assert.False(t, c.hasClaims, "operator path never parses JWT claims")
+	assert.NoError(t, c.authErr)
+}
+
+func TestMiddleware_OperatorKey_CustomAdminRole(t *testing.T) {
+	t.Parallel()
+	// The stamped role tracks the policy's configured admin_role, read live.
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"})
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, operatorHeader(testOperatorKey))
+	assert.True(t, c.isOperator)
+	assert.Equal(t, "superuser", c.role)
+}
+
+func TestMiddleware_OperatorKey_NilPolicy_BreakGlass(t *testing.T) {
+	t.Parallel()
+	// Break-glass: with a nil/deleted policy the admin role resolves to "", but
+	// the operator bit is still set so RequireAdmin can admit the request to
+	// restore the policy over HTTP.
+	store := policy.NewMemoryStore(nil)
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, operatorHeader(testOperatorKey))
+	assert.True(t, c.isOperator, "operator bit is set even with a nil policy")
+	assert.Empty(t, c.role, "nil policy → admin role is empty; the operator bit carries authorization")
+}
+
+func TestMiddleware_OperatorKey_NilStore(t *testing.T) {
+	t.Parallel()
+	// A nil store must not panic; the admin role resolves to "" and the operator
+	// bit still authorizes.
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, nil, nil, operatorHeader(testOperatorKey))
+	assert.True(t, c.isOperator)
+	assert.Empty(t, c.role)
+}
+
+func TestMiddleware_OperatorKey_WrongKey_FallsThroughToJWT(t *testing.T) {
+	t.Parallel()
+	cfg := Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey}
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	c := runOp(t, cfg, store, nil, func(r *http.Request) {
+		r.Header.Set("X-Operator-Key", "wrong-key")
+		r.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "editor"}))
+	})
+	assert.False(t, c.isOperator, "a non-matching operator key does not authenticate")
+	assert.Equal(t, "editor", c.role, "the request falls through to the JWT path")
+}
+
+func TestMiddleware_OperatorKey_WinsOverValidJWT(t *testing.T) {
+	t.Parallel()
+	// The operator key is checked before the Bearer token, so it takes precedence.
+	cfg := Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey}
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	c := runOp(t, cfg, store, nil, func(r *http.Request) {
+		r.Header.Set("X-Operator-Key", testOperatorKey)
+		r.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "editor"}))
+	})
+	assert.True(t, c.isOperator)
+	assert.Equal(t, "admin", c.role, "operator key wins over a valid JWT")
+	assert.False(t, c.hasClaims)
+}
+
+func TestMiddleware_OperatorKey_NotConfigured_HeaderIgnored(t *testing.T) {
+	t.Parallel()
+	// With no operator key configured, the X-Operator-Key header is inert.
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	c := runOp(t, Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, store, nil, operatorHeader("anything"))
+	assert.False(t, c.isOperator)
+	assert.Empty(t, c.role, "operator key disabled → header ignored, roleless default")
+	assert.NoError(t, c.authErr)
+}
+
+func TestMiddleware_OperatorKey_ConfiguredButHeaderAbsent(t *testing.T) {
+	t.Parallel()
+	// Operator key configured but no header present → not an operator, roleless.
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, nil)
+	assert.False(t, c.isOperator)
+	assert.Empty(t, c.role)
+}
+
 func TestContextHelpers_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -229,16 +332,19 @@ func TestContextHelpers_RoundTrip(t *testing.T) {
 	_, ok := ClaimsFromContext(ctx)
 	assert.False(t, ok)
 	assert.NoError(t, AuthErrorFromContext(ctx))
+	assert.False(t, IsOperator(ctx))
 
 	ctx = WithRole(ctx, "editor")
 	ctx = WithClaims(ctx, jwt.MapClaims{"sub": "u1"})
 	ctx = WithAuthError(ctx, errInvalidToken)
+	ctx = WithOperator(ctx)
 
 	assert.Equal(t, "editor", RoleFromContext(ctx))
 	claims, ok := ClaimsFromContext(ctx)
 	require.True(t, ok)
 	assert.Equal(t, "u1", claims["sub"])
 	assert.True(t, errors.Is(AuthErrorFromContext(ctx), errInvalidToken))
+	assert.True(t, IsOperator(ctx))
 }
 
 func TestExtractClaim(t *testing.T) {

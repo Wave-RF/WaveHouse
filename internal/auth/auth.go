@@ -2,20 +2,24 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 // Config holds configuration for the JWT authentication middleware.
 type Config struct {
-	JWTSecret string
-	JWKSURL   string
-	RoleClaim string // dot-separated claim path, e.g. "role" or "app_metadata.role"
+	JWTSecret   string
+	JWKSURL     string
+	RoleClaim   string // dot-separated claim path, e.g. "role" or "app_metadata.role"
+	OperatorKey string // optional non-JWT operator credential; a match on the X-Operator-Key header authorizes a full-access platform operator (see Middleware)
 }
 
 var (
@@ -44,7 +48,14 @@ var (
 // If JWKSURL is set but its JWK Set can't be fetched at startup, Middleware
 // returns an error so the caller can fail fast instead of booting into a
 // degraded state where no token can validate.
-func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
+//
+// When cfg.OperatorKey is set, a non-JWT operator path is checked before the
+// Bearer token (see the X-Operator-Key handling below): a constant-time match
+// authorizes a full-access platform operator independent of the JWT verifier.
+// store and logger back that path — the live admin role is read from store per
+// request, and operator authentications are logged at info (audit). Both may be
+// nil when no operator key is configured.
+func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http.Handler) http.Handler, error) {
 	roleClaim := cfg.RoleClaim
 	if roleClaim == "" {
 		roleClaim = "role"
@@ -93,6 +104,37 @@ func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Operator key: a non-JWT break-glass/operator credential, checked
+			// before any Bearer token. A constant-time match on the X-Operator-Key
+			// header authorizes a full-access platform operator, independent of the
+			// JWT verifier. It stamps two things into the context: the live admin
+			// role — so the policy evaluator's admin bypass grants unrestricted
+			// data-plane access while a policy exists — and an operator bit, which
+			// RequireAdmin honors even when the policy is nil/deleted, so the
+			// operator can still reach the admin surface to restore a wiped policy.
+			if cfg.OperatorKey != "" &&
+				subtle.ConstantTimeCompare([]byte(operatorKey(r)), []byte(cfg.OperatorKey)) == 1 {
+				if logger != nil {
+					// Audit at Info (not Debug): the operator key is the most
+					// privileged credential in the system — full data-plane +
+					// admin, honored even when the policy is wiped — so its use
+					// must be visible in production logs (Info+), mirroring the
+					// WARN emitted on an authz denial.
+					logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
+						slog.String("path", r.URL.Path),
+						slog.String("method", r.Method),
+					)
+				}
+				var p *policy.Policy
+				if store != nil {
+					p = store.Get()
+				}
+				ctx := WithOperator(r.Context())
+				ctx = WithRole(ctx, policy.AdminRole(p))
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			tokenStr := bearerToken(r)
 			if tokenStr == "" {
 				// No token: roleless request (not an error), resolved to
@@ -132,6 +174,12 @@ func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
 			next.ServeHTTP(w, r)
 		})
 	}, nil
+}
+
+// operatorKey extracts the operator credential from the X-Operator-Key header.
+// Returns "" when the header is absent.
+func operatorKey(r *http.Request) string {
+	return r.Header.Get("X-Operator-Key")
 }
 
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
