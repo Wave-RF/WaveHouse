@@ -497,13 +497,67 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	h.Dedup = dedup
 	h.IDField = "event_id"
 
-	// Payload does NOT include event_id — should skip dedup and publish.
+	// Payload omits event_id and require_id is off (the default): the row skips
+	// dedup and is still published — the warn+counter path, not a rejection (#219).
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.NotNil(t, pub.LastMessage(), "should have published even without dedup ID")
+}
+
+// TestIngest_Dedup_RequireID_Rejects covers strict mode: a single insert lacking
+// the id is a 400 that publishes nothing, while one carrying the id still passes.
+func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.RequireID = true
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	testutil.AssertJSONErrorResponse(t, w)
+	assert.Nil(t, pub.LastMessage(), "must not publish a row missing the dedupe id under require_id")
+
+	w = httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "ok-1"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "a record carrying the id is still accepted")
+}
+
+// TestIngest_NDJSON_RequireID_Rejects confirms strict mode is per-record: the
+// missing-id line fails while the rest of the batch is published.
+func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.RequireID = true
+
+	req := ndjsonRequest(t, "clicks",
+		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
+		jsonLine(t, map[string]any{"page": "/b"}), // missing id → rejected
+		jsonLine(t, map[string]any{"page": "/c", "event_id": "e2"}),
+	)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Equal(t, 1, resp.Failed)
+	assert.Equal(t, 0, resp.Duplicates)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Contains(t, resultAt(t, resp, 2).Error, "missing dedupe id field")
+	assert.True(t, resultAt(t, resp, 3).Ok)
+	assert.Len(t, pub.Messages, 2)
 }
 
 func TestIngest_Policy_DenyColumns(t *testing.T) {

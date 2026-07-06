@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -121,10 +120,11 @@ func run() int {
 		} else {
 			promHandler = ph
 			defer func() {
-				// Bound shutdown so an unreachable collector doesn't hang
-				// process exit. The OTel SDK's batch processors don't fully
-				// honor the context deadline during gRPC retry/backoff.
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// Bound shutdown so an unreachable collector can't hang exit:
+				// otelShutdown honors this deadline internally (see
+				// observability.InitProvider), returning even when a provider's
+				// flush is stuck in gRPC backoff.
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 				_ = otelShutdown(ctx)
 			}()
@@ -281,8 +281,11 @@ func run() int {
 	gapWindow := time.Duration(cfg.MQ.GapWindowMinutes) * time.Minute
 	sweeper := ingest.NewSweeper(embeddedMQ.JetStream(), gapWindow, logger)
 
-	// Hub for streaming fan-out.
-	hub := api.NewHub()
+	// Streaming fan-out: one SSE metric set shared by the Hub (drop counts) and the
+	// handler (write counts), and the Hub that projects/serializes each event once
+	// per (topic, role) and pushes it to that role's subscribers.
+	sseMetrics := stream.NewMetrics()
+	streamHub := stream.NewHub(policyStore, sseMetrics)
 
 	// Start policy watch for cluster-wide updates.
 	go policyStore.Watch(ctx)
@@ -306,16 +309,11 @@ func run() int {
 	// Start active sweeper.
 	go sweeper.Start(ctx)
 
-	// Hub bridge: MQ → broadcast to connected SSE clients.
+	// Hub bridge: MQ → broadcast to connected SSE clients. The Hub decodes and
+	// projects each event itself (skipping malformed payloads), so the bridge just
+	// forwards the raw bytes and acks.
 	if err := embeddedMQ.Subscribe(ctx, "ingest.>", "hub-bridge", func(msg *mq.Message) error {
-		var evt ingest.EventMessage
-		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			if err := msg.Ack(); err != nil {
-				slog.Warn("failed to ack message from embedded hub bridge", "error", err)
-			}
-			return nil
-		}
-		hub.Broadcast(msg.Subject, msg)
+		streamHub.Broadcast(msg.Subject, msg.Data)
 		if err := msg.Ack(); err != nil {
 			slog.Warn("failed to ack message from embedded hub bridge", "error", err)
 		}
@@ -332,6 +330,7 @@ func run() int {
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
+		ingestHandler.RequireID = cfg.Dedupe.RequireID
 	}
 
 	var dlqHandler *api.DLQHandler
@@ -357,9 +356,8 @@ func run() int {
 	healthHandler := api.NewHealthHandler(chConn)
 	healthHandler.Boot = bootState
 
-	streamHandler := api.NewStreamHandler(hub, js)
-	streamHandler.PolicyStore = policyStore
-	streamHandler.Metrics = stream.NewMetrics()
+	streamHandler := api.NewStreamHandler(streamHub, js)
+	streamHandler.Metrics = sseMetrics
 
 	// Shared keepalive wheel: one goroutine nudges idle streams so proxies don't
 	// idle-close them. Runs for the process lifetime.

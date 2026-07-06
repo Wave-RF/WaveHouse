@@ -150,6 +150,9 @@ WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 # Optional dedup
 WH_DEDUPE_ENABLED=true
 WH_DEDUPE_ID_FIELD=event_id
+# Reject rows missing the id field instead of publishing them un-deduped
+# (default false → such rows are logged + counted, not rejected).
+WH_DEDUPE_REQUIRE_ID=false
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill

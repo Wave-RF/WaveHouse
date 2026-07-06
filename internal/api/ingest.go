@@ -21,6 +21,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -38,6 +39,7 @@ type IngestHandler struct {
 	Registry    *discovery.SchemaRegistry
 	Dedup       dedupe.Deduplicator // nil if dedup disabled
 	IDField     string              // dedup key field name (e.g. "event_id")
+	RequireID   bool                // reject rows missing IDField instead of publishing un-deduped (dedupe.require_id)
 	Publisher   mq.Publisher
 	PolicyStore *policy.Store
 	logger      *slog.Logger
@@ -52,6 +54,11 @@ type IngestHandler struct {
 func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
 	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
 }
+
+var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
+	"wavehouse_ingest_dedupe_missing_id_total",
+	metric.WithDescription("Ingested records missing the configured dedupe id_field (idempotency skipped)"),
+)
 
 // batchResult is the response body for any multi-record ingest (a JSON array,
 // an NDJSON batch, and — later — CSV). The status is 200 whenever the body was
@@ -396,7 +403,18 @@ func (h *IngestHandler) processRecord(
 
 	// Optional deduplication.
 	if h.Dedup != nil && h.IDField != "" {
-		if idVal, ok := data[h.IDField]; ok {
+		idVal, ok := data[h.IDField]
+		if !ok {
+			dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
+			if h.RequireID {
+				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", h.IDField, "table", table)
+				return false, &recordReject{
+					Status:  http.StatusBadRequest,
+					Message: fmt.Sprintf("missing dedupe id field %q", h.IDField),
+				}, nil
+			}
+			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", h.IDField, "table", table)
+		} else {
 			eventID := fmt.Sprint(idVal)
 			dup, err := h.Dedup.CheckAndMark(ctx, eventID)
 			if err != nil {

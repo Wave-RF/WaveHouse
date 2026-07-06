@@ -70,6 +70,9 @@ mq:
 dedupe:
   enabled: false
   id_field: event_id
+  # Reject rows missing id_field instead of publishing them un-deduped. Off by
+  # default (they are logged + counted via wavehouse_ingest_dedupe_missing_id_total).
+  require_id: false
 
 cache:
   l1_max_cost: 67108864

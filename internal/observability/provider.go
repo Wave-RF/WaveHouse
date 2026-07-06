@@ -77,12 +77,45 @@ func InitProvider(ctx context.Context, serviceName string, cfg ProviderConfig) (
 	var shutdownFuncs []func(context.Context) error
 
 	shutdown := func(ctx context.Context) error {
-		var err error
-		for _, fn := range shutdownFuncs {
-			err = errors.Join(err, fn(ctx))
+		// Nothing registered (or a repeat call after the funcs were cleared)
+		// is a genuine no-op — return before the deadline machinery so it
+		// can't misreport an already-expired ctx as a shutdown failure.
+		if len(shutdownFuncs) == 0 {
+			return nil
+		}
+
+		errs := make([]error, len(shutdownFuncs))
+		var wg sync.WaitGroup
+		for i, fn := range shutdownFuncs {
+			wg.Go(func() {
+				errs[i] = fn(ctx)
+			})
 		}
 		shutdownFuncs = nil
-		return err
+
+		// Fan the providers out concurrently AND bound the whole thing by
+		// ctx: with an unreachable collector, traces and metrics honor the
+		// deadline but the experimental logs SDK's BatchProcessor.Shutdown
+		// (sdk/log v0.20.0) does not — while an export is mid-flight in gRPC
+		// backoff it blocks for the exporter's full ~10s timeout, ignoring
+		// ctx. Waiting on all of them (wg.Wait) would drag the whole shutdown
+		// out to that ~10s. Every provider already got the same deadline, so
+		// once it passes we return ctx.Err() instead of blocking process exit
+		// on a flush that (collector down) can't succeed. A straggler
+		// goroutine is reaped by the imminent os.Exit; reading errs on that
+		// path would race it, so we only touch errs once done is closed (all
+		// goroutines returned).
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			return errors.Join(errs...)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	// On any setup error we run partial shutdown to release whatever was
