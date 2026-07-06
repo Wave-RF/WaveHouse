@@ -244,6 +244,7 @@ mq:
 dedupe:
   enabled: false
   id_field: event_id
+  require_id: false
 
 cache:
   l1_max_cost: 67108864
@@ -313,6 +314,7 @@ WH_MQ_MAX_BYTES_GB=50
 
 WH_DEDUPE_ENABLED=false
 WH_DEDUPE_ID_FIELD=event_id
+WH_DEDUPE_REQUIRE_ID=false
 
 WH_CACHE_L1_MAX_COST=67108864
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
