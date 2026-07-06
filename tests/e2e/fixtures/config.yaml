@@ -17,6 +17,9 @@ mq:
 dedupe:
   enabled: true
   id_field: event_id
+  tables:
+    events_ingest:
+      require_id: true
 
 # JWT validation. The suite signs test tokens with this fixed dev secret;
 # don't reuse outside the e2e rig.

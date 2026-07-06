@@ -593,6 +593,7 @@ func TestIngest_Dedup_PerTable_RequireIDOverride(t *testing.T) {
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"})) // no event_id
 	assert.Equal(t, http.StatusBadRequest, w.Code, "clicks overrides require_id=true, so a missing id is rejected")
 	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	testutil.AssertJSONErrorResponse(t, w)
 	assert.Nil(t, pub.LastMessage())
 }
 
