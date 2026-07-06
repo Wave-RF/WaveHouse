@@ -1,14 +1,16 @@
 ---
-// Custom header overriding Starlight's default. The layout is our own — its
-// contents are held in a centered max-width column (matching the page content,
-// à la ClickHouse/Supabase) rather than spanning edge to edge: brand + primary
-// nav pinned left, controls pinned right, with a compact icon search among the
-// right-hand controls. Every control is still
-// Starlight's own built-in, pulled in through its `virtual:starlight/components/*`
-// import, so the SiteTitle/Search/Theme overrides and the Pagefind-search logic
-// keep working untouched. The outer <header class="header"> (PageFrame — fixed
-// position + full-width glass background) is not ours and stays as-is; only our
-// inner content is column-constrained, so the bar itself still spans the page.
+// Custom header overriding Starlight's default. The layout is our own: brand +
+// primary nav pinned left, controls (search, social, theme, language) pinned
+// right. On doc pages the bar is full-bleed to the edges; on the splash homepage
+// (the only page with a hero) the inner content is held in a centered max-width
+// column matching the hero, à la ClickHouse/Supabase. Search shows Starlight's
+// expanded "Search … ⌘K" box on every page (≥50rem), so the keyboard shortcut
+// stays discoverable. Every control is still Starlight's own built-in, pulled in
+// through its `virtual:starlight/components/*` import, so the SiteTitle/Search/
+// Theme overrides and the Pagefind-search logic keep working untouched. The
+// outer <header class="header"> (PageFrame — fixed position + full-width glass
+// background) is not ours and stays as-is; only our inner content is
+// column-constrained on the splash, so the bar itself still spans the page.
 //
 // Because the controls are Starlight built-ins re-rendered here, env.d.ts
 // declares their virtual modules so `astro check` can resolve them. On
@@ -84,19 +86,18 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
 </div>
 
 <style>
-  /* Our own layout, held in a centered column that matches the page content
-     (~68rem, like the splash hero) instead of Starlight's edge-to-edge row.
-     The outer PageFrame bar still spans full width; only this inner content is
-     capped + centered. Unlayered so it authoritatively styles this component's
-     inner .header row (Starlight's own rules are @layer'd and would otherwise
-     win). */
+  /* Our own header layout. Unlayered so it authoritatively styles this
+     component's inner .header row (Starlight's own rules are @layer'd and would
+     otherwise win). Base case — doc pages — is full-bleed to the bar edges, like
+     Supabase/ClickHouse docs; the splash override below holds the inner content
+     in a centered content-width column instead. The outer PageFrame bar always
+     spans full width; only this inner content is ever capped + centered. */
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
     height: 100%;
-    /* Doc pages: full-bleed to the bar edges, like Supabase/ClickHouse docs. */
   }
   /* Splash homepage (the only page with a hero): hold the header in a centered
      content-width column instead. Keyed off the hero's presence in the body —
@@ -146,9 +147,8 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
     border-inline-end: 1px solid var(--sl-color-gray-5);
   }
 
-  /* Search. Doc pages show Starlight's expanded "Search … ⌘K" box; the splash
-     homepage collapses it to a compact icon. Either way it opens the same
-     modal. */
+  /* Search. Starlight's expanded "Search … ⌘K" box on every page (≥50rem) so the
+     keyboard shortcut stays discoverable; below 50rem it sizes down to its icon. */
   .wh-search {
     align-items: center;
   }
@@ -167,39 +167,33 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
       max-width: 100%;
     }
   }
-  /* Splash homepage: collapse to a compact icon button at every width (label +
-     ⌘K hidden), ClickHouse-style. */
-  :global(body:has(.wh-hero)) .wh-search :global(button[data-open-modal] > span),
-  :global(body:has(.wh-hero)) .wh-search :global(button[data-open-modal] > kbd) {
-    display: none;
-  }
-  :global(body:has(.wh-hero)) .wh-search :global(button[data-open-modal]) {
-    width: auto;
-    min-width: 0;
-    padding: 0.5rem;
-    gap: 0;
-  }
 
-  /* Primary nav links — quiet by default, brand accent when current. */
+  /* Primary nav links — present but subordinate to the wordmark, brand accent on
+     hover and when current. */
   .wh-header-nav {
     align-items: center;
     gap: 1.5rem;
   }
   .wh-header-nav__link {
-    color: var(--wh-ink-muted);
-    /* Smaller than the "WaveHouse" wordmark (1.0625rem). Both are centered on
-       the same header line, so the shorter link would otherwise sit slightly
-       high; drop it by half the size gap to land its bottom on the wordmark's. */
+    /* A step up from muted secondary text so it reads as an interactive nav link
+       at rest (plain muted looked like a static label), but held just under the
+       wordmark's full ink so the brand stays dominant. */
+    color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
+    /* Smaller than the "WaveHouse" wordmark (1.0625rem), but flex-centering on
+       the header line already lands it on the wordmark's baseline — no vertical
+       nudge (an earlier downward shift by the size gap left it sitting low). */
     font-size: 0.875rem;
-    transform: translateY(calc((1.0625rem - 0.875rem) / 2));
     font-weight: 500;
     line-height: 1;
     text-decoration: none;
     white-space: nowrap;
     transition: color 0.15s ease;
   }
+  /* Brand accent on hover, matching the footer links (a clearer "this is a link"
+     cue than the earlier brighten-to-ink, which is now near-invisible from the
+     lifted resting colour). */
   .wh-header-nav__link:hover {
-    color: var(--wh-ink);
+    color: var(--wh-accent-hi);
   }
   .wh-header-nav__link[aria-current="page"] {
     color: var(--wh-accent-text);
