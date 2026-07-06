@@ -240,89 +240,108 @@ func TestMiddleware_JWKSEmptyKeySet_TokenDoesNotAuthenticate(t *testing.T) {
 	assert.True(t, errors.Is(c.authErr, errInvalidToken), "present-but-unverifiable token records invalid-token")
 }
 
-func TestMiddleware_OperatorKey_MatchGrantsOperatorAndAdminRole(t *testing.T) {
+func TestMiddleware_OperatorKey(t *testing.T) {
 	t.Parallel()
-	cfg := Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey}
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
-	c := runOp(t, cfg, store, testutil.NopLogger(), operatorHeader(testOperatorKey))
-	assert.True(t, c.isOperator, "a matching operator key sets the operator bit")
-	assert.Equal(t, "admin", c.role, "operator key stamps the live admin role")
-	assert.False(t, c.hasClaims, "operator path never parses JWT claims")
-	assert.NoError(t, c.authErr)
-}
+	adminStore := func() *policy.Store { return policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"}) }
+	// A valid JWT (signed with the test secret) for the fall-through / precedence cases.
+	editorJWT := testutil.MakeJWT(t, map[string]any{"role": "editor"})
+	withBoth := func(opKey string) func(*http.Request) {
+		return func(r *http.Request) {
+			r.Header.Set("X-Operator-Key", opKey)
+			r.Header.Set("Authorization", "Bearer "+editorJWT)
+		}
+	}
 
-func TestMiddleware_OperatorKey_CustomAdminRole(t *testing.T) {
-	t.Parallel()
-	// The stamped role tracks the policy's configured admin_role, read live.
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"})
-	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, operatorHeader(testOperatorKey))
-	assert.True(t, c.isOperator)
-	assert.Equal(t, "superuser", c.role)
-}
+	tests := []struct {
+		name       string
+		cfg        Config
+		store      *policy.Store
+		logger     *slog.Logger
+		setup      func(*http.Request)
+		wantOp     bool
+		wantRole   string
+		wantClaims bool
+	}{
+		{
+			name:     "match sets operator bit and stamps the live admin role",
+			cfg:      Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey},
+			store:    adminStore(),
+			logger:   testutil.NopLogger(), // exercise the audit-log (logger != nil) branch
+			setup:    operatorHeader(testOperatorKey),
+			wantOp:   true,
+			wantRole: "admin",
+		},
+		{
+			name:     "stamped role tracks a custom admin_role, read live",
+			cfg:      Config{OperatorKey: testOperatorKey},
+			store:    policy.NewMemoryStore(&policy.Policy{AdminRole: "superuser"}),
+			setup:    operatorHeader(testOperatorKey),
+			wantOp:   true,
+			wantRole: "superuser",
+		},
+		{
+			// Break-glass: a nil/deleted policy makes the admin role resolve to "",
+			// but the operator bit is still set so RequireAdmin can admit the request
+			// to restore the policy over HTTP.
+			name:   "nil policy sets the operator bit but an empty role (break-glass)",
+			cfg:    Config{OperatorKey: testOperatorKey},
+			store:  policy.NewMemoryStore(nil),
+			setup:  operatorHeader(testOperatorKey),
+			wantOp: true,
+		},
+		{
+			name:   "nil store does not panic and still authorizes",
+			cfg:    Config{OperatorKey: testOperatorKey},
+			store:  nil,
+			setup:  operatorHeader(testOperatorKey),
+			wantOp: true,
+		},
+		{
+			// A non-matching key never authenticates; the request falls through to
+			// the Bearer-token path (a valid JWT → role editor, claims set).
+			name:       "wrong key falls through to the JWT path",
+			cfg:        Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey},
+			store:      adminStore(),
+			setup:      withBoth("wrong-key"),
+			wantRole:   "editor",
+			wantClaims: true,
+		},
+		{
+			// The operator key is checked before the Bearer token, so it wins even
+			// when a valid JWT is also present (and never parses the JWT claims).
+			name:     "operator key wins over a valid JWT",
+			cfg:      Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey},
+			store:    adminStore(),
+			setup:    withBoth(testOperatorKey),
+			wantOp:   true,
+			wantRole: "admin",
+		},
+		{
+			name:  "no operator key configured → header ignored, roleless",
+			cfg:   Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"},
+			store: adminStore(),
+			setup: operatorHeader("anything"),
+		},
+		{
+			name:  "operator key configured but header absent → roleless",
+			cfg:   Config{OperatorKey: testOperatorKey},
+			store: adminStore(),
+			setup: nil,
+		},
+	}
 
-func TestMiddleware_OperatorKey_NilPolicy_BreakGlass(t *testing.T) {
-	t.Parallel()
-	// Break-glass: with a nil/deleted policy the admin role resolves to "", but
-	// the operator bit is still set so RequireAdmin can admit the request to
-	// restore the policy over HTTP.
-	store := policy.NewMemoryStore(nil)
-	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, operatorHeader(testOperatorKey))
-	assert.True(t, c.isOperator, "operator bit is set even with a nil policy")
-	assert.Empty(t, c.role, "nil policy → admin role is empty; the operator bit carries authorization")
-}
-
-func TestMiddleware_OperatorKey_NilStore(t *testing.T) {
-	t.Parallel()
-	// A nil store must not panic; the admin role resolves to "" and the operator
-	// bit still authorizes.
-	c := runOp(t, Config{OperatorKey: testOperatorKey}, nil, nil, operatorHeader(testOperatorKey))
-	assert.True(t, c.isOperator)
-	assert.Empty(t, c.role)
-}
-
-func TestMiddleware_OperatorKey_WrongKey_FallsThroughToJWT(t *testing.T) {
-	t.Parallel()
-	cfg := Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey}
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
-	c := runOp(t, cfg, store, nil, func(r *http.Request) {
-		r.Header.Set("X-Operator-Key", "wrong-key")
-		r.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "editor"}))
-	})
-	assert.False(t, c.isOperator, "a non-matching operator key does not authenticate")
-	assert.Equal(t, "editor", c.role, "the request falls through to the JWT path")
-}
-
-func TestMiddleware_OperatorKey_WinsOverValidJWT(t *testing.T) {
-	t.Parallel()
-	// The operator key is checked before the Bearer token, so it takes precedence.
-	cfg := Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey}
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
-	c := runOp(t, cfg, store, nil, func(r *http.Request) {
-		r.Header.Set("X-Operator-Key", testOperatorKey)
-		r.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, map[string]any{"role": "editor"}))
-	})
-	assert.True(t, c.isOperator)
-	assert.Equal(t, "admin", c.role, "operator key wins over a valid JWT")
-	assert.False(t, c.hasClaims)
-}
-
-func TestMiddleware_OperatorKey_NotConfigured_HeaderIgnored(t *testing.T) {
-	t.Parallel()
-	// With no operator key configured, the X-Operator-Key header is inert.
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
-	c := runOp(t, Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"}, store, nil, operatorHeader("anything"))
-	assert.False(t, c.isOperator)
-	assert.Empty(t, c.role, "operator key disabled → header ignored, roleless default")
-	assert.NoError(t, c.authErr)
-}
-
-func TestMiddleware_OperatorKey_ConfiguredButHeaderAbsent(t *testing.T) {
-	t.Parallel()
-	// Operator key configured but no header present → not an operator, roleless.
-	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
-	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, nil)
-	assert.False(t, c.isOperator)
-	assert.Empty(t, c.role)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := runOp(t, tt.cfg, tt.store, tt.logger, tt.setup)
+			assert.Equal(t, tt.wantOp, c.isOperator, "operator bit")
+			assert.Equal(t, tt.wantRole, c.role, "role")
+			assert.Equal(t, tt.wantClaims, c.hasClaims, "claims present")
+			// Every operator-key outcome (match, or fall-through to a valid JWT, or
+			// roleless) records no auth error.
+			assert.NoError(t, c.authErr)
+		})
+	}
 }
 
 func TestContextHelpers_RoundTrip(t *testing.T) {

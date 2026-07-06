@@ -120,9 +120,12 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 					// admin, honored even when the policy is wiped — so its use
 					// must be visible in production logs (Info+), mirroring the
 					// WARN emitted on an authz denial.
+					// remote_addr is the connection peer (the reverse proxy when
+					// behind one); trusted client-IP extraction is tracked in #333.
 					logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
 						slog.String("path", r.URL.Path),
 						slog.String("method", r.Method),
+						slog.String("remote_addr", r.RemoteAddr),
 					)
 				}
 				var p *policy.Policy
