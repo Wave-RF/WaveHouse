@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -402,6 +403,73 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 			assert.NoError(t, c.authErr)
 		})
 	}
+}
+
+// infoBufLogger returns a logger writing JSON records at Info+ to buf, so a test
+// can assert both that the failed-operator-attempt WARN fires and that ordinary
+// traffic does not emit it. Mirrors warnBufLogger in internal/api/errors_test.go.
+func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})), &buf
+}
+
+// A presented-but-wrong operator credential is recorded at WARN (so operators
+// can alert on probing of the most privileged credential) while the request
+// still falls through unauthenticated — no operator bit, roleless — because the
+// middleware never rejects. A request carrying no operator credential must NOT
+// emit that WARN, so ordinary traffic never drowns the signal. The counter
+// (wavehouse_auth_operator_key_failures_total) rides the same branch; like its
+// sibling wavehouse_ingest_dedupe_missing_id_total it isn't asserted here, but
+// the failed-attempt cases in TestMiddleware_OperatorKey already exercise the
+// Add call (proving it's safe under the default no-op meter).
+func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
+	t.Parallel()
+	cfg := Config{OperatorKey: testOperatorKey}
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+
+	t.Run("wrong key via X-Operator-Key logs WARN and falls through", func(t *testing.T) {
+		t.Parallel()
+		logger, buf := infoBufLogger()
+		c := runOp(t, cfg, store, logger, operatorHeader("wrong-key"))
+		assert.False(t, c.isOperator, "a wrong key never sets the operator bit")
+		assert.Empty(t, c.role, "wrong key + no JWT → roleless fall-through")
+		assert.NoError(t, c.authErr)
+		out := buf.String()
+		assert.Contains(t, out, `"level":"WARN"`)
+		assert.Contains(t, out, `"msg":"operator key authentication failed"`)
+		assert.Contains(t, out, `"path":"/"`)
+		assert.Contains(t, out, `"method":"GET"`)
+	})
+
+	t.Run("wrong key via Authorization Operator scheme logs WARN", func(t *testing.T) {
+		t.Parallel()
+		logger, buf := infoBufLogger()
+		c := runOp(t, cfg, store, logger, func(r *http.Request) {
+			r.Header.Set("Authorization", "Operator wrong-key")
+		})
+		assert.False(t, c.isOperator)
+		assert.Contains(t, buf.String(), `"msg":"operator key authentication failed"`)
+	})
+
+	t.Run("absent operator credential does not emit the failed-attempt WARN", func(t *testing.T) {
+		t.Parallel()
+		logger, buf := infoBufLogger()
+		c := runOp(t, cfg, store, logger, nil) // no operator header at all
+		assert.False(t, c.isOperator)
+		assert.NotContains(t, buf.String(), "operator key authentication failed",
+			"an absent operator credential is an ordinary request, not a failed attempt")
+	})
+
+	t.Run("successful operator auth logs the INFO audit, not the failure WARN", func(t *testing.T) {
+		t.Parallel()
+		logger, buf := infoBufLogger()
+		c := runOp(t, cfg, store, logger, operatorHeader(testOperatorKey))
+		assert.True(t, c.isOperator)
+		out := buf.String()
+		assert.Contains(t, out, `"level":"INFO"`)
+		assert.Contains(t, out, `"msg":"operator key authenticated request"`)
+		assert.NotContains(t, out, "authentication failed")
+	})
 }
 
 func TestContextHelpers_RoundTrip(t *testing.T) {

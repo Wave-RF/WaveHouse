@@ -90,6 +90,8 @@ Set the result via `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and present i
 curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/admin/policy
 ```
 
+**Monitor failed attempts.** A successful operator authentication is audit-logged at `INFO`; a request presenting a *wrong* operator key is logged at `WARN` (`operator key authentication failed`) and counted by the `wavehouse_auth_operator_key_failures_total` metric, then handled as an ordinary unauthenticated request (the middleware never rejects). A wrong operator key is never sent by accident, so a nonzero rate is a strong probing/brute-force signal against your most privileged credential — alert on it.
+
 ## Anatomy of a policy
 
 A policy is a YAML or JSON document with three top-level fields:

@@ -12,6 +12,8 @@ import (
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Config holds configuration for the JWT authentication middleware.
@@ -25,6 +27,17 @@ type Config struct {
 var (
 	errInvalidToken = errors.New("invalid token")
 	errTokenExpired = errors.New("token expired")
+)
+
+// operatorKeyFailures counts requests that presented an operator credential
+// which did NOT match the configured key. A wrong operator key is never sent by
+// accident — legitimate callers present a Bearer JWT or nothing — so a mismatch
+// is a probing/brute-force signal against the most privileged credential in the
+// system, meant to be alerted on. Paired with the WARN in Middleware; a
+// package-level instrument mirroring wavehouse_ingest_dedupe_missing_id_total.
+var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
+	"wavehouse_auth_operator_key_failures_total",
+	metric.WithDescription("Requests presenting an operator key that did not match the configured value"),
 )
 
 // Middleware authenticates Bearer tokens and records the caller's role, claims,
@@ -53,8 +66,11 @@ var (
 // Bearer token (see operatorKey below): a constant-time match on the presented
 // credential authorizes a full-access platform operator independent of the JWT verifier.
 // store and logger back that path — the live admin role is read from store per
-// request, and operator authentications are logged at info (audit). Both may be
-// nil when no operator key is configured.
+// request, and operator authentications are logged at info (audit). A presented
+// credential that does not match is logged at warn and counted by
+// wavehouse_auth_operator_key_failures_total (a probing signal), then falls
+// through like any unauthenticated request. Both store and logger may be nil
+// when no operator key is configured.
 func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http.Handler) http.Handler, error) {
 	roleClaim := cfg.RoleClaim
 	if roleClaim == "" {
@@ -114,32 +130,59 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 			// operator bit, which RequireAdmin honors even when the policy is
 			// nil/deleted, so the operator can still reach the admin surface to
 			// restore a wiped policy.
-			if cfg.OperatorKey != "" &&
-				subtle.ConstantTimeCompare([]byte(operatorKey(r)), []byte(cfg.OperatorKey)) == 1 {
-				if logger != nil {
-					// Audit at Info (not Debug): the operator key is the most
-					// privileged credential in the system — full data-plane +
-					// admin, honored even when the policy is wiped — so its use
-					// must be visible in production logs (Info+), mirroring the
-					// WARN emitted on an authz denial. Correlation fields
-					// (request_id, and eventually the trusted-proxy client IP) are
-					// deliberately NOT stamped per-call-site — they belong in the
-					// global TraceHandler (internal/observability) so every log line
-					// gets them uniformly; tracked in #333. When OTel is enabled this
-					// line already carries trace_id/span_id from that handler.
-					logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
-						slog.String("path", r.URL.Path),
-						slog.String("method", r.Method),
-					)
+			if cfg.OperatorKey != "" {
+				// Resolve the presented credential once. An empty credential
+				// (no operator header at all) never matches and is not a failed
+				// attempt — it's just an ordinary request that falls through to
+				// the Bearer/default path. The constant-time compare runs only
+				// on a non-empty credential, guarding the key bytes; whether a
+				// header was sent is not secret.
+				presented := operatorKey(r)
+				match := presented != "" &&
+					subtle.ConstantTimeCompare([]byte(presented), []byte(cfg.OperatorKey)) == 1
+				if match {
+					if logger != nil {
+						// Audit at Info (not Debug): the operator key is the most
+						// privileged credential in the system — full data-plane +
+						// admin, honored even when the policy is wiped — so its use
+						// must be visible in production logs (Info+), mirroring the
+						// WARN emitted on an authz denial. Correlation fields
+						// (request_id, and eventually the trusted-proxy client IP) are
+						// deliberately NOT stamped per-call-site — they belong in the
+						// global TraceHandler (internal/observability) so every log line
+						// gets them uniformly; tracked in #333. When OTel is enabled this
+						// line already carries trace_id/span_id from that handler.
+						logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
+							slog.String("path", r.URL.Path),
+							slog.String("method", r.Method),
+						)
+					}
+					var p *policy.Policy
+					if store != nil {
+						p = store.Get()
+					}
+					ctx := WithOperator(r.Context())
+					ctx = WithRole(ctx, policy.AdminRole(p))
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
 				}
-				var p *policy.Policy
-				if store != nil {
-					p = store.Get()
+				if presented != "" {
+					// Present but wrong: record a failed operator-key attempt and
+					// fall through to the normal Bearer/default path — this
+					// middleware never rejects (authentication is decoupled from
+					// authorization), so the request resolves roleless like any
+					// other unauthenticated caller. WARN + a counter because a
+					// mismatch is a strong probing/brute-force signal: nobody
+					// sends a wrong operator key by accident. Same correlation-field
+					// deferral (request_id / client IP → #333) as the audit line above.
+					operatorKeyFailures.Add(r.Context(), 1)
+					if logger != nil {
+						logger.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
+							slog.String("path", r.URL.Path),
+							slog.String("method", r.Method),
+						)
+					}
 				}
-				ctx := WithOperator(r.Context())
-				ctx = WithRole(ctx, policy.AdminRole(p))
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
 			}
 
 			tokenStr := bearerToken(r)
