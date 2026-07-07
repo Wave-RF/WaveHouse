@@ -112,12 +112,11 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
 
   .wh-lead {
     display: flex;
-    /* Baseline alignment: the "Docs" nav link sits on the header row's text
-       baseline, and the logo lockup is nudged (in SiteTitle) so its baked-in
-       "WaveHouse" wordmark baseline lands on that same line — bottoms flush.
-       Robust by construction: the lockup's alignment is pure SVG geometry, and
-       the link's baseline is its own, so no per-size pixel nudge is involved. */
-    align-items: baseline;
+    /* Center the lockup vertically in the bar, matching the right-hand controls
+       (search, social, theme) — which are all centered too. The "Docs" link is
+       then dropped onto the lockup's wordmark baseline (see .wh-header-nav__link);
+       it can't be flex-baseline-aligned to a wordmark baked inside an image. */
+    align-items: center;
     gap: 1.75rem;
     min-width: 0;
   }
@@ -184,10 +183,13 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
        at rest (plain muted looked like a static label), but held just under the
        wordmark's full ink so the brand stays dominant. */
     color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
-    /* Smaller than the logo wordmark, held subordinate to it. No vertical nudge:
-       the lead row baseline-aligns this link to the lockup's wordmark (.wh-lead
-       above), so their bottoms sit flush on their own — at any DPI or font-size. */
-    font-size: 0.875rem;
+    /* Held subordinate to the logo wordmark. The lockup's "WaveHouse" baseline
+       sits just below the centered logo's midline (the wordmark is the lower part
+       of the image), so drop this link a hair to sit its bottom flush on that
+       baseline. Fixed offset by necessity — CSS can't baseline-align to text
+       baked inside an image; retune if the logo height or this font-size change. */
+    font-size: 0.9375rem;
+    transform: translateY(0.125rem);
     font-weight: 500;
     line-height: 1;
     text-decoration: none;

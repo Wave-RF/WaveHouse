@@ -36,17 +36,11 @@ const base = import.meta.env.BASE_URL;
     width: auto;
   }
 
-  /* Full lockup — bottom-align its baked-in "WaveHouse" wordmark with the header
-     row. The wordmark baseline sits at y74 of the lockup's 0–100 viewBox, so the
-     image box extends 26% of its height BELOW that baseline (bottom padding + the
-     wave mark, which dips below the wordmark by design). Nudge the image down by
-     that 26% so — under `.wh-lead { align-items: baseline }` (Header.astro) — the
-     WORDMARK, not the image's bottom edge, lands flush on the "Docs" baseline.
-     The 26% is pure SVG geometry (100 − 74): no font metrics, so it holds at any
-     DPI, zoom, or root font-size. */
+  /* Full lockup — sized by height and centered vertically in the bar by the
+     header row (Header.astro `.wh-lead { align-items: center }`). The "Docs" link
+     is aligned to the lockup's baked-in wordmark on the Header side. */
   .wh-logo--lockup {
     height: 1.625rem;
-    transform: translateY(calc(1.625rem * (100 - 74) / 100));
   }
   .wh-logo--mark {
     height: 1.5rem;
