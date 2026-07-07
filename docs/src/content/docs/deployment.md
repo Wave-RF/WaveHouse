@@ -136,7 +136,8 @@ WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 WH_AUTH_ROLE_CLAIM=app_metadata.role
-# Optional non-JWT operator credential (X-Operator-Key header): full-access
+# Optional non-JWT operator credential (Authorization: Operator <key>, or the
+# X-Operator-Key alias): full-access
 # admin for bootstrap/break-glass, honored even if the policy is wiped. Treat it
 # as an admin secret — inject from your secret store, serve only over TLS.
 WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>

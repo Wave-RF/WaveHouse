@@ -50,8 +50,8 @@ var (
 // degraded state where no token can validate.
 //
 // When cfg.OperatorKey is set, a non-JWT operator path is checked before the
-// Bearer token (see the X-Operator-Key handling below): a constant-time match
-// authorizes a full-access platform operator independent of the JWT verifier.
+// Bearer token (see operatorKey below): a constant-time match on the presented
+// credential authorizes a full-access platform operator independent of the JWT verifier.
 // store and logger back that path — the live admin role is read from store per
 // request, and operator authentications are logged at info (audit). Both may be
 // nil when no operator key is configured.
@@ -105,13 +105,15 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Operator key: a non-JWT break-glass/operator credential, checked
-			// before any Bearer token. A constant-time match on the X-Operator-Key
-			// header authorizes a full-access platform operator, independent of the
-			// JWT verifier. It stamps two things into the context: the live admin
-			// role — so the policy evaluator's admin bypass grants unrestricted
-			// data-plane access while a policy exists — and an operator bit, which
-			// RequireAdmin honors even when the policy is nil/deleted, so the
-			// operator can still reach the admin surface to restore a wiped policy.
+			// before any Bearer token. A constant-time match on the presented
+			// credential (Authorization: Operator <key>, or the X-Operator-Key
+			// alias — see operatorKey) authorizes a full-access platform operator,
+			// independent of the JWT verifier. It stamps two things into the
+			// context: the live admin role — so the policy evaluator's admin bypass
+			// grants unrestricted data-plane access while a policy exists — and an
+			// operator bit, which RequireAdmin honors even when the policy is
+			// nil/deleted, so the operator can still reach the admin surface to
+			// restore a wiped policy.
 			if cfg.OperatorKey != "" &&
 				subtle.ConstantTimeCompare([]byte(operatorKey(r)), []byte(cfg.OperatorKey)) == 1 {
 				if logger != nil {
@@ -119,13 +121,13 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 					// privileged credential in the system — full data-plane +
 					// admin, honored even when the policy is wiped — so its use
 					// must be visible in production logs (Info+), mirroring the
-					// WARN emitted on an authz denial.
-					// remote_addr is the connection peer (the reverse proxy when
-					// behind one); trusted client-IP extraction is tracked in #333.
+					// WARN emitted on an authz denial. Deliberately no client IP:
+					// WaveHouse logs none today (see router.go's RealIP note), and
+					// trusted-proxy client-IP capture for logs is tracked in #333 —
+					// this line inherits it once that lands.
 					logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
 						slog.String("path", r.URL.Path),
 						slog.String("method", r.Method),
-						slog.String("remote_addr", r.RemoteAddr),
 					)
 				}
 				var p *policy.Policy
@@ -179,9 +181,20 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 	}, nil
 }
 
-// operatorKey extracts the operator credential from the X-Operator-Key header.
-// Returns "" when the header is absent.
+// operatorKey extracts the presented operator credential from either the
+// standard Authorization header with the "Operator" auth-scheme (preferred: the
+// Authorization header is forwarded verbatim by proxies and doesn't collide with
+// Bearer JWTs) or the X-Operator-Key header (a convenience alias). The scheme is
+// matched case-insensitively per RFC 7235, and the Authorization header takes
+// precedence. Returns "" when neither is present. The result is compared against
+// the configured key in constant time by the caller. The key is never accepted
+// via the URL (unlike the JWT ?token= fallback) so an admin secret can't leak
+// into request lines or access logs.
 func operatorKey(r *http.Request) string {
+	const scheme = "Operator " // RFC 7235 auth-scheme + one SP
+	if h := r.Header.Get("Authorization"); len(h) > len(scheme) && strings.EqualFold(h[:len(scheme)], scheme) {
+		return h[len(scheme):]
+	}
 	return r.Header.Get("X-Operator-Key")
 }
 

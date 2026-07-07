@@ -29,9 +29,11 @@ The `Authorization` header takes precedence when both are provided: the `?token=
 
 **Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/admin/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/admin/*` **and** the schema/DLQ endpoints are admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
 
-**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key`, presented in the `X-Operator-Key` header — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/admin/*` surface, without a JWT and independently of the token verifier.
+**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/admin/*` surface, without a JWT and independently of the token verifier. Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
 
 ```text
+Authorization: Operator <operator-key>
+# or, equivalently:
 X-Operator-Key: <operator-key>
 ```
 

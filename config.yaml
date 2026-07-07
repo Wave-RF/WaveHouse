@@ -87,7 +87,7 @@ auth:
   jwt_secret: change-me-in-production
   jwks_url: ""
   role_claim: role
-  operator_key: "" # non-JWT full-access operator credential (X-Operator-Key header) for bootstrap/break-glass; empty disables
+  operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for bootstrap/break-glass; empty disables
 
 schema:
   refresh_interval: 60

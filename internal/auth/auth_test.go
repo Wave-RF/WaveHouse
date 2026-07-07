@@ -74,6 +74,10 @@ func operatorHeader(key string) func(*http.Request) {
 	return func(r *http.Request) { r.Header.Set("X-Operator-Key", key) }
 }
 
+func authOperatorHeader(key string) func(*http.Request) {
+	return func(r *http.Request) { r.Header.Set("Authorization", "Operator "+key) }
+}
+
 func cfg() Config { return Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role"} }
 
 func TestMiddleware_NoToken_RolelessNoError(t *testing.T) {
@@ -327,6 +331,44 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 			cfg:   Config{OperatorKey: testOperatorKey},
 			store: adminStore(),
 			setup: nil,
+		},
+		{
+			name:     "Authorization Operator scheme grants operator",
+			cfg:      Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey},
+			store:    adminStore(),
+			setup:    authOperatorHeader(testOperatorKey),
+			wantOp:   true,
+			wantRole: "admin",
+		},
+		{
+			// RFC 7235 auth-schemes are case-insensitive.
+			name:     "Authorization scheme matched case-insensitively",
+			cfg:      Config{OperatorKey: testOperatorKey},
+			store:    adminStore(),
+			setup:    func(r *http.Request) { r.Header.Set("Authorization", "operator "+testOperatorKey) },
+			wantOp:   true,
+			wantRole: "admin",
+		},
+		{
+			// A Bearer credential is a JWT, never mistaken for the operator key.
+			name:       "Authorization Bearer is a JWT, not the operator key",
+			cfg:        Config{JWTSecret: testutil.TestJWTSecret, RoleClaim: "role", OperatorKey: testOperatorKey},
+			store:      adminStore(),
+			setup:      bearer(editorJWT),
+			wantRole:   "editor",
+			wantClaims: true,
+		},
+		{
+			// The Authorization header takes precedence: a wrong Operator-scheme
+			// value is used (and rejected) even when a correct X-Operator-Key is
+			// also present — so it never silently falls back to the alias.
+			name:  "Authorization Operator takes precedence over X-Operator-Key",
+			cfg:   Config{OperatorKey: testOperatorKey},
+			store: adminStore(),
+			setup: func(r *http.Request) {
+				r.Header.Set("Authorization", "Operator wrong-key")
+				r.Header.Set("X-Operator-Key", testOperatorKey)
+			},
 		},
 	}
 

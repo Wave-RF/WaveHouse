@@ -206,11 +206,13 @@ There is no auth on/off switch — the JWT middleware always runs, but authoriza
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
-The **operator key** is a non-JWT alternative: set one and send it in the `X-Operator-Key` header. Before any policy is seeded it reaches the **admin surface** — enough to seed or restore a policy over HTTP (the break-glass path). Once a policy is loaded, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
+The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Before any policy is seeded it reaches the **admin surface** — enough to seed or restore a policy over HTTP (the break-glass path). Once a policy is loaded, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
 
 ```bash
 WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
 # ...then, in another shell — the admin surface works even with no policy seeded:
+curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/admin/policy
+# the X-Operator-Key alias works too:
 curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/admin/policy
 ```
 
