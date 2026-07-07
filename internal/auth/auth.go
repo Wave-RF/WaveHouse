@@ -191,9 +191,11 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 // via the URL (unlike the JWT ?token= fallback) so an admin secret can't leak
 // into request lines or access logs.
 func operatorKey(r *http.Request) string {
-	const scheme = "Operator " // RFC 7235 auth-scheme + one SP
-	if h := r.Header.Get("Authorization"); len(h) > len(scheme) && strings.EqualFold(h[:len(scheme)], scheme) {
-		return h[len(scheme):]
+	// Split "Operator <key>" on the first space. EqualFold because the RFC 7235
+	// auth-scheme is case-insensitive — the one behavioral difference from
+	// bearerToken's case-sensitive "Bearer " match below.
+	if scheme, key, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Operator") {
+		return key
 	}
 	return r.Header.Get("X-Operator-Key")
 }

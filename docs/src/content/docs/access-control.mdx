@@ -76,6 +76,20 @@ There is no separate `service` role. To reach an admin endpoint or to read data 
 
 Unlike `admin_role`, the operator key is honored **even when the policy is `nil`** (deleted, or never seeded), so it is the one HTTP path that can restore a wiped policy — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
 
+Generate a high-entropy value (≥ 256 bits of randomness) and load it from a secret manager rather than committing it:
+
+```bash
+openssl rand -base64 32          # 32 random bytes, base64-encoded — no shell-quoting surprises
+# or, without openssl:
+head -c 32 /dev/urandom | base64
+```
+
+Set the result via `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and present it as `Authorization: Operator <key>` (or `X-Operator-Key: <key>`):
+
+```bash
+curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/admin/policy
+```
+
 ## Anatomy of a policy
 
 A policy is a YAML or JSON document with three top-level fields:
