@@ -15,9 +15,17 @@ const title =
 
 <style>
   .wh-site-title {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.625rem;
+    /* inline-block, NOT inline-flex, on purpose: an inline-block's baseline is
+       its text's baseline, so this box exposes the wordmark's baseline to the
+       header row — which baseline-aligns the "Docs" nav link to it with no pixel
+       nudge (see Header.astro .wh-lead). A flex row would instead export the
+       TALL mark's edge as the box baseline, which is what forced the old nudge.
+       The mark is lifted out of flow (absolute, below) so only the text sets the
+       baseline; its slot is reserved here as inline-start padding = mark + gap. */
+    display: inline-block;
+    position: relative;
+    padding-inline-start: calc(1.5rem + 0.625rem);
+    white-space: nowrap;
     text-decoration: none;
     color: var(--wh-ink);
     font-weight: 700;
@@ -34,6 +42,13 @@ const title =
     color: var(--wh-ink);
   }
   .wh-site-title__mark {
+    /* Sits in the reserved inline-start slot, vertically centred on the wordmark
+       line box. Centre with a negative margin (−½ height) rather than a translate
+       so `transform` stays free for the hover rotate above. */
+    position: absolute;
+    inset-inline-start: 0;
+    top: 50%;
+    margin-top: -0.75rem;
     width: 1.5rem;
     height: 1.5rem;
     color: var(--wh-accent-hi);
@@ -44,6 +59,18 @@ const title =
   }
 
   @media (max-width: 30rem) {
+    /* Icon-only logo: with the wordmark hidden there's no text box to centre the
+       mark against, so return it to normal flow and drop the reserved slot so the
+       link hugs the mark. */
+    .wh-site-title {
+      padding-inline-start: 0;
+    }
+    .wh-site-title__mark {
+      position: static;
+      margin-top: 0;
+      display: inline-grid;
+      vertical-align: middle;
+    }
     .wh-site-title__text {
       display: none;
     }

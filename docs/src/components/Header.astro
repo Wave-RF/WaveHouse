@@ -112,7 +112,16 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
 
   .wh-lead {
     display: flex;
-    align-items: center;
+    /* Baseline, not center. The "WaveHouse" wordmark and the "Docs" nav link are
+       live text at different sizes; centering them would leave their bottoms off
+       by a sub-pixel fraction that no fixed nudge can fix across every DPI and
+       root font-size. Aligning their actual text baselines makes the bottoms
+       flush by construction (neither word has descenders, so baseline == bottom).
+       This relies on SiteTitle being an inline-block whose box baseline IS the
+       wordmark text's baseline — see SiteTitle.astro. (The big docs sites dodge
+       this by using a graphic logo next to centered nav; ours is real text, so we
+       align it properly instead.) */
+    align-items: baseline;
     gap: 1.75rem;
     min-width: 0;
   }
@@ -179,12 +188,10 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
        at rest (plain muted looked like a static label), but held just under the
        wordmark's full ink so the brand stays dominant. */
     color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
-    /* Smaller than the "WaveHouse" wordmark (1.0625rem). Flex-centering leaves
-       the link's baseline ~1.25px ABOVE the wordmark's, so nudge it down to sit
-       their bottoms flush. Value gauged against the rendered wordmark baseline
-       (canvas font metrics disagree with the browser's actual placement here). */
+    /* Smaller than the "WaveHouse" wordmark (1.0625rem). No vertical nudge: the
+       lead row baseline-aligns this link to the wordmark (.wh-lead above), so
+       their bottoms sit flush on their own — at any DPI, browser or font-size. */
     font-size: 0.875rem;
-    transform: translateY(1.25px);
     font-weight: 500;
     line-height: 1;
     text-decoration: none;
