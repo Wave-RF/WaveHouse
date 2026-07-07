@@ -393,8 +393,24 @@ const DEMO_HOST = "stats.wavehouse.dev";
       seen.add(k);
       const el = feedEl(row, verb[0], verb[1]);
       el.dataset.k = k;
+      const t = Date.parse(normTs(row.event_ts || "")) || 0;
+      el.dataset.ts = String(t);
       el.style.setProperty("--d", `${stagger * 70}ms`);
-      if (where === "top") feed.prepend(el);
+      // Keep the feed ordered by event_ts DESC (newest on top). Live SSE rows do NOT
+      // arrive in event_ts order — GitHub delivers a webhook burst and the stream
+      // relays it in ingest order — so the old blind prepend jumbled the tail (a late
+      // delivery landed on top above newer rows). Slot each row in before the first
+      // strictly-older sibling instead; equal-ts rows keep arrival order (gh_events
+      // event_ts is only second-granular for CI/checks, so there's no finer tiebreak).
+      // `where` now only gates the backfill full-stop guard + stagger, not placement.
+      let ref: Element | null = null;
+      for (const child of feed.children) {
+        if (t > Number((child as HTMLElement).dataset.ts)) {
+          ref = child;
+          break;
+        }
+      }
+      if (ref) feed.insertBefore(el, ref);
       else feed.append(el);
       while (feed.children.length > MAX_ROWS) {
         const last = feed.lastElementChild as HTMLElement;
