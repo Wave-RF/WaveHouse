@@ -121,10 +121,12 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 					// privileged credential in the system — full data-plane +
 					// admin, honored even when the policy is wiped — so its use
 					// must be visible in production logs (Info+), mirroring the
-					// WARN emitted on an authz denial. Deliberately no client IP:
-					// WaveHouse logs none today (see router.go's RealIP note), and
-					// trusted-proxy client-IP capture for logs is tracked in #333 —
-					// this line inherits it once that lands.
+					// WARN emitted on an authz denial. Correlation fields
+					// (request_id, and eventually the trusted-proxy client IP) are
+					// deliberately NOT stamped per-call-site — they belong in the
+					// global TraceHandler (internal/observability) so every log line
+					// gets them uniformly; tracked in #333. When OTel is enabled this
+					// line already carries trace_id/span_id from that handler.
 					logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
 						slog.String("path", r.URL.Path),
 						slog.String("method", r.Method),

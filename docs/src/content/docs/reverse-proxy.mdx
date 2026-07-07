@@ -136,7 +136,7 @@ These limit the *whole* request regardless of traffic, so no keepalive extends t
 
 ## Header and auth forwarding
 
-- **`Authorization`** — forward verbatim. WaveHouse validates a `Bearer` JWT (resolving the role from it) or an `Operator <key>` [operator credential](/access-control#operator-key). Proxies forward `Authorization` unchanged, so this is the transport to prefer for the operator key.
+- **`Authorization`** — forward verbatim. WaveHouse validates a `Bearer` JWT (resolving the role from it) or an `Operator <key>` [operator credential](/access-control#operator-key). Most proxies forward `Authorization` unchanged, so it's the transport to prefer for the operator key — the exception to check for is an auth-terminating layer that consumes or rewrites the header (e.g. a gateway doing its own auth).
 - **`X-Operator-Key`** (optional) — only relevant if you present the [operator key](/access-control#operator-key) via this alias header instead of `Authorization: Operator <key>`. Custom request headers are forwarded by default, but confirm your proxy doesn't strip it — and note nginx silently drops header names containing **underscores** (this one uses hyphens, so it's fine as named). The `Authorization` form needs none of this.
 - **`X-Forwarded-For` / `X-Forwarded-Proto` / `Host`** — set these for your own logs and any upstream that reads them. WaveHouse does not currently derive a client IP from `X-Forwarded-For` (see the caution below); forwarding it is good hygiene and is what the trusted-proxy client-IP work ([#333](https://github.com/Wave-RF/WaveHouse/issues/333)) will consume.
 
