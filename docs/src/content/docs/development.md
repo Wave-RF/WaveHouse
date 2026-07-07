@@ -200,10 +200,20 @@ Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { c
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies everyone, admins included). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
+There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
 
 ```bash
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
+```
+
+The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Before any policy is seeded it reaches the **admin surface** — enough to seed or restore a policy over HTTP (the break-glass path). Once a policy is loaded, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
+
+```bash
+WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
+# ...then, in another shell — the admin surface works even with no policy seeded:
+curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/admin/policy
+# the X-Operator-Key alias works too:
+curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/admin/policy
 ```
 
 Then mint a token (role == the policy `admin_role`) and call an admin endpoint:

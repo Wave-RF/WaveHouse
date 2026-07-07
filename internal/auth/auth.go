@@ -2,25 +2,42 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Config holds configuration for the JWT authentication middleware.
 type Config struct {
-	JWTSecret string
-	JWKSURL   string
-	RoleClaim string // dot-separated claim path, e.g. "role" or "app_metadata.role"
+	JWTSecret   string
+	JWKSURL     string
+	RoleClaim   string // dot-separated claim path, e.g. "role" or "app_metadata.role"
+	OperatorKey string // optional non-JWT operator credential; a match on the presented credential (Authorization: Operator <key>, or the X-Operator-Key alias) authorizes a full-access platform operator (see Middleware)
 }
 
 var (
 	errInvalidToken = errors.New("invalid token")
 	errTokenExpired = errors.New("token expired")
+)
+
+// operatorKeyFailures counts requests that presented an operator credential
+// which did NOT match the configured key. A wrong operator key is never sent by
+// accident — legitimate callers present a Bearer JWT or nothing — so a mismatch
+// is a probing/brute-force signal against the most privileged credential in the
+// system, meant to be alerted on. Paired with the WARN in Middleware; a
+// package-level instrument mirroring wavehouse_ingest_dedupe_missing_id_total.
+var operatorKeyFailures, _ = otel.Meter("wavehouse-auth").Int64Counter(
+	"wavehouse_auth_operator_key_failures_total",
+	metric.WithDescription("Requests presenting an operator key that did not match the configured value"),
 )
 
 // Middleware authenticates Bearer tokens and records the caller's role, claims,
@@ -44,7 +61,17 @@ var (
 // If JWKSURL is set but its JWK Set can't be fetched at startup, Middleware
 // returns an error so the caller can fail fast instead of booting into a
 // degraded state where no token can validate.
-func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
+//
+// When cfg.OperatorKey is set, a non-JWT operator path is checked before the
+// Bearer token (see operatorKey below): a constant-time match on the presented
+// credential authorizes a full-access platform operator independent of the JWT verifier.
+// store and logger back that path — the live admin role is read from store per
+// request, and operator authentications are logged at info (audit). A presented
+// credential that does not match is logged at warn and counted by
+// wavehouse_auth_operator_key_failures_total (a probing signal), then falls
+// through like any unauthenticated request. Both store and logger may be nil
+// when no operator key is configured.
+func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http.Handler) http.Handler, error) {
 	roleClaim := cfg.RoleClaim
 	if roleClaim == "" {
 		roleClaim = "role"
@@ -93,6 +120,71 @@ func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Operator key: a non-JWT break-glass/operator credential, checked
+			// before any Bearer token. A constant-time match on the presented
+			// credential (Authorization: Operator <key>, or the X-Operator-Key
+			// alias — see operatorKey) authorizes a full-access platform operator,
+			// independent of the JWT verifier. It stamps two things into the
+			// context: the live admin role — so the policy evaluator's admin bypass
+			// grants unrestricted data-plane access while a policy exists — and an
+			// operator bit, which RequireAdmin honors even when the policy is
+			// nil/deleted, so the operator can still reach the admin surface to
+			// restore a wiped policy.
+			if cfg.OperatorKey != "" {
+				// Resolve the presented credential once. An empty credential
+				// (no operator header at all) never matches and is not a failed
+				// attempt — it's just an ordinary request that falls through to
+				// the Bearer/default path. The constant-time compare runs only
+				// on a non-empty credential, guarding the key bytes; whether a
+				// header was sent is not secret.
+				presented := operatorKey(r)
+				match := presented != "" &&
+					subtle.ConstantTimeCompare([]byte(presented), []byte(cfg.OperatorKey)) == 1
+				if match {
+					if logger != nil {
+						// Audit at Info (not Debug): the operator key is the most
+						// privileged credential in the system — full data-plane +
+						// admin, honored even when the policy is wiped — so its use
+						// must be visible in production logs (Info+), mirroring the
+						// WARN emitted on an authz denial. Correlation fields
+						// (request_id, and eventually the trusted-proxy client IP) are
+						// deliberately NOT stamped per-call-site — they belong in the
+						// global TraceHandler (internal/observability) so every log line
+						// gets them uniformly; tracked in #333. When OTel is enabled this
+						// line already carries trace_id/span_id from that handler.
+						logger.LogAttrs(r.Context(), slog.LevelInfo, "operator key authenticated request",
+							slog.String("path", r.URL.Path),
+							slog.String("method", r.Method),
+						)
+					}
+					var p *policy.Policy
+					if store != nil {
+						p = store.Get()
+					}
+					ctx := WithOperator(r.Context())
+					ctx = WithRole(ctx, policy.AdminRole(p))
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				if presented != "" {
+					// Present but wrong: record a failed operator-key attempt and
+					// fall through to the normal Bearer/default path — this
+					// middleware never rejects (authentication is decoupled from
+					// authorization), so the request resolves roleless like any
+					// other unauthenticated caller. WARN + a counter because a
+					// mismatch is a strong probing/brute-force signal: nobody
+					// sends a wrong operator key by accident. Same correlation-field
+					// deferral (request_id / client IP → #333) as the audit line above.
+					operatorKeyFailures.Add(r.Context(), 1)
+					if logger != nil {
+						logger.LogAttrs(r.Context(), slog.LevelWarn, "operator key authentication failed",
+							slog.String("path", r.URL.Path),
+							slog.String("method", r.Method),
+						)
+					}
+				}
+			}
+
 			tokenStr := bearerToken(r)
 			if tokenStr == "" {
 				// No token: roleless request (not an error), resolved to
@@ -134,13 +226,38 @@ func Middleware(cfg Config) (func(http.Handler) http.Handler, error) {
 	}, nil
 }
 
+// authScheme returns the credential following the given Authorization
+// auth-scheme (e.g. "Bearer", "Operator") and whether the scheme matched. The
+// scheme name is compared case-insensitively, as RFC 7235 requires. Shared by
+// operatorKey and bearerToken so both schemes parse identically.
+func authScheme(r *http.Request, scheme string) (string, bool) {
+	name, cred, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	return cred, ok && strings.EqualFold(name, scheme)
+}
+
+// operatorKey extracts the presented operator credential from either the
+// standard Authorization header with the "Operator" auth-scheme (preferred: the
+// Authorization header is forwarded verbatim by proxies and doesn't collide with
+// Bearer JWTs) or the X-Operator-Key header (a convenience alias). The
+// Authorization header takes precedence. Returns "" when neither is present. The
+// result is compared against the configured key in constant time by the caller.
+// The key is never accepted via the URL (unlike the JWT ?token= fallback) so an
+// admin secret can't leak into request lines or access logs.
+func operatorKey(r *http.Request) string {
+	if key, ok := authScheme(r, "Operator"); ok {
+		return key
+	}
+	return r.Header.Get("X-Operator-Key")
+}
+
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
-// clients that can't set headers — the ?token query parameter, which
-// is stripped from the URL so it can't leak into logs. The Authorization header
-// takes precedence when both are present. Returns "" if absent.
+// clients that can't set headers — the ?token query parameter, which is stripped
+// from the URL so it can't leak into logs. The Authorization header takes
+// precedence when both are present; the Bearer auth-scheme is matched
+// case-insensitively (RFC 7235). Returns "" if absent.
 func bearerToken(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimPrefix(h, "Bearer ")
+	if tok, ok := authScheme(r, "Bearer"); ok {
+		return tok
 	}
 	if q := r.URL.Query().Get("token"); q != "" {
 		params := r.URL.Query()
