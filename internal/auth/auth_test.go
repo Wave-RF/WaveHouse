@@ -104,6 +104,24 @@ func TestMiddleware_ValidToken_FlatRole(t *testing.T) {
 	assert.NoError(t, c.authErr)
 }
 
+func TestMiddleware_BearerScheme_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+	// RFC 7235 auth-schemes are case-insensitive; a lowercase / mixed-case
+	// "bearer" must validate exactly like the canonical "Bearer" (regression
+	// guard — bearerToken shares the case-insensitive authScheme matcher with
+	// the operator path).
+	tok := testutil.MakeJWT(t, map[string]any{"role": "editor"})
+	for _, scheme := range []string{"bearer", "BEARER", "BeArEr"} {
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+			c := run(t, cfg(), func(r *http.Request) { r.Header.Set("Authorization", scheme+" "+tok) })
+			assert.Equal(t, "editor", c.role, "the Bearer auth-scheme must be case-insensitive")
+			assert.True(t, c.hasClaims)
+			assert.NoError(t, c.authErr)
+		})
+	}
+}
+
 func TestMiddleware_ValidToken_NestedRoleClaim(t *testing.T) {
 	t.Parallel()
 	tok := testutil.MakeJWT(t, map[string]any{"app_metadata": map[string]any{"role": "manager"}})

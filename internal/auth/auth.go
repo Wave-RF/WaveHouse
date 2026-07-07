@@ -181,32 +181,38 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 	}, nil
 }
 
+// authScheme returns the credential following the given Authorization
+// auth-scheme (e.g. "Bearer", "Operator") and whether the scheme matched. The
+// scheme name is compared case-insensitively, as RFC 7235 requires. Shared by
+// operatorKey and bearerToken so both schemes parse identically.
+func authScheme(r *http.Request, scheme string) (string, bool) {
+	name, cred, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	return cred, ok && strings.EqualFold(name, scheme)
+}
+
 // operatorKey extracts the presented operator credential from either the
 // standard Authorization header with the "Operator" auth-scheme (preferred: the
 // Authorization header is forwarded verbatim by proxies and doesn't collide with
-// Bearer JWTs) or the X-Operator-Key header (a convenience alias). The scheme is
-// matched case-insensitively per RFC 7235, and the Authorization header takes
-// precedence. Returns "" when neither is present. The result is compared against
-// the configured key in constant time by the caller. The key is never accepted
-// via the URL (unlike the JWT ?token= fallback) so an admin secret can't leak
-// into request lines or access logs.
+// Bearer JWTs) or the X-Operator-Key header (a convenience alias). The
+// Authorization header takes precedence. Returns "" when neither is present. The
+// result is compared against the configured key in constant time by the caller.
+// The key is never accepted via the URL (unlike the JWT ?token= fallback) so an
+// admin secret can't leak into request lines or access logs.
 func operatorKey(r *http.Request) string {
-	// Split "Operator <key>" on the first space. EqualFold because the RFC 7235
-	// auth-scheme is case-insensitive — the one behavioral difference from
-	// bearerToken's case-sensitive "Bearer " match below.
-	if scheme, key, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Operator") {
+	if key, ok := authScheme(r, "Operator"); ok {
 		return key
 	}
 	return r.Header.Get("X-Operator-Key")
 }
 
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
-// clients that can't set headers — the ?token query parameter, which
-// is stripped from the URL so it can't leak into logs. The Authorization header
-// takes precedence when both are present. Returns "" if absent.
+// clients that can't set headers — the ?token query parameter, which is stripped
+// from the URL so it can't leak into logs. The Authorization header takes
+// precedence when both are present; the Bearer auth-scheme is matched
+// case-insensitively (RFC 7235). Returns "" if absent.
 func bearerToken(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimPrefix(h, "Bearer ")
+	if tok, ok := authScheme(r, "Bearer"); ok {
+		return tok
 	}
 	if q := r.URL.Query().Get("token"); q != "" {
 		params := r.URL.Query()
