@@ -25,8 +25,11 @@ func NewEmbedded(dir string) (*EmbeddedDeduplicator, error) {
 }
 
 // CheckAndMark returns true if the event was already seen.
-func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, eventID string) (bool, error) {
-	key := []byte(eventID)
+func (d *EmbeddedDeduplicator) CheckAndMark(_ context.Context, table, eventID string) (bool, error) {
+	// Namespace the key by table so equal id values in different tables don't
+	// collide. A ClickHouse identifier can't contain a NUL byte, so the
+	// first NUL unambiguously separates the table prefix from the id.
+	key := []byte(table + "\x00" + eventID)
 
 	_, closer, err := d.db.Get(key)
 	if err == nil {

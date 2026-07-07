@@ -20,9 +20,11 @@ type stubDeduplicator struct {
 	stats map[string]int64
 }
 
-func (s *stubDeduplicator) CheckAndMark(context.Context, string) (bool, error) { return false, nil }
-func (s *stubDeduplicator) Stats() map[string]int64                            { return s.stats }
-func (s *stubDeduplicator) Close() error                                       { return nil }
+func (s *stubDeduplicator) CheckAndMark(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (s *stubDeduplicator) Stats() map[string]int64 { return s.stats }
+func (s *stubDeduplicator) Close() error            { return nil }
 
 func TestRegisterSystemMetrics_NilInputs(t *testing.T) {
 	// No t.Parallel(): all three TestRegisterSystemMetrics_* tests mutate the

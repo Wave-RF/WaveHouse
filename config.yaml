@@ -73,6 +73,16 @@ dedupe:
   # Reject rows missing id_field instead of publishing them un-deduped. Off by
   # default (they are logged + counted via wavehouse_ingest_dedupe_missing_id_total).
   require_id: false
+  # Per-table overrides of id_field / require_id (YAML-only; the settings above
+  # are the defaults). A table not listed inherits the defaults; set a table's
+  # id_field to "" to skip dedupe for it. (#222)
+  # tables:
+  #   payments:
+  #     require_id: true      # payments must carry an id or be rejected
+  #   page_views:
+  #     id_field: view_id     # dedupe this table on view_id instead of event_id
+  #   audit_log:
+  #     id_field: ""          # skip dedupe for this table entirely
 
 cache:
   l1_max_cost: 67108864

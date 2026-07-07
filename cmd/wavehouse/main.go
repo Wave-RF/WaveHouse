@@ -338,6 +338,13 @@ func run() int {
 		ingestHandler.Dedup = dedup
 		ingestHandler.IDField = cfg.Dedupe.IDField
 		ingestHandler.RequireID = cfg.Dedupe.RequireID
+		if len(cfg.Dedupe.Tables) > 0 {
+			overrides := make(map[string]api.DedupeOverride, len(cfg.Dedupe.Tables))
+			for t, o := range cfg.Dedupe.Tables {
+				overrides[t] = api.DedupeOverride{IDField: o.IDField, RequireID: o.RequireID}
+			}
+			ingestHandler.DedupeTables = overrides
+		}
 	}
 
 	var dlqHandler *api.DLQHandler
