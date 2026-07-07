@@ -19,7 +19,7 @@ type Config struct {
 	JWTSecret   string
 	JWKSURL     string
 	RoleClaim   string // dot-separated claim path, e.g. "role" or "app_metadata.role"
-	OperatorKey string // optional non-JWT operator credential; a match on the X-Operator-Key header authorizes a full-access platform operator (see Middleware)
+	OperatorKey string // optional non-JWT operator credential; a match on the presented credential (Authorization: Operator <key>, or the X-Operator-Key alias) authorizes a full-access platform operator (see Middleware)
 }
 
 var (
