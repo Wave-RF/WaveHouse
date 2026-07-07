@@ -17,6 +17,7 @@ const (
 	contextKeyClaims    contextKey = "jwt_claims"
 	contextKeyRole      contextKey = "jwt_role"
 	contextKeyAuthError contextKey = "jwt_auth_error"
+	contextKeyOperator  contextKey = "operator"
 )
 
 // ClaimsFromContext extracts JWT claims from the request context. ok is false
@@ -62,4 +63,21 @@ func WithRole(ctx context.Context, role string) context.Context {
 // denied. See AuthErrorFromContext.
 func WithAuthError(ctx context.Context, err error) context.Context {
 	return context.WithValue(ctx, contextKeyAuthError, err)
+}
+
+// WithOperator returns a copy of ctx marked as a platform-operator request, set
+// by the middleware when a valid operator key is presented (Authorization:
+// Operator <key>, or the X-Operator-Key alias).
+// The operator bit authorizes the admin surface independently of the policy —
+// RequireAdmin honors it even when the policy is nil/deleted — so it is the
+// break-glass path for restoring a wiped policy over HTTP.
+func WithOperator(ctx context.Context) context.Context {
+	return context.WithValue(ctx, contextKeyOperator, true)
+}
+
+// IsOperator reports whether the request was authenticated with the operator
+// key. See WithOperator.
+func IsOperator(ctx context.Context) bool {
+	v, _ := ctx.Value(contextKeyOperator).(bool)
+	return v
 }

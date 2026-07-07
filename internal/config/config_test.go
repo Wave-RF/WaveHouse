@@ -25,6 +25,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.ClickHouse.Password)
 	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
 	assert.Equal(t, "role", cfg.Auth.RoleClaim)
+	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.False(t, cfg.Dedupe.Enabled)
 	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
 	assert.True(t, cfg.DLQ.Enabled)
@@ -52,6 +53,7 @@ clickhouse:
   http_scheme: "https"
 auth:
   jwt_secret: "test-secret"
+  operator_key: "op-key"
 `
 	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
@@ -65,6 +67,14 @@ auth:
 	assert.Equal(t, "https", cfg.ClickHouse.HTTPScheme)
 	assert.Equal(t, time.Duration(30)*time.Second, cfg.ClickHouse.QueryTimeout)
 	assert.Equal(t, "test-secret", cfg.Auth.JWTSecret)
+	assert.Equal(t, "op-key", cfg.Auth.OperatorKey)
+}
+
+func TestLoad_OperatorKey_FromEnv(t *testing.T) {
+	t.Setenv("WH_AUTH_OPERATOR_KEY", "env-operator-key")
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "env-operator-key", cfg.Auth.OperatorKey)
 }
 
 func TestLoad_QueryLimits_Defaults(t *testing.T) {

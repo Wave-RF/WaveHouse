@@ -78,6 +78,13 @@ func run() int {
 		logger.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
+	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
+	if cfg.Auth.OperatorKey == "" {
+		logger.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or the policy is wiped — you will be locked out remotely and will need SSH access to restore the policy file and reboot")
+	} else {
+		logger.Info("operator key is set: requests presenting it via 'Authorization: Operator <key>' (or the X-Operator-Key alias) are authorized as a full-access platform operator, and can restore a wiped policy over HTTP")
+	}
+
 	ctx := context.Background()
 	serviceName := "wavehouse"
 
@@ -375,10 +382,11 @@ func run() int {
 	// Build the auth middleware up front so a misconfigured/unreachable JWKS
 	// endpoint fails startup loudly rather than booting into a degraded state.
 	authMW, err := auth.Middleware(auth.Config{
-		JWTSecret: cfg.Auth.JWTSecret,
-		JWKSURL:   cfg.Auth.JWKSURL,
-		RoleClaim: cfg.Auth.RoleClaim,
-	})
+		JWTSecret:   cfg.Auth.JWTSecret,
+		JWKSURL:     cfg.Auth.JWKSURL,
+		RoleClaim:   cfg.Auth.RoleClaim,
+		OperatorKey: cfg.Auth.OperatorKey,
+	}, policyStore, logger)
 	if err != nil {
 		logger.Error("auth middleware init", "error", err)
 		return 1

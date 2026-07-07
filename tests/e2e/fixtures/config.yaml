@@ -26,6 +26,7 @@ dedupe:
 auth:
   jwt_secret: sdk-dev-secret
   role_claim: role
+  # operator_key: "" # non-JWT full-access operator credential (Authorization: Operator, or X-Operator-Key); unset in the rig
 
 schema:
   # 5s, not the 60s default — tests asserting schema-discovery side
