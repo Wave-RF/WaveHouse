@@ -65,8 +65,9 @@ func WithAuthError(ctx context.Context, err error) context.Context {
 	return context.WithValue(ctx, contextKeyAuthError, err)
 }
 
-// WithOperator returns a copy of ctx marked as a platform-operator request,
-// set by the middleware when a valid operator key (X-Operator-Key) is presented.
+// WithOperator returns a copy of ctx marked as a platform-operator request, set
+// by the middleware when a valid operator key is presented (Authorization:
+// Operator <key>, or the X-Operator-Key alias).
 // The operator bit authorizes the admin surface independently of the policy —
 // RequireAdmin honors it even when the policy is nil/deleted — so it is the
 // break-glass path for restoring a wiped policy over HTTP.

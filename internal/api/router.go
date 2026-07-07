@@ -252,9 +252,10 @@ func RequireAdmin(store *policy.Store, logger *slog.Logger) func(http.Handler) h
 			if store != nil {
 				p = store.Get()
 			}
-			// The operator key (X-Operator-Key) authorizes the admin surface
-			// independently of the policy, so it passes even when p is nil —
-			// the break-glass path for restoring a wiped policy over HTTP.
+			// The operator key (Authorization: Operator <key>, or the X-Operator-Key
+			// alias) authorizes the admin surface independently of the policy, so it
+			// passes even when p is nil — the break-glass path for restoring a wiped
+			// policy over HTTP.
 			role := policy.ResolveRole(p, auth.RoleFromContext(r.Context()))
 			if auth.IsOperator(r.Context()) || policy.IsAdmin(p, role) {
 				next.ServeHTTP(w, r)

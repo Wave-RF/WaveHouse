@@ -200,7 +200,7 @@ Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { c
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies everyone, admins included). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
+There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
 
 ```bash
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
