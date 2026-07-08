@@ -149,10 +149,18 @@ type Cache struct {
 // claim matches a granted role (or the policy admin_role). With neither
 // JWTSecret nor JWKSURL set, no token can validate, so every request is the
 // default role — a pure public deployment.
+//
+// OperatorKey is an optional non-JWT credential for the operator running the
+// deployment: a request presenting it via an "Authorization: Operator <key>"
+// header (or the X-Operator-Key alias) is authorized as a full-access platform
+// operator, independent of the JWT verifier, and keeps working even if the
+// policy is missing/deleted (break-glass recovery). Empty (the default) disables
+// it. Treat it as an admin secret.
 type Auth struct {
-	JWTSecret string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
-	JWKSURL   string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
-	RoleClaim string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
+	JWTSecret   string `yaml:"jwt_secret" env:"WH_AUTH_JWT_SECRET"`
+	JWKSURL     string `yaml:"jwks_url" env:"WH_AUTH_JWKS_URL"`
+	RoleClaim   string `yaml:"role_claim" env:"WH_AUTH_ROLE_CLAIM" env-default:"role"`
+	OperatorKey string `yaml:"operator_key" env:"WH_AUTH_OPERATOR_KEY"`
 }
 
 // Policy configures the access control policy engine.
