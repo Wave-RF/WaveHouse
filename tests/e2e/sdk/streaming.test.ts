@@ -1,6 +1,6 @@
 import type { Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { adminClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
+import { adminClient, authClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 describe("Streaming", () => {
@@ -18,10 +18,18 @@ describe("Streaming", () => {
     const publicPolicy = structuredClone(baselinePolicy);
     publicPolicy.default_role = "anon";
 
-    // Explicitly allow the 'anon' role to SELECT (stream) from this suite's tables
+    // Explicitly allow the 'anon' role to SELECT (stream) from this suite's tables.
+    // 'scoped' additionally carries a per-subscriber row filter — streamed rows are
+    // limited to the caller's own country claim — so the SSE fan-out exercises the
+    // row-level-security path (CompileRowFilter → RowVisible) end to end, not just
+    // column projection.
     publicPolicy.tables[T.clicks].select = {
       ...(publicPolicy.tables[T.clicks].select || {}),
       anon: { allow_columns: ["*"] },
+      scoped: {
+        allow_columns: ["*"],
+        filter: { country: { _eq: "{{ jwt.country }}" } },
+      },
     };
     publicPolicy.tables[T.events].select = {
       ...(publicPolicy.tables[T.events].select || {}),
@@ -113,6 +121,50 @@ describe("Streaming", () => {
       } finally {
         if (unsub) unsub();
         stream.close();
+      }
+    });
+
+    it("applies the role's row filter per subscriber (row-level scoping)", async () => {
+      // Two subscribers, same 'scoped' role but different country claims. The role's
+      // filter (country = {{ jwt.country }}) must be evaluated per subscriber against
+      // the full event, so each sees only its own country's rows over the live stream —
+      // the #319 row-level-security guarantee, exercised end to end on SSE.
+      const inserter = dataClient(); // viewer may insert into this suite's tables
+      const usClient = authClient("scoped", { country: "US" });
+      const caClient = authClient("scoped", { country: "CA" });
+      const usEvents: any[] = [];
+      const caEvents: any[] = [];
+      const usId = testId();
+      const caId = testId();
+
+      const usStream = usClient.from(T.clicks).stream();
+      const caStream = caClient.from(T.clicks).stream();
+      let unsubUs: (() => void) | undefined;
+      let unsubCa: (() => void) | undefined;
+      try {
+        unsubUs = usStream.subscribe({ next: (e) => usEvents.push(e), error: (err) => console.error("US SSE error:", err) });
+        unsubCa = caStream.subscribe({ next: (e) => caEvents.push(e), error: (err) => console.error("CA SSE error:", err) });
+        await usStream.connected(20_000);
+        await caStream.connected(20_000);
+
+        // One row per country; the filter must route each to only its matching subscriber.
+        const base = { page: "/scoped", user_id: "u", session_id: "s", duration_ms: 1 };
+        await inserter.from(T.clicks).insert({ ...base, event_id: usId, country: "US" });
+        await inserter.from(T.clicks).insert({ ...base, event_id: caId, country: "CA" });
+
+        // Each subscriber receives its own country's row. Waiting for BOTH positives
+        // proves both rows were broadcast, so the cross-absence checks below are real
+        // (a row filtered out at the source can never arrive later).
+        await waitForCondition(() => usEvents.some((e) => e.data?.event_id === usId), 10_000);
+        await waitForCondition(() => caEvents.some((e) => e.data?.event_id === caId), 10_000);
+
+        expect(usEvents.some((e) => e.data?.event_id === caId)).toBe(false);
+        expect(caEvents.some((e) => e.data?.event_id === usId)).toBe(false);
+      } finally {
+        if (unsubUs) unsubUs();
+        if (unsubCa) unsubCa();
+        usStream.close();
+        caStream.close();
       }
     });
   });
