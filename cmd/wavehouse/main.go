@@ -292,7 +292,7 @@ func run() int {
 	// handler (write counts), and the Hub that projects/serializes each event once
 	// per (topic, role) and pushes it to that role's subscribers.
 	sseMetrics := stream.NewMetrics()
-	streamHub := stream.NewHub(policyStore, sseMetrics)
+	streamHub := stream.NewHub(policyStore, registry, sseMetrics)
 
 	// Start policy watch for cluster-wide updates.
 	go policyStore.Watch(ctx)

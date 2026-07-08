@@ -23,6 +23,13 @@ type Subscriber struct {
 	out    chan Frame // ready-to-write frames; see defaultSubscriberQueue
 	bucket Bucket     // set on Add so the keepalive wheel's Remove is O(1); nil until added
 
+	// claims are this connection's JWT claims, evaluated against a role's row-level
+	// security filter so the Hub can decide, per subscriber, whether each event row is
+	// visible (see Hub.Broadcast). Set once via SetClaims before Add, then read-only —
+	// so the fan-out goroutine reads it without synchronization. nil ⇒ no claims (a
+	// tokenless subscriber), which fails any claim-scoped row-filter closed.
+	claims map[string]any
+
 	// evict is closed (once) to ask the owning handler to disconnect a wedged slow
 	// consumer; the handler selects on Evicted() and tears the stream down, after
 	// which the client reconnects and gap-fills via Last-Event-ID. The seam is wired
@@ -40,6 +47,12 @@ func NewSubscriber() *Subscriber { return newSubscriber(defaultSubscriberQueue) 
 func newSubscriber(size int) *Subscriber {
 	return &Subscriber{out: make(chan Frame, size), evict: make(chan struct{})}
 }
+
+// SetClaims attaches this connection's JWT claims, which the Hub evaluates against a
+// role's row-level-security filter to decide, per subscriber, whether each event row
+// is visible. Call it before registering the subscriber with the Hub; the claims are
+// then read-only for the subscriber's lifetime, so the fan-out reads them race-free.
+func (s *Subscriber) SetClaims(claims map[string]any) { s.claims = claims }
 
 // Frames is the queue of ready-to-write frames; the handler writes whatever
 // arrives here to the client verbatim.

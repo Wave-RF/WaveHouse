@@ -48,9 +48,9 @@ func Validate(schema *TableSchema, data map[string]any) error {
 	return nil
 }
 
-// isTypeCompatible checks whether a Go/JSON value can be stored in the given ClickHouse type.
-func isTypeCompatible(chType string, val any) bool {
-	// Robustly unwrap nested modifiers (e.g., LowCardinality(Nullable(String)))
+// unwrapType strips Nullable(...) and LowCardinality(...) modifiers (nested in any
+// order, e.g. LowCardinality(Nullable(String))) down to the base ClickHouse type.
+func unwrapType(chType string) string {
 	for {
 		if strings.HasPrefix(chType, "Nullable(") && strings.HasSuffix(chType, ")") {
 			chType = chType[9 : len(chType)-1]
@@ -60,8 +60,13 @@ func isTypeCompatible(chType string, val any) bool {
 			chType = chType[15 : len(chType)-1]
 			continue
 		}
-		break
+		return chType
 	}
+}
+
+// isTypeCompatible checks whether a Go/JSON value can be stored in the given ClickHouse type.
+func isTypeCompatible(chType string, val any) bool {
+	chType = unwrapType(chType)
 
 	switch {
 	// String-compatible types accept Strings, Numbers (coerced), and Bools
@@ -142,6 +147,14 @@ func isTypeCompatible(chType string, val any) bool {
 		// Unknown type — accept any value and let ClickHouse validate.
 		return true
 	}
+}
+
+// IsNumericType reports whether chType is a ClickHouse numeric type (integer, float,
+// or decimal), unwrapping Nullable/LowCardinality modifiers first. The stream
+// row-filter evaluator uses it to choose numeric vs lexicographic comparison for a
+// column, so ordering predicates (>, <) on numbers match ClickHouse (9 < 100).
+func IsNumericType(chType string) bool {
+	return isNumericType(unwrapType(chType))
 }
 
 // isNumericType returns true for ClickHouse integer, float, and decimal types.

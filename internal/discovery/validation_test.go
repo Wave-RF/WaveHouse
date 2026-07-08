@@ -224,3 +224,32 @@ func TestIsNumericType(t *testing.T) {
 		})
 	}
 }
+
+// TestIsNumericType_Exported checks the exported wrapper the stream row-filter uses:
+// it must unwrap Nullable/LowCardinality (in any nesting) before classifying, so a
+// Nullable(UInt64) column still compares numerically.
+func TestIsNumericType_Exported(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		chType string
+		want   bool
+	}{
+		{"UInt64", true},
+		{"Nullable(UInt64)", true},
+		{"LowCardinality(Int32)", true},
+		{"LowCardinality(Nullable(Float64))", true},
+		{"Decimal(10,2)", true},
+		{"String", false},
+		{"Nullable(String)", false},
+		{"LowCardinality(String)", false},
+		{"DateTime", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.chType, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsNumericType(tt.chType))
+		})
+	}
+}

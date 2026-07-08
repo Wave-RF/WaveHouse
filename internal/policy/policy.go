@@ -62,11 +62,16 @@ type Filter struct {
 
 // ResolvedPermissions is the result of evaluating a policy against JWT claims.
 type ResolvedPermissions struct {
-	Allowed             bool
-	AllowColumns        []string
-	DenyColumns         []string
-	WhereClause         string
-	WhereParams         []any
+	Allowed      bool
+	AllowColumns []string
+	DenyColumns  []string
+	WhereClause  string
+	WhereParams  []any
+	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
+	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
+	// while the query path renders it to SQL. Both derive from one resolvePredicates
+	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
+	rowFilter           []resolvedPredicate
 	CheckClauses        map[string]any // column → required value (for inserts)
 	AllowedAggregations []string
 	DeniedAggregations  []string
@@ -189,7 +194,13 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 				return &ResolvedPermissions{Allowed: false}
 			}
 		}
-		clauses, params := resolveFilters(perms.Filter, claims)
+		// Resolve the row-filter once into predicates, then render both read surfaces
+		// from that single source so they can't drift: the query path binds them into
+		// a SQL WHERE here; the stream path evaluates the same predicates in memory
+		// (ResolvedPermissions.RowVisible).
+		preds := resolvePredicates(perms.Filter, claims)
+		resolved.rowFilter = preds
+		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
 			resolved.WhereClause = strings.Join(clauses, " AND ")
 			resolved.WhereParams = params
@@ -214,50 +225,90 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	return resolved
 }
 
-// resolveFilters converts filter definitions with claim templates into SQL WHERE clauses.
-func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
+// resolvedPredicate is one row-filter comparison with its claim templates already
+// resolved to concrete string values — the shared, render-agnostic form the query
+// path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
+// (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
+// for the scalar operators and zero-or-more for "in" (empty ⇒ matches no rows).
+type resolvedPredicate struct {
+	Column string
+	Op     string
+	Values []string
+}
+
+// resolvePredicates resolves each filter's claim templates once into predicates.
+// Both read surfaces derive from this single result so they can't drift; the
+// operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
+func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
+	var preds []resolvedPredicate
+	for col, f := range filters {
+		if f.Eq != nil {
+			preds = append(preds, resolvedPredicate{col, "=", []string{resolveTemplate(*f.Eq, claims)}})
+		}
+		if f.Neq != nil {
+			preds = append(preds, resolvedPredicate{col, "!=", []string{resolveTemplate(*f.Neq, claims)}})
+		}
+		if f.Gt != nil {
+			preds = append(preds, resolvedPredicate{col, ">", []string{resolveTemplate(*f.Gt, claims)}})
+		}
+		if f.Lt != nil {
+			preds = append(preds, resolvedPredicate{col, "<", []string{resolveTemplate(*f.Lt, claims)}})
+		}
+		if f.In != nil {
+			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+		}
+	}
+	return preds
+}
+
+// predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
+func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 	var clauses []string
 	var params []any
-	for col, f := range filters {
+	for _, p := range preds {
 		// Quote the policy-authored column the same way the query builder quotes
 		// caller columns, so a row-filter on a weird-but-legal column name (dots,
 		// spaces, keywords) is emitted safely.
-		qcol := chsql.QuoteIdent(col)
-		if f.Eq != nil {
-			val := resolveTemplate(*f.Eq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s = ?", qcol))
-			params = append(params, val)
-		}
-		if f.Neq != nil {
-			val := resolveTemplate(*f.Neq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s != ?", qcol))
-			params = append(params, val)
-		}
-		if f.Gt != nil {
-			val := resolveTemplate(*f.Gt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s > ?", qcol))
-			params = append(params, val)
-		}
-		if f.Lt != nil {
-			val := resolveTemplate(*f.Lt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s < ?", qcol))
-			params = append(params, val)
-		}
-		if f.In != nil {
-			vals := resolveInValues(*f.In, claims)
-			if len(vals) == 0 {
+		qcol := chsql.QuoteIdent(p.Column)
+		switch p.Op {
+		case "in":
+			if len(p.Values) == 0 {
 				// An empty/unresolvable set fails closed: a row filter scoped to no
 				// values matches no rows, never widening to all of them (the #224
 				// fail-open). `IN ()` is not valid SQL, so emit a constant false.
 				clauses = append(clauses, "1 = 0")
 			} else {
-				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
+				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(p.Values)), ",")
 				clauses = append(clauses, fmt.Sprintf("%s IN (%s)", qcol, placeholders))
-				params = append(params, vals...)
+				for _, v := range p.Values {
+					params = append(params, v)
+				}
 			}
+		default:
+			clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, p.Op))
+			params = append(params, p.Values[0])
 		}
 	}
 	return clauses, params
+}
+
+// resolveFilters converts filter definitions with claim templates into SQL WHERE
+// clauses. Retained as the predicates→SQL composition the query-path tests target.
+func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
+	return predicatesToSQL(resolvePredicates(filters, claims))
+}
+
+// toStrings normalizes resolveInValues' []any (already stringified elements) to the
+// []string a resolvedPredicate carries.
+func toStrings(vals []any) []string {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = fmt.Sprint(v)
+	}
+	return out
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.

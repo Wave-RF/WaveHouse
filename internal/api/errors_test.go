@@ -194,7 +194,7 @@ func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
 		Query:       &QueryHandler{},
-		SSE:         NewStreamHandler(stream.NewHub(nil, nil), nil),
+		SSE:         NewStreamHandler(stream.NewHub(nil, nil, nil), nil),
 		Health:      &HealthHandler{},
 		Schema:      NewSchemaHandler(reg),
 		AuthMW:      func(next http.Handler) http.Handler { return next },
