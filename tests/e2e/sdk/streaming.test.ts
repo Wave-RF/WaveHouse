@@ -1,6 +1,13 @@
 import type { Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { adminClient, authClient, dataClient, publicClient, testId, waitForCondition } from "./helpers.js";
+import {
+  adminClient,
+  authClient,
+  dataClient,
+  publicClient,
+  testId,
+  waitForCondition,
+} from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 describe("Streaming", () => {
@@ -142,8 +149,14 @@ describe("Streaming", () => {
       let unsubUs: (() => void) | undefined;
       let unsubCa: (() => void) | undefined;
       try {
-        unsubUs = usStream.subscribe({ next: (e) => usEvents.push(e), error: (err) => console.error("US SSE error:", err) });
-        unsubCa = caStream.subscribe({ next: (e) => caEvents.push(e), error: (err) => console.error("CA SSE error:", err) });
+        unsubUs = usStream.subscribe({
+          next: (e) => usEvents.push(e),
+          error: (err) => console.error("US SSE error:", err),
+        });
+        unsubCa = caStream.subscribe({
+          next: (e) => caEvents.push(e),
+          error: (err) => console.error("CA SSE error:", err),
+        });
         await usStream.connected(20_000);
         await caStream.connected(20_000);
 
