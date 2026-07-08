@@ -801,26 +801,17 @@ header.header {
 }
 /* Inner header row width. Kept GLOBAL (not in Header.astro's scoped styles) on
    purpose: the header is PRESERVED across view-transitions, and Astro's scoped
-   styles don't re-apply to a persisted element after a swap, so a scoped
-   transition is dropped mid-navigation (its max-width read `none` post-nav). A
-   global rule survives, so the width TWEENS instead of snapping. Doc pages are
-   full-bleed; the splash (the only page with a hero) holds the inner content in
-   a centred content-width column matching the hero. */
+   styles don't reliably re-apply to a persisted element after a swap (its
+   max-width read `none` post-nav), so a scoped rule can drop on navigation — a
+   global one survives. Doc pages render full-bleed; the splash (the only page
+   with a hero) holds the inner content in a centred content-width column
+   matching the hero. The width just cuts between the two on navigation — no
+   tween (a moving transition on the header read as distracting). */
 .wh-header {
-  /* 100vw (not 100%) so the two endpoints are both <length> — max-width won't
-     TWEEN between a length (68rem) and a percentage, it snaps. 100vw never binds
-     (the row is already capped by the padded bar), so full-bleed is unchanged. */
-  max-width: 100vw;
   margin-inline: auto;
-  transition: max-width 0.4s ease;
 }
 body:has(.wh-hero) .wh-header {
   max-width: 68rem;
-}
-@media (prefers-reduced-motion: reduce) {
-  .wh-header {
-    transition: none;
-  }
 }
 /* Mobile: glass off. A translucent fixed bar over a small screen reads as a
    double exposure while scrolling, and Starlight's sticky "On this page" bar
