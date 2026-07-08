@@ -19,7 +19,7 @@ import (
 // resolved against each subscriber's claims, so two subscribers of the same role can
 // be entitled to different rows. For a role that carries a row-filter, Broadcast
 // therefore keeps the shared column projection but evaluates row visibility PER
-// subscriber (ResolvedPermissions.RowVisible) before delivering — closing the
+// subscriber (CompiledRowFilter.RowVisible) before delivering — closing the
 // query/stream RLS drift in #319. Roles without a row-filter keep the pure
 // once-per-role fast path unchanged. See projectColumns.
 type Hub struct {
@@ -241,8 +241,9 @@ func (h *Hub) ReplayFrame(role string, claims map[string]any, raw []byte) (Frame
 // role+table policy entry (AllowColumns/DenyColumns), never from claims, so this
 // frame is byte-identical for every subscriber of a (role, table) — the shared
 // projection that lets one serialization serve a whole bucket. Row-level security is
-// NOT applied here; the caller checks perms.RowVisible per subscriber (with that
-// subscriber's claims) when perms.HasRowFilter(). ok=false means skip: the role can't
+// NOT applied here; when perms.HasRowFilter(), the caller compiles the role's filter
+// once (policy.CompileRowFilter) and checks its RowVisible per subscriber with that
+// subscriber's claims. ok=false means skip: the role can't
 // read the table, or the payload is unusable. perms is nil for the legacy no-policy
 // passthrough (which has no row-filter).
 func projectColumns(p *policy.Policy, filter bool, role string, evt *ingest.EventMessage, raw []byte, decoded bool) (wire []byte, perms *policy.ResolvedPermissions, ok bool) {

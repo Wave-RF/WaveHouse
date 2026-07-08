@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"math"
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -150,7 +152,9 @@ func compareScalar(rowVal any, filterVal string, numeric bool) (int, bool) {
 	if numeric {
 		a, err1 := strconv.ParseFloat(s, 64)
 		b, err2 := strconv.ParseFloat(filterVal, 64)
-		if err1 != nil || err2 != nil {
+		// NaN must be rejected explicitly: ParseFloat accepts "NaN", and NaN's
+		// three-way comparison reads as "equal to everything" below — a fail-open.
+		if err1 != nil || err2 != nil || math.IsNaN(a) || math.IsNaN(b) {
 			return 0, false
 		}
 		switch {
@@ -159,10 +163,29 @@ func compareScalar(rowVal any, filterVal string, numeric bool) (int, bool) {
 		case a > b:
 			return 1, true
 		default:
-			return 0, true
+			// Float equality is not proof of equality: distinct integers beyond
+			// 2^53 (string-encoded on ingest exactly to survive JS precision loss)
+			// collapse to one float64, and rounding is monotonic so only the
+			// equal case is in doubt. Resolve the tie at full precision.
+			return compareExact(s, filterVal)
 		}
 	}
 	return strings.Compare(s, filterVal), true
+}
+
+// compareExact compares two numeric strings at arbitrary precision — the tie-break
+// for operands float64 cannot tell apart. ok=false when either side isn't an exact
+// rational (±Inf, malformed), failing the predicate closed.
+func compareExact(a, b string) (int, bool) {
+	ra, ok := new(big.Rat).SetString(a)
+	if !ok {
+		return 0, false
+	}
+	rb, ok := new(big.Rat).SetString(b)
+	if !ok {
+		return 0, false
+	}
+	return ra.Cmp(rb), true
 }
 
 // scalarString renders a JSON-decoded scalar as the canonical string compared

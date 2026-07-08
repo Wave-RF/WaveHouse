@@ -78,6 +78,40 @@ func TestRowVisible_NumericEquality_FloatFormatting(t *testing.T) {
 	assert.False(t, perms.RowVisible(map[string]any{"amount": float64(101)}, num))
 }
 
+// TestRowVisible_NaN_FailsClosed: strconv.ParseFloat accepts "NaN", and NaN's
+// three-way comparison would otherwise read as "equal to everything" — a fail-open
+// that delivers a row the query path's WHERE excludes. Either operand parsing to
+// NaN must withhold the row instead.
+func TestRowVisible_NaN_FailsClosed(t *testing.T) {
+	t.Parallel()
+	num := map[string]bool{"amount": true}
+
+	byRow := evalRowFilter(t, map[string]Filter{"amount": {Eq: new("100")}}, nil)
+	assert.False(t, byRow.RowVisible(map[string]any{"amount": "NaN"}, num), "NaN row value must not equal 100")
+
+	byClaim := evalRowFilter(t, map[string]Filter{"amount": {Eq: new("{{ jwt.cap }}")}}, map[string]any{"cap": "NaN"})
+	assert.False(t, byClaim.RowVisible(map[string]any{"amount": float64(100)}, num), "NaN claim must not match any row")
+
+	neq := evalRowFilter(t, map[string]Filter{"amount": {Neq: new("NaN")}}, nil)
+	assert.False(t, neq.RowVisible(map[string]any{"amount": float64(100)}, num), "NaN is uncomparable, so even != fails closed")
+}
+
+// TestRowVisible_NumericEquality_ExactBeyondFloat64: ingest accepts string-encoded
+// numerics precisely so 64-bit IDs survive JS precision loss; equality must not
+// collapse distinct IDs that round to the same float64 (adjacent values past 2^53).
+func TestRowVisible_NumericEquality_ExactBeyondFloat64(t *testing.T) {
+	t.Parallel()
+	num := map[string]bool{"id": true}
+
+	perms := evalRowFilter(t, map[string]Filter{"id": {Eq: new("9007199254740993")}}, nil)
+	assert.False(t, perms.RowVisible(map[string]any{"id": "9007199254740992"}, num), "float64-equal neighbors are not equal")
+	assert.True(t, perms.RowVisible(map[string]any{"id": "9007199254740993"}, num))
+	assert.True(t, perms.RowVisible(map[string]any{"id": "9007199254740993.0"}, num), "same value in a different rendering still matches")
+
+	neq := evalRowFilter(t, map[string]Filter{"id": {Neq: new("9007199254740993")}}, nil)
+	assert.True(t, neq.RowVisible(map[string]any{"id": "9007199254740992"}, num), "the exact tie-break keeps distinct IDs unequal for !=")
+}
+
 func TestRowVisible_NilReceiver_AllVisible(t *testing.T) {
 	t.Parallel()
 	var perms *ResolvedPermissions
