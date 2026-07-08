@@ -161,13 +161,16 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 		// shared, but whether each subscriber may see THIS row depends on its claims, so
 		// evaluate visibility per subscriber. Predicates read the full event data (a
 		// filter may key on a column the role can't SELECT), not the projected columns.
+		// The filter compiles once per bucket (claims-independent); only the claim
+		// binding inside RowVisible is per subscriber, so a filtered high-fan-out topic
+		// pays no per-subscriber predicate resolution.
 		if !numericResolved {
 			numericCols = h.numericCols(evt.TableName)
 			numericResolved = true
 		}
+		compiled := policy.CompileRowFilter(p, rb.role, evt.TableName, "select")
 		for _, sub := range rb.bucket.Snapshot() {
-			subPerms := policy.EvaluateRowFilter(p, rb.role, evt.TableName, "select", sub.claims)
-			if !subPerms.RowVisible(evt.Data, numericCols) {
+			if !compiled.RowVisible(evt.Data, sub.claims, numericCols) {
 				continue // this row is filtered out for this subscriber
 			}
 			if !sub.Send(frame) {
@@ -224,8 +227,8 @@ func (h *Hub) ReplayFrame(role string, claims map[string]any, raw []byte) (Frame
 		return Frame{}, false
 	}
 	if perms.HasRowFilter() {
-		subPerms := policy.EvaluateRowFilter(p, role, evt.TableName, "select", claims)
-		if !subPerms.RowVisible(evt.Data, h.numericCols(evt.TableName)) {
+		compiled := policy.CompileRowFilter(p, role, evt.TableName, "select")
+		if !compiled.RowVisible(evt.Data, claims, h.numericCols(evt.TableName)) {
 			return Frame{}, false // this row is filtered out for these claims
 		}
 	}

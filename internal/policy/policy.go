@@ -112,7 +112,7 @@ func ResolveRole(p *Policy, role string) string {
 // (role, table, operation), applying role resolution, the admin bypass, and
 // default-deny. It returns admin=true for the unconditional-bypass role (perms is the
 // zero value — the caller grants full access) and ok=false for any denial (perms is
-// the zero value). Evaluate (query path) and EvaluateRowFilter (stream path) share
+// the zero value). Evaluate (query path) and CompileRowFilter (stream path) share
 // this one navigation so they can never disagree on who is authorized or which policy
 // entry applies.
 func resolveRolePerms(p *Policy, role, table, operation string) (perms RolePermissions, admin, ok bool) {
@@ -198,9 +198,9 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 
 	// Resolve the row-filter once into predicates, then render both read surfaces
 	// from that single source so they can't drift: the query path binds them into a
-	// SQL WHERE here; the stream path evaluates the same predicates in memory
-	// (ResolvedPermissions.RowVisible, via EvaluateRowFilter). resolveFilterPredicates
-	// fails closed on a bind-unsafe column (see there).
+	// SQL WHERE here; the stream path evaluates the same compiled predicates in memory
+	// (CompiledRowFilter.RowVisible). resolveFilterPredicates fails closed on a
+	// bind-unsafe column (see there).
 	if len(perms.Filter) > 0 {
 		preds, deny := resolveFilterPredicates(perms.Filter, claims)
 		if deny {
@@ -232,52 +232,198 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	return resolved
 }
 
-// EvaluateRowFilter resolves ONLY the row-level-security predicates governing
-// (role, table, operation) for the given claims, returning a *ResolvedPermissions the
-// caller evaluates with RowVisible. It is the stream fan-out's per-subscriber twin of
-// Evaluate: it shares Evaluate's role resolution, admin bypass, default-deny, and
-// bind-safe predicate resolution — so the two can never disagree on which rows a
-// subscriber may see — but skips the column, aggregation, resource-cap, and SQL-WHERE
-// work Evaluate does, none of which an in-memory row check needs. That keeps a
-// high-fan-out filtered topic from allocating and discarding a full ResolvedPermissions
-// per subscriber per event (see stream.BenchmarkBroadcast_RowFilteredFanout).
-//
-// The result carries Allowed and the resolved rowFilter only. Admin and roles without
-// a filter yield no predicates (RowVisible admits every row); a denied role or a
-// bind-unsafe filter yields Allowed:false. The stream calls this only after its column
-// projection has already confirmed the role may read the table, so Allowed is
-// invariantly true at that call site and RowVisible alone decides visibility.
-func EvaluateRowFilter(p *Policy, role, table, operation string, claims map[string]any) *ResolvedPermissions {
-	perms, admin, ok := resolveRolePerms(p, role, table, operation)
-	if admin {
-		return &ResolvedPermissions{Allowed: true}
-	}
-	if !ok {
-		return &ResolvedPermissions{Allowed: false}
-	}
-	preds, deny := resolveFilterPredicates(perms.Filter, claims)
-	if deny {
-		return &ResolvedPermissions{Allowed: false}
-	}
-	return &ResolvedPermissions{Allowed: true, rowFilter: preds}
-}
-
-// resolveFilterPredicates resolves a role's row-filter map into predicates, first
-// failing closed (deny=true) if any filter column is bind-unsafe: a '?' in the column
-// would shift clickhouse-go's positional value binding — including this filter's own
-// bound value — so the role is denied rather than the predicate dropped (which would
-// widen row access) or a mis-bound query emitted. validateRolePerms rejects such a
-// policy at write time; this is defense-in-depth (the resolver does not re-validate the
-// policy it is handed). Shared by Evaluate (query path, which then renders SQL via
-// predicatesToSQL) and EvaluateRowFilter (stream path, which evaluates in memory), so
-// both reject the same unsafe policy and resolve identical predicates.
+// resolveFilterPredicates resolves a role's row-filter map into predicates for the
+// query path, first failing closed (deny=true) if any filter column is bind-unsafe: a
+// '?' in the column would shift clickhouse-go's positional value binding — including
+// this filter's own bound value — so the role is denied rather than the predicate
+// dropped (which would widen row access) or a mis-bound query emitted. validateRolePerms
+// rejects such a policy at write time; this is defense-in-depth (the resolver does not
+// re-validate the policy it is handed). The stream path applies the same bind-unsafe
+// gate in CompileRowFilter, so both read surfaces reject the same unsafe policy.
 func resolveFilterPredicates(filters map[string]Filter, claims map[string]any) (preds []resolvedPredicate, deny bool) {
-	for col := range filters {
-		if chsql.BindUnsafe(col) {
-			return nil, true
-		}
+	if filterBindUnsafe(filters) {
+		return nil, true
 	}
 	return resolvePredicates(filters, claims), false
+}
+
+// filterBindUnsafe reports whether any filter column can't be bound safely (see
+// resolveFilterPredicates for why that denies the role). Claims-independent, so the
+// stream can check it once per bucket in CompileRowFilter.
+func filterBindUnsafe(filters map[string]Filter) bool {
+	for col := range filters {
+		if chsql.BindUnsafe(col) {
+			return true
+		}
+	}
+	return false
+}
+
+// -----------------------------------------------------------------------------
+// Compiled row filter: claims-independent structure, per-subscriber claim binding.
+//
+// The stream fan-out resolves a role's row-filter ONCE per bucket into compiled
+// predicates (CompileRowFilter), then binds each subscriber's claims at evaluation
+// time (CompiledRowFilter.RowVisible). It is the deferred-binding twin of
+// resolvePredicates, which eagerly resolves for the query path's single claim set.
+// The two must agree on every (filter, claims) pair — that parity is pinned by
+// TestCompiledRowFilter_MatchesEvaluatePath. The optimization is that a whole
+// {{ jwt.path }} value binds via a map walk (navigateClaims) and a constant binds to
+// itself, so a filtered high-fan-out topic pays no per-subscriber regexp/predicate
+// allocation.
+// -----------------------------------------------------------------------------
+
+type valueKind uint8
+
+const (
+	valConstant valueKind = iota // literal, no claim template
+	valClaim                     // exactly one {{ jwt.path }} — bound via navigateClaims
+	valTemplate                  // text with embedded {{ jwt.… }} — bound via resolveTemplate
+)
+
+// compiledValue is a filter value with its claim-template structure classified once,
+// so binding a subscriber's claims is a map walk (valClaim) or a no-op (valConstant)
+// rather than a regexp pass.
+type compiledValue struct {
+	kind valueKind
+	s    string   // valConstant literal, or valTemplate raw text
+	path []string // valClaim: the pre-split jwt claim path
+}
+
+// compileScalarValue classifies an _eq/_neq/_gt/_lt value the way resolveTemplate reads
+// it — a substring replace, with a whole-value (no surrounding text) {{ jwt.path }}
+// short-circuited to a direct claim lookup. It matches on the UNtrimmed value so a
+// space-padded ref stays a template, exactly as resolveTemplate would keep the spaces.
+func compileScalarValue(v string) compiledValue {
+	if m := wholeClaimRe.FindStringSubmatch(v); m != nil {
+		return compiledValue{kind: valClaim, path: strings.Split(m[1], ".")}
+	}
+	if claimTemplateRe.MatchString(v) {
+		return compiledValue{kind: valTemplate, s: v}
+	}
+	return compiledValue{kind: valConstant, s: v}
+}
+
+// compileInValue classifies an _in value the way resolveInValues reads it: a
+// TrimSpace'd whole {{ jwt.path }} is a claim list; anything else is a single
+// (possibly templated) value.
+func compileInValue(v string) compiledValue {
+	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(v)); m != nil {
+		return compiledValue{kind: valClaim, path: strings.Split(m[1], ".")}
+	}
+	if claimTemplateRe.MatchString(v) {
+		return compiledValue{kind: valTemplate, s: v}
+	}
+	return compiledValue{kind: valConstant, s: v}
+}
+
+// bindScalar resolves a scalar value against claims — the deferred twin of
+// resolveTemplate. A whole-claim ref returns the claim's string form (no allocation
+// when the claim is already a string; fmt.Sprint otherwise, matching resolveTemplate),
+// and a missing claim resolves to "" exactly as resolveTemplate does.
+func (cv compiledValue) bindScalar(claims map[string]any) string {
+	switch cv.kind {
+	case valClaim:
+		val := navigateClaims(claims, cv.path)
+		if val == nil {
+			return ""
+		}
+		if s, ok := val.(string); ok {
+			return s
+		}
+		return fmt.Sprint(val)
+	case valTemplate:
+		return resolveTemplate(cv.s, claims)
+	case valConstant:
+		return cv.s
+	default:
+		return cv.s // unreachable: every valueKind has an explicit case above
+	}
+}
+
+// bindIn resolves an _in value against claims into the set of bound values (the
+// deferred twin of resolveInValues). A claim list yields one bound value per element;
+// any other value yields the single scalar-bound value.
+func (cv compiledValue) bindIn(claims map[string]any) []string {
+	if cv.kind == valClaim {
+		switch v := navigateClaims(claims, cv.path).(type) {
+		case nil:
+			return nil
+		case []any:
+			out := make([]string, 0, len(v))
+			for _, e := range v {
+				out = append(out, fmt.Sprint(e))
+			}
+			return out
+		default:
+			return []string{fmt.Sprint(v)}
+		}
+	}
+	return []string{cv.bindScalar(claims)}
+}
+
+// compiledPredicate is one row-filter comparison with its value structure compiled but
+// the claim binding deferred to evaluation time.
+type compiledPredicate struct {
+	Column string
+	Op     string
+	Value  compiledValue
+}
+
+// compilePredicates compiles a role's row-filter into per-subscriber-bindable
+// predicates, mirroring resolvePredicates' column/operator expansion (and order) so the
+// compiled and resolved paths produce the same predicate set.
+func compilePredicates(filters map[string]Filter) []compiledPredicate {
+	var preds []compiledPredicate
+	for col, f := range filters {
+		if f.Eq != nil {
+			preds = append(preds, compiledPredicate{col, "=", compileScalarValue(*f.Eq)})
+		}
+		if f.Neq != nil {
+			preds = append(preds, compiledPredicate{col, "!=", compileScalarValue(*f.Neq)})
+		}
+		if f.Gt != nil {
+			preds = append(preds, compiledPredicate{col, ">", compileScalarValue(*f.Gt)})
+		}
+		if f.Lt != nil {
+			preds = append(preds, compiledPredicate{col, "<", compileScalarValue(*f.Lt)})
+		}
+		if f.In != nil {
+			preds = append(preds, compiledPredicate{col, "in", compileInValue(*f.In)})
+		}
+	}
+	return preds
+}
+
+// CompiledRowFilter is a role/table's row-level-security filter compiled once
+// (claims-independent) so the stream fan-out can reuse it across every subscriber in a
+// bucket: resolve it per bucket with CompileRowFilter, then call RowVisible per
+// subscriber with that subscriber's claims. It binds claims at evaluation time, so a
+// filtered high-fan-out topic pays no per-subscriber predicate resolution — the
+// deferred-binding counterpart to the query path's resolvePredicates (which binds a
+// single claim set eagerly for SQL).
+type CompiledRowFilter struct {
+	allowed bool
+	preds   []compiledPredicate
+}
+
+// CompileRowFilter compiles the row-filter governing (role, table, operation),
+// claims-independently. It shares Evaluate's role resolution, admin bypass, and
+// default-deny (via resolveRolePerms) and the same bind-unsafe gate, so it agrees with
+// the query path on who is authorized and which policy is rejected. Compile once per
+// role bucket; the per-subscriber cost is then only RowVisible.
+func CompileRowFilter(p *Policy, role, table, operation string) *CompiledRowFilter {
+	perms, admin, ok := resolveRolePerms(p, role, table, operation)
+	if admin {
+		return &CompiledRowFilter{allowed: true} // admin: no predicates ⇒ every row visible
+	}
+	if !ok {
+		return &CompiledRowFilter{allowed: false}
+	}
+	if filterBindUnsafe(perms.Filter) {
+		return &CompiledRowFilter{allowed: false} // fail closed, as Evaluate does
+	}
+	return &CompiledRowFilter{allowed: true, preds: compilePredicates(perms.Filter)}
 }
 
 // resolvedPredicate is one row-filter comparison with its claim templates already
@@ -291,29 +437,27 @@ type resolvedPredicate struct {
 	Values []string
 }
 
-// resolvePredicates resolves each filter's claim templates once into predicates.
-// Both read surfaces derive from this single result so they can't drift; the
-// operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
+// resolvePredicates resolves each filter's claim templates into predicates for the
+// query path. It compiles the filter — the single, claims-independent source the stream
+// path also uses (CompileRowFilter) — then binds this request's claims, so the two read
+// surfaces derive from one place and can't drift. Operator order within a column
+// (=, !=, >, <, in) mirrors compilePredicates and the former inline SQL.
 func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
 	var preds []resolvedPredicate
-	for col, f := range filters {
-		if f.Eq != nil {
-			preds = append(preds, resolvedPredicate{col, "=", []string{resolveTemplate(*f.Eq, claims)}})
-		}
-		if f.Neq != nil {
-			preds = append(preds, resolvedPredicate{col, "!=", []string{resolveTemplate(*f.Neq, claims)}})
-		}
-		if f.Gt != nil {
-			preds = append(preds, resolvedPredicate{col, ">", []string{resolveTemplate(*f.Gt, claims)}})
-		}
-		if f.Lt != nil {
-			preds = append(preds, resolvedPredicate{col, "<", []string{resolveTemplate(*f.Lt, claims)}})
-		}
-		if f.In != nil {
-			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
-		}
+	for _, cp := range compilePredicates(filters) {
+		preds = append(preds, cp.resolve(claims))
 	}
 	return preds
+}
+
+// resolve binds a compiled predicate's claim value(s) into a resolvedPredicate — the
+// eager, query-path counterpart to compiledPredicate.visible (which the stream
+// evaluates against the row in memory instead of materializing this form).
+func (cp compiledPredicate) resolve(claims map[string]any) resolvedPredicate {
+	if cp.Op == "in" {
+		return resolvedPredicate{cp.Column, "in", cp.Value.bindIn(claims)}
+	}
+	return resolvedPredicate{cp.Column, cp.Op, []string{cp.Value.bindScalar(claims)}}
 }
 
 // predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
@@ -351,19 +495,6 @@ func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 // clauses. Retained as the predicates→SQL composition the query-path tests target.
 func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
 	return predicatesToSQL(resolvePredicates(filters, claims))
-}
-
-// toStrings normalizes resolveInValues' []any (already stringified elements) to the
-// []string a resolvedPredicate carries.
-func toStrings(vals []any) []string {
-	if len(vals) == 0 {
-		return nil
-	}
-	out := make([]string, len(vals))
-	for i, v := range vals {
-		out[i] = fmt.Sprint(v)
-	}
-	return out
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.

@@ -506,13 +506,14 @@ func TestWireFrame(t *testing.T) {
 	}
 }
 
-// BenchmarkBroadcast_RowFilteredFanout measures one Broadcast on a row-filtered
-// topic as the subscriber count grows. Every subscriber of a filtered role triggers
-// a per-subscriber policy.Evaluate + RowVisible on each event (hub.go Broadcast), so
-// this exercises the O(subscribers) allocation path CodeRabbit flagged on PR #381.
-// It isolates that fan-out cost: the shared column projection is built once per
-// event, and full outbound queues merely drop (a nil-metric no-op), so the
-// allocs/op reported here are dominated by the per-subscriber evaluation.
+// BenchmarkBroadcast_RowFilteredFanout measures one Broadcast on a row-filtered topic
+// as the subscriber count grows. The filter compiles once per bucket
+// (policy.CompileRowFilter); each subscriber then pays only a claim-bound RowVisible on
+// the full event, so allocations stay flat regardless of fan-out. This is the benchmark
+// behind the O(subscribers) → O(1) allocation work on PR #381 — run it before/after a
+// fan-out change to catch a regression back to per-subscriber resolution. It isolates
+// the fan-out cost: the shared column projection is built once per event, and full
+// outbound queues merely drop (a nil-metric no-op).
 //
 //	go test ./internal/stream/ -run '^$' -bench BenchmarkBroadcast_RowFilteredFanout -benchmem
 func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
