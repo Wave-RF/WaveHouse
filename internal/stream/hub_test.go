@@ -435,6 +435,32 @@ func TestHub_ReplayFrame(t *testing.T) {
 	}
 }
 
+// TestHub_ReplayFrame_RowFilter exercises the row-filter branch of ReplayFrame: the
+// #319 fix applies row-level security on the per-connection replay path too, so a
+// gap-fill event is projected only when the connection's claims satisfy the filter.
+func TestHub_ReplayFrame_RowFilter(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
+		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
+
+	t.Run("matching claims replay the row, projected to allowed columns", func(t *testing.T) {
+		t.Parallel()
+		f, ok := hub.ReplayFrame("viewer", map[string]any{"tenant": "acme"}, raw)
+		require.True(t, ok)
+		assert.Equal(t, KindReplay, f.Kind)
+		inner := frameData(t, f)["data"].(map[string]any)
+		assert.Equal(t, "/a", inner["page"])
+		assert.NotContains(t, inner, "secret", "denied column stripped on replay too")
+	})
+
+	t.Run("non-matching claims withhold the row", func(t *testing.T) {
+		t.Parallel()
+		_, ok := hub.ReplayFrame("viewer", map[string]any{"tenant": "globex"}, raw)
+		require.False(t, ok, "row must be withheld when claims don't satisfy the filter")
+	})
+}
+
 func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)

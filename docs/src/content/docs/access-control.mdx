@@ -370,7 +370,7 @@ The same policy drives every data path, but not every field is meaningful on eve
 | ------- | -------- | -------- |
 | Structured read | `POST /v1/query?table={table}` | table+role `select` required, then `allow`/`deny_columns`, row `filter`, aggregation rules, and the per-role `max_rows` / `max_execution_time` / `max_rows_to_read` / `max_memory_usage` caps (over the [ClickHouse server-wide limits](/configuration#server-side-resource-limits)) |
 | Ingest (write) | `POST /v1/ingest?table={table}` | table+role `insert` required, then `allow`/`deny_columns` and `check` (enforced and auto-injected) |
-| Live stream | `GET /v1/stream` | table+role `select` required (a table the role can't read is skipped), then denied columns are masked from each event |
+| Live stream | `GET /v1/stream` | table+role `select` required (a table the role can't read is skipped), then denied columns are masked from each event and the role's row `filter` is applied per subscriber against their JWT claims (see caution below) |
 | Raw SQL | `POST /v1/admin/query` | `admin_role` only — no per-statement policy; the role gate is the entire authorization story |
 | Named pipe | `GET/POST /v1/pipes/{name}` | per-pipe `allowed_roles` (not the policy engine; see [Named Pipes](/pipes)). Resource limits come from ClickHouse's [server-wide settings](/configuration#server-side-resource-limits), not per-role policy caps |
 
