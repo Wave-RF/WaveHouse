@@ -525,8 +525,9 @@ func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
 		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
 			hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 			// Half the subscribers share the event's tenant (row visible), half don't
-			// (row withheld); either way each still pays the per-subscriber Evaluate,
-			// which is the cost under measurement.
+			// (row withheld); either way each pays the per-subscriber RowVisible check
+			// against the once-per-bucket compiled filter, which is the cost under
+			// measurement.
 			for i := range n {
 				sub := NewSubscriber()
 				tenant := "acme"
