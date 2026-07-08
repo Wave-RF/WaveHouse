@@ -1,22 +1,22 @@
 ---
 // Custom header overriding Starlight's default. The layout is our own: brand +
 // primary nav pinned left, controls (search, social, theme, language) pinned
-// right. On doc pages the bar is full-bleed to the edges; on the splash homepage
-// (the only page with a hero) the inner content is held in a centered max-width
-// column matching the hero, à la ClickHouse/Supabase. Search shows Starlight's
-// expanded "Search … ⌘K" box on every page (≥50rem), so the keyboard shortcut
-// stays discoverable. Every control is still Starlight's own built-in, pulled in
-// through its `virtual:starlight/components/*` import, so the SiteTitle/Search/
-// Theme overrides and the Pagefind-search logic keep working untouched. The
-// outer <header class="header"> (PageFrame — fixed position + full-width glass
-// background) is not ours and stays as-is; only our inner content is
-// column-constrained on the splash, so the bar itself still spans the page.
+// right. The inner row is full-bleed to the bar edges on every page, splash and
+// docs alike — an earlier revision capped it to the hero width on the splash,
+// but vtbot preserves the header across view transitions, so that width visibly
+// jumped on splash↔docs navigation (see the <style> note below). Search shows
+// Starlight's expanded "Search … ⌘K" box on every page (≥50rem), so the keyboard
+// shortcut stays discoverable. Every control is still Starlight's own built-in,
+// pulled in through its `virtual:starlight/components/*` import, so the
+// SiteTitle/Search/Theme overrides and the Pagefind-search logic keep working
+// untouched. The outer <header class="header"> (PageFrame — fixed position +
+// full-width glass background) is not ours and stays as-is.
 //
 // Because the controls are Starlight built-ins re-rendered here, env.d.ts
 // declares their virtual modules so `astro check` can resolve them. On
 // @astrojs/starlight upgrades, re-check those component module paths.
 //
-// The left nav and the controls/CTA are hidden below Starlight's `md` (50rem):
+// The left nav and the controls are hidden below Starlight's `md` (50rem):
 // under 50rem the sidebar (a hamburger drawer) already carries navigation on
 // doc pages, leaving the logo + the (always-visible) search button.
 import config from "virtual:starlight/user-config";
@@ -84,6 +84,25 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
     </div>
   </div>
 </div>
+
+<script is:inline>
+  // The header sits outside the frame vtbot swaps on view transitions, so its
+  // server-rendered aria-current freezes at whatever the first full page load
+  // computed. Recompute it on each client navigation — mirroring the currentPath
+  // logic in the frontmatter — so the active nav link tracks SPA navigation and
+  // not just hard reloads.
+  function syncHeaderNavCurrent() {
+    var path = location.pathname.replace(/(.)\/$/, '$1');
+    document.querySelectorAll('.wh-header-nav__link').forEach(function (link) {
+      var href = link.pathname.replace(/(.)\/$/, '$1');
+      var current = path === href || path.startsWith(href + '/');
+      if (current) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+  }
+  document.addEventListener('DOMContentLoaded', syncHeaderNavCurrent);
+  document.addEventListener('astro:page-load', syncHeaderNavCurrent);
+</script>
 
 <style>
   /* Our own header layout. Unlayered so it authoritatively styles this
