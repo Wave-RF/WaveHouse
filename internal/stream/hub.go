@@ -166,7 +166,7 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 			numericResolved = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
-			subPerms := policy.Evaluate(p, rb.role, evt.TableName, "select", sub.claims)
+			subPerms := policy.EvaluateRowFilter(p, rb.role, evt.TableName, "select", sub.claims)
 			if !subPerms.RowVisible(evt.Data, numericCols) {
 				continue // this row is filtered out for this subscriber
 			}
@@ -224,7 +224,7 @@ func (h *Hub) ReplayFrame(role string, claims map[string]any, raw []byte) (Frame
 		return Frame{}, false
 	}
 	if perms.HasRowFilter() {
-		subPerms := policy.Evaluate(p, role, evt.TableName, "select", claims)
+		subPerms := policy.EvaluateRowFilter(p, role, evt.TableName, "select", claims)
 		if !subPerms.RowVisible(evt.Data, h.numericCols(evt.TableName)) {
 			return Frame{}, false // this row is filtered out for these claims
 		}

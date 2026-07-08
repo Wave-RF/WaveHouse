@@ -108,8 +108,14 @@ func ResolveRole(p *Policy, role string) string {
 	return p.DefaultRole
 }
 
-// Evaluate resolves a policy for a given role, table, and operation against JWT claims.
-func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *ResolvedPermissions {
+// resolveRolePerms navigates the policy to the RolePermissions governing
+// (role, table, operation), applying role resolution, the admin bypass, and
+// default-deny. It returns admin=true for the unconditional-bypass role (perms is the
+// zero value — the caller grants full access) and ok=false for any denial (perms is
+// the zero value). Evaluate (query path) and EvaluateRowFilter (stream path) share
+// this one navigation so they can never disagree on who is authorized or which policy
+// entry applies.
+func resolveRolePerms(p *Policy, role, table, operation string) (perms RolePermissions, admin, ok bool) {
 	// Map an empty/absent role to the configured default_role (no-op if none,
 	// or if the policy is nil). A non-empty role is unchanged — roles never
 	// inherit the default's permissions.
@@ -125,20 +131,20 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	// over HTTP), so a nil policy falls through to the deny just below. Mirrors
 	// RoleAllowed's admin short-circuit on the pipe path.
 	if IsAdmin(p, role) {
-		return &ResolvedPermissions{Allowed: true}
+		return RolePermissions{}, true, false
 	}
 
 	// Beyond here the role is non-admin (non-empty only if it carried a concrete
 	// role or matched a real default_role); any failure to find a matching entry
 	// is a plain deny.
 	if p == nil {
-		return &ResolvedPermissions{Allowed: false}
+		return RolePermissions{}, false, false
 	}
 
-	tp, ok := p.Tables[table]
-	if !ok {
+	tp, found := p.Tables[table]
+	if !found {
 		// No policy for this table — default deny.
-		return &ResolvedPermissions{Allowed: false}
+		return RolePermissions{}, false, false
 	}
 
 	var rolePerms map[string]RolePermissions
@@ -148,11 +154,11 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	case "insert":
 		rolePerms = tp.Insert
 	default:
-		return &ResolvedPermissions{Allowed: false}
+		return RolePermissions{}, false, false
 	}
 
 	if rolePerms == nil {
-		return &ResolvedPermissions{Allowed: false}
+		return RolePermissions{}, false, false
 	}
 
 	// An empty/absent role must never match a role entry — a roleless request is
@@ -161,9 +167,18 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	// role key in a policy therefore grants nothing: the policy-side twin of the
 	// empty-AllowedRoles-entry footgun closed for pipes in #159. Matching is
 	// exact — there is no "*" any-role wildcard.
-	perms, ok := RolePermissions{}, false
-	if role != "" {
-		perms, ok = rolePerms[role]
+	if role == "" {
+		return RolePermissions{}, false, false
+	}
+	perms, ok = rolePerms[role]
+	return perms, false, ok
+}
+
+// Evaluate resolves a policy for a given role, table, and operation against JWT claims.
+func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *ResolvedPermissions {
+	perms, admin, ok := resolveRolePerms(p, role, table, operation)
+	if admin {
+		return &ResolvedPermissions{Allowed: true}
 	}
 	if !ok {
 		return &ResolvedPermissions{Allowed: false}
@@ -181,24 +196,16 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		MaxMemoryUsage:      perms.MaxMemoryUsage,
 	}
 
-	// Resolve filters into WHERE clause. A bind-unsafe filter column can't be
-	// emitted safely — a '?' in it would shift clickhouse-go's positional value
-	// binding, including this RLS filter's own bound value — so deny the role
-	// fail-closed rather than drop the predicate (which would widen row access)
-	// or emit a mis-bound query. validateRolePerms rejects such a policy at write
-	// time; this guards the query path as defense-in-depth (Evaluate does not
-	// re-validate the policy it is handed).
+	// Resolve the row-filter once into predicates, then render both read surfaces
+	// from that single source so they can't drift: the query path binds them into a
+	// SQL WHERE here; the stream path evaluates the same predicates in memory
+	// (ResolvedPermissions.RowVisible, via EvaluateRowFilter). resolveFilterPredicates
+	// fails closed on a bind-unsafe column (see there).
 	if len(perms.Filter) > 0 {
-		for col := range perms.Filter {
-			if chsql.BindUnsafe(col) {
-				return &ResolvedPermissions{Allowed: false}
-			}
+		preds, deny := resolveFilterPredicates(perms.Filter, claims)
+		if deny {
+			return &ResolvedPermissions{Allowed: false}
 		}
-		// Resolve the row-filter once into predicates, then render both read surfaces
-		// from that single source so they can't drift: the query path binds them into
-		// a SQL WHERE here; the stream path evaluates the same predicates in memory
-		// (ResolvedPermissions.RowVisible).
-		preds := resolvePredicates(perms.Filter, claims)
 		resolved.rowFilter = preds
 		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
@@ -223,6 +230,54 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	}
 
 	return resolved
+}
+
+// EvaluateRowFilter resolves ONLY the row-level-security predicates governing
+// (role, table, operation) for the given claims, returning a *ResolvedPermissions the
+// caller evaluates with RowVisible. It is the stream fan-out's per-subscriber twin of
+// Evaluate: it shares Evaluate's role resolution, admin bypass, default-deny, and
+// bind-safe predicate resolution — so the two can never disagree on which rows a
+// subscriber may see — but skips the column, aggregation, resource-cap, and SQL-WHERE
+// work Evaluate does, none of which an in-memory row check needs. That keeps a
+// high-fan-out filtered topic from allocating and discarding a full ResolvedPermissions
+// per subscriber per event (see stream.BenchmarkBroadcast_RowFilteredFanout).
+//
+// The result carries Allowed and the resolved rowFilter only. Admin and roles without
+// a filter yield no predicates (RowVisible admits every row); a denied role or a
+// bind-unsafe filter yields Allowed:false. The stream calls this only after its column
+// projection has already confirmed the role may read the table, so Allowed is
+// invariantly true at that call site and RowVisible alone decides visibility.
+func EvaluateRowFilter(p *Policy, role, table, operation string, claims map[string]any) *ResolvedPermissions {
+	perms, admin, ok := resolveRolePerms(p, role, table, operation)
+	if admin {
+		return &ResolvedPermissions{Allowed: true}
+	}
+	if !ok {
+		return &ResolvedPermissions{Allowed: false}
+	}
+	preds, deny := resolveFilterPredicates(perms.Filter, claims)
+	if deny {
+		return &ResolvedPermissions{Allowed: false}
+	}
+	return &ResolvedPermissions{Allowed: true, rowFilter: preds}
+}
+
+// resolveFilterPredicates resolves a role's row-filter map into predicates, first
+// failing closed (deny=true) if any filter column is bind-unsafe: a '?' in the column
+// would shift clickhouse-go's positional value binding — including this filter's own
+// bound value — so the role is denied rather than the predicate dropped (which would
+// widen row access) or a mis-bound query emitted. validateRolePerms rejects such a
+// policy at write time; this is defense-in-depth (the resolver does not re-validate the
+// policy it is handed). Shared by Evaluate (query path, which then renders SQL via
+// predicatesToSQL) and EvaluateRowFilter (stream path, which evaluates in memory), so
+// both reject the same unsafe policy and resolve identical predicates.
+func resolveFilterPredicates(filters map[string]Filter, claims map[string]any) (preds []resolvedPredicate, deny bool) {
+	for col := range filters {
+		if chsql.BindUnsafe(col) {
+			return nil, true
+		}
+	}
+	return resolvePredicates(filters, claims), false
 }
 
 // resolvedPredicate is one row-filter comparison with its claim templates already
