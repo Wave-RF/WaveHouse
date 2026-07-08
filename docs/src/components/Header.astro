@@ -88,10 +88,13 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
 <style>
   /* Our own header layout. Unlayered so it authoritatively styles this
      component's inner .header row (Starlight's own rules are @layer'd and would
-     otherwise win). Base case — doc pages — is full-bleed to the bar edges, like
-     Supabase/ClickHouse docs; the splash override below holds the inner content
-     in a centered content-width column instead. The outer PageFrame bar always
-     spans full width; only this inner content is ever capped + centered. */
+     otherwise win). Full-bleed to the bar edges on every page, like
+     Supabase/ClickHouse docs. An earlier revision capped this inner column to the
+     hero width on the splash, but vtbot's <ReplacementSwap/> PRESERVES the header
+     across view-transitions, so that made the header width visibly change on
+     splash↔docs navigation (flagged in review — the change couldn't be animated
+     cleanly through the transition). One consistent full-bleed width removes the
+     jump; the outer PageFrame bar was — and stays — full width regardless. */
   .header {
     display: flex;
     align-items: center;
@@ -99,23 +102,13 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
     gap: 1rem;
     height: 100%;
   }
-  /* Splash homepage (the only page with a hero): hold the header in a centered
-     content-width column instead. Keyed off the hero's presence in the body —
-     the same signal global.css uses — rather than an SSR class/attribute on the
-     header, because vtbot's <ReplacementSwap/> PRESERVES the header element
-     across view-transitions while swapping the body content: a baked-in
-     attribute would go stale, but this `:has()` selector re-evaluates live. */
-  :global(body:has(.wh-hero)) .header {
-    max-width: 68rem;
-    margin-inline: auto;
-  }
 
   .wh-lead {
     display: flex;
-    /* Center the lockup vertically in the bar, matching the right-hand controls
-       (search, social, theme) — which are all centered too. The "Docs" link is
-       then dropped onto the lockup's wordmark baseline (see .wh-header-nav__link);
-       it can't be flex-baseline-aligned to a wordmark baked inside an image. */
+    /* Center everything vertically in the bar — the lockup, the "Docs" link, and
+       (to match) the right-hand controls. The lockup's wordmark is centered
+       within its own image box, so centering the link against the lockup lands it
+       on the wordmark's optical centre — no baked-in baseline offset needed. */
     align-items: center;
     gap: 1.75rem;
     min-width: 0;
@@ -179,31 +172,28 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
     gap: 1.5rem;
   }
   .wh-header-nav__link {
-    /* A step up from muted secondary text so it reads as an interactive nav link
-       at rest (plain muted looked like a static label), but held just under the
+    /* Ink-toned, a step up from muted secondary text but held just under the
        wordmark's full ink so the brand stays dominant. */
     color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
-    /* Held subordinate to the logo wordmark. With the lockup centered, its baked
-       "WaveHouse" baseline sits a touch below this link's, so nudge the link down
-       to sit their bottoms flush. Fixed offset by necessity — CSS can't
-       baseline-align to text rasterized inside an image; value tuned against the
-       rendered lockup, so retune if the logo height or this font-size change. */
     font-size: 0.9375rem;
-    transform: translateY(0.0625rem);
     font-weight: 500;
     line-height: 1;
-    text-decoration: none;
+    /* Persistent underline so it unmistakably reads as a link at rest — a lone
+       muted word read as a static label in review. Offset + tinted like the
+       site's body-text links; it firms up to the brand accent on hover/current. */
+    text-decoration: underline;
+    text-decoration-color: color-mix(in oklab, var(--wh-ink) 45%, transparent);
+    text-underline-offset: 3px;
     white-space: nowrap;
-    transition: color 0.15s ease;
+    transition: color 0.15s ease, text-decoration-color 0.15s ease;
   }
-  /* Brand accent on hover, matching the footer links (a clearer "this is a link"
-     cue than the earlier brighten-to-ink, which is now near-invisible from the
-     lifted resting colour). */
   .wh-header-nav__link:hover {
     color: var(--wh-accent-hi);
+    text-decoration-color: var(--wh-accent-hi);
   }
   .wh-header-nav__link[aria-current="page"] {
     color: var(--wh-accent-text);
+    text-decoration-color: var(--wh-accent-text);
     font-weight: 600;
   }
 </style>
