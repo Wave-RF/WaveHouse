@@ -1,10 +1,10 @@
 ---
 // Custom header overriding Starlight's default. The layout is our own: brand +
 // primary nav pinned left, controls (search, social, theme, language) pinned
-// right. The inner row is full-bleed to the bar edges on every page, splash and
-// docs alike — an earlier revision capped it to the hero width on the splash,
-// but vtbot preserves the header across view transitions, so that width visibly
-// jumped on splash↔docs navigation (see the <style> note below). Search shows
+// right. On doc pages the inner row is full-bleed to the bar edges; on the splash
+// homepage (the only page with a hero) it's held in a centered content-width
+// column matching the hero — so the header widens back out to the edges when you
+// navigate into the docs (see the <style> note below). Search shows
 // Starlight's expanded "Search … ⌘K" box on every page (≥50rem), so the keyboard
 // shortcut stays discoverable. Every control is still Starlight's own built-in,
 // pulled in through its `virtual:starlight/components/*` import, so the
@@ -107,19 +107,27 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
 <style>
   /* Our own header layout. Unlayered so it authoritatively styles this
      component's inner .header row (Starlight's own rules are @layer'd and would
-     otherwise win). Full-bleed to the bar edges on every page, like
-     Supabase/ClickHouse docs. An earlier revision capped this inner column to the
-     hero width on the splash, but vtbot's <ReplacementSwap/> PRESERVES the header
-     across view-transitions, so that made the header width visibly change on
-     splash↔docs navigation (flagged in review — the change couldn't be animated
-     cleanly through the transition). One consistent full-bleed width removes the
-     jump; the outer PageFrame bar was — and stays — full width regardless. */
+     otherwise win). Doc pages are full-bleed to the bar edges, like
+     Supabase/ClickHouse docs; the splash override below holds the inner content
+     in a centered content-width column matching the hero. The outer PageFrame bar
+     always spans full width; only this inner content is capped + centered. */
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
     height: 100%;
+  }
+  /* Splash homepage (the only page with a hero): hold the header's inner content
+     in a centered content-width column matching the hero, so the brand + controls
+     line up with the hero below; navigating into the docs widens it back out to
+     full-bleed. Keyed off the hero's presence in the body — the same signal
+     global.css uses — rather than a baked-in header attribute, because vtbot's
+     <ReplacementSwap/> PRESERVES the header across view-transitions: a static
+     attribute would go stale, but this `:has()` selector re-evaluates live. */
+  :global(body:has(.wh-hero)) .header {
+    max-width: 68rem;
+    margin-inline: auto;
   }
 
   .wh-lead {
@@ -192,27 +200,21 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
   }
   .wh-header-nav__link {
     /* Ink-toned, a step up from muted secondary text but held just under the
-       wordmark's full ink so the brand stays dominant. */
+       wordmark's full ink so the brand stays dominant; the brand-accent shift on
+       hover / current page is the interactive cue. */
     color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
     font-size: 0.9375rem;
     font-weight: 500;
     line-height: 1;
-    /* Persistent underline so it unmistakably reads as a link at rest — a lone
-       muted word read as a static label in review. Offset + tinted like the
-       site's body-text links; it firms up to the brand accent on hover/current. */
-    text-decoration: underline;
-    text-decoration-color: color-mix(in oklab, var(--wh-ink) 45%, transparent);
-    text-underline-offset: 3px;
+    text-decoration: none;
     white-space: nowrap;
-    transition: color 0.15s ease, text-decoration-color 0.15s ease;
+    transition: color 0.15s ease;
   }
   .wh-header-nav__link:hover {
     color: var(--wh-accent-hi);
-    text-decoration-color: var(--wh-accent-hi);
   }
   .wh-header-nav__link[aria-current="page"] {
     color: var(--wh-accent-text);
-    text-decoration-color: var(--wh-accent-text);
     font-weight: 600;
   }
 </style>
