@@ -1,0 +1,73 @@
+---
+// The WaveHouse logo — the wave mark + "WaveHouse" wordmark as ONE inline SVG,
+// themed entirely by CSS (mark = --wh-accent via currentColor, wordmark =
+// --wh-ink), so there are no pre-baked light/dark image variants. Below 30rem it
+// collapses to the mark alone (the wordmark would crowd a narrow bar), matching
+// the previous behaviour. Reusable anywhere the brand logo is needed.
+//
+// The lockup is inlined (set:html) rather than loaded through <img> for two
+// reasons: CSS can theme it, and a baseline-flex parent can align adjacent text
+// (e.g. the header "Docs" link) to the *wordmark* baseline. `.wh-logo` reports
+// the wordmark baseline as its own via the margin-bottom anchor below — the
+// wordmark baseline sits at --wh-lockup-baseline of the lockup height, and the
+// slice beneath it is pulled out of the box — so alignment survives any font /
+// font-size / logo-height change with no per-pixel magic number.
+import WaveMark from "./WaveMark.astro";
+import lockup from "../assets/branding/lockup-themed.svg?raw";
+
+interface Props {
+  class?: string;
+}
+const { class: className } = Astro.props;
+---
+
+<span class:list={["wh-logo", className]}>
+  <span class="wh-logo__lockup" set:html={lockup} />
+  <span class="wh-logo__mark"><WaveMark /></span>
+</span>
+
+<style>
+  .wh-logo {
+    /* Size + theme knobs. Override --wh-logo-height to rescale the whole logo;
+       everything else is derived from it. */
+    --wh-logo-height: 1.625rem;
+    /* Wordmark baseline as a fraction of the lockup height (y74 of the 0..100
+       viewBox). The ONE geometric constant — a property of the art, not a tuned
+       nudge; it only changes if the logo itself is redesigned. */
+    --wh-lockup-baseline: 0.74;
+    display: inline-flex;
+    align-items: baseline;
+    color: var(--wh-accent);
+  }
+
+  /* Full lockup — shown from 30rem up. */
+  .wh-logo__lockup {
+    display: none;
+  }
+  .wh-logo__lockup :global(svg) {
+    display: block;
+    height: var(--wh-logo-height);
+    width: auto;
+    /* Expose the wordmark baseline as this element's baseline: pull the box
+       bottom up by the slice of the lockup that hangs below the wordmark
+       baseline, so a baseline-flex parent lands on the wordmark, not the image
+       bottom edge. */
+    margin-bottom: calc((var(--wh-lockup-baseline) - 1) * var(--wh-logo-height));
+  }
+
+  /* Compact mark — shown below 30rem. */
+  .wh-logo__mark {
+    display: block;
+    width: var(--wh-logo-height);
+    height: var(--wh-logo-height);
+  }
+
+  @media (min-width: 30.0625rem) {
+    .wh-logo__lockup {
+      display: block;
+    }
+    .wh-logo__mark {
+      display: none;
+    }
+  }
+</style>

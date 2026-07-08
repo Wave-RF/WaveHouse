@@ -202,6 +202,16 @@ cat > "$OUT_KIT/lockup-light.svg" <<EOF
 EOF
 outline_lockup_svg "$OUT_KIT/lockup-light.svg"
 
+# Themeable inline lockup for in-app components (Logo.astro inlines it via
+# set:html). Same OUTLINED art as lockup-dark, but colours swapped for CSS hooks
+# so ONE asset themes itself with no light/dark variants: mark → currentColor
+# (the consumer sets color: var(--wh-accent)), wordmark → var(--wh-ink). The
+# substitution is case-insensitive because usvg may lower-case the hex on outline.
+{
+  printf '%s\n' '<!-- Themeable inline lockup: mark=currentColor (set color:var(--wh-accent)), wordmark=var(--wh-ink). GENERATED from lockup-dark.svg by generate.sh — do not hand-edit. -->'
+  sed -E -e "s|$COLOR_DARK|currentColor|Ig" -e "s|fill=\"$OG_INK\"|style=\"fill:var(--wh-ink)\"|Ig" "$OUT_KIT/lockup-dark.svg"
+} > "$SRC/lockup-themed.svg"
+
 # --- 4. favicon.ico (16/32/48) → kit + site root ------------------------------
 rsvg-convert -w 16 -h 16 "$OUT_KIT/favicon.svg" -o "$TMP/fav-16.png"
 rsvg-convert -w 32 -h 32 "$OUT_KIT/favicon.svg" -o "$TMP/fav-32.png"

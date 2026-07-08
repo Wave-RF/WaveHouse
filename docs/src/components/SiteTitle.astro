@@ -1,4 +1,8 @@
 ---
+// Starlight's site-title override — just the home link wrapping the shared
+// <Logo/>. All logo rendering/theming lives in Logo.astro so it can be reused
+// outside the header too.
+import Logo from "./Logo.astro";
 import config from "virtual:starlight/user-config";
 
 const title =
@@ -7,18 +11,7 @@ const base = import.meta.env.BASE_URL;
 ---
 
 <a href={base} class="wh-site-title" aria-label={`${title} home`}>
-  {/*
-    Image lockup (wave mark + "WaveHouse" wordmark) instead of live text — the
-    branding-designed logo, so the wordmark is pixel-identical to the rest of the
-    brand. Two pre-themed exports from public/branding, swapped by CSS on the
-    site's `data-theme` (which defaults to dark); below 30rem it collapses to the
-    compact mark, like the old text-hidden state. alt="" because the link's
-    aria-label already names it — the images are decorative.
-  */}
-  <img class="wh-logo wh-logo--lockup wh-logo--on-dark" src={`${base}branding/lockup-dark.svg`} alt="" width="508" height="100" />
-  <img class="wh-logo wh-logo--lockup wh-logo--on-light" src={`${base}branding/lockup-light.svg`} alt="" width="508" height="100" />
-  <img class="wh-logo wh-logo--mark wh-logo--on-dark" src={`${base}branding/mark-dark.svg`} alt="" width="100" height="100" />
-  <img class="wh-logo wh-logo--mark wh-logo--on-light" src={`${base}branding/mark-light.svg`} alt="" width="100" height="100" />
+  <Logo />
 </a>
 
 <style>
@@ -29,34 +22,5 @@ const base = import.meta.env.BASE_URL;
   }
   .wh-site-title:hover {
     opacity: 0.8;
-  }
-
-  .wh-logo {
-    display: none;
-    width: auto;
-  }
-
-  /* Full lockup — sized by height and centered vertically in the bar by the
-     header row (Header.astro `.wh-lead { align-items: center }`). The "Docs" link
-     is aligned to the lockup's baked-in wordmark on the Header side. */
-  .wh-logo--lockup {
-    height: 1.625rem;
-  }
-  .wh-logo--mark {
-    height: 1.5rem;
-  }
-
-  /* Exactly one logo is visible: the lockup at ≥30rem, the compact mark below —
-     each swapped dark↔light on the theme (dark is the default when data-theme is
-     unset, so the dark export shows unless [data-theme="light"] overrides). */
-  @media (min-width: 30.0625rem) {
-    .wh-logo--lockup.wh-logo--on-dark { display: block; }
-    :root[data-theme="light"] .wh-logo--lockup.wh-logo--on-dark { display: none; }
-    :root[data-theme="light"] .wh-logo--lockup.wh-logo--on-light { display: block; }
-  }
-  @media (max-width: 30rem) {
-    .wh-logo--mark.wh-logo--on-dark { display: block; }
-    :root[data-theme="light"] .wh-logo--mark.wh-logo--on-dark { display: none; }
-    :root[data-theme="light"] .wh-logo--mark.wh-logo--on-light { display: block; }
   }
 </style>

@@ -40,7 +40,7 @@ const shouldRenderSearch =
 const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
 ---
 
-<div class="header">
+<div class="header wh-header">
   <div class="wh-lead">
     <div class="title-wrapper sl-flex">
       <SiteTitle />
@@ -111,6 +111,12 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
      Supabase/ClickHouse docs; the splash override below holds the inner content
      in a centered content-width column matching the hero. The outer PageFrame bar
      always spans full width; only this inner content is capped + centered. */
+  /* Layout only. The width behaviour — the splash's centred column widening to
+     full-bleed on the docs, and the animated tween between them — lives in
+     global.css as `.wh-header`, NOT here: the header element is PRESERVED across
+     view-transitions, and Astro's SCOPED styles don't re-apply to a persisted
+     element after a swap, so a scoped transition gets dropped on navigation. A
+     global rule survives (verified: scoped max-width read `none` post-nav). */
   .header {
     display: flex;
     align-items: center;
@@ -118,25 +124,15 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
     gap: 1rem;
     height: 100%;
   }
-  /* Splash homepage (the only page with a hero): hold the header's inner content
-     in a centered content-width column matching the hero, so the brand + controls
-     line up with the hero below; navigating into the docs widens it back out to
-     full-bleed. Keyed off the hero's presence in the body — the same signal
-     global.css uses — rather than a baked-in header attribute, because vtbot's
-     <ReplacementSwap/> PRESERVES the header across view-transitions: a static
-     attribute would go stale, but this `:has()` selector re-evaluates live. */
-  :global(body:has(.wh-hero)) .header {
-    max-width: 68rem;
-    margin-inline: auto;
-  }
 
   .wh-lead {
     display: flex;
-    /* Center everything vertically in the bar — the lockup, the "Docs" link, and
-       (to match) the right-hand controls. The lockup's wordmark is centered
-       within its own image box, so centering the link against the lockup lands it
-       on the wordmark's optical centre — no baked-in baseline offset needed. */
-    align-items: center;
+    /* Baseline-align the row so the "Docs" link sits on the logo wordmark's
+       baseline. <Logo/> exposes the wordmark baseline as its own (inline SVG +
+       one documented ratio — see Logo.astro), so this needs no per-pixel nudge
+       and survives font / logo-size changes. Vertical centring in the bar comes
+       from `.header { align-items: center }` centring this row as a whole. */
+    align-items: baseline;
     gap: 1.75rem;
     min-width: 0;
   }
@@ -203,6 +199,8 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
        wordmark's full ink so the brand stays dominant; the brand-accent shift on
        hover / current page is the interactive cue. */
     color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
+    /* Baseline-aligned to the wordmark by the parent (.wh-lead is align-items:
+       baseline, and <Logo/> exposes the wordmark baseline) — no nudge needed. */
     font-size: 0.9375rem;
     font-weight: 500;
     line-height: 1;
