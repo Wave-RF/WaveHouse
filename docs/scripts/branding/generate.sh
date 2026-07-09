@@ -208,10 +208,11 @@ outline_lockup_svg "$OUT_KIT/lockup-light.svg"
 # so ONE asset themes itself with no light/dark variants: mark → currentColor
 # (the consumer sets color: var(--wh-accent)), wordmark → var(--wh-ink). The
 # substitution is case-insensitive because usvg may lower-case the hex on outline.
-{
-  printf '%s\n' '<!-- Themeable inline lockup: mark=currentColor (set color:var(--wh-accent)), wordmark=var(--wh-ink). GENERATED from lockup-dark.svg by generate.sh — do not hand-edit. -->'
-  sed -E -e "s|$COLOR_DARK|currentColor|Ig" -e "s|fill=\"$OG_INK\"|style=\"fill:var(--wh-ink)\"|Ig" "$OUT_KIT/lockup-dark.svg"
-} > "$SRC/lockup-themed.svg"
+# No provenance comment in the file itself: XML forbids `--` inside comments, so
+# naming var(--wh-ink) there makes browsers/GitHub reject the whole SVG (PR #368
+# review). The generated/do-not-hand-edit note lives in Logo.astro instead.
+sed -E -e "s|$COLOR_DARK|currentColor|Ig" -e "s|fill=\"$OG_INK\"|style=\"fill:var(--wh-ink)\"|Ig" \
+  "$OUT_KIT/lockup-dark.svg" > "$SRC/lockup-themed.svg"
 
 # --- 4. favicon.ico (16/32/48) → kit + site root ------------------------------
 rsvg-convert -w 16 -h 16 "$OUT_KIT/favicon.svg" -o "$TMP/fav-16.png"

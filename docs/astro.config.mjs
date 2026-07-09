@@ -98,10 +98,11 @@ export default defineConfig({
         },
       ],
       // No `logo` here on purpose: the SiteTitle override renders the brand
-      // mark via the shared <WaveMark/> component (currentColor, theme-aware),
-      // so Starlight's logo config would never render. The brand mark lives in
-      // exactly one place — src/components/WaveMark.astro.
-      // Same SVG as the head[] icon entry — see the icon-set comment there.
+      // lockup via the shared <Logo/> component (CSS-themed inline SVG), so
+      // Starlight's logo config would never render. The in-app logo lives in
+      // exactly one place — src/components/Logo.astro.
+      // The favicon is the same mark as the head[] icon entry — see the
+      // icon-set comment there.
       favicon: "/branding/favicon.svg",
       customCss: ["./src/styles/global.css", "katex/dist/katex.min.css"],
       social: [
