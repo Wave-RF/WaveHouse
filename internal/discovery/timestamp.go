@@ -11,83 +11,63 @@ import (
 )
 
 // Ingest canonicalizes every DateTime/DateTime64 column value to one wire form —
-// RFC 3339 UTC (`2026-06-21T04:00:00Z`, fraction per column precision) — before the
-// event is published (#372). The event payload is fanned out verbatim to SSE
-// subscribers and inserted into ClickHouse as-is, so without one canonical form the
-// same instant reaches stream consumers in whatever spelling the producer chose
-// (zone-less ClickHouse-native, Unix seconds, …) while /v1/query renders the stored
-// value as RFC 3339 — the two read paths land on different clocks. ClickHouse itself
-// discards the input spelling at insert, so canonicalizing costs nothing on the
-// query path and makes the streamed form match it.
+// RFC 3339 UTC (`2026-06-21T04:00:00Z`, fraction per column precision) — before
+// the event is published (#372), so SSE subscribers see the same spelling
+// /v1/query renders instead of whatever the producer sent. ClickHouse discards
+// the input spelling at insert, so only the streamed form changes.
+//
+// Canonicalization is fail-open: anything it cannot parse or resolve passes
+// through verbatim — ClickHouse's more liberal best_effort parser stays the
+// arbiter of what is insertable (failures land in the DLQ, as before #372).
+// Fail-closed enforcement of the canonical form is the stream row-filter's (#381).
 
 // IsTimestampType reports whether chType is a ClickHouse DateTime or DateTime64
-// (unwrapping Nullable/LowCardinality modifiers). Date/Date32 are deliberately not
-// included: they are day-precision values with no zone or spelling ambiguity on the
-// paths #372 covers, so ingest passes them through untouched.
+// (unwrapping Nullable/LowCardinality). Date/Date32 are excluded — day-precision,
+// no zone or spelling ambiguity.
 func IsTimestampType(chType string) bool {
 	return strings.HasPrefix(unwrapType(chType), "DateTime")
 }
 
-// CanonicalizeTimestamps rewrites every DateTime/DateTime64 column value in data to
-// the canonical RFC 3339 UTC form, in place. Zone-less values are interpreted the
-// way ClickHouse itself would parse them — in the column's declared time zone, else
-// the server default — so canonicalization never changes which instant is stored,
-// only how it is spelled. Each column's precision and zone come from its spec,
-// precomputed when the schema was built (Refresh / NewSchemaRegistryFromMap); a
-// schema built outside a registry falls back to per-record resolution with UTC as
-// the server default. The fraction is truncated to the column's precision so the
-// streamed value equals what ClickHouse stores and /v1/query returns. Absent and
-// null values are left untouched (defaults and Nullable columns). An unparseable
-// value returns an error naming the column, which ingest maps to a per-record 400 —
-// the same class of failure previously surfaced only at the async insert, via the
-// DLQ.
-func CanonicalizeTimestamps(schema *TableSchema, data map[string]any) error {
+// CanonicalizeTimestamps rewrites every DateTime/DateTime64 column value in data
+// to the canonical RFC 3339 UTC form, in place, best-effort. Zone-less values are
+// interpreted as ClickHouse would — in the column's zone, else the server default
+// (precomputed on the column's spec at schema build) — so only the spelling ever
+// changes, never the stored instant; the fraction is truncated to the column's
+// precision to byte-match /v1/query. Everything else passes through verbatim
+// (fail-open): absent/null values, unparseable values, columns without a spec, and
+// zone-less values when no zone is known (assuming one could move the instant).
+func CanonicalizeTimestamps(schema *TableSchema, data map[string]any) {
 	for _, col := range schema.Columns {
 		spec := col.tsSpec
-		if spec == nil && !IsTimestampType(col.Type) {
+		if spec == nil {
 			continue
 		}
 		v, ok := data[col.Name]
 		if !ok || v == nil {
 			continue
 		}
-		if spec == nil {
-			// No precomputed spec: a hand-built schema, or a zone the schema build
-			// could not resolve. Resolving here keeps that failure scoped to the
-			// records that carry the column (a per-record 400), never the schema.
-			s, err := resolveTimestampSpec(col.Type, nil)
-			if err != nil {
-				return fmt.Errorf("column %q: %w", col.Name, err)
-			}
-			spec = &s
-		}
 		t, err := parseTimestamp(v, spec.loc)
 		if err != nil {
-			return fmt.Errorf("column %q: %w", col.Name, err)
+			continue
 		}
 		data[col.Name] = canonicalTimestamp(t, spec.precision)
 	}
-	return nil
 }
 
 // timestampSpec is a timestamp column's precomputed canonicalization inputs: the
-// DateTime64 sub-second precision (0 for DateTime) and the zone in which zone-less
-// values are interpreted (the column's declared zone, else the ClickHouse server
-// default at resolve time).
+// DateTime64 sub-second precision (0 for DateTime) and the zone for interpreting
+// zone-less values (declared zone, else server default; nil when neither is
+// known — then only zone-explicit values canonicalize).
 type timestampSpec struct {
 	precision int
 	loc       *time.Location
 }
 
 // resolveTimestampSpecs precomputes the timestampSpec of every DateTime/DateTime64
-// column in ts, in place — run once per schema build so the per-record ingest path
-// never parses type strings, loads zones, or allocates. A column whose zone Go
-// cannot resolve keeps a nil spec and is logged, not fatal: ClickHouse validated
-// the name at CREATE TABLE, so a miss means tzdata skew between the ClickHouse
-// server and this binary (cmd/wavehouse embeds time/tzdata to keep that window
-// minimal). Ingest then resolves that one column per record and rejects its values
-// with the same error — per-record 400s on one column, not a failed refresh for
-// the whole schema.
+// column in ts, in place — once per schema build, so the per-record ingest path
+// parses no type strings and loads no zones. A column whose zone this binary
+// cannot resolve (the distroless image ships no tzdata) keeps a nil spec —
+// warned, not fatal: its values pass through un-canonicalized.
 func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slog.Logger) {
 	for i := range ts.Columns {
 		col := &ts.Columns[i]
@@ -96,7 +76,7 @@ func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slo
 		}
 		spec, err := resolveTimestampSpec(col.Type, serverTZ)
 		if err != nil {
-			logger.Warn("cannot resolve timestamp column spec; its ingest values will be rejected",
+			logger.Warn("cannot resolve timestamp column spec; its ingest values will pass through un-canonicalized",
 				"table", ts.Name, "column", col.Name, "type", col.Type, "error", err)
 			continue
 		}
@@ -106,12 +86,9 @@ func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slo
 
 // resolveTimestampSpec extracts a DateTime/DateTime64 type's sub-second precision
 // and time zone: `DateTime` / `DateTime('TZ')` / `DateTime64(P)` /
-// `DateTime64(P, 'TZ')`. A type without an explicit zone uses serverTZ (nil ⇒
-// UTC), matching how ClickHouse interprets zone-less strings for that column.
+// `DateTime64(P, 'TZ')`. A type without an explicit zone takes serverTZ (possibly
+// nil = unknown) — ClickHouse's own rule for zone-less strings.
 func resolveTimestampSpec(chType string, serverTZ *time.Location) (timestampSpec, error) {
-	if serverTZ == nil {
-		serverTZ = time.UTC
-	}
 	t := unwrapType(chType)
 
 	var args []string
@@ -146,11 +123,10 @@ func resolveTimestampSpec(chType string, serverTZ *time.Location) (timestampSpec
 	return timestampSpec{precision: precision, loc: loc}, nil
 }
 
-// parseTimestamp converts one ingested value into a time.Time. Accepted forms are
-// the ones ClickHouse itself accepts on this path: RFC 3339 (zone-explicit),
-// `YYYY-MM-DD[ T]HH:MM:SS[.fraction]` and `YYYY-MM-DD` (zone-less, interpreted in
-// loc), and Unix seconds as a JSON number or a numeric string. Anything else is an
-// error.
+// parseTimestamp converts one ingested value into a time.Time. Accepted forms:
+// RFC 3339, `YYYY-MM-DD[ T]HH:MM:SS[.fraction]` and `YYYY-MM-DD` (zone-less,
+// interpreted in loc; skipped when loc is nil), and Unix seconds as a number or
+// numeric string. Anything else errors — the caller passes it through.
 func parseTimestamp(v any, loc *time.Location) (time.Time, error) {
 	switch x := v.(type) {
 	case string:
@@ -159,14 +135,15 @@ func parseTimestamp(v any, loc *time.Location) (time.Time, error) {
 		}
 		// Zone-less forms; Go's Parse accepts an input fraction after the seconds
 		// even when the layout carries none.
-		for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
-			if t, err := time.ParseInLocation(layout, x, loc); err == nil {
-				return t, nil
+		if loc != nil {
+			for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
+				if t, err := time.ParseInLocation(layout, x, loc); err == nil {
+					return t, nil
+				}
 			}
 		}
-		// A bare number is Unix seconds — the quoted twin of the JSON-number form.
-		// ClickHouse's own text parsing read digit-strings this way before #372, so
-		// the form keeps working (non-finite values are not an instant).
+		// A bare digit-string is Unix seconds, as ClickHouse itself reads it
+		// (non-finite values are not an instant).
 		if f, err := strconv.ParseFloat(x, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 			return unixToTime(f), nil
 		}
@@ -194,10 +171,8 @@ func unixToTime(f float64) time.Time {
 }
 
 // canonicalTimestamp renders t in the canonical wire form: UTC RFC 3339, fraction
-// truncated to the column's precision. time.RFC3339Nano trims trailing fractional
-// zeros — exactly how /v1/query renders (its transformRow formats every time.Time
-// via UTC().Format(time.RFC3339Nano)), so the two read paths stay byte-identical
-// whatever zone the column declares.
+// truncated to the column's precision. RFC3339Nano trims trailing zeros exactly
+// like /v1/query's transformRow, keeping the two read paths byte-identical.
 func canonicalTimestamp(t time.Time, precision int) string {
 	unit := time.Second
 	for range precision {

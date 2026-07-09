@@ -61,7 +61,8 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 		{"naive space form, column zone", "DateTime('America/New_York')", nil, "2026-06-21 00:00:00", "2026-06-21T04:00:00Z"},
 		{"naive T form, column zone", "DateTime('America/New_York')", nil, "2026-06-21T00:00:00", "2026-06-21T04:00:00Z"},
 		{"naive form, server zone", "DateTime", nyc, "2026-06-21 00:00:00", "2026-06-21T04:00:00Z"},
-		{"naive form, no zone known ⇒ UTC", "DateTime", nil, "2026-06-21 04:00:00", "2026-06-21T04:00:00Z"},
+		{"naive form, unknown server zone ⇒ passes through", "DateTime", nil, "2026-06-21 04:00:00", "2026-06-21 04:00:00"},
+		{"offset form, unknown server zone still canonicalizes", "DateTime", nil, "2026-06-21T06:00:00+02:00", "2026-06-21T04:00:00Z"},
 		{"date-only ⇒ midnight in zone", "DateTime('America/New_York')", nil, "2026-06-21", "2026-06-21T04:00:00Z"},
 		{"unix seconds number", "DateTime('UTC')", nil, float64(1782014400), "2026-06-21T04:00:00Z"},
 		{"unix seconds json.Number", "DateTime('UTC')", nil, json.Number("1782014400"), "2026-06-21T04:00:00Z"},
@@ -84,65 +85,66 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 			schema := tsSchema(tt.colType)
 			resolveTimestampSpecs(schema, tt.serverTZ, discardLogger())
 			data := map[string]any{"ts": tt.value}
-			require.NoError(t, CanonicalizeTimestamps(schema, data))
+			CanonicalizeTimestamps(schema, data)
 			assert.Equal(t, tt.want, data["ts"])
 		})
 	}
 }
 
-// TestCanonicalizeTimestamps_NoPrecomputedSpec: a schema that never went through
-// spec resolution (hand-built Column literals, outside a registry) still
-// canonicalizes — resolved per record, with UTC as the server default.
+// TestCanonicalizeTimestamps_NoPrecomputedSpec: a schema that skipped spec
+// resolution (hand-built literals) passes through untouched.
 func TestCanonicalizeTimestamps_NoPrecomputedSpec(t *testing.T) {
 	t.Parallel()
 	data := map[string]any{"ts": "2026-06-21 04:00:00"}
-	require.NoError(t, CanonicalizeTimestamps(tsSchema("DateTime"), data))
-	assert.Equal(t, "2026-06-21T04:00:00Z", data["ts"])
+	CanonicalizeTimestamps(tsSchema("DateTime"), data)
+	assert.Equal(t, "2026-06-21 04:00:00", data["ts"])
 }
 
 // TestCanonicalizeTimestamps_AbsentColumn: a column not in the payload (DEFAULT-
 // filled by ClickHouse) is left absent, never invented.
 func TestCanonicalizeTimestamps_AbsentColumn(t *testing.T) {
 	t.Parallel()
+	schema := &TableSchema{Name: "t", Columns: []Column{
+		{Name: "ts", Type: "DateTime", HasDefault: true},
+		{Name: "page", Type: "String"},
+	}}
+	resolveTimestampSpecs(schema, time.UTC, discardLogger())
 	data := map[string]any{"page": "/home"}
-	require.NoError(t, CanonicalizeTimestamps(
-		&TableSchema{Name: "t", Columns: []Column{
-			{Name: "ts", Type: "DateTime", HasDefault: true},
-			{Name: "page", Type: "String"},
-		}}, data))
+	CanonicalizeTimestamps(schema, data)
 	assert.Equal(t, map[string]any{"page": "/home"}, data)
 }
 
-func TestCanonicalizeTimestamps_Errors(t *testing.T) {
+// TestCanonicalizeTimestamps_Unparseable_PassThrough: fail-open — unparseable
+// values and unresolvable column specs pass through verbatim.
+func TestCanonicalizeTimestamps_Unparseable_PassThrough(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
 		colType string
 		value   any
-		wantIn  string
 	}{
-		{"unrecognized string", "DateTime('UTC')", "banana", `column "ts"`},
-		{"non-finite numeric string is not an instant", "DateTime('UTC')", "NaN", "unrecognized timestamp"},
-		{"wrong value type", "DateTime('UTC')", true, "must be a string or Unix-seconds number"},
-		{"unknown zone in type", "DateTime('Not/AZone')", "2026-06-21 04:00:00", `unknown time zone "Not/AZone"`},
-		{"malformed DateTime64 precision", "DateTime64(x)", "2026-06-21 04:00:00", "bad precision"},
+		{"unrecognized string", "DateTime('UTC')", "banana"},
+		{"non-finite numeric string is not an instant", "DateTime('UTC')", "NaN"},
+		{"wrong value type", "DateTime('UTC')", true},
+		{"unknown zone in type", "DateTime('Not/AZone')", "2026-06-21 04:00:00"},
+		{"malformed DateTime64 precision", "DateTime64(x)", "2026-06-21 04:00:00"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := CanonicalizeTimestamps(tsSchema(tt.colType), map[string]any{"ts": tt.value})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantIn)
+			schema := tsSchema(tt.colType)
+			resolveTimestampSpecs(schema, time.UTC, discardLogger())
+			data := map[string]any{"ts": tt.value}
+			CanonicalizeTimestamps(schema, data)
+			assert.Equal(t, tt.value, data["ts"])
 		})
 	}
 }
 
-// TestResolveTimestampSpecs: schema-build-time spec resolution — timestamp
-// columns get a spec (the type's own zone, else the server default), other
-// columns don't, and an unresolvable zone degrades to a nil spec (per-record
-// rejection at ingest) rather than failing the schema build.
+// TestResolveTimestampSpecs: timestamp columns get a spec (own zone, else server
+// default); others don't; an unresolvable zone degrades to nil, not a failure.
 func TestResolveTimestampSpecs(t *testing.T) {
 	t.Parallel()
 	nyc, err := time.LoadLocation("America/New_York")
@@ -164,10 +166,10 @@ func TestResolveTimestampSpecs(t *testing.T) {
 	assert.Nil(t, schema.Columns[2].tsSpec, "non-timestamp column gets no spec")
 	assert.Nil(t, schema.Columns[3].tsSpec, "unresolvable zone degrades to nil, not a failed build")
 
-	// The degraded column still rejects loudly — per record, naming the column.
-	err = CanonicalizeTimestamps(schema, map[string]any{"broken": "2026-06-21 04:00:00"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `unknown time zone "Not/AZone"`)
+	// The degraded column passes through untouched — fail-open, never a rejection.
+	data := map[string]any{"broken": "2026-06-21 04:00:00"}
+	CanonicalizeTimestamps(schema, data)
+	assert.Equal(t, "2026-06-21 04:00:00", data["broken"])
 }
 
 // TestNewSchemaRegistryFromMap_PrecomputesSpecs: the map-built test registry

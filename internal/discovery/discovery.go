@@ -21,10 +21,9 @@ type Column struct {
 	HasDefault bool   `json:"has_default"`
 
 	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
-	// once when the schema is built (Refresh / NewSchemaRegistryFromMap) so the
-	// per-record ingest path parses no type strings and loads no zones. nil for
-	// non-timestamp columns, hand-built Column literals, and zones Go cannot
-	// resolve — CanonicalizeTimestamps falls back to per-record resolution.
+	// once at schema build (Refresh / NewSchemaRegistryFromMap). nil for
+	// non-timestamp columns, hand-built Column literals, and unresolvable zones —
+	// CanonicalizeTimestamps passes those through untouched (fail-open, #372).
 	tsSpec *timestampSpec
 }
 
@@ -68,30 +67,31 @@ func NewSchemaRegistry(conn driver.Conn, database string, refreshInterval time.D
 	}
 }
 
-// Refresh rebuilds the in-memory schema cache: it discovers the ClickHouse
-// server's default time zone (`SELECT timezone()`), queries system.columns, and
-// precomputes each timestamp column's canonicalization spec before swapping the
-// new cache in.
+// Refresh rebuilds the in-memory schema cache: it discovers the server's default
+// time zone, queries system.columns, and precomputes timestamp column specs.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
 
-	// The server's default time zone is how ClickHouse interprets zone-less
-	// timestamp strings on columns without an explicit one; ingest canonicalization
-	// must apply the same rule so it never changes which instant is stored (#372).
+	// ClickHouse interprets zone-less timestamp strings in the server's default
+	// zone; canonicalization applies the same rule so the instant never changes (#372).
 	var tzName string
 	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
 		return fmt.Errorf("query server timezone: %w", err)
 	}
-	serverTZ, err := time.LoadLocation(tzName)
-	if err != nil {
-		// Deliberately fails the refresh rather than falling back to UTC: on a
-		// non-UTC server, a UTC fallback would silently change which instant a
-		// zone-less string stores. cmd/wavehouse embeds time/tzdata, so this
-		// resolves even on images without a system zone database; failing here
-		// means the server's zone is newer than the binary's own tzdata.
-		return fmt.Errorf("load server timezone %q: %w", tzName, err)
+	var serverTZ *time.Location
+	if tzName == "Etc/UTC" {
+		// Debian-family spelling of UTC; Go can't resolve it without a zone
+		// database (the distroless image ships none), but "UTC" it always can.
+		serverTZ = time.UTC
+	} else if loc, err := time.LoadLocation(tzName); err == nil {
+		serverTZ = loc
+	} else {
+		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
+		// instants). A nil server zone means zone-less values pass through.
+		sr.logger.Warn("cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
+			"timezone", tzName, "error", err)
 	}
 
 	rows, err := sr.conn.Query(ctx,
@@ -233,13 +233,12 @@ func isNullable(chType string) bool {
 
 // NewSchemaRegistryFromMap creates a SchemaRegistry pre-loaded with the given
 // table schemas. Intended for testing — no ClickHouse connection is required.
-// Timestamp specs are precomputed like Refresh does (no server to ask ⇒ UTC), so
-// handler tests exercise the same precomputed path as production.
+// Timestamp specs are precomputed like Refresh does (UTC as the server default).
 func NewSchemaRegistryFromMap(tables []*TableSchema) *SchemaRegistry {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := make(map[string]*TableSchema, len(tables))
 	for _, t := range tables {
-		resolveTimestampSpecs(t, nil, logger)
+		resolveTimestampSpecs(t, time.UTC, logger)
 		m[t.Name] = t
 	}
 	return &SchemaRegistry{

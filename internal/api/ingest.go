@@ -401,17 +401,13 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Canonicalize timestamp columns to the RFC 3339 UTC wire form, so the one
-	// payload published below reaches every consumer — SSE subscribers, the
-	// ClickHouse insert, the DLQ — in a single unambiguous spelling (#372). After
-	// the permission checks so check-clause comparisons keep their pre-#372
-	// semantics (and claim-injected values are covered); before dedup so a
-	// rejected record never marks a dedup key. Each column's precision and zone
-	// were resolved at schema discovery, so this is pure computation per record.
-	if err := discovery.CanonicalizeTimestamps(schema, data); err != nil {
-		h.logger.WarnContext(ctx, "timestamp canonicalization failed", "error", err, "table", table)
-		return false, &recordReject{Status: http.StatusBadRequest, Message: err.Error()}, nil
-	}
+	// Canonicalize timestamp columns to RFC 3339 UTC so the one payload published
+	// below reaches every consumer — SSE, the ClickHouse insert, the DLQ — in the
+	// spelling /v1/query renders (#372). Fail-open: unparseable values pass through
+	// for ClickHouse's own parser to judge; fail-closed enforcement is the stream
+	// row-filter's job (#381). After the permission checks so check-clause
+	// comparisons keep their pre-#372 semantics.
+	discovery.CanonicalizeTimestamps(schema, data)
 
 	// Optional deduplication.
 	if h.Dedup != nil && h.IDField != "" {

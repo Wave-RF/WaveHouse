@@ -99,6 +99,7 @@ type fakeConn struct {
 	driver.Conn
 	errsThenSuccess []error
 	calls           atomic.Int32
+	tz              string // SELECT timezone() answer; "" ⇒ "UTC"
 }
 
 func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
@@ -112,15 +113,21 @@ func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, er
 // QueryRow answers the SELECT timezone() probe Refresh issues before the
 // system.columns query (#372); errsThenSuccess sequencing stays keyed on Query.
 func (c *fakeConn) QueryRow(context.Context, string, ...any) driver.Row {
-	return tzRow{}
+	if c.tz != "" {
+		return tzRow{tz: c.tz}
+	}
+	return tzRow{tz: "UTC"}
 }
 
-type tzRow struct{ driver.Row }
+type tzRow struct {
+	driver.Row
+	tz string
+}
 
-func (tzRow) Scan(dest ...any) error {
+func (r tzRow) Scan(dest ...any) error {
 	if len(dest) == 1 {
 		if s, ok := dest[0].(*string); ok {
-			*s = "UTC"
+			*s = r.tz
 			return nil
 		}
 	}
@@ -143,6 +150,16 @@ func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	conn := &fakeConn{errsThenSuccess: errs}
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return NewSchemaRegistry(conn, "test", time.Hour, logger), conn
+}
+
+// TestRefresh_UnresolvableServerTimezone_NotFatal: an unresolvable server zone
+// degrades to pass-through canonicalization (#372), never a failed refresh.
+func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{tz: "Not/AZone"}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	sr := NewSchemaRegistry(conn, "test", time.Hour, logger)
+	require.NoError(t, sr.Refresh(context.Background()))
 }
 
 // TestRetryRefresh_SucceedsOnFirstAttempt is the happy path: Refresh returns

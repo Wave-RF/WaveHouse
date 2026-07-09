@@ -14,13 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	// Embed the IANA time zone database (~450 KB). Schema discovery resolves the
-	// ClickHouse server zone and timestamp-column zones with time.LoadLocation
-	// (#372), which must not depend on the deploy image shipping a system tzdata
-	// package — a schema refresh that cannot resolve the server zone fails, and
-	// stays failed, until tzdata appears.
-	_ "time/tzdata"
-
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/Wave-RF/WaveHouse/internal/api"
 	"github.com/Wave-RF/WaveHouse/internal/auth"

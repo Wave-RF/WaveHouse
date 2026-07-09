@@ -114,7 +114,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 ### `discovery/` — Schema Discovery & Validation
 
 - **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Each refresh also discovers the server's default time zone (`SELECT timezone()`) and bakes every `DateTime`/`DateTime64` column's canonicalization spec (precision + resolved zone) into the cached schema, so the per-record ingest path parses no type strings and loads no zones ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). Supports periodic auto-refresh, on-demand refresh, and `RetryRefresh` (boot-time exponential backoff loop used by `cmd/wavehouse` so a transiently unreachable ClickHouse doesn't crash-loop the binary). Thread-safe via `sync.RWMutex`.
-- **timestamp.go** — `CanonicalizeTimestamps(schema, data)` rewrites every `DateTime`/`DateTime64` value to the canonical RFC 3339 UTC wire form before the event is published (#372): zone-less values are interpreted in the column's declared zone, else the discovered server default — the same rule ClickHouse applies, so the spelling changes but never the instant. An unparseable value is a per-record `400` naming the column.
+- **timestamp.go** — `CanonicalizeTimestamps(schema, data)` rewrites every `DateTime`/`DateTime64` value it can parse to the canonical RFC 3339 UTC wire form before the event is published (#372): zone-less values are interpreted in the column's declared zone, else the discovered server default — ClickHouse's own rule, so the spelling changes but never the instant. Fail-open: an unparseable value or unresolvable zone passes through verbatim for ClickHouse's own parser to judge; ingest never rejects a record over its timestamp spelling.
 - **validation.go** — `Validate(schema, data)` checks incoming JSON against the discovered schema: unknown fields, type compatibility, missing required columns, null handling.
 - **discovery_test.go** — Unit tests for validation logic.
 
@@ -169,8 +169,8 @@ Client POST /v1/ingest?table={table}
   → Policy column rules + check clauses (disallowed columns rejected;
     claim-derived values enforced or injected)
   → Canonicalize DateTime/DateTime64 values to RFC 3339 UTC (rewrites the
-    payload so every consumer shares one spelling; an unparseable value is a
-    400 for that record)
+    payload so every consumer shares one spelling; fail-open — an unparseable
+    value passes through verbatim for ClickHouse's own parser to judge)
   → Optional deduplication check (configurable ID field; a row missing that
     field is published un-deduped + logged/counted, or rejected under require_id)
   → Publish to NATS JetStream (ingest.{table})

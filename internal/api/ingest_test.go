@@ -1431,9 +1431,9 @@ func TestIngest_TimestampsCanonicalized(t *testing.T) {
 	assert.Equal(t, "e", data["name"], "non-timestamp columns untouched")
 }
 
-// TestIngest_TimestampGarbage_400: an unparseable timestamp is rejected loudly at
-// ingest, naming the column — not accepted and left to die at the async insert.
-func TestIngest_TimestampGarbage_400(t *testing.T) {
+// TestIngest_TimestampGarbage_PassesThrough: fail-open — an unparseable value
+// publishes verbatim; ClickHouse's own parser decides insertability (#372/#381).
+func TestIngest_TimestampGarbage_PassesThrough(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(tsRegistry(), pub, testutil.NopLogger())
@@ -1442,15 +1442,13 @@ func TestIngest_TimestampGarbage_400(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	testutil.AssertJSONErrorResponse(t, w)
-	assert.Contains(t, w.Body.String(), `column \"ts\"`)
-	assert.Nil(t, pub.LastMessage(), "nothing published for a rejected record")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "banana", publishedData(t, pub)["ts"], "unparseable value published verbatim")
 }
 
-// TestIngest_Batch_BadTimestampIsolatedPerRecord: one bad timestamp fails its own
-// record; the rest of the batch still publishes (the #195 isolation contract).
-func TestIngest_Batch_BadTimestampIsolatedPerRecord(t *testing.T) {
+// TestIngest_Batch_MixedTimestampSpellings: parseable spellings canonicalize,
+// the unparseable one passes through — no record fails on its timestamp.
+func TestIngest_Batch_MixedTimestampSpellings(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(tsRegistry(), pub, testutil.NopLogger())
@@ -1468,16 +1466,24 @@ func TestIngest_Batch_BadTimestampIsolatedPerRecord(t *testing.T) {
 		Total     int `json:"total"`
 		Succeeded int `json:"succeeded"`
 		Failed    int `json:"failed"`
-		Results   []struct {
-			Index int    `json:"index"`
-			Error string `json:"error"`
-		} `json:"results"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
 	assert.Equal(t, 3, result.Total)
-	assert.Equal(t, 2, result.Succeeded)
-	assert.Equal(t, 1, result.Failed)
-	require.Len(t, result.Results, 3)
-	assert.Contains(t, result.Results[1].Error, `column "ts"`)
-	assert.Len(t, pub.Messages, 2, "the two good records published")
+	assert.Equal(t, 3, result.Succeeded)
+	assert.Equal(t, 0, result.Failed)
+	require.Len(t, pub.Messages, 3, "every record published")
+
+	var spellings []string
+	for _, msg := range pub.Messages {
+		var evt struct {
+			Data map[string]any `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(msg.Data, &evt))
+		spellings = append(spellings, evt.Data["ts"].(string))
+	}
+	assert.Equal(t, []string{
+		"2026-06-21T04:00:00Z", // already canonical
+		"banana",               // unparseable — passed through verbatim
+		"2026-06-21T04:00:00Z", // Unix seconds — canonicalized
+	}, spellings)
 }
