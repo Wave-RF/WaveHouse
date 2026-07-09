@@ -213,7 +213,10 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
   }
   .wh-footer__bar {
     display: flex;
-    align-items: center;
+    /* Baseline, not center: <Logo/> exposes the wordmark baseline as its own
+       (see Logo.astro), so the "WaveHouse" wordmark sits on the same baseline
+       as the tagline and links — same alignment the header's .wh-lead uses. */
+    align-items: baseline;
     gap: 0.625rem;
     flex-wrap: wrap;
   }
