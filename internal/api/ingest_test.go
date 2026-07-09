@@ -1443,6 +1443,7 @@ func TestIngest_TimestampGarbage_400(t *testing.T) {
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	testutil.AssertJSONErrorResponse(t, w)
 	assert.Contains(t, w.Body.String(), `column \"ts\"`)
 	assert.Nil(t, pub.LastMessage(), "nothing published for a rejected record")
 }

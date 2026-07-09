@@ -19,6 +19,13 @@ type Column struct {
 	Type       string `json:"type"`
 	IsNullable bool   `json:"is_nullable"`
 	HasDefault bool   `json:"has_default"`
+
+	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
+	// once when the schema is built (Refresh / NewSchemaRegistryFromMap) so the
+	// per-record ingest path parses no type strings and loads no zones. nil for
+	// non-timestamp columns, hand-built Column literals, and zones Go cannot
+	// resolve — CanonicalizeTimestamps falls back to per-record resolution.
+	tsSpec *timestampSpec
 }
 
 // TableSchema holds the discovered schema for one ClickHouse table.
@@ -48,7 +55,6 @@ type SchemaRegistry struct {
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
-	serverTZ        *time.Location // ClickHouse server default zone; nil until discovered (⇒ UTC)
 }
 
 // NewSchemaRegistry creates a registry that discovers schemas from system.columns.
@@ -62,7 +68,10 @@ func NewSchemaRegistry(conn driver.Conn, database string, refreshInterval time.D
 	}
 }
 
-// Refresh queries system.columns and rebuilds the in-memory schema cache.
+// Refresh rebuilds the in-memory schema cache: it discovers the ClickHouse
+// server's default time zone (`SELECT timezone()`), queries system.columns, and
+// precomputes each timestamp column's canonicalization spec before swapping the
+// new cache in.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
@@ -77,6 +86,11 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	}
 	serverTZ, err := time.LoadLocation(tzName)
 	if err != nil {
+		// Deliberately fails the refresh rather than falling back to UTC: on a
+		// non-UTC server, a UTC fallback would silently change which instant a
+		// zone-less string stores. cmd/wavehouse embeds time/tzdata, so this
+		// resolves even on images without a system zone database; failing here
+		// means the server's zone is newer than the binary's own tzdata.
 		return fmt.Errorf("load server timezone %q: %w", tzName, err)
 	}
 
@@ -113,25 +127,16 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		ts.Columns = append(ts.Columns, col)
 	}
 
+	for _, ts := range tables {
+		resolveTimestampSpecs(ts, serverTZ, sr.logger)
+	}
+
 	sr.mu.Lock()
 	sr.tables = tables
-	sr.serverTZ = serverTZ
 	sr.mu.Unlock()
 	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName)
 
 	return nil
-}
-
-// ServerTimezone returns the ClickHouse server's default time zone, or UTC when it
-// has not been discovered yet (a map-built test registry, or before the first
-// successful Refresh).
-func (sr *SchemaRegistry) ServerTimezone() *time.Location {
-	sr.mu.RLock()
-	defer sr.mu.RUnlock()
-	if sr.serverTZ == nil {
-		return time.UTC
-	}
-	return sr.serverTZ
 }
 
 // Get returns the schema for a table, or nil if not found.
@@ -228,13 +233,17 @@ func isNullable(chType string) bool {
 
 // NewSchemaRegistryFromMap creates a SchemaRegistry pre-loaded with the given
 // table schemas. Intended for testing — no ClickHouse connection is required.
+// Timestamp specs are precomputed like Refresh does (no server to ask ⇒ UTC), so
+// handler tests exercise the same precomputed path as production.
 func NewSchemaRegistryFromMap(tables []*TableSchema) *SchemaRegistry {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := make(map[string]*TableSchema, len(tables))
 	for _, t := range tables {
+		resolveTimestampSpecs(t, nil, logger)
 		m[t.Name] = t
 	}
 	return &SchemaRegistry{
 		tables: m,
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger: logger,
 	}
 }

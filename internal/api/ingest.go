@@ -406,8 +406,9 @@ func (h *IngestHandler) processRecord(
 	// ClickHouse insert, the DLQ — in a single unambiguous spelling (#372). After
 	// the permission checks so check-clause comparisons keep their pre-#372
 	// semantics (and claim-injected values are covered); before dedup so a
-	// rejected record never marks a dedup key.
-	if err := discovery.CanonicalizeTimestamps(schema, data, h.Registry.ServerTimezone()); err != nil {
+	// rejected record never marks a dedup key. Each column's precision and zone
+	// were resolved at schema discovery, so this is pure computation per record.
+	if err := discovery.CanonicalizeTimestamps(schema, data); err != nil {
 		h.logger.WarnContext(ctx, "timestamp canonicalization failed", "error", err, "table", table)
 		return false, &recordReject{Status: http.StatusBadRequest, Message: err.Error()}, nil
 	}
