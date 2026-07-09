@@ -17,11 +17,11 @@
 // declares their virtual modules so `astro check` can resolve them. On
 // @astrojs/starlight upgrades, re-check those component module paths.
 //
-// Only the right-hand controls are hidden below Starlight's `md` (50rem) —
-// on doc pages the sidebar drawer already carries theme/language pickers. The
-// left nav stays at every width: the full lockup + one "Docs" link fit even a
-// 320px bar (with the mobile gap tightening below), and hiding them left the
-// mobile header near-empty — a bare mark and a search icon (PR #368 review).
+// The left nav and the controls are hidden below Starlight's `md` (50rem):
+// under 50rem the sidebar (a hamburger drawer) already carries navigation on
+// doc pages, leaving the full-lockup logo + the (always-visible) search button
+// — the wordmark (not the old bare mark) keeps the mobile bar from reading
+// empty (PR #368 review).
 import config from "virtual:starlight/user-config";
 
 import LanguageSelect from "virtual:starlight/components/LanguageSelect";
@@ -51,7 +51,10 @@ const currentPath = stripSlash(Astro.url.pathname);
     <div class="title-wrapper sl-flex">
       <SiteTitle />
     </div>
-    <nav class="wh-header-nav sl-flex print:hidden" aria-label="Primary">
+    <nav
+      class="wh-header-nav sl-hidden md:sl-flex print:hidden"
+      aria-label="Primary"
+    >
       {
         headerNav.map(({ label, href }) => {
           const target = stripSlash(href);
@@ -144,14 +147,6 @@ const currentPath = stripSlash(Astro.url.pathname);
     align-items: baseline;
     gap: 1.75rem;
     min-width: 0;
-  }
-  /* Below 50rem the doc-page header also hosts Starlight's fixed hamburger
-     (a 4rem end-padding reservation), so the row loses ~3rem: tighten the
-     lead gaps so lockup + "Docs" + search still clear a 320px viewport. */
-  @media (max-width: 49.9375rem) {
-    .wh-lead {
-      gap: 1rem;
-    }
   }
   .title-wrapper {
     /* Prevent the title overflowing and covering the search button on narrow
