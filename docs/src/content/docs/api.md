@@ -217,6 +217,8 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 - Type compatibility: `String`/`DateTime`/`UUID`/`Enum`/`IPv*` accept JSON strings; `Int*`/`Float*`/`Decimal` accept JSON numbers; `Bool` accepts JSON booleans or numbers; `Array` accepts JSON arrays; `Map`/`Tuple` accept JSON objects.
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
 
+**Timestamp canonicalization:** a `DateTime`/`DateTime64` column value may be sent as RFC 3339 (any offset), `YYYY-MM-DD[ T]HH:MM:SS[.fff]` or `YYYY-MM-DD` (zone-less — interpreted in the column's time zone, else the ClickHouse server's, exactly as ClickHouse itself would), or Unix seconds (a JSON number, or the same digits as a string). Whatever the input spelling, WaveHouse rewrites the value to **one canonical wire form — RFC 3339 UTC** (`2026-06-21T04:00:00Z`, fraction truncated to the column's precision) — before publishing, so the stored instant never changes but every downstream consumer (the ClickHouse insert, [SSE subscribers](#get-v1stream--server-sent-events-stream), the DLQ) sees the same spelling `/v1/query` renders. An unparseable timestamp is rejected with a `400` naming the column (previously it surfaced only at the async insert, via the DLQ). `Date`/`Date32` columns are passed through untouched.
+
 **Response (accepted):**
 
 ```json
@@ -235,6 +237,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
+| 400 | `{"error":"column \"ts\": unrecognized timestamp ..."}` | A `DateTime`/`DateTime64` column value that parses as none of the accepted timestamp forms (see timestamp canonicalization above). In a batch this is a per-record failure. |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
@@ -539,6 +542,8 @@ data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","da
 
 Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.
 
+Row `DateTime`/`DateTime64` column values inside `data` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#post-v1ingesttabletable--ingest-data)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). For a column stored in UTC (the norm) the two renderings are byte-identical; a column declared with a non-UTC zone streams as `Z` while `/v1/query` renders it in the column's own offset — the same instant either way. Events ingested before this behavior shipped replay in whatever spelling they were published with.
+
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
 **CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
@@ -768,7 +773,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
-| `data` | object | The original flat JSON body. |
+| `data` | object | The flat JSON body, with `DateTime`/`DateTime64` column values rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#post-v1ingesttabletable--ingest-data)); other values as originally sent. |
 
 ### Client-Facing Format (SSE)
 

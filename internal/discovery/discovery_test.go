@@ -109,6 +109,24 @@ func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, er
 	return &emptyRows{}, nil
 }
 
+// QueryRow answers the SELECT timezone() probe Refresh issues before the
+// system.columns query (#372); errsThenSuccess sequencing stays keyed on Query.
+func (c *fakeConn) QueryRow(context.Context, string, ...any) driver.Row {
+	return tzRow{}
+}
+
+type tzRow struct{ driver.Row }
+
+func (tzRow) Scan(dest ...any) error {
+	if len(dest) == 1 {
+		if s, ok := dest[0].(*string); ok {
+			*s = "UTC"
+			return nil
+		}
+	}
+	return errors.New("unexpected timezone scan")
+}
+
 type emptyRows struct {
 	driver.Rows
 }

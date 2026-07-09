@@ -1379,3 +1379,104 @@ func TestIngest_BodyCap_413(t *testing.T) {
 		})
 	}
 }
+
+// tsRegistry returns a registry whose events table carries the timestamp column
+// shapes the #372 canonicalization path rewrites.
+func tsRegistry() *discovery.SchemaRegistry {
+	return discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+		{
+			Name: "events",
+			Columns: []discovery.Column{
+				{Name: "name", Type: "String"},
+				{Name: "ts", Type: "DateTime('UTC')", HasDefault: true},
+				{Name: "ts_ms", Type: "DateTime64(3, 'UTC')", HasDefault: true},
+			},
+		},
+	})
+}
+
+// publishedData decodes the inner data object of the last published envelope —
+// what the stream fans out and the worker inserts.
+func publishedData(t *testing.T, pub *testutil.MockPublisher) map[string]any {
+	t.Helper()
+	msg := pub.LastMessage()
+	require.NotNil(t, msg)
+	var evt struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(msg.Data, &evt))
+	return evt.Data
+}
+
+// TestIngest_TimestampsCanonicalized is the #372 contract: whatever spelling a
+// producer uses, the published payload — the one copy SSE subscribers, the
+// ClickHouse insert, and the DLQ all consume — carries RFC 3339 UTC.
+func TestIngest_TimestampsCanonicalized(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(tsRegistry(), pub, testutil.NopLogger())
+
+	req := ingestRequest(t, "events", map[string]any{
+		"name":  "e",
+		"ts":    "2026-06-21 04:00:00", // zone-less ClickHouse-native form
+		"ts_ms": 1782014400.5,          // Unix seconds
+	})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	data := publishedData(t, pub)
+	assert.Equal(t, "2026-06-21T04:00:00Z", data["ts"])
+	assert.Equal(t, "2026-06-21T04:00:00.5Z", data["ts_ms"])
+	assert.Equal(t, "e", data["name"], "non-timestamp columns untouched")
+}
+
+// TestIngest_TimestampGarbage_400: an unparseable timestamp is rejected loudly at
+// ingest, naming the column — not accepted and left to die at the async insert.
+func TestIngest_TimestampGarbage_400(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(tsRegistry(), pub, testutil.NopLogger())
+
+	req := ingestRequest(t, "events", map[string]any{"name": "e", "ts": "banana"})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), `column \"ts\"`)
+	assert.Nil(t, pub.LastMessage(), "nothing published for a rejected record")
+}
+
+// TestIngest_Batch_BadTimestampIsolatedPerRecord: one bad timestamp fails its own
+// record; the rest of the batch still publishes (the #195 isolation contract).
+func TestIngest_Batch_BadTimestampIsolatedPerRecord(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(tsRegistry(), pub, testutil.NopLogger())
+
+	req := ingestRequest(t, "events", []map[string]any{
+		{"name": "a", "ts": "2026-06-21T04:00:00Z"},
+		{"name": "b", "ts": "banana"},
+		{"name": "c", "ts": float64(1782014400)},
+	})
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var result struct {
+		Total     int `json:"total"`
+		Succeeded int `json:"succeeded"`
+		Failed    int `json:"failed"`
+		Results   []struct {
+			Index int    `json:"index"`
+			Error string `json:"error"`
+		} `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+	assert.Equal(t, 3, result.Total)
+	assert.Equal(t, 2, result.Succeeded)
+	assert.Equal(t, 1, result.Failed)
+	require.Len(t, result.Results, 3)
+	assert.Contains(t, result.Results[1].Error, `column "ts"`)
+	assert.Len(t, pub.Messages, 2, "the two good records published")
+}

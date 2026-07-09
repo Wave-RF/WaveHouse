@@ -48,6 +48,7 @@ type SchemaRegistry struct {
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	tables          map[string]*TableSchema
+	serverTZ        *time.Location // ClickHouse server default zone; nil until discovered (⇒ UTC)
 }
 
 // NewSchemaRegistry creates a registry that discovers schemas from system.columns.
@@ -66,6 +67,18 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
+
+	// The server's default time zone is how ClickHouse interprets zone-less
+	// timestamp strings on columns without an explicit one; ingest canonicalization
+	// must apply the same rule so it never changes which instant is stored (#372).
+	var tzName string
+	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
+		return fmt.Errorf("query server timezone: %w", err)
+	}
+	serverTZ, err := time.LoadLocation(tzName)
+	if err != nil {
+		return fmt.Errorf("load server timezone %q: %w", tzName, err)
+	}
 
 	rows, err := sr.conn.Query(ctx,
 		`SELECT table, name, type, default_kind
@@ -102,10 +115,23 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 
 	sr.mu.Lock()
 	sr.tables = tables
+	sr.serverTZ = serverTZ
 	sr.mu.Unlock()
-	sr.logger.Info("schema registry refreshed", "tables", len(tables))
+	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName)
 
 	return nil
+}
+
+// ServerTimezone returns the ClickHouse server's default time zone, or UTC when it
+// has not been discovered yet (a map-built test registry, or before the first
+// successful Refresh).
+func (sr *SchemaRegistry) ServerTimezone() *time.Location {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	if sr.serverTZ == nil {
+		return time.UTC
+	}
+	return sr.serverTZ
 }
 
 // Get returns the schema for a table, or nil if not found.

@@ -431,6 +431,11 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", w.db)
 	q.Set("param_target_table", tableName)
 	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
+	// Ingest canonicalizes DateTime values to RFC 3339 UTC (#372), whose zone
+	// suffix ClickHouse's default 'basic' parser rejects. best_effort is a
+	// superset: it accepts the canonical form, and pre-#372 messages still in the
+	// stream (zone-less strings, Unix numbers) parse exactly as before.
+	q.Set("date_time_input_format", "best_effort")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", w.chURL+"?"+q.Encode(), &buf)
 	if err != nil {
