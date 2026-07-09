@@ -1,11 +1,9 @@
 package policy
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // evalRowFilter builds a one-role/one-table policy carrying filter and returns the
@@ -140,127 +138,4 @@ func TestRowVisible_MultiplePredicates_AllMustPass(t *testing.T) {
 	assert.True(t, perms.RowVisible(map[string]any{"tenant_id": "acme", "amount": float64(250)}, num))
 	assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "acme", "amount": float64(9)}, num), "amount fails")
 	assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "globex", "amount": float64(250)}, num), "tenant fails")
-}
-
-// TestCompiledRowFilter_MatchesEvaluatePath pins the parity the compiled per-subscriber
-// stream path depends on: for every (filter, claims, row) below, CompileRowFilter +
-// RowVisible must return exactly what the query path (Evaluate → resolved predicates →
-// matches) returns. Were the two to diverge, a subscriber could see rows the query path
-// hides (or vice versa) — the
-// row-level-security bug this path exists to prevent. The matrix exercises every operator,
-// constant / whole-claim / mixed-template / space-padded / nested-path values, and
-// missing columns, empty claim sets, and numeric-vs-lexicographic comparison.
-func TestCompiledRowFilter_MatchesEvaluatePath(t *testing.T) {
-	t.Parallel()
-	filters := []map[string]Filter{
-		{"tenant_id": {Eq: new("{{ jwt.tenant }}")}},
-		{"tenant_id": {Neq: new("{{ jwt.tenant }}")}},
-		{"amount": {Gt: new("100")}},
-		{"amount": {Lt: new("{{ jwt.cap }}")}},
-		{"status": {Eq: new("active")}},                                   // constant
-		{"region": {In: new("{{ jwt.regions }}")}},                        // claim list
-		{"tag": {In: new("{{ jwt.tag }}")}},                               // claim scalar
-		{"kind": {In: new("published")}},                                  // constant in-set
-		{"label": {Eq: new("v-{{ jwt.tier }}")}},                          // mixed template
-		{"tenant_id": {Eq: new(" {{ jwt.tenant }} ")}},                    // space-padded ⇒ stays a template
-		{"tenant_id": {Eq: new("{{ jwt.tenant }}"), Neq: new("blocked")}}, // two predicates on one column
-		{"org": {Eq: new("{{ jwt.org.id }}")}},                            // nested claim path
-	}
-	claimsets := []map[string]any{
-		nil,
-		{"tenant": "acme"},
-		{"tenant": "acme", "cap": float64(500), "regions": []any{"us", "eu"}, "tag": "x", "tier": "pro", "org": map[string]any{"id": "o1"}},
-		{"tenant": ""},
-		{"tenant": "acme", "regions": []any{}}, // empty claim list
-	}
-	rows := []map[string]any{
-		{"tenant_id": "acme", "amount": float64(250), "status": "active", "region": "us", "tag": "x", "kind": "published", "label": "v-pro", "org": "o1"},
-		{"tenant_id": "globex", "amount": float64(9), "status": "off", "region": "apac", "tag": "y", "kind": "draft", "label": "v-free", "org": "o2"},
-		{"amount": float64(500)}, // several columns missing ⇒ fail closed
-		{"tenant_id": "", "amount": "NaN", "org": "o1"},
-	}
-	numeric := map[string]bool{"amount": true}
-
-	for fi, f := range filters {
-		p := &Policy{Tables: map[string]TablePolicy{
-			"t": {Select: map[string]RolePermissions{"viewer": {Filter: f}}},
-		}}
-		compiled := CompileRowFilter(p, "viewer", "t", "select")
-		assert.Equalf(t, Evaluate(p, "viewer", "t", "select", nil).HasRowFilter(), compiled.HasRowFilter(),
-			"HasRowFilter parity, filter#%d", fi)
-		for _, claims := range claimsets {
-			resolved := Evaluate(p, "viewer", "t", "select", claims)
-			for ri, row := range rows {
-				want := resolved.RowVisible(row, numeric)
-				got := compiled.RowVisible(row, claims, numeric)
-				assert.Equalf(t, want, got,
-					"filter#%d claims=%v row#%d — compiled=%v resolved=%v", fi, claims, ri, got, want)
-			}
-		}
-	}
-}
-
-// FuzzCompiledRowFilterParity is the property form of the matrix test above: for ANY
-// operator, filter value, claim, and row the fuzzer synthesizes, the compiled
-// per-subscriber stream path (CompileRowFilter + RowVisible) must agree with the query
-// path (Evaluate + resolved predicates). The fuzzer probes the template-parsing edges
-// where a divergence would hide — stray "{{", "jwt.", nested dots, whitespace, partial
-// templates — that a hand-written matrix can't enumerate. The seed corpus also runs as a
-// plain regression test under `go test` (no -fuzz needed). The column is fixed to a
-// bind-safe name so the role always resolves as allowed; RowVisible parity is defined
-// only for an allowed role (a denied role never reaches the per-subscriber check).
-func FuzzCompiledRowFilterParity(f *testing.F) {
-	f.Add(uint8(0), "{{ jwt.x }}", "acme", "acme", true, false, false)   // eq claim-ref, match
-	f.Add(uint8(1), " {{ jwt.x }} ", "acme", "acme", true, false, false) // space-padded ⇒ template
-	f.Add(uint8(2), "100", "", "250", true, true, false)                 // gt numeric constant
-	f.Add(uint8(3), "{{ jwt.x }}", "500", "250", true, true, false)      // lt numeric claim
-	f.Add(uint8(4), "{{ jwt.x }}", "a,b,c", "b", true, false, true)      // in claim-list
-	f.Add(uint8(0), "v-{{ jwt.x }}", "pro", "v-pro", true, false, false) // mixed template
-	f.Add(uint8(0), "{{ jwt.x }}", "acme", "acme", false, false, false)  // column absent ⇒ fail closed
-	f.Add(uint8(0), "{{ jwt.a.b }}", "z", "z", true, false, false)       // nested claim path
-
-	f.Fuzz(func(t *testing.T, opSel uint8, filterVal, claimVal, rowVal string, colPresent, numeric, claimList bool) {
-		var filter Filter
-		switch opSel % 5 {
-		case 0:
-			filter.Eq = &filterVal
-		case 1:
-			filter.Neq = &filterVal
-		case 2:
-			filter.Gt = &filterVal
-		case 3:
-			filter.Lt = &filterVal
-		case 4:
-			filter.In = &filterVal
-		}
-		p := &Policy{Tables: map[string]TablePolicy{
-			"t": {Select: map[string]RolePermissions{"r": {Filter: map[string]Filter{"col": filter}}}},
-		}}
-
-		var claim any = claimVal
-		if claimList { // exercise the _in []any path, not just a scalar claim
-			parts := strings.Split(claimVal, ",")
-			list := make([]any, len(parts))
-			for i, s := range parts {
-				list[i] = s
-			}
-			claim = list
-		}
-		claims := map[string]any{"x": claim}
-		row := map[string]any{}
-		if colPresent {
-			row["col"] = rowVal
-		}
-		nc := map[string]bool{}
-		if numeric {
-			nc["col"] = true
-		}
-
-		compiled := CompileRowFilter(p, "r", "t", "select")
-		resolved := Evaluate(p, "r", "t", "select", claims)
-		require.True(t, resolved.Allowed, "fixed bind-safe setup must resolve as allowed")
-		require.Equalf(t, resolved.RowVisible(row, nc), compiled.RowVisible(row, claims, nc),
-			"parity broke: op=%d filter=%q claim=%v(list=%v) row=%q(present=%v) numeric=%v",
-			opSel%5, filterVal, claim, claimList, rowVal, colPresent, numeric)
-	})
 }

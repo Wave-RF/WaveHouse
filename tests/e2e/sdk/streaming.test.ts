@@ -28,7 +28,7 @@ describe("Streaming", () => {
     // Explicitly allow the 'anon' role to SELECT (stream) from this suite's tables.
     // 'scoped' additionally carries a per-subscriber row filter — streamed rows are
     // limited to the caller's own country claim — so the SSE fan-out exercises the
-    // row-level-security path (CompileRowFilter → RowVisible) end to end, not just
+    // row-level-security path (ResolvedPermissions.RowVisible) end to end, not just
     // column projection.
     publicPolicy.tables[T.clicks].select = {
       ...(publicPolicy.tables[T.clicks].select || {}),

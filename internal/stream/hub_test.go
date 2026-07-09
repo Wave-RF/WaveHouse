@@ -3,7 +3,6 @@ package stream
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -19,9 +18,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// rawEvent marshals an EventMessage the way the ingest path publishes it. It takes
-// testing.TB so both tests (*testing.T) and benchmarks (*testing.B) can build events.
-func rawEvent(t testing.TB, table, ts string, data map[string]any) []byte {
+// rawEvent marshals an EventMessage the way the ingest path publishes it.
+func rawEvent(t *testing.T, table, ts string, data map[string]any) []byte {
 	t.Helper()
 	raw, err := json.Marshal(ingest.EventMessage{TableName: table, ReceivedTimestamp: ts, Data: data})
 	require.NoError(t, err)
@@ -502,45 +500,6 @@ func TestWireFrame(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, string(wireFrame(tt.id, []byte(tt.payload))))
-		})
-	}
-}
-
-// BenchmarkBroadcast_RowFilteredFanout measures one Broadcast on a row-filtered topic
-// as the subscriber count grows. The filter compiles once per bucket
-// (policy.CompileRowFilter); each subscriber then pays only a claim-bound RowVisible on
-// the full event, so allocations stay flat regardless of fan-out. This is the benchmark
-// behind the O(subscribers) → O(1) allocation work on PR #381 — run it before/after a
-// fan-out change to catch a regression back to per-subscriber resolution. It isolates
-// the fan-out cost: the shared column projection is built once per event, and full
-// outbound queues merely drop (a nil-metric no-op).
-//
-//	go test ./internal/stream/ -run '^$' -bench BenchmarkBroadcast_RowFilteredFanout -benchmem
-func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
-	const topic = "ingest.clicks"
-	raw := rawEvent(b, "clicks", "2026-06-26T00:00:00Z",
-		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
-
-	for _, n := range []int{100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
-			hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
-			// Half the subscribers share the event's tenant (row visible), half don't
-			// (row withheld); either way each pays the per-subscriber RowVisible check
-			// against the once-per-bucket compiled filter, which is the cost under
-			// measurement.
-			for i := range n {
-				sub := NewSubscriber()
-				tenant := "acme"
-				if i%2 == 1 {
-					tenant = "globex"
-				}
-				sub.SetClaims(map[string]any{"tenant": tenant})
-				hub.Add(topic, "viewer", sub)
-			}
-			b.ReportAllocs()
-			for b.Loop() {
-				hub.Broadcast(topic, raw)
-			}
 		})
 	}
 }

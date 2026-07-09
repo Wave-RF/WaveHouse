@@ -19,7 +19,7 @@ import (
 // resolved against each subscriber's claims, so two subscribers of the same role can
 // be entitled to different rows. For a role that carries a row-filter, Broadcast
 // therefore keeps the shared column projection but evaluates row visibility PER
-// subscriber (CompiledRowFilter.RowVisible) before delivering — closing the
+// subscriber (ResolvedPermissions.RowVisible) before delivering — closing the
 // query/stream RLS drift in #319. Roles without a row-filter keep the pure
 // once-per-role fast path unchanged. See projectColumns.
 type Hub struct {
@@ -161,16 +161,13 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 		// shared, but whether each subscriber may see THIS row depends on its claims, so
 		// evaluate visibility per subscriber. Predicates read the full event data (a
 		// filter may key on a column the role can't SELECT), not the projected columns.
-		// The filter compiles once per bucket (claims-independent); only the claim
-		// binding inside RowVisible is per subscriber, so a filtered high-fan-out topic
-		// pays no per-subscriber predicate resolution.
 		if !numericResolved {
 			numericCols = h.numericCols(evt.TableName)
 			numericResolved = true
 		}
-		compiled := policy.CompileRowFilter(p, rb.role, evt.TableName, "select")
 		for _, sub := range rb.bucket.Snapshot() {
-			if !compiled.RowVisible(evt.Data, sub.claims, numericCols) {
+			subPerms := policy.Evaluate(p, rb.role, evt.TableName, "select", sub.claims)
+			if !subPerms.RowVisible(evt.Data, numericCols) {
 				continue // this row is filtered out for this subscriber
 			}
 			if !sub.Send(frame) {
@@ -227,8 +224,8 @@ func (h *Hub) ReplayFrame(role string, claims map[string]any, raw []byte) (Frame
 		return Frame{}, false
 	}
 	if perms.HasRowFilter() {
-		compiled := policy.CompileRowFilter(p, role, evt.TableName, "select")
-		if !compiled.RowVisible(evt.Data, claims, h.numericCols(evt.TableName)) {
+		subPerms := policy.Evaluate(p, role, evt.TableName, "select", claims)
+		if !subPerms.RowVisible(evt.Data, h.numericCols(evt.TableName)) {
 			return Frame{}, false // this row is filtered out for these claims
 		}
 	}
@@ -241,9 +238,8 @@ func (h *Hub) ReplayFrame(role string, claims map[string]any, raw []byte) (Frame
 // role+table policy entry (AllowColumns/DenyColumns), never from claims, so this
 // frame is byte-identical for every subscriber of a (role, table) — the shared
 // projection that lets one serialization serve a whole bucket. Row-level security is
-// NOT applied here; when perms.HasRowFilter(), the caller compiles the role's filter
-// once (policy.CompileRowFilter) and checks its RowVisible per subscriber with that
-// subscriber's claims. ok=false means skip: the role can't
+// NOT applied here; the caller checks perms.RowVisible per subscriber (with that
+// subscriber's claims) when perms.HasRowFilter(). ok=false means skip: the role can't
 // read the table, or the payload is unusable. perms is nil for the legacy no-policy
 // passthrough (which has no row-filter).
 func projectColumns(p *policy.Policy, filter bool, role string, evt *ingest.EventMessage, raw []byte, decoded bool) (wire []byte, perms *policy.ResolvedPermissions, ok bool) {

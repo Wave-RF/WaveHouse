@@ -37,6 +37,11 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, numericCols map[str
 	if p == nil {
 		return true
 	}
+	// A denied role sees no rows — fail closed, mirroring the !Allowed guard on
+	// IsColumnAllowed, so a denied receiver never reads as "no filter ⇒ all visible".
+	if !p.Allowed {
+		return false
+	}
 	for _, pred := range p.rowFilter {
 		if !pred.matches(row, numericCols[pred.Column]) {
 			return false
@@ -72,69 +77,6 @@ func (pred resolvedPredicate) matches(row map[string]any, numeric bool) bool {
 			}
 		}
 		return false
-	default:
-		return false
-	}
-}
-
-// HasRowFilter reports whether the compiled filter carries any predicate. A nil
-// receiver, or an admin / unfiltered role, has none — the compiled twin of
-// ResolvedPermissions.HasRowFilter.
-func (c *CompiledRowFilter) HasRowFilter() bool {
-	return c != nil && len(c.preds) > 0
-}
-
-// RowVisible reports whether row satisfies every compiled predicate for the given
-// claims — the per-subscriber, deferred-binding twin of ResolvedPermissions.RowVisible,
-// and it must agree with it on every decision. A nil receiver (no policy applies)
-// admits every row; a denied or bind-unsafe filter admits none (fail closed).
-// numericCols is as in ResolvedPermissions.RowVisible.
-func (c *CompiledRowFilter) RowVisible(row, claims map[string]any, numericCols map[string]bool) bool {
-	if c == nil {
-		return true
-	}
-	if !c.allowed {
-		return false
-	}
-	for _, pred := range c.preds {
-		if !pred.visible(row, claims, numericCols[pred.Column]) {
-			return false
-		}
-	}
-	return true
-}
-
-// visible evaluates one compiled predicate against the row for the given claims. It
-// binds the claim value at call time, then reuses compareScalar — the same comparison
-// core as resolvedPredicate.matches — so the compiled and resolved paths can't drift on
-// how values compare. Fails closed on an absent or uncomparable value, exactly as
-// matches does.
-func (cp compiledPredicate) visible(row, claims map[string]any, numeric bool) bool {
-	raw, ok := row[cp.Column]
-	if !ok {
-		return false // column not in the event ⇒ can't prove the row is allowed
-	}
-	if cp.Op == "in" {
-		for _, v := range cp.Value.bindIn(claims) {
-			if c, ok := compareScalar(raw, v, numeric); ok && c == 0 {
-				return true
-			}
-		}
-		return false
-	}
-	c, ok := compareScalar(raw, cp.Value.bindScalar(claims), numeric)
-	if !ok {
-		return false
-	}
-	switch cp.Op {
-	case "=":
-		return c == 0
-	case "!=":
-		return c != 0
-	case ">":
-		return c > 0
-	case "<":
-		return c < 0
 	default:
 		return false
 	}
