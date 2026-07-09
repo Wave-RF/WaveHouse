@@ -195,8 +195,9 @@ func unixToTime(f float64) time.Time {
 
 // canonicalTimestamp renders t in the canonical wire form: UTC RFC 3339, fraction
 // truncated to the column's precision. time.RFC3339Nano trims trailing fractional
-// zeros — exactly how /v1/query renders (encoding/json marshals time.Time with the
-// same layout), so the two read paths stay byte-identical for UTC columns.
+// zeros — exactly how /v1/query renders (its transformRow formats every time.Time
+// via UTC().Format(time.RFC3339Nano)), so the two read paths stay byte-identical
+// whatever zone the column declares.
 func canonicalTimestamp(t time.Time, precision int) string {
 	unit := time.Second
 	for range precision {
