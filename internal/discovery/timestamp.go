@@ -116,11 +116,18 @@ func resolveTimestampSpec(chType string, serverTZ *time.Location) (timestampSpec
 		return timestampSpec{precision: precision, loc: serverTZ}, nil
 	}
 	name := strings.Trim(args[0], "'")
-	loc, err := time.LoadLocation(name)
+	loc, err := loadLocation(name)
 	if err != nil {
 		return timestampSpec{}, fmt.Errorf("unknown time zone %q in type %q: %w", name, chType, err)
 	}
 	return timestampSpec{precision: precision, loc: loc}, nil
+}
+
+func loadLocation(name string) (*time.Location, error) {
+	if name == "Etc/UTC" {
+		return time.UTC, nil
+	}
+	return time.LoadLocation(name)
 }
 
 // parseTimestamp converts one ingested value into a time.Time. Accepted forms:

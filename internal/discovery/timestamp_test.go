@@ -60,6 +60,7 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 		{"offset converts to Z", "DateTime('UTC')", nil, "2026-06-21T06:30:00+02:30", "2026-06-21T04:00:00Z"},
 		{"naive space form, column zone", "DateTime('America/New_York')", nil, "2026-06-21 00:00:00", "2026-06-21T04:00:00Z"},
 		{"naive T form, column zone", "DateTime('America/New_York')", nil, "2026-06-21T00:00:00", "2026-06-21T04:00:00Z"},
+		{"naive form, Etc/UTC column zone", "DateTime('Etc/UTC')", nil, "2026-06-21 04:00:00", "2026-06-21T04:00:00Z"},
 		{"naive form, server zone", "DateTime", nyc, "2026-06-21 00:00:00", "2026-06-21T04:00:00Z"},
 		{"naive form, unknown server zone ⇒ passes through", "DateTime", nil, "2026-06-21 04:00:00", "2026-06-21 04:00:00"},
 		{"offset form, unknown server zone still canonicalizes", "DateTime", nil, "2026-06-21T06:00:00+02:00", "2026-06-21T04:00:00Z"},
@@ -155,6 +156,7 @@ func TestResolveTimestampSpecs(t *testing.T) {
 		{Name: "zoned", Type: "DateTime64(3, 'America/New_York')"},
 		{Name: "page", Type: "String"},
 		{Name: "broken", Type: "DateTime('Not/AZone')"},
+		{Name: "etc_utc", Type: "DateTime('Etc/UTC')"},
 	}}
 	resolveTimestampSpecs(schema, nyc, discardLogger())
 
@@ -165,6 +167,8 @@ func TestResolveTimestampSpecs(t *testing.T) {
 	assert.Equal(t, 3, schema.Columns[1].tsSpec.precision)
 	assert.Nil(t, schema.Columns[2].tsSpec, "non-timestamp column gets no spec")
 	assert.Nil(t, schema.Columns[3].tsSpec, "unresolvable zone degrades to nil, not a failed build")
+	require.NotNil(t, schema.Columns[4].tsSpec)
+	assert.Same(t, time.UTC, schema.Columns[4].tsSpec.loc, "Etc/UTC maps to UTC without a tzdata lookup")
 
 	// The degraded column passes through untouched — fail-open, never a rejection.
 	data := map[string]any{"broken": "2026-06-21 04:00:00"}

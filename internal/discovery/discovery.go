@@ -81,11 +81,7 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		return fmt.Errorf("query server timezone: %w", err)
 	}
 	var serverTZ *time.Location
-	if tzName == "Etc/UTC" {
-		// Debian-family spelling of UTC; Go can't resolve it without a zone
-		// database (the distroless image ships none), but "UTC" it always can.
-		serverTZ = time.UTC
-	} else if loc, err := time.LoadLocation(tzName); err == nil {
+	if loc, err := loadLocation(tzName); err == nil {
 		serverTZ = loc
 	} else {
 		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
