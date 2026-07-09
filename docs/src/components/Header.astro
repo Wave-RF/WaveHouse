@@ -2,8 +2,9 @@
 // Custom header overriding Starlight's default. The layout is our own: brand +
 // primary nav pinned left, controls (search, social, theme, language) pinned
 // right. On doc pages the inner row is full-bleed to the bar edges; on the splash
-// homepage (the only page with a hero) it's held in a centered content-width
-// column matching the hero — so the header widens back out to the edges when you
+// homepage (the only page with a hero) it's held in a centered 68rem column —
+// deliberately narrower than the hero's 80rem band, the inset look settled in
+// PR #368 review — so the header widens back out to the edges when you
 // navigate into the docs (see the <style> note below). Search shows
 // Starlight's expanded "Search … ⌘K" box on every page (≥50rem), so the keyboard
 // shortcut stays discoverable. Every control is still Starlight's own built-in,
@@ -36,8 +37,11 @@ const shouldRenderSearch =
 
 // Highlight the active destination — exact match, or any nested page beneath it
 // (so a "/guides" link stays current on "/guides/foo"). trailingSlash is
-// "never", so strip a stray trailing slash before comparing, just in case.
-const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
+// "never", so strip stray trailing slashes before comparing, just in case — on
+// BOTH sides, mirroring the client sync script below, so SSR and client can't
+// disagree if a headerNav entry ever carries one.
+const stripSlash = (path: string) => path.replace(/(.)\/$/, "$1");
+const currentPath = stripSlash(Astro.url.pathname);
 ---
 
 <div class="header wh-header">
@@ -50,19 +54,22 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
       aria-label="Primary"
     >
       {
-        headerNav.map(({ label, href }) => (
-          <a
-            href={href}
-            class="wh-header-nav__link"
-            aria-current={
-              currentPath === href || currentPath.startsWith(`${href}/`)
-                ? "page"
-                : undefined
-            }
-          >
-            {label}
-          </a>
-        ))
+        headerNav.map(({ label, href }) => {
+          const target = stripSlash(href);
+          return (
+            <a
+              href={href}
+              class="wh-header-nav__link"
+              aria-current={
+                currentPath === target || currentPath.startsWith(`${target}/`)
+                  ? "page"
+                  : undefined
+              }
+            >
+              {label}
+            </a>
+          );
+        })
       }
     </nav>
   </div>
@@ -108,15 +115,18 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
   /* Our own header layout. Unlayered so it authoritatively styles this
      component's inner .header row (Starlight's own rules are @layer'd and would
      otherwise win). Doc pages are full-bleed to the bar edges, like
-     Supabase/ClickHouse docs; the splash override below holds the inner content
-     in a centered content-width column matching the hero. The outer PageFrame bar
-     always spans full width; only this inner content is capped + centered. */
+     Supabase/ClickHouse docs; the splash rule in global.css holds the inner
+     content in a centered 68rem column, deliberately narrower than the hero. The
+     outer PageFrame bar always spans full width; only this inner content is
+     capped + centered. */
   /* Layout only. The width behaviour — the splash's centred column widening to
      full-bleed on the docs, and the animated tween between them — lives in
-     global.css as `.wh-header`, NOT here: the header element is PRESERVED across
-     view-transitions, and Astro's SCOPED styles don't re-apply to a persisted
-     element after a swap, so a scoped transition gets dropped on navigation. A
-     global rule survives (verified: scoped max-width read `none` post-nav). */
+     global.css as `.wh-header`, NOT here: the rule is keyed on
+     `body:has(.wh-hero)`, and body/hero live outside this component's template,
+     so a component-scoped selector would need :global() to match at all; and
+     since the header element is PRESERVED across view-transitions, one
+     always-applied global rule lets max-width TWEEN on the persisted node
+     instead of snapping (see the global.css note). */
   .header {
     display: flex;
     align-items: center;
@@ -137,7 +147,11 @@ const currentPath = Astro.url.pathname.replace(/(.)\/$/, "$1");
     min-width: 0;
   }
   .title-wrapper {
-    /* Avoid clipping the focus ring around the title link. */
+    /* Prevent the title overflowing and covering the search button on narrow
+       viewports (upstream default's guard; moot for the fixed-size logo, kept
+       for future-proofing). The 0.25rem padding gutter exactly hosts the 4px
+       focus ring, so the clip never eats it. */
+    overflow: clip;
     padding: 0.25rem;
     margin: -0.25rem;
     min-width: 0;

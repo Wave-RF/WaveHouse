@@ -800,12 +800,14 @@ header.header {
   border-bottom: 1px solid var(--wh-border);
 }
 /* Inner header row width. Kept GLOBAL (not in Header.astro's scoped styles) on
-   purpose: the header is PRESERVED across view-transitions, and Astro's scoped
-   styles don't reliably re-apply to a persisted element after a swap (its
-   max-width read `none` post-nav), so a scoped transition would drop mid-nav —
-   a global rule survives, so the width TWEENS between the two states instead of
-   snapping. Doc pages are full-bleed; the splash (the only page with a hero)
-   holds the inner content in a centred content-width column matching the hero. */
+   purpose: the selector is keyed on `body:has(.wh-hero)` — body and the hero
+   live outside Header.astro's template, so a component-scoped rule would need
+   :global() to match at all — and the header is PRESERVED across
+   view-transitions, so one always-applied rule lets max-width TWEEN on the
+   persisted element instead of snapping. Doc pages are full-bleed; the splash
+   (the only page with a hero) holds the inner content in a centred 68rem
+   column — deliberately narrower than the hero's 80rem band, the inset look
+   settled in PR #368 review. */
 .wh-header {
   /* 100vw (not 100%) so BOTH endpoints are <length>: max-width won't tween
      between a length (68rem) and a percentage, it snaps. 100vw never binds (the

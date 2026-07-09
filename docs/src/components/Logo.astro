@@ -3,7 +3,12 @@
 // themed entirely by CSS (mark = --wh-accent via currentColor, wordmark =
 // --wh-ink), so there are no pre-baked light/dark image variants. Below 30rem it
 // collapses to the mark alone (the wordmark would crowd a narrow bar), matching
-// the previous behaviour. Reusable anywhere the brand logo is needed.
+// the previous behaviour. Reusable anywhere the brand logo is needed. The
+// lockup SVG ships role/aria-label for the standalone brand kit, but is
+// aria-hidden here (like the WaveMark next to it): decorative by default —
+// pass `title` to expose the logo as a labelled image (mirroring WaveMark's
+// API) when no wrapping element provides the name; the header's home link
+// (SiteTitle) labels itself, so it passes none.
 //
 // The lockup is inlined (set:html) rather than loaded through <img> for two
 // reasons: CSS can theme it, and a baseline-flex parent can align adjacent text
@@ -17,12 +22,17 @@ import lockup from "../assets/branding/lockup-themed.svg?raw";
 
 interface Props {
   class?: string;
+  title?: string;
 }
-const { class: className } = Astro.props;
+const { class: className, title } = Astro.props;
 ---
 
-<span class:list={["wh-logo", className]}>
-  <span class="wh-logo__lockup" set:html={lockup} />
+<span
+  class:list={["wh-logo", className]}
+  role={title ? "img" : undefined}
+  aria-label={title}
+>
+  <span class="wh-logo__lockup" aria-hidden="true" set:html={lockup} />
   <span class="wh-logo__mark"><WaveMark /></span>
 </span>
 

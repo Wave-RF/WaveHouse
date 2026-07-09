@@ -89,7 +89,10 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
 // truth for navigation. A single "Docs" entry into the doc tree: the splash
 // homepage hides the sidebar, so this is the way in from there; every doc page
 // already carries the full sidebar. Root-absolute href matches the internal link
-// convention used across the docs (index.mdx hero, LinkCards).
+// convention used across the docs (index.mdx hero, LinkCards). Unlike those
+// Markdown-authored links, component-rendered hrefs are OUTSIDE
+// starlight-links-validator's scope — nothing build-verifies these targets, so
+// keep them in sync by hand when restructuring the docs.
 export const headerNav: { label: string; href: string }[] = [
   { label: "Docs", href: "/getting-started" },
 ];

@@ -20,6 +20,7 @@
 #   branding/mark-{light,dark}.png  1024x1024 transparent raster marks
 #   branding/lockup-{light,dark}.png 1200-wide transparent raster lockups
 #   favicon.ico                     (site root, for /favicon.ico auto-probe)
+#   docs/src/assets/branding/lockup-themed.svg  CSS-var-themed lockup, inlined by Logo.astro
 #
 # To change the brand: edit a hue in docs/src/styles/global.css (--brand-*) or
 # a source SVG, then run `make branding-docs` from the repo root. The live site
@@ -271,3 +272,4 @@ for out in favicon.svg favicon-light.svg favicon-dark.svg favicon.ico \
   printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/branding/$out"
 done
 printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/favicon.ico (site root)"
+printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/src/assets/branding/lockup-themed.svg (inlined by Logo.astro)"
