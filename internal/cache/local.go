@@ -28,27 +28,30 @@ func NewLocal(maxCost int64) (*LocalCache, error) {
 	return &LocalCache{cache: cache, versionManager: vm}, nil
 }
 
-// Get looks up a cached query RESULT by its sha (hash of SQL+params) and the
-// namespaces it depends on. Used by BOTH structured queries (which pass one
-// Namespace) and pipes (which pass several). Returns nil, 0, nil on miss.
-func (l *LocalCache) Get(_ context.Context, sha string, deps []Namespace) ([]byte, time.Duration, error) {
-	cacheKey := l.versionManager.QueryKey(sha, deps)
+// Key folds sha (hash of SQL+params) with each dependency namespace at its
+// current version — the point-in-time snapshot both Get and Set of one request
+// must share (see the Cache interface contract). Used by BOTH structured
+// queries (which pass one Namespace) and pipes (which pass several).
+func (l *LocalCache) Key(sha string, deps []Namespace) string {
+	return l.versionManager.QueryKey(sha, deps)
+}
 
-	val, found := l.cache.Get(cacheKey)
+// Get looks up a cached query RESULT by its folded key. Returns nil, 0, nil on miss.
+func (l *LocalCache) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
+	val, found := l.cache.Get(key)
 	if !found {
 		return nil, 0, nil
 	}
-	remaining, _ := l.cache.GetTTL(cacheKey)
+	remaining, _ := l.cache.GetTTL(key)
 	return val, remaining, nil
 }
 
-// Set stores a query result under the folded key for its dependency namespaces.
-// Used by both structured queries and pipes.
-func (l *LocalCache) Set(_ context.Context, sha string, deps []Namespace, value []byte, ttl time.Duration) error {
-	cacheKey := l.versionManager.QueryKey(sha, deps)
-
-	if ok := l.cache.SetWithTTL(cacheKey, value, int64(len(value)), ttl); !ok {
-		return fmt.Errorf("cache admission rejected for key %q", cacheKey)
+// Set stores a query result under the folded key snapshotted before the query
+// ran (see Cache.Key); a version bump since the snapshot simply orphans the
+// entry — no future Get computes this key.
+func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
+	if ok := l.cache.SetWithTTL(key, value, int64(len(value)), ttl); !ok {
+		return fmt.Errorf("cache admission rejected for key %q", key)
 	}
 	return nil
 }
@@ -69,6 +72,11 @@ func (l *LocalCache) Set(_ context.Context, sha string, deps []Namespace, value 
 // in every namespace key), so a caller that knows a whole-table bump is coming
 // should drop the now-redundant scope entries itself — the ingest worker does this
 // as it builds the batch, where it already loops once and knows it's a single table.
+//
+// Any non-empty batch also bumps the DATABASE version once (DatabaseVersionTable),
+// continuing the subsumption hierarchy upward: a result folding only the database
+// namespace — the dependency-resolution fallback — is evicted by any write, in O(1)
+// instead of folding every base table.
 func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint64, error) {
 	bumpedViews := make(map[string]struct{})
 	for _, ns := range namespaces {
@@ -84,6 +92,9 @@ func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint
 			bumpedViews[view] = struct{}{}
 			l.versionManager.BumpTable(view)
 		}
+	}
+	if len(namespaces) > 0 {
+		l.versionManager.BumpTable(DatabaseVersionTable)
 	}
 	return uint64(len(namespaces)), nil
 }

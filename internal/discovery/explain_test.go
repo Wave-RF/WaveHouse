@@ -16,6 +16,10 @@ func TestParseExplainTables(t *testing.T) {
 		db         string
 		wantTables []string
 		wantDicts  []string
+		// wantExternal: the query reads something no local table version can watch
+		// (a TABLE_FUNCTION node, or a TABLE node that doesn't resolve to a
+		// configured-database name — conservative), so the caller TTL-caps.
+		wantExternal bool
 	}{
 		{
 			name: "simple join, both local",
@@ -41,13 +45,14 @@ func TestParseExplainTables(t *testing.T) {
 			wantTables: []string{"weird.name 2024"},
 		},
 		{
-			name: "foreign database is dropped (unsupported, documented)",
+			name: "foreign database is dropped and marks the read external",
 			lines: []string{
 				"    TABLE id: 3, alias: __table1, table_name: otherdb.events",
 				"    TABLE id: 5, alias: __table2, table_name: default.local",
 			},
-			db:         "default",
-			wantTables: []string{"local"},
+			db:           "default",
+			wantTables:   []string{"local"},
+			wantExternal: true,
 		},
 		{
 			name: "dedup repeated table (self-join)",
@@ -59,9 +64,26 @@ func TestParseExplainTables(t *testing.T) {
 			wantTables: []string{"t"},
 		},
 		{
-			name:  "table function: no table_name line → nothing",
-			lines: []string{"  QUERY id: 0", "    JOIN TREE", "      TABLE_FUNCTION numbers"},
-			db:    "default",
+			name:         "table function: no tracked table, marks the read external",
+			lines:        []string{"  QUERY id: 0", "    JOIN TREE", "      TABLE_FUNCTION numbers"},
+			db:           "default",
+			wantExternal: true,
+		},
+		{
+			name: "table function alongside a local table: table tracked, still external",
+			lines: []string{
+				"  TABLE id: 3, alias: __table1, table_name: default.events",
+				"  TABLE_FUNCTION id: 5, alias: __table2, table_function_name: numbers",
+			},
+			db:           "default",
+			wantTables:   []string{"events"},
+			wantExternal: true,
+		},
+		{
+			name:         "TABLE node without a parseable name is conservatively external",
+			lines:        []string{"  TABLE id: 3, alias: __table1"},
+			db:           "default",
+			wantExternal: true,
 		},
 		{
 			name:  "no tables (SELECT 1)",
@@ -98,12 +120,13 @@ func TestParseExplainTables(t *testing.T) {
 			wantTables: []string{"jt"},
 		},
 		{
-			name: "joinGet cross-db dropped",
+			name: "joinGet cross-db dropped and marks the read external",
 			lines: []string{
 				"      FUNCTION id: 4, function_name: joinGet, function_type: ordinary, result_type: String",
 				"            CONSTANT id: 6, constant_value: 'otherdb.jt', constant_value_type: String",
 			},
-			db: "default",
+			db:           "default",
+			wantExternal: true,
 		},
 		{
 			name: "joinGet with a non-string first constant disarms (no false capture)",
@@ -126,12 +149,13 @@ func TestParseExplainTables(t *testing.T) {
 			wantDicts: []string{"mydict"},
 		},
 		{
-			name: "dictGet cross-db dropped",
+			name: "dictGet cross-db dropped and marks the read external",
 			lines: []string{
 				"          FUNCTION id: 3, function_name: dictGet, function_type: ordinary, result_type: String",
 				"                CONSTANT id: 5, constant_value: 'otherdb.mydict', constant_value_type: String",
 			},
-			db: "default",
+			db:           "default",
+			wantExternal: true,
 		},
 		{
 			name: "joinGet and dictGet together",
@@ -170,12 +194,15 @@ func TestParseExplainTables(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotTables, gotDicts, _ := parseExplainTables(tt.lines, tt.db)
+			gotTables, gotDicts, _, gotExternal := parseExplainTables(tt.lines, tt.db)
 			if !reflect.DeepEqual(gotTables, tt.wantTables) {
 				t.Errorf("tables = %v, want %v", gotTables, tt.wantTables)
 			}
 			if !reflect.DeepEqual(gotDicts, tt.wantDicts) {
 				t.Errorf("dicts = %v, want %v", gotDicts, tt.wantDicts)
+			}
+			if gotExternal != tt.wantExternal {
+				t.Errorf("external = %v, want %v", gotExternal, tt.wantExternal)
 			}
 		})
 	}
@@ -262,7 +289,7 @@ func TestParseExplainTables_DeadBranchPruning(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotTables, _, gotPruned := parseExplainTables(tt.lines, "default")
+			gotTables, _, gotPruned, _ := parseExplainTables(tt.lines, "default")
 			if !reflect.DeepEqual(gotTables, tt.wantTables) {
 				t.Errorf("tables = %v, want %v", gotTables, tt.wantTables)
 			}

@@ -270,11 +270,12 @@ func TestFuzzDeps(t *testing.T) {
 
 	check := func(cat, sql string, expected, referenced map[string]bool) {
 		total++
-		got, err := ResolveTables(ctx, conn, fdb, sql)
+		res, err := ResolveTables(ctx, conn, fdb, sql)
 		if err != nil {
 			errs = append(errs, finding{cat: cat, sql: sql, got: []string{err.Error()}})
 			return
 		}
+		got := res.Tables
 		gotSet := toSet(got)
 		var under, over []string
 		for tbl := range expected {

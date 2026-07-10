@@ -23,7 +23,7 @@ func tbl(name string, cols ...string) *TableSchema {
 
 // IsKnown reports whether a first-level name is safe to fold directly: a base table
 // or a view that flattens cleanly to base tables. An unfoldable view (a source it
-// can't resolve) and an unknown name are not — the caller TTL-floors those.
+// can't resolve) and an unknown name are not — the caller TTL-caps those.
 func TestIsKnown(t *testing.T) {
 	tables := []*TableSchema{tbl("base_a", "x"), tbl("base_b", "x"), tbl("v_norm", "x"), tbl("mv1", "x"), tbl("mv2", "x"), tbl("mv_bad", "x")}
 	viewSources := map[string][]string{

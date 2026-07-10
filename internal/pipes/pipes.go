@@ -19,6 +19,7 @@ import (
 
 const kvBucket = "WAVEHOUSE_PIPES"
 
+// NamedQuery is a pre-defined SQL template with parameter support.
 type NamedQuery struct {
 	Name         string     `json:"name"`
 	SQL          string     `json:"sql"`

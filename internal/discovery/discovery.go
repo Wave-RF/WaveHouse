@@ -50,11 +50,17 @@ func (ts *TableSchema) ColumnNames() []string {
 // what used to be five parallel maps. Rebuilt wholesale on every successful Refresh
 // and guarded by SchemaRegistry.mu.
 type tableInfo struct {
-	schema   *TableSchema // columns in physical order; drives Get/List/ColumnNames
-	isView   bool         // engine is a View family — a view, which ingest never writes
-	sources  []string     // a view's immediate source tables (nil for a base table)
-	asSelect string       // a view's SELECT text — diffed across refreshes to catch a redefinition
-	foldable bool         // derived: a view that flattens cleanly to known base tables
+	schema    *TableSchema // columns in physical order; drives Get/List/ColumnNames
+	isView    bool         // engine is a View family — a view, which ingest never writes
+	sources   []string     // a view's immediate source tables (nil for a base table)
+	asSelect  string       // a view's SELECT text — diffed across refreshes to catch a redefinition
+	foldable  bool         // derived: a view that flattens cleanly to known base tables
+	defPruned bool         // EXPLAIN dead-branch-pruned this view's definition: its source set may be incomplete, so it is never foldable (readers TTL-cap)
+	// defExternal: this view's definition reads something no table version can
+	// watch (a table function, a cross-database table, a non-local dictionary
+	// source). The cascade can't observe writes to it, so the view is never
+	// foldable and its readers TTL-cap instead of trusting eviction.
+	defExternal bool
 }
 
 // SchemaRegistry discovers and caches ClickHouse table schemas, and derives the
@@ -64,7 +70,18 @@ type SchemaRegistry struct {
 	database        string
 	refreshInterval time.Duration
 	logger          *slog.Logger
-	mu              sync.RWMutex
+	// refreshMu serializes whole Refresh invocations (auto-refresh ticker, boot
+	// retry, and the manual /v1/admin/schema/refresh trigger can otherwise
+	// overlap). mu alone only guards the state swap; without total ordering, an
+	// older refresh finishing last could install its older cascade over a newer
+	// one, and computeChangedViews would diff against whichever swap happened to
+	// land in between. Serializing also stops racing callers from duplicating the
+	// expensive pass-2 EXPLAIN work — a queued duplicate re-runs pass 1, sees an
+	// unchanged metaHash, and returns cheaply. Held across onRefresh too, so the
+	// cascade installs into the cache in refresh order; the callback only touches
+	// the cache and pipe memo, never Refresh, so it cannot re-enter.
+	refreshMu sync.Mutex
+	mu        sync.RWMutex
 	// tables maps every name in the configured database — base tables AND views —
 	// to its schema, view-ness, sources, definition, and derived foldability (see
 	// tableInfo). The single source of per-name truth; rebuilt and swapped atomically
@@ -142,6 +159,12 @@ func NewSchemaRegistry(conn driver.Conn, database string, refreshInterval time.D
 // dropping mid-refresh) is recorded (lastResolveOK) so the next refresh re-resolves
 // even when the cheap signals are unchanged, rather than freezing missing edges.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
+	// Serialize refreshes end-to-end (see refreshMu): concurrent callers queue and
+	// run in order, and a duplicate that queued behind an identical refresh
+	// short-circuits on the unchanged metaHash in pass 1.
+	sr.refreshMu.Lock()
+	defer sr.refreshMu.Unlock()
+
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
@@ -232,7 +255,10 @@ func buildDeps(tables map[string]*tableInfo) map[string][]string {
 			path[name] = struct{}{}
 			defer delete(path, name)
 			baseSet := make(map[string]struct{})
-			complete := true
+			// A defPruned/defExternal definition never flattens completely (see
+			// tableInfo) — the view stays unfoldable and readers TTL-cap; its known
+			// bases still feed the cascade walk.
+			complete := !t.defPruned && !t.defExternal
 			for _, s := range t.sources {
 				sb, sok := flatten(s, path)
 				if !sok {
@@ -260,7 +286,7 @@ func buildDeps(tables map[string]*tableInfo) map[string][]string {
 		}
 		bases, complete := flatten(name, make(map[string]struct{}))
 		if !complete {
-			continue // unfoldable: IsKnown reports it not-known so the caller TTL-floors
+			continue // unfoldable: IsKnown reports it not-known so the caller TTL-caps
 		}
 		t.foldable = true
 		ev := chsql.SafeEncodeNATS(name)
@@ -437,13 +463,26 @@ func (sr *SchemaRegistry) discoverViewMeta(ctx context.Context, infos map[string
 func (sr *SchemaRegistry) resolveViewSources(ctx context.Context, infos map[string]*tableInfo, toResolve []viewDef) bool {
 	allResolved := true
 	for _, v := range toResolve {
-		srcs, perr := ResolveTables(ctx, sr.conn, sr.database, v.asSelect)
+		res, perr := ResolveTables(ctx, sr.conn, sr.database, v.asSelect)
 		if perr != nil {
 			sr.logger.Debug("view definition not resolvable via EXPLAIN; relying on dependencies_table", "view", v.name, "error", perr)
 			allResolved = false
 			continue
 		}
-		infos[v.name].sources = append(infos[v.name].sources, srcs...)
+		if res.Pruned {
+			// Pruning dropped a table from this view's OWN definition (a constant-
+			// false arm authored into the view) — never foldable, readers TTL-cap
+			// (see tableInfo.defPruned).
+			infos[v.name].defPruned = true
+			sr.logger.Debug("view definition was dead-branch pruned; treating as unfoldable", "view", v.name)
+		}
+		if res.External {
+			// The view reads something no table version can watch — never foldable,
+			// readers TTL-cap (see tableInfo.defExternal).
+			infos[v.name].defExternal = true
+			sr.logger.Debug("view definition reads an external source; treating as unfoldable", "view", v.name)
+		}
+		infos[v.name].sources = append(infos[v.name].sources, res.Tables...)
 	}
 
 	for _, t := range infos {
@@ -453,22 +492,6 @@ func (sr *SchemaRegistry) resolveViewSources(ctx context.Context, infos map[stri
 		}
 	}
 	return allResolved
-}
-
-// AllBaseTables returns the name of every base table (not a view) — the tables
-// ClickHouse writes go to. It is the over-resolve fallback: a pipe whose exact
-// tables can't be resolved is treated as depending on all of them, so any write
-// evicts it. Coarse, but never a stale read.
-func (sr *SchemaRegistry) AllBaseTables() []string {
-	sr.mu.RLock()
-	defer sr.mu.RUnlock()
-	out := make([]string, 0, len(sr.tables))
-	for name, t := range sr.tables {
-		if !t.isView && t.schema != nil {
-			out = append(out, name)
-		}
-	}
-	return out
 }
 
 // Database returns the configured ClickHouse database this registry tracks.
@@ -527,7 +550,7 @@ func contentHash(infos map[string]*tableInfo) uint64 {
 // table (ingest writes it) and for a foldable view (a write to a source bumps it
 // via the cascade), but NOT for an unfoldable view (unparsed definition, or a
 // cross-database/unknown source) nor an unknown name: the caller treats those as
-// unresolved and TTL-floors the result rather than trust an unmaintained version.
+// unresolved and TTL-caps the result rather than trust an unmaintained version.
 // Pure in-memory lookup over the map built during Refresh — no query.
 func (sr *SchemaRegistry) IsKnown(name string) bool {
 	sr.mu.RLock()

@@ -158,9 +158,14 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// implemented; SafeEncodeNATS("") is "", so this is a no-op while scope is empty.
 	deps := []cache.Namespace{{Table: safeTableName, Scope: chsql.SafeEncodeNATS(scope)}}
 
-	// Try cache.
+	// Snapshot the version-folded key once, before the query runs, and reuse it
+	// for the Get, the singleflight, and the Set (the Cache.Key contract). Keying
+	// the singleflight on the folded key (not the bare sha) also keeps a post-bump
+	// request from coalescing onto a pre-bump flight.
+	entryKey := cacheKey
 	if h.Cache != nil {
-		if data, _, err := h.Cache.Get(r.Context(), cacheKey, deps); err == nil && data != nil {
+		entryKey = h.Cache.Key(cacheKey, deps)
+		if data, _, err := h.Cache.Get(r.Context(), entryKey); err == nil && data != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(data)
@@ -169,7 +174,7 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Execute with singleflight.
-	v, err, _ := h.sf.Do(cacheKey, func() (interface{}, error) {
+	v, err, _ := h.sf.Do(entryKey, func() (interface{}, error) {
 		timeout := h.maxQueryTimeout
 		if perms.MaxExecutionTime > 0 {
 			timeout = min(perms.MaxExecutionTime.Duration(), timeout)
@@ -213,9 +218,16 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 		}
 
 		ttl := cache.QueryTimeToTTL(queryDuration)
+		if !h.Registry.IsKnown(table) {
+			// The name resolved a schema at the top of Handle, but it's an UNFOLDABLE
+			// view the refresh-time cascade never bumps. Same rule as pipes: cap the
+			// TTL (cache.UnresolvedDepsTTLCap) so the result self-expires. A base
+			// table or foldable view is always known, so the happy path is untouched.
+			ttl = min(ttl, cache.UnresolvedDepsTTLCap)
+		}
 
 		if h.Cache != nil {
-			_ = h.Cache.Set(r.Context(), cacheKey, deps, data, ttl)
+			_ = h.Cache.Set(r.Context(), entryKey, data, ttl)
 		}
 		return data, nil
 	})
