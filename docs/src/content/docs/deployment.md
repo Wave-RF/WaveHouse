@@ -136,6 +136,11 @@ WH_SERVER_CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 WH_AUTH_JWT_SECRET=<strong-random-secret>
 WH_AUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 WH_AUTH_ROLE_CLAIM=app_metadata.role
+# Optional non-JWT operator credential (Authorization: Operator <key>, or the
+# X-Operator-Key alias): full-access
+# admin for bootstrap/break-glass, honored even if the policy is wiped. Treat it
+# as an admin secret — inject from your secret store, serve only over TLS.
+WH_AUTH_OPERATOR_KEY=<strong-random-operator-key>
 
 # Access control & pipes — both bootstrap paths are opt-in (no default). When
 # WH_POLICY_FILE_PATH is set, the file MUST exist and parse or the process
@@ -150,6 +155,9 @@ WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 # Optional dedup
 WH_DEDUPE_ENABLED=true
 WH_DEDUPE_ID_FIELD=event_id
+# Reject rows missing the id field instead of publishing them un-deduped
+# (default false → such rows are logged + counted, not rejected).
+WH_DEDUPE_REQUIRE_ID=false
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill

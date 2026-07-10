@@ -384,6 +384,111 @@ func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	assert.Contains(t, string(msg.Data), "injected-org")
 }
 
+// checkInStore builds a policy whose insert check restricts org_id to the set
+// carried by the token's `orgs` claim (an _in check) — the multi-tenant
+// "a writer may only insert rows for tenants they belong to" case (#224).
+func checkInStore() *policy.Store {
+	orgsTemplate := "{{ jwt.orgs }}"
+	return policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {Check: map[string]policy.Filter{"org_id": {In: &orgsTemplate}}},
+				},
+			},
+		},
+	})
+}
+
+func TestIngest_Policy_CheckIn_InSet(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	// org_id is one of the token's allowed orgs — should pass.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-b"})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", "org-b"}})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "an in-set value should publish")
+}
+
+func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	// org_id is NOT one of the token's allowed orgs — forging another tenant's row.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-z"})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", "org-b"}})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	// org_id omitted — unlike _eq there's no single value to auto-inject, so the
+	// insert is rejected (fail closed) rather than stamped with an arbitrary org.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", "org-b"}})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed locks the typed-nil []any
+// path behind an _in check: when the claim itself is absent, resolveInValues
+// returns a typed-nil []any, which must still assert as []any in processRecord
+// (entering the membership branch) so the column is rejected — never treated as a
+// scalar _eq value and auto-injected. The sibling _Absent test omits the column
+// with the claim present; this one drops the claim too. Guards #224 fail-closed.
+func TestIngest_Policy_CheckIn_AbsentClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	// The `orgs` claim is absent entirely, so the _in set resolves to a typed-nil
+	// []any; org_id is omitted too. The insert must be rejected (fail closed), not
+	// auto-injected with nil and published.
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	assert.Nil(t, pub.LastMessage(), "an absent _in claim must not auto-inject or publish")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -392,13 +497,67 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	h.Dedup = dedup
 	h.IDField = "event_id"
 
-	// Payload does NOT include event_id — should skip dedup and publish.
+	// Payload omits event_id and require_id is off (the default): the row skips
+	// dedup and is still published — the warn+counter path, not a rejection (#219).
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home"})
 	w := httptest.NewRecorder()
 	h.Handle(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.NotNil(t, pub.LastMessage(), "should have published even without dedup ID")
+}
+
+// TestIngest_Dedup_RequireID_Rejects covers strict mode: a single insert lacking
+// the id is a 400 that publishes nothing, while one carrying the id still passes.
+func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.RequireID = true
+
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	testutil.AssertJSONErrorResponse(t, w)
+	assert.Nil(t, pub.LastMessage(), "must not publish a row missing the dedupe id under require_id")
+
+	w = httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "ok-1"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "a record carrying the id is still accepted")
+}
+
+// TestIngest_NDJSON_RequireID_Rejects confirms strict mode is per-record: the
+// missing-id line fails while the rest of the batch is published.
+func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.IDField = "event_id"
+	h.RequireID = true
+
+	req := ndjsonRequest(t, "clicks",
+		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
+		jsonLine(t, map[string]any{"page": "/b"}), // missing id → rejected
+		jsonLine(t, map[string]any{"page": "/c", "event_id": "e2"}),
+	)
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := decodeBatchResult(t, w)
+	assert.Equal(t, 3, resp.Total)
+	assert.Equal(t, 2, resp.Succeeded)
+	assert.Equal(t, 1, resp.Failed)
+	assert.Equal(t, 0, resp.Duplicates)
+	assert.True(t, resultAt(t, resp, 1).Ok)
+	assert.Contains(t, resultAt(t, resp, 2).Error, "missing dedupe id field")
+	assert.True(t, resultAt(t, resp, 3).Ok)
+	assert.Len(t, pub.Messages, 2)
 }
 
 func TestIngest_Policy_DenyColumns(t *testing.T) {

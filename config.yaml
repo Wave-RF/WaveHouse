@@ -70,6 +70,9 @@ mq:
 dedupe:
   enabled: false
   id_field: event_id
+  # Reject rows missing id_field instead of publishing them un-deduped. Off by
+  # default (they are logged + counted via wavehouse_ingest_dedupe_missing_id_total).
+  require_id: false
 
 cache:
   l1_max_cost: 67108864
@@ -84,6 +87,7 @@ auth:
   jwt_secret: change-me-in-production
   jwks_url: ""
   role_claim: role
+  operator_key: "" # non-JWT full-access operator credential (Authorization: Operator <key>, or X-Operator-Key) for bootstrap/break-glass; empty disables
 
 schema:
   refresh_interval: 60

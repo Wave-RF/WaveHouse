@@ -2,30 +2,26 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
-	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // StreamHandler handles GET /v1/stream
 type StreamHandler struct {
-	Hub         *Hub
+	Hub         *stream.Hub
 	JS          jetstream.JetStream
-	PolicyStore *policy.Store
 	Heartbeater *stream.Heartbeater
 	Metrics     *stream.Metrics
 }
 
-func NewStreamHandler(hub *Hub, js jetstream.JetStream) *StreamHandler {
+func NewStreamHandler(hub *stream.Hub, js jetstream.JetStream) *StreamHandler {
 	return &StreamHandler{Hub: hub, JS: js}
 }
 
@@ -45,11 +41,11 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve stream permissions for this request. Evaluate maps an empty role
-	// to the policy default_role per event (applyStreamPolicy), so the raw role
-	// from context is what we keep here.
+	// Resolve stream permissions for this request. The raw role from context is the
+	// bucket key: the Hub projects/serializes once per (topic, role), and column
+	// visibility derives only from the role+table policy entry — never from claims
+	// (see stream.Hub). Evaluate maps an empty role to the policy default_role.
 	role := auth.RoleFromContext(r.Context())
-	claims, _ := auth.ClaimsFromContext(r.Context())
 
 	// TODO: impl scope
 	scope := ""
@@ -79,10 +75,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	connectedAt := time.Now()
 	defer func() { h.Metrics.ConnClosed(time.Since(connectedAt)) }()
 
-	// Subscribe for live events.
-	ch := make(chan []byte, 64) // TODO: need to test how many are actually needed, as this is ~1.6KB per subscriber channel...
-	h.Hub.Subscribe(topic, ch)
-	defer h.Hub.Unsubscribe(topic, ch)
+	// Register for live events before gap-fill so events arriving during replay
+	// buffer in the subscriber queue instead of being missed (an overlap with
+	// replay yields duplicates, deduped client-side by id: — at-least-once).
+	sub := stream.NewSubscriber()
+	h.Hub.Add(topic, role, sub)
+	defer h.Hub.Remove(topic, role, sub)
 
 	// Gap fill from NATS using DeliverByStartTime.
 	// Prefer Last-Event-ID header (set automatically by EventSource on reconnect)
@@ -93,21 +91,21 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		sinceStr = r.URL.Query().Get("since")
 	}
 	if sinceStr != "" {
-		// One send path for both timestamp formats: project, write, and count the
-		// replayed frame. A write error means the client is gone, so stop the
+		// One send path for both timestamp formats: project per-connection (replay is
+		// low-volume and one-time, unlike the per-role live fan-out), write, and count
+		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
 		sendReplay := func(data []byte) bool {
-			out := h.applyStreamPolicy(data, role, claims)
-			if out == nil {
+			f, ok := h.Hub.ReplayFrame(role, data)
+			if !ok {
 				return true // filtered for this role — skip
 			}
-			id := extractEventTimestamp(out)
-			n, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
+			n, err := w.Write(f.Data)
 			if err != nil {
 				return false
 			}
 			flusher.Flush()
-			h.Metrics.FrameSent(stream.KindReplay, n)
+			h.Metrics.FrameSent(f.Kind, n)
 			return true
 		}
 		if ts, err := time.Parse(time.RFC3339Nano, sinceStr); err == nil && h.JS != nil {
@@ -122,7 +120,6 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Register with the shared keepalive wheel so a quiet stream isn't idle-closed
 	// by a proxy/tunnel between events.
-	sub := stream.NewSubscriber()
 	if h.Heartbeater != nil {
 		h.Heartbeater.Add(sub)
 		defer h.Heartbeater.Remove(sub)
@@ -132,78 +129,22 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case raw := <-sub.Frames():
-			// Pre-serialized bytes written verbatim — the generic byte-pump. Today
-			// only the keepalive wheel feeds this. A write error means the client is
-			// gone (also a liveness probe on idle streams).
-			n, err := w.Write(raw)
+		case <-sub.Evicted():
+			// Marked for disconnection (slow consumer). The client reconnects and
+			// gap-fills via Last-Event-ID. Inert until the slow-consumer follow-up.
+			return
+		case f := <-sub.Frames():
+			// One byte-pump for every frame kind: keepalive comments from the wheel and
+			// projected event frames from the Hub, already serialized. A write error
+			// means the client is gone (also a liveness probe on idle streams).
+			n, err := w.Write(f.Data)
 			if err != nil {
 				return
 			}
 			flusher.Flush()
-			h.Metrics.FrameSent(stream.KindKeepalive, n)
-		case data := <-ch:
-			// Live hub event: unmarshal, policy-project, and serialize per subscriber.
-			out := h.applyStreamPolicy(data, role, claims)
-			if out == nil {
-				continue
-			}
-			id := extractEventTimestamp(out)
-			n, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", id, out)
-			if err != nil {
-				return
-			}
-			flusher.Flush()
-			h.Metrics.FrameSent(stream.KindEvent, n)
+			h.Metrics.FrameSent(f.Kind, n)
 		}
 	}
-}
-
-// extractEventTimestamp extracts the received_timestamp field from a JSON event
-// payload for use as the SSE id: field. Returns empty string on failure.
-func extractEventTimestamp(data []byte) string {
-	var envelope struct {
-		ReceivedTimestamp string `json:"received_timestamp"`
-	}
-	if err := json.Unmarshal(data, &envelope); err == nil && envelope.ReceivedTimestamp != "" {
-		return envelope.ReceivedTimestamp
-	}
-	return ""
-}
-
-// applyStreamPolicy transforms raw event data for the client, filtering columns
-// based on the caller's policy permissions. Returns nil if the event should be skipped.
-func (h *StreamHandler) applyStreamPolicy(raw []byte, role string, claims map[string]any) []byte {
-	// Scope should be applied before getting here, so we ignore it here
-	var evt ingest.EventMessage
-	if err := json.Unmarshal(raw, &evt); err != nil || evt.TableName == "" {
-		// Not an EventMessage — pass through if valid JSON, skip otherwise.
-		if !json.Valid(raw) {
-			return nil
-		}
-		return raw
-	}
-
-	// Apply policy-based column filtering.
-	if h.PolicyStore != nil {
-		p := h.PolicyStore.Get()
-		perms := policy.Evaluate(p, role, evt.TableName, "select", claims)
-		if !perms.Allowed {
-			return nil // role has no access to this table
-		}
-		evt.Data = filterEventColumns(evt.Data, perms)
-	}
-
-	out := map[string]any{
-		"table_name":         evt.TableName,
-		"received_timestamp": evt.ReceivedTimestamp,
-		"data":               evt.Data,
-	}
-	data, err := json.Marshal(out)
-	if err != nil {
-		return nil
-	}
-	return data
 }
 
 // replayFromNATS creates an ephemeral NATS consumer starting at the given time

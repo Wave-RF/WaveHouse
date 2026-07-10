@@ -27,12 +27,21 @@ services:
       # without it, every request resolves to the policy default_role.
       # WH_AUTH_JWT_SECRET: "change-me"
       #
+      # Optional non-JWT operator credential: a request presenting it
+      # (Authorization: Operator <key>, or the X-Operator-Key alias) gets
+      # full-access admin, works even if the policy is wiped (break-glass).
+      # Treat it as an admin secret.
+      # WH_AUTH_OPERATOR_KEY: "change-me-operator-key"
+      #
       # Seed a policy on first boot. WaveHouse is fail-closed: with no policy,
       # every request (even admin) is denied. dev-policy.yaml ships a permissive
       # "public" trial policy (read/write the demo tables, NOT admin) so the
       # quickstart works tokenless. Tune it before production — see that file.
       WH_POLICY_FILE_PATH: /app/policy.yaml
       WH_DEDUPE_ENABLED: "false"
+      # With dedupe on, reject rows missing the id field instead of publishing
+      # them un-deduped (default false → logged + counted, not rejected).
+      WH_DEDUPE_REQUIRE_ID: "false"
       WH_SCHEMA_REFRESH_INTERVAL: "60"
       WH_DLQ_ENABLED: "true"
       WH_SERVER_CORS_ALLOWED_ORIGINS: "*"

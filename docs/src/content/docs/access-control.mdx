@@ -31,7 +31,7 @@ flowchart TD
 
 Two things make this safe by default:
 
-- **Fail-closed.** A role only gets what the policy explicitly grants it. No policy entry for a table, operation, or role means *denied* — there is no implicit allow. If there is no policy at all (none seeded yet, or it was deleted), **every** request is denied, including the admin role.
+- **Fail-closed.** A role only gets what the policy explicitly grants it. No policy entry for a table, operation, or role means *denied* — there is no implicit allow. If there is no policy at all (none seeded yet, or it was deleted), **every token-based** request is denied, including the admin role — the lone exception is the [operator key](#operator-key), below.
 - **The empty role matches nothing.** A request with no role never matches a policy entry by accident. It is authorized only after `default_role` deliberately maps it to a concrete role, or via the admin role.
 
 ## Roles
@@ -64,11 +64,33 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
 - It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
-There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role).
+There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
 :::caution[A missing policy locks everyone out — including admin]
-`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies everyone, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. Recovery is server-side — restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot, not an "admin" token over HTTP.
+`admin_role` only grants access while a policy is loaded. Deleting the policy from the store sets it to `nil`, and a `nil` policy denies every **token-based** caller, by design: an implicit admin grant must never re-open a deliberately-emptied deployment. The one credential that still works is the [operator key](#operator-key) — configure one to recover over HTTP; without it, recovery is server-side only (restore the [bootstrap file](#bootstrapping-and-the-policy-lifecycle) and reboot).
 :::
+
+### Operator key
+
+`auth.operator_key` (config; presented in an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias) is a static, role-free credential for the person running the deployment, meant for bootstrap and break-glass recovery. A request presenting it is authorized as a **full-access platform operator** — the entire data plane *and* the `/v1/admin/*` management surface — without minting a JWT, and independently of the JWT verifier (`jwt_secret`/`jwks_url`).
+
+Unlike `admin_role`, the operator key is honored **even when the policy is `nil`** (deleted, or never seeded), so it is the one HTTP path that can restore a wiped policy — the break-glass case the caution above describes. It is matched in constant time, takes precedence over any Bearer token on the same request, and is disabled when empty (the default). Treat it as an admin secret: load it from a secret store, serve it only over TLS, and rotate it like any other credential. See [Configuration — Authentication](/configuration#authentication).
+
+Generate a high-entropy value (≥ 256 bits of randomness) and load it from a secret manager rather than committing it:
+
+```bash
+openssl rand -base64 32          # 32 random bytes, base64-encoded — no shell-quoting surprises
+# or, without openssl:
+head -c 32 /dev/urandom | base64
+```
+
+Set the result via `WH_AUTH_OPERATOR_KEY` (or `auth.operator_key`) and present it as `Authorization: Operator <key>` (or `X-Operator-Key: <key>`):
+
+```bash
+curl -H "Authorization: Operator $(cat operator.key)" https://wavehouse.example.com/v1/admin/policy
+```
+
+**Monitor failed attempts.** A successful operator authentication is audit-logged at `INFO`; a request presenting a *wrong* operator key is logged at `WARN` (`operator key authentication failed`) and counted by the `wavehouse_auth_operator_key_failures_total` metric, then handled as an ordinary unauthenticated request (the middleware never rejects). A wrong operator key is never sent by accident, so a nonzero rate is a strong probing/brute-force signal against your most privileged credential — alert on it.
 
 ## Anatomy of a policy
 
@@ -195,8 +217,9 @@ Supported comparison operators:
 | `_neq` | `col != ?` | not equals |
 | `_gt` | `col > ?` | greater than |
 | `_lt` | `col < ?` | less than |
+| `_in` | `col IN (?, …)` | one of a set |
 
-> The policy `Filter` schema also accepts `_in`, but it is **not yet enforced** (tracked in [#224](https://github.com/Wave-RF/WaveHouse/issues/224)) — an `_in` clause is silently ignored (no predicate is produced), so stick to the operators above.
+`_in` scopes a column to a **set** of values. Unlike the other operators, its value is a single claim that resolves to a JSON **array**: `tenant_id: { _in: "{{ jwt.app_metadata.tenant_ids }}" }` with a token claim `tenant_ids: ["a", "b"]` produces `tenant_id IN ('a', 'b')`. This is the multi-tenant case — the allowed set rides on the signed token. A scalar claim yields a one-element set; a missing or empty claim matches **no rows** (fail-closed: an empty allowed-set sees nothing, never everything).
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 
@@ -211,7 +234,7 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 ## Insert checks
 
-`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It only supports `_eq`.
+`check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected at config load**.
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">
@@ -249,8 +272,8 @@ insert:
 
 For each checked column, on `POST /v1/ingest?table={table}`:
 
-- **If the request body includes the column**, its value must equal the claim-derived value, or the insert is rejected with `403 check failed for column "x"`. A `writer` cannot forge a row for another user or tenant.
-- **If the request body omits the column**, WaveHouse **auto-injects** the claim-derived value before publishing. So clients can send just the business fields (`page`, `score`) and let the policy stamp `user_id` and `tenant_id` from the token.
+- **If the request body includes the column**, its value must satisfy the check — equal the claim-derived value (`_eq`), or be one of the claim-derived set (`_in`) — or the insert is rejected with `403 check failed for column "x"`. A `writer` cannot forge a row for another user or tenant.
+- **If the request body omits the column**, an `_eq` check **auto-injects** the claim-derived value before publishing, so clients can send just the business fields (`page`, `score`) and let the policy stamp `user_id` and `tenant_id` from the token. An `_in` check has no single value to stamp, so an omitted column is **rejected** — the writer must name a value within their allowed set.
 
 This pairs naturally with a matching `filter` on the `select` side: `check` stamps the tenant on write, `filter` scopes reads to that tenant.
 
@@ -403,7 +426,7 @@ WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 </TabItem>
 </Tabs>
 
-Because a deleted policy is a total lockout (including admin), treat the bootstrap file as your recovery path: keep it in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
+Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
 
 ## A complete example
 
@@ -496,8 +519,8 @@ Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
 | ----- | ---- | ---------- | ----------- |
 | `allow_columns` | string[] | select, insert | Allowlist of columns. Empty or `["*"]` = all columns (minus `deny_columns`). |
 | `deny_columns` | string[] | select, insert | Blocklist of columns. Always wins over `allow_columns`. |
-| `filter` | map | select | Row-level `WHERE` predicates (`_eq`/`_neq`/`_gt`/`_lt`), ANDed together. Values support `{{ jwt.path }}` templating. |
-| `check` | map | insert | Required insert values (`_eq` only). Enforced if present in the body, auto-injected if absent. Supports templating. |
+| `filter` | map | select | Row-level `WHERE` predicates (`_eq`/`_neq`/`_gt`/`_lt`/`_in`), ANDed together. `_in` takes a single array-valued claim → `col IN (…)`. Values support `{{ jwt.path }}` templating. |
+| `check` | map | insert | Required insert values (`_eq`, or `_in` for a claim-derived set; `_neq`/`_gt`/`_lt` are rejected). `_eq` is enforced if present and auto-injected if absent; `_in` requires the column be present and in-set. Supports templating. |
 | `allowed_aggregations` | string[] | select | Allowlist of aggregation functions. Empty = all (minus denied). Case-insensitive. |
 | `denied_aggregations` | string[] | select | Blocklist of aggregation functions. Always wins. |
 | `max_rows` | int | select | Caps the query `LIMIT`. `0` = no limit (the `query.default_max_rows` config default applies). Must be non-negative. |

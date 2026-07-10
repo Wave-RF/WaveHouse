@@ -6,10 +6,10 @@
 import EditLink from "virtual:starlight/components/EditLink";
 import LastUpdated from "virtual:starlight/components/LastUpdated";
 import Pagination from "virtual:starlight/components/Pagination";
+import Logo from "./Logo.astro";
 import MermaidZoom from "./MermaidZoom.astro";
 import ReadingProgress from "./ReadingProgress.astro";
 import ScrollHints from "./ScrollHints.astro";
-import WaveMark from "./WaveMark.astro";
 
 const year = new Date().getFullYear();
 
@@ -35,10 +35,7 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
 
       <div class="wh-footer__brandblock">
         <div class="wh-footer__bar">
-          <span class="wh-footer__mark" aria-hidden="true">
-            <WaveMark />
-          </span>
-        <strong class="wh-footer__name">WaveHouse</strong>
+          <Logo class="wh-footer__logo" title="WaveHouse" />
         <span class="wh-footer__sub">
           A{" "}
           <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
@@ -73,22 +70,17 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     <footer class="wh-footer wh-footer--full not-content">
       <div class="wh-footer__inner">
         <div class="wh-footer__brand">
-          <span class="wh-footer__mark" aria-hidden="true">
-            <WaveMark />
+          <Logo class="wh-footer__logo" title="WaveHouse" />
+          <span class="wh-footer__sub">
+            A{" "}
+            <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
+              Wave RF
+            </a>{" "}
+            open-source project ·{" "}
+            <a href={repo} target="_blank" rel="noopener noreferrer">
+              GitHub
+            </a>
           </span>
-          <div>
-            <strong>WaveHouse</strong>
-            <span class="wh-footer__sub">
-              A{" "}
-              <a href="https://wave-rf.com" target="_blank" rel="noopener noreferrer">
-                Wave RF
-              </a>{" "}
-              open-source project ·{" "}
-              <a href={repo} target="_blank" rel="noopener noreferrer">
-                GitHub
-              </a>
-            </span>
-          </div>
         </div>
 
         <div class="wh-footer__cols">
@@ -152,12 +144,6 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
 
 <style>
   /* ---------- shared bits (both variants) ---------- */
-  .wh-footer__mark {
-    color: var(--wh-accent-hi);
-    display: grid;
-    place-items: center;
-    flex: none;
-  }
   .wh-footer__sub {
     color: var(--wh-ink-muted);
     font-size: 0.875rem;
@@ -225,21 +211,14 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
     display: grid;
     gap: 1rem;
   }
-  .wh-footer--compact .wh-footer__mark {
-    width: 1.75rem;
-    height: 1.75rem;
-  }
   .wh-footer__bar {
     display: flex;
-    align-items: center;
+    /* Baseline, not center: <Logo/> exposes the wordmark baseline as its own
+       (see Logo.astro), so the "WaveHouse" wordmark sits on the same baseline
+       as the tagline and links — same alignment the header's .wh-lead uses. */
+    align-items: baseline;
     gap: 0.625rem;
     flex-wrap: wrap;
-  }
-  .wh-footer__name {
-    font-size: 0.9375rem;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--wh-ink);
   }
   /* push the links to the trailing edge of the content column (gap sized so
      the row + the external-link arrows still fit the prose column on one
@@ -309,19 +288,14 @@ const repo = "https://github.com/Wave-RF/WaveHouse";
   }
   .wh-footer__brand {
     display: flex;
-    align-items: center;
-    gap: 1rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.625rem;
   }
-  .wh-footer--full .wh-footer__mark {
-    width: 2.25rem;
-    height: 2.25rem;
-  }
-  .wh-footer__brand strong {
-    display: block;
-    font-size: 1rem;
-    font-weight: 650;
-    letter-spacing: -0.02em;
-    color: var(--wh-ink);
+  /* Bigger lockup than the header's 1.625rem default — the marketing footer
+     has room, and it replaces the old 2.25rem mark + 1rem name pair. */
+  .wh-footer--full :global(.wh-footer__logo) {
+    --wh-logo-height: 2rem;
   }
   .wh-footer--full .wh-footer__sub {
     display: block;

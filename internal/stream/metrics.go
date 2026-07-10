@@ -24,6 +24,7 @@ type Metrics struct {
 	duration metric.Float64Histogram
 	frames   metric.Int64Counter
 	bytes    metric.Int64Counter
+	dropped  metric.Int64Counter
 }
 
 // NewMetrics builds the SSE instruments on the global meter provider. Call it
@@ -39,7 +40,9 @@ func NewMetrics() *Metrics {
 		metric.WithDescription("SSE frames written to clients"))
 	bytes, _ := meter.Int64Counter("wavehouse_sse_bytes_sent_total",
 		metric.WithDescription("SSE bytes written to clients"), metric.WithUnit("By"))
-	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes}
+	dropped, _ := meter.Int64Counter("wavehouse_sse_dropped_frames_total",
+		metric.WithDescription("SSE frames dropped to a full subscriber queue (slow consumer)"))
+	return &Metrics{active: active, duration: duration, frames: frames, bytes: bytes, dropped: dropped}
 }
 
 // ConnOpened records a newly established stream.
@@ -68,4 +71,13 @@ func (m *Metrics) FrameSent(kind string, n int) {
 	attrs := metric.WithAttributes(attribute.String("kind", kind))
 	m.frames.Add(context.Background(), 1, attrs)
 	m.bytes.Add(context.Background(), int64(n), attrs)
+}
+
+// FrameDropped records one frame dropped because a subscriber's queue was full —
+// the slow-consumer signal that was silent before #294. kind is a Kind* constant.
+func (m *Metrics) FrameDropped(kind string) {
+	if m == nil {
+		return
+	}
+	m.dropped.Add(context.Background(), 1, metric.WithAttributes(attribute.String("kind", kind)))
 }

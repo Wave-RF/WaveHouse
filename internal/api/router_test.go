@@ -10,6 +10,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -85,6 +86,36 @@ func TestRequireAdmin_InvalidTokenFailsLoud(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), "token expired")
+}
+
+// TestRequireAdmin_OperatorBypass: the operator bit (set by the auth middleware
+// on a valid operator key) passes the gate regardless of the role — even a
+// non-admin one.
+func TestRequireAdmin_OperatorBypass(t *testing.T) {
+	t.Parallel()
+	handler := RequireAdmin(policy.NewMemoryStore(&policy.Policy{}), testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	ctx := auth.WithOperator(auth.WithRole(context.Background(), "viewer"))
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code, "operator bit passes the admin gate regardless of role")
+}
+
+// TestRequireAdmin_OperatorBypassesNilPolicy: break-glass — with no policy at
+// all (IsAdmin admits nobody), the operator bit still admits the request so the
+// operator can restore a wiped policy over HTTP.
+func TestRequireAdmin_OperatorBypassesNilPolicy(t *testing.T) {
+	t.Parallel()
+	handler := RequireAdmin(nil, testutil.NopLogger())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	ctx := auth.WithOperator(context.Background())
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code, "operator bit admits even a nil-policy request (break-glass)")
 }
 
 func TestCORSMiddleware_Preflight(t *testing.T) {
@@ -252,7 +283,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	deps := Dependencies{
 		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -308,7 +339,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 	router := NewRouter(Dependencies{
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
@@ -380,7 +411,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -441,7 +472,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	deps := Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -492,7 +523,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -517,7 +548,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -614,7 +645,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	t.Parallel()
 	reg := discovery.NewSchemaRegistryFromMap(nil)
 	pub := &testutil.MockPublisher{}
-	hub := NewHub()
+	hub := stream.NewHub(nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),

@@ -1,51 +1,26 @@
 ---
+// Starlight's site-title override — just the home link wrapping the shared
+// <Logo/>. All logo rendering/theming lives in Logo.astro so it can be reused
+// outside the header too.
+import Logo from "./Logo.astro";
 import config from "virtual:starlight/user-config";
-import WaveMark from "./WaveMark.astro";
 
 const title =
   typeof config.title === "string" ? config.title : config.title.en ?? "WaveHouse";
+const base = import.meta.env.BASE_URL;
 ---
 
-<a href={import.meta.env.BASE_URL} class="wh-site-title" aria-label={`${title} home`}>
-  <span class="wh-site-title__mark" aria-hidden="true">
-    <WaveMark />
-  </span>
-  <span class="wh-site-title__text">{title}</span>
+<a href={base} class="wh-site-title" aria-label={`${title} home`}>
+  <Logo />
 </a>
 
 <style>
   .wh-site-title {
     display: inline-flex;
-    align-items: center;
-    gap: 0.625rem;
     text-decoration: none;
-    color: var(--wh-ink);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    font-size: 1.0625rem;
-    line-height: 1;
-    transition: color 0.15s ease;
+    transition: opacity 0.15s ease;
   }
-  .wh-site-title:hover .wh-site-title__mark {
-    color: var(--wh-accent);
-    transform: rotate(-2deg);
-  }
-  .wh-site-title:hover .wh-site-title__text {
-    color: var(--wh-ink);
-  }
-  .wh-site-title__mark {
-    width: 1.5rem;
-    height: 1.5rem;
-    color: var(--wh-accent-hi);
-    display: grid;
-    place-items: center;
-    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
-      color 0.15s ease;
-  }
-
-  @media (max-width: 30rem) {
-    .wh-site-title__text {
-      display: none;
-    }
+  .wh-site-title:hover {
+    opacity: 0.8;
   }
 </style>
