@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
-	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -162,7 +161,7 @@ func TestPipesHandler_Execute_DenialLogsAllowedRoles(t *testing.T) {
 func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	h := NewIngestHandler(testRegistry(), &testutil.MockPublisher{}, logger)
+	h := NewIngestHandler(testRegistry(t), &testutil.MockPublisher{}, logger)
 	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
 		Tables: map[string]policy.TablePolicy{
 			"clicks": {Select: map[string]policy.RolePermissions{"viewer": {}}}, // no insert for viewer
@@ -190,7 +189,7 @@ func TestIngest_DenialLogsPolicyGate(t *testing.T) {
 func TestAuthzDenied_LogsChiRoutePattern(t *testing.T) {
 	t.Parallel()
 	logger, buf := warnBufLogger()
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, &testutil.MockPublisher{}, logger),
 		Query:       &QueryHandler{},

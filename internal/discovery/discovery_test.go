@@ -60,52 +60,59 @@ func TestNewSchemaRegistry_ConstructorDefaults(t *testing.T) {
 	assert.Nil(t, sr.Get("anything"))
 }
 
-func TestNewSchemaRegistryFromMap_PopulatesAndLookups(t *testing.T) {
+// TestRefresh_PopulatesAndLookups: Refresh turns the system.columns scan into
+// name-keyed schemas — Get finds them, List returns them all.
+func TestRefresh_PopulatesAndLookups(t *testing.T) {
 	t.Parallel()
-	clicks := &TableSchema{Name: "clicks", Columns: []Column{{Name: "id", Type: "String"}}}
-	users := &TableSchema{Name: "users", Columns: []Column{{Name: "id", Type: "UInt64"}}}
+	conn := &fakeConn{columns: [][4]string{
+		{"clicks", "id", "String", ""},
+		{"clicks", "page", "String", "DEFAULT"},
+		{"users", "id", "UInt64", ""},
+	}}
+	sr := NewSchemaRegistry(conn, "test", time.Hour, discardLogger())
+	require.NoError(t, sr.Refresh(context.Background()))
 
-	sr := NewSchemaRegistryFromMap([]*TableSchema{clicks, users})
-	require.NotNil(t, sr)
-
-	assert.Same(t, clicks, sr.Get("clicks"))
-	assert.Same(t, users, sr.Get("users"))
+	clicks := sr.Get("clicks")
+	require.NotNil(t, clicks)
+	assert.Equal(t, []string{"id", "page"}, clicks.ColumnNames())
+	assert.False(t, clicks.Columns[0].HasDefault)
+	assert.True(t, clicks.Columns[1].HasDefault, "non-empty default_kind ⇒ HasDefault")
+	require.NotNil(t, sr.Get("users"))
 	assert.Nil(t, sr.Get("missing"))
-
-	got := sr.List()
-	assert.Len(t, got, 2)
-	names := map[string]bool{}
-	for _, s := range got {
-		names[s.Name] = true
-	}
-	assert.True(t, names["clicks"])
-	assert.True(t, names["users"])
+	assert.Len(t, sr.List(), 2)
 }
 
-func TestNewSchemaRegistryFromMap_Empty(t *testing.T) {
+// TestRefresh_EmptyDatabase: zero system.columns rows yield an empty, usable
+// registry — nil lookups, empty List, no error.
+func TestRefresh_EmptyDatabase(t *testing.T) {
 	t.Parallel()
-	sr := NewSchemaRegistryFromMap(nil)
-	require.NotNil(t, sr)
+	sr, _ := newFakeRegistry(t, nil)
+	require.NoError(t, sr.Refresh(context.Background()))
 	assert.Empty(t, sr.List())
 	assert.Nil(t, sr.Get("x"))
 }
 
-// fakeConn implements just enough of driver.Conn to drive RetryRefresh. It
-// returns successive errors from errsThenSuccess, and once that slice is
-// exhausted returns emptyRows (which makes Refresh succeed with zero tables).
-// The nil-embedded interface trick handles every other method — none of them
+// fakeConn implements just enough of driver.Conn to drive Refresh and
+// RetryRefresh. It returns successive errors from errsThenSuccess, and once
+// that slice is exhausted serves columns as the system.columns result set
+// (emptyRows when nil, which makes Refresh succeed with zero tables). The
+// nil-embedded interface trick handles every other method — none of them
 // are reached by Refresh.
 type fakeConn struct {
 	driver.Conn
 	errsThenSuccess []error
 	calls           atomic.Int32
-	tz              string // SELECT timezone() answer; "" ⇒ "UTC"
+	tz              string      // SELECT timezone() answer; "" ⇒ "UTC"
+	columns         [][4]string // system.columns rows served on success; nil ⇒ none
 }
 
 func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
 	n := c.calls.Add(1)
 	if int(n) <= len(c.errsThenSuccess) {
 		return nil, c.errsThenSuccess[n-1]
+	}
+	if c.columns != nil {
+		return &fakeRows{rows: c.columns}, nil
 	}
 	return &emptyRows{}, nil
 }
@@ -144,6 +151,37 @@ func (*emptyRows) Err() error   { return nil }
 func (*emptyRows) ColumnTypes() []driver.ColumnType {
 	return nil
 }
+
+// fakeRows plays a system.columns result set: one [table, name, type,
+// default_kind] row per column, in the given order.
+type fakeRows struct {
+	driver.Rows
+	rows [][4]string
+	next int
+}
+
+func (r *fakeRows) Next() bool {
+	r.next++
+	return r.next <= len(r.rows)
+}
+
+func (r *fakeRows) Scan(dest ...any) error {
+	row := r.rows[r.next-1]
+	if len(dest) != len(row) {
+		return errors.New("unexpected system.columns scan shape")
+	}
+	for i, d := range dest {
+		s, ok := d.(*string)
+		if !ok {
+			return errors.New("system.columns scan dest must be *string")
+		}
+		*s = row[i]
+	}
+	return nil
+}
+
+func (*fakeRows) Close() error { return nil }
+func (*fakeRows) Err() error   { return nil }
 
 func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	t.Helper()
@@ -354,9 +392,8 @@ func TestClampBackoff(t *testing.T) {
 // would otherwise panic).
 func TestStartAutoRefresh_ExitsOnContextCancel(t *testing.T) {
 	t.Parallel()
-	sr := NewSchemaRegistryFromMap(nil)
 	// Long interval so the ticker never fires before cancel.
-	sr.refreshInterval = time.Hour
+	sr := NewSchemaRegistry(nil, "test", time.Hour, discardLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 

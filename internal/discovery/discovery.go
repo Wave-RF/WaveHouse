@@ -3,7 +3,6 @@ package discovery
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -21,9 +20,9 @@ type Column struct {
 	HasDefault bool   `json:"has_default"`
 
 	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
-	// once at schema build (Refresh / NewSchemaRegistryFromMap). nil for
-	// non-timestamp columns, hand-built Column literals, and unresolvable zones —
-	// CanonicalizeTimestamps passes those through untouched (fail-open, #372).
+	// once at schema build (Refresh). nil for non-timestamp columns, hand-built
+	// Column literals, and unresolvable zones — CanonicalizeTimestamps passes
+	// those through untouched (fail-open, #372).
 	tsSpec *timestampSpec
 }
 
@@ -225,20 +224,4 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 // isNullable checks if a ClickHouse type string is Nullable.
 func isNullable(chType string) bool {
 	return len(chType) > 9 && chType[:9] == "Nullable("
-}
-
-// NewSchemaRegistryFromMap creates a SchemaRegistry pre-loaded with the given
-// table schemas. Intended for testing — no ClickHouse connection is required.
-// Timestamp specs are precomputed like Refresh does (UTC as the server default).
-func NewSchemaRegistryFromMap(tables []*TableSchema) *SchemaRegistry {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m := make(map[string]*TableSchema, len(tables))
-	for _, t := range tables {
-		resolveTimestampSpecs(t, time.UTC, logger)
-		m[t.Name] = t
-	}
-	return &SchemaRegistry{
-		tables: m,
-		logger: logger,
-	}
 }

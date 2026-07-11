@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -176,12 +177,14 @@ func TestResolveTimestampSpecs(t *testing.T) {
 	assert.Equal(t, "2026-06-21 04:00:00", data["broken"])
 }
 
-// TestNewSchemaRegistryFromMap_PrecomputesSpecs: the map-built test registry
-// resolves specs like Refresh does (UTC server default), so handler tests
-// exercise the same precomputed path as production.
-func TestNewSchemaRegistryFromMap_PrecomputesSpecs(t *testing.T) {
+// TestRefresh_PrecomputesSpecs: schema builds resolve timestamp specs with the
+// server zone from SELECT timezone(), so registry consumers — production and
+// the testutil mock-conn path alike — exercise the same precomputed path.
+func TestRefresh_PrecomputesSpecs(t *testing.T) {
 	t.Parallel()
-	reg := NewSchemaRegistryFromMap([]*TableSchema{tsSchema("DateTime")})
+	conn := &fakeConn{columns: [][4]string{{"t", "ts", "DateTime", ""}}}
+	reg := NewSchemaRegistry(conn, "test", time.Hour, discardLogger())
+	require.NoError(t, reg.Refresh(context.Background()))
 	col := reg.Get("t").Columns[0]
 	require.NotNil(t, col.tsSpec)
 	assert.Equal(t, time.UTC, col.tsSpec.loc)
