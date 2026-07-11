@@ -219,6 +219,15 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 
 **Timestamp canonicalization:** a `DateTime`/`DateTime64` column value sent as RFC 3339 (any offset), `YYYY-MM-DD[ T]HH:MM:SS[.fff]` or `YYYY-MM-DD` (zone-less — interpreted in the column's time zone, else the ClickHouse server's, exactly as ClickHouse itself would), or Unix seconds (a JSON number, or a string of exactly 9–10 digits — other digit lengths are ClickHouse calendar forms like `YYYYMMDD`, so they pass through untouched) is rewritten to **one canonical wire form — RFC 3339 UTC** (`2026-06-21T04:00:00Z`, fraction truncated to the column's precision) before publishing, so the stored instant never changes but every consumer (the ClickHouse insert, [SSE subscribers](#get-v1stream--server-sent-events-stream), the DLQ) sees the same spelling `/v1/query` renders. **Fail-open**: a value in none of those forms is published verbatim — ClickHouse's more liberal parser decides insertability, and a value it too rejects surfaces via the DLQ, as before. `Date`/`Date32` columns pass through untouched.
 
+**The canonical form, precisely.** This is the one strict timestamp spelling in WaveHouse — the same one `/v1/query` renders and the SSE stream carries, and the form the stream row-filter will require for timestamp comparisons once row-level enforcement lands ([#381](https://github.com/Wave-RF/WaveHouse/issues/381)):
+
+- `YYYY-MM-DDTHH:MM:SSZ`, or `YYYY-MM-DDTHH:MM:SS.FZ` when there is a sub-second part: uppercase `T` separator, uppercase `Z` suffix, always UTC — never a numeric offset — and seconds always present.
+- The fraction is **truncated** (never rounded) to the column's precision: a `DateTime` column (whole seconds) never carries a fraction; a `DateTime64(3)` column carries at most three digits.
+- Trailing fractional zeros are trimmed and an all-zero fraction is dropped (Go's `time.RFC3339Nano` rendering): `.120` becomes `.12Z`, `.000` becomes plain `Z` — byte-for-byte what `/v1/query` returns for the same stored value.
+- A column's declared time zone changes only how zone-less *inputs* are interpreted, never the output: every canonical value ends in `Z`.
+
+Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00.1239"` (zone-less, read in New York) → `"2026-06-21T04:00:00.123Z"`; `1750478400.5` (Unix seconds) → `"2025-06-21T04:00:00.5Z"`.
+
 **Response (accepted):**
 
 ```json
