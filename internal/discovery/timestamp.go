@@ -124,8 +124,15 @@ func resolveTimestampSpec(chType string, serverTZ *time.Location) (timestampSpec
 }
 
 func loadLocation(name string) (*time.Location, error) {
-	if name == "Etc/UTC" {
+	switch name {
+	case "Etc/UTC":
 		return time.UTC, nil
+	case "", "Local":
+		// time.LoadLocation reads "" as UTC and "Local" from the process
+		// environment. Neither is a zone ClickHouse would declare, and an
+		// environment-dependent zone is the opposite of canonical — treat
+		// both as unresolvable (nil spec, pass-through) instead of guessing.
+		return nil, fmt.Errorf("not an IANA zone name: %q", name)
 	}
 	return time.LoadLocation(name)
 }
@@ -133,7 +140,10 @@ func loadLocation(name string) (*time.Location, error) {
 // parseTimestamp converts one ingested value into a time.Time. Accepted forms:
 // RFC 3339, `YYYY-MM-DD[ T]HH:MM:SS[.fraction]` and `YYYY-MM-DD` (zone-less,
 // interpreted in loc; skipped when loc is nil), and Unix seconds as a number or
-// numeric string. Anything else errors — the caller passes it through.
+// as a string of 9–10 digits. Anything else errors — the caller passes it
+// through. The grammar is deliberately a subset of ClickHouse best_effort's,
+// instant-identical on that subset: when unsure what ClickHouse would read,
+// this parser must fail, never guess.
 func parseTimestamp(v any, loc *time.Location) (time.Time, error) {
 	switch x := v.(type) {
 	case string:
@@ -149,13 +159,19 @@ func parseTimestamp(v any, loc *time.Location) (time.Time, error) {
 				}
 			}
 		}
-		// A bare digit-string is Unix seconds, as ClickHouse itself reads it
-		// (non-finite values are not an instant).
-		if f, err := strconv.ParseFloat(x, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
-			return unixToTime(f), nil
+		// A digit-string is Unix seconds only in the one shape ClickHouse's
+		// best_effort parser reads that way: 9–10 integer digits, optional
+		// all-digit fraction. Other digit runs are calendar forms there
+		// (8 ⇒ YYYYMMDD, 14 ⇒ YYYYMMDDhhmmss, 4 ⇒ YYYY), and signs/exponents
+		// aren't timestamps to it at all — those pass through, so this parser
+		// can never read a different instant than the insert will store.
+		if isUnixSecondsString(x) {
+			if f, err := strconv.ParseFloat(x, 64); err == nil {
+				return unixToTime(f), nil
+			}
 		}
 		return time.Time{}, fmt.Errorf(
-			"unrecognized timestamp %.64q (accepted: RFC 3339, 'YYYY-MM-DD[ T]HH:MM:SS[.fff]', 'YYYY-MM-DD', or Unix seconds)", x)
+			"unrecognized timestamp %.64q (accepted: RFC 3339, 'YYYY-MM-DD[ T]HH:MM:SS[.fff]', 'YYYY-MM-DD', or 9-10 digit Unix seconds)", x)
 	case float64:
 		return unixToTime(x), nil
 	case json.Number:
@@ -167,6 +183,26 @@ func parseTimestamp(v any, loc *time.Location) (time.Time, error) {
 	default:
 		return time.Time{}, fmt.Errorf("timestamp must be a string or Unix-seconds number, got %T", v)
 	}
+}
+
+// isUnixSecondsString reports whether s is Unix seconds in the only string
+// shape ClickHouse's best_effort parser reads as such: 9 or 10 ASCII digits,
+// optionally followed by a non-empty all-digit fraction.
+func isUnixSecondsString(s string) bool {
+	intPart, frac, hasFrac := strings.Cut(s, ".")
+	if len(intPart) < 9 || len(intPart) > 10 || !isDigits(intPart) {
+		return false
+	}
+	return !hasFrac || (frac != "" && isDigits(frac))
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // unixToTime converts fractional Unix seconds to a time.Time (nanoseconds rounded;

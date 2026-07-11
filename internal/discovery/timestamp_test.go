@@ -69,6 +69,7 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 		{"unix seconds number", "DateTime('UTC')", nil, float64(1782014400), "2026-06-21T04:00:00Z"},
 		{"unix seconds json.Number", "DateTime('UTC')", nil, json.Number("1782014400"), "2026-06-21T04:00:00Z"},
 		{"unix seconds digit-string", "DateTime('UTC')", nil, "1782014400", "2026-06-21T04:00:00Z"},
+		{"9-digit unix string", "DateTime('UTC')", nil, "999999999", "2001-09-09T01:46:39Z"},
 		{"fractional unix digit-string", "DateTime64(3, 'UTC')", nil, "1782014400.5", "2026-06-21T04:00:00.5Z"},
 		{"fractional unix on DateTime64", "DateTime64(3, 'UTC')", nil, 1782014400.5, "2026-06-21T04:00:00.5Z"},
 		{"fraction truncated to column precision", "DateTime64(3, 'UTC')", nil, "2026-06-21T04:00:00.123456Z", "2026-06-21T04:00:00.123Z"},
@@ -131,6 +132,21 @@ func TestCanonicalizeTimestamps_Unparseable_PassThrough(t *testing.T) {
 		{"wrong value type", "DateTime('UTC')", true},
 		{"unknown zone in type", "DateTime('Not/AZone')", "2026-06-21 04:00:00"},
 		{"malformed DateTime64 precision", "DateTime64(x)", "2026-06-21 04:00:00"},
+		// Digit-strings outside the 9–10 digit Unix shape mean calendar forms
+		// (or nothing) to ClickHouse best_effort — parsing them as Unix seconds
+		// would store a different instant than the insert (PR #402 review).
+		{"8-digit string is YYYYMMDD to ClickHouse", "DateTime('UTC')", "20260711"},
+		{"12-digit string (ClickHouse rejects)", "DateTime('UTC')", "202607111500"},
+		{"14-digit string is YYYYMMDDhhmmss to ClickHouse", "DateTime('UTC')", "20260711150000"},
+		{"4-digit string is a year to ClickHouse", "DateTime('UTC')", "2026"},
+		{"11-digit string", "DateTime('UTC')", "17504784000"},
+		{"scientific notation is not a timestamp", "DateTime('UTC')", "1e9"},
+		{"negative digit-string", "DateTime('UTC')", "-100"},
+		{"empty fraction", "DateTime('UTC')", "1750478400."},
+		// "" and "Local" are Go LoadLocation quirks (UTC / process env), not
+		// zone declarations — strict: unresolvable, pass through.
+		{"empty zone name in type", "DateTime('')", "2026-06-21 04:00:00"},
+		{"Local zone in type", "DateTime('Local')", "2026-06-21 04:00:00"},
 	}
 
 	for _, tt := range tests {
