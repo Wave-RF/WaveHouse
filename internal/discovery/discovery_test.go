@@ -93,11 +93,9 @@ func TestRefresh_EmptyDatabase(t *testing.T) {
 }
 
 // fakeConn implements just enough of driver.Conn to drive Refresh and
-// RetryRefresh. It returns successive errors from errsThenSuccess, and once
-// that slice is exhausted serves columns as the system.columns result set
-// (emptyRows when nil, which makes Refresh succeed with zero tables). The
-// nil-embedded interface trick handles every other method — none of them
-// are reached by Refresh.
+// RetryRefresh: successive errors from errsThenSuccess, then columns as the
+// system.columns result set (emptyRows when nil). The nil-embedded interface
+// covers every other method — none are reached by Refresh.
 type fakeConn struct {
 	driver.Conn
 	errsThenSuccess []error

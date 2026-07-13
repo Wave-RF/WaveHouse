@@ -323,8 +323,9 @@ func TestInsertToClickHouse_BuildsCorrectRequest(t *testing.T) {
 			assert.Equal(t, "test_db", q.Get("database"))
 			assert.Equal(t, "events", q.Get("param_target_table"))
 			assert.Equal(t, "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow", q.Get("query"))
-			// #372: canonical RFC 3339 timestamps carry a zone suffix the default
-			// 'basic' parser rejects, so the insert must opt into best_effort.
+			// #372: the insert pins best_effort — the server default since
+			// ClickHouse 26.5; older 'basic' defaults reject the canonical
+			// form's zone suffix.
 			assert.Equal(t, "best_effort", q.Get("date_time_input_format"))
 
 			assert.Equal(t, "application/json", req.Header.Get("Content-Type"))

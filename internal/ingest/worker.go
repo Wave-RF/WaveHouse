@@ -431,9 +431,6 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", w.db)
 	q.Set("param_target_table", tableName)
 	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
-	// Canonical RFC 3339 timestamps (#372) carry a zone suffix ClickHouse's
-	// default 'basic' parser rejects; best_effort is a superset, so non-canonical
-	// values (pre-#372 messages, fail-open pass-throughs) parse as before.
 	q.Set("date_time_input_format", "best_effort")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", w.chURL+"?"+q.Encode(), &buf)

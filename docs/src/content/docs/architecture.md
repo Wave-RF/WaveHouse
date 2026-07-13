@@ -181,10 +181,10 @@ Ingest worker pipeline (StartIngestWorker):
   ← JetStream pull consumer (buffer-consumer) on ingest.>
   → Parse the event envelope (a malformed envelope is the only poison pill: it's acked-and-dropped)
   → Batch events per table, bulk INSERT to ClickHouse
-    (INSERTs set date_time_input_format=best_effort: ClickHouse's default
-    'basic' parser rejects the canonical RFC 3339 form's zone suffix; best_effort
-    is a superset, so pre-canonical and fail-open pass-through spellings parse
-    as before)
+    (INSERTs pin date_time_input_format=best_effort — the server default since
+    ClickHouse 26.5; on older servers the 'basic' default rejects the canonical
+    RFC 3339 form's zone suffix. A superset of basic, so pre-canonical and
+    fail-open pass-through spellings parse as before)
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
 

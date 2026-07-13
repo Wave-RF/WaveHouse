@@ -71,7 +71,15 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 		{"unix seconds digit-string", "DateTime('UTC')", nil, "1782014400", "2026-06-21T04:00:00Z"},
 		{"9-digit unix string", "DateTime('UTC')", nil, "999999999", "2001-09-09T01:46:39Z"},
 		{"fractional unix digit-string", "DateTime64(3, 'UTC')", nil, "1782014400.5", "2026-06-21T04:00:00.5Z"},
-		{"fractional unix on DateTime64", "DateTime64(3, 'UTC')", nil, 1782014400.5, "2026-06-21T04:00:00.5Z"},
+		{"nanosecond fraction parsed exactly, not via float64", "DateTime64(9, 'UTC')", nil, "1782014400.123456789", "2026-06-21T04:00:00.123456789Z"},
+		{"fraction digits beyond nine truncate, never round", "DateTime64(9, 'UTC')", nil, "1782014400.9999999995", "2026-06-21T04:00:00.999999999Z"},
+		// Integer numbers are ClickHouse *ticks* at the column scale on DateTime64
+		// — the ms epoch is the natural producer shape there, and an epoch-seconds
+		// number really is a 1970 instant (what the insert stores either way).
+		{"epoch-ms number is ticks on DateTime64(3)", "DateTime64(3, 'UTC')", nil, float64(1782014400000), "2026-06-21T04:00:00Z"},
+		{"epoch-ms json.Number with sub-second ticks", "DateTime64(3, 'UTC')", nil, json.Number("1782014400123"), "2026-06-21T04:00:00.123Z"},
+		{"epoch-seconds number on DateTime64(3) is a 1970 instant", "DateTime64(3, 'UTC')", nil, float64(1782014400), "1970-01-21T15:00:14.4Z"},
+		{"number on DateTime64(0) is seconds (scale 1)", "DateTime64(0, 'UTC')", nil, float64(1782014400), "2026-06-21T04:00:00Z"},
 		{"fraction truncated to column precision", "DateTime64(3, 'UTC')", nil, "2026-06-21T04:00:00.123456Z", "2026-06-21T04:00:00.123Z"},
 		{"fraction truncated off a second-precision column", "DateTime('UTC')", nil, "2026-06-21 04:00:00.999", "2026-06-21T04:00:00Z"},
 		{"trailing fractional zeros trimmed, like /v1/query", "DateTime64(3, 'UTC')", nil, "2026-06-21T04:00:00.120Z", "2026-06-21T04:00:00.12Z"},
@@ -140,9 +148,33 @@ func TestCanonicalizeTimestamps_Unparseable_PassThrough(t *testing.T) {
 		{"14-digit string is YYYYMMDDhhmmss to ClickHouse", "DateTime('UTC')", "20260711150000"},
 		{"4-digit string is a year to ClickHouse", "DateTime('UTC')", "2026"},
 		{"11-digit string", "DateTime('UTC')", "17504784000"},
+		{"13-digit string is ClickHouse's ms epoch, not ours", "DateTime('UTC')", "1752278400000"},
+		{"16-digit string is ClickHouse's µs epoch, not ours", "DateTime('UTC')", "1750478400123456"},
 		{"scientific notation is not a timestamp", "DateTime('UTC')", "1e9"},
 		{"negative digit-string", "DateTime('UTC')", "-100"},
 		{"empty fraction", "DateTime('UTC')", "1750478400."},
+		// ClickHouse consumes a fraction after a Unix epoch only for DateTime64
+		// targets; on plain DateTime the leftover fraction fails the row.
+		{"fractional unix string on DateTime", "DateTime('UTC')", "1782014400.5"},
+		// ClickHouse has no ',' decimal separator (Go's RFC3339Nano accepts one
+		// per ISO 8601) — rewriting would insert a row ClickHouse rejects raw.
+		{"comma fraction", "DateTime('UTC')", "2026-06-21T04:00:00,999Z"},
+		{"comma fraction on DateTime64", "DateTime64(3, 'UTC')", "2026-06-21T04:00:00,9Z"},
+		// ClickHouse rejects non-integer JSON numbers for every DateTime kind.
+		{"non-integer number", "DateTime64(3, 'UTC')", 1782014400.5},
+		{"non-integer number on DateTime", "DateTime('UTC')", 1782014400.5},
+		{"negative number", "DateTime('UTC')", float64(-100)},
+		{"json.Number with exponent", "DateTime('UTC')", json.Number("1.5e9")},
+		// Out of the column kind's range: ClickHouse saturates, and saturation is
+		// spelling-dependent (local time-of-day is kept while the date clamps), so
+		// no rewrite is safe — the raw spelling must be the one that saturates.
+		{"pre-epoch instant on DateTime", "DateTime('UTC')", "1960-01-01T00:00:00Z"},
+		{"beyond UInt32 seconds on DateTime", "DateTime('UTC')", "2107-01-01T00:00:00Z"},
+		{"number beyond UInt32 seconds on DateTime", "DateTime('UTC')", float64(4294967296)},
+		{"beyond 2299 on DateTime64", "DateTime64(3, 'UTC')", "2300-06-30 12:30:00"},
+		{"beyond the Int64-ns ceiling on DateTime64(9)", "DateTime64(9, 'UTC')", "2280-01-01T00:00:00Z"},
+		// Valid RFC 3339 the subset deliberately omits (Go rejects :60).
+		{"leap-second spelling", "DateTime('UTC')", "2016-12-31T23:59:60Z"},
 		// "" and "Local" are Go LoadLocation quirks (UTC / process env), not
 		// zone declarations — strict: unresolvable, pass through.
 		{"empty zone name in type", "DateTime('')", "2026-06-21 04:00:00"},
@@ -179,9 +211,11 @@ func TestResolveTimestampSpecs(t *testing.T) {
 
 	require.NotNil(t, schema.Columns[0].tsSpec)
 	assert.Equal(t, nyc, schema.Columns[0].tsSpec.loc, "zone-less column takes the server zone")
+	assert.False(t, schema.Columns[0].tsSpec.isDT64, "DateTime is not kind DateTime64")
 	require.NotNil(t, schema.Columns[1].tsSpec)
 	assert.Equal(t, nyc, schema.Columns[1].tsSpec.loc)
 	assert.Equal(t, 3, schema.Columns[1].tsSpec.precision)
+	assert.True(t, schema.Columns[1].tsSpec.isDT64, "numbers and unix fractions follow the DateTime64 rules")
 	assert.Nil(t, schema.Columns[2].tsSpec, "non-timestamp column gets no spec")
 	assert.Nil(t, schema.Columns[3].tsSpec, "unresolvable zone degrades to nil, not a failed build")
 	require.NotNil(t, schema.Columns[4].tsSpec)
