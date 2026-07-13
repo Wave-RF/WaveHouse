@@ -47,7 +47,7 @@ jobs:
       - name: Checkout main (trusted lint-pr-title.sh + labeler config source)
         # Explicit ref so scripts/lint-pr-title.sh and .github/labeler.yml
         # resolve from the default branch, not the PR head.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -56,7 +56,7 @@ jobs:
       # `sync-labels: true` removes labels when their matching files
       # leave the diff, so labels track the current change set.
       - name: Apply file-path labels
-        uses: actions/labeler@f27b608878404679385c85cfa523b85ccb86e213 # v6.1.0
+        uses: actions/labeler@b8dd2d9be0f68b860e7dae5dae7d772984eacd6d # v6.2.0
         with:
           configuration-path: .github/labeler.yml
           sync-labels: true
