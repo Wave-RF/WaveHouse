@@ -401,11 +401,8 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Canonicalize timestamp columns to RFC 3339 UTC so the one payload published
-	// below reaches every consumer — SSE, the ClickHouse insert, the DLQ — in the
-	// spelling /v1/query renders (#372); fail-open, with fail-closed enforcement
-	// left to the stream row-filter (#381). After the permission checks so
-	// check-clause comparisons keep their pre-#372 semantics.
+	// Canonicalize timestamps to RFC 3339 UTC (#372; fail-open — #381's row-filter
+	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
 	discovery.CanonicalizeTimestamps(schema, data)
 
 	// Optional deduplication.

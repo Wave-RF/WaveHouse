@@ -63,9 +63,9 @@ type timestampSpec struct {
 
 // resolveTimestampSpecs precomputes the timestampSpec of every DateTime/DateTime64
 // column in ts once per schema build, so the per-record ingest path parses no
-// type strings and loads no zones. An unresolvable zone (the distroless image
-// ships no tzdata) keeps a nil spec — warned, not fatal: those values pass
-// through un-canonicalized.
+// type strings and loads no zones. An unresolvable zone (no embedded tzdata —
+// resolution needs the runtime's zone database) keeps a nil spec — warned, not
+// fatal: those values pass through un-canonicalized.
 func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slog.Logger) {
 	for i := range ts.Columns {
 		col := &ts.Columns[i]
