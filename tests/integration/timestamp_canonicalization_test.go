@@ -81,6 +81,9 @@ func TestTimestampCanonicalization_DifferentialAgainstClickHouse(t *testing.T) {
 
 	for _, ct := range colTypes {
 		t.Run(ct.name, func(t *testing.T) {
+			// Independent tables per shape; parallel keeps the six shapes from
+			// serializing ~350 single-row inserts against the suite timeout.
+			t.Parallel()
 			rawTable := createTable(t, "id UInt32, v "+ct.ddl, "ORDER BY id")
 			canonTable := createTable(t, "id UInt32, v "+ct.ddl, "ORDER BY id")
 			schema := env(t).registry.Get(rawTable)

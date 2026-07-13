@@ -677,7 +677,7 @@ test-integration: go-mod-download ## Run Go integration tests + render coverage 
 	@printf "$(CYAN)==> Running Integration Tests...$(RESET)\n"
 	@rm -rf $(COV_INT)/data && mkdir -p $(COV_INT)/data
 	@GOCOVERDIR="$(CURDIR)/$(COV_INT)/data" go tool gotestsum --format $(GOTESTSUM_FMT) -- \
-		-tags="integration $(TAGS)" -timeout 120s -coverpkg=./... -race -count=1 \
+		-tags="integration $(TAGS)" -timeout 240s -coverpkg=./... -race -count=1 \
 		./tests/integration/... $(ARGS) \
 		-args -test.gocoverdir="$(CURDIR)/$(COV_INT)/data"
 	@if [ -z "$(COV_DEFER)" ]; then go run ./scripts/cov render integration; fi
