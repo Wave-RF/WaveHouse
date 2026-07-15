@@ -193,8 +193,7 @@ func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 	t.Parallel()
 	conn := &fakeConn{tz: "Not/AZone"}
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	sr := NewSchemaRegistry(conn, "test", time.Hour, logger)
+	sr := NewSchemaRegistry(conn, "test", time.Hour, discardLogger())
 	require.NoError(t, sr.Refresh(context.Background()))
 }
 

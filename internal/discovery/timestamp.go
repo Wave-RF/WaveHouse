@@ -19,10 +19,10 @@ import (
 // (tests/integration/timestamp_canonicalization_test.go) — and everything else
 // passes through verbatim, so ClickHouse is never second-guessed.
 
-// IsTimestampType reports whether chType is a ClickHouse DateTime or DateTime64
+// isTimestampType reports whether chType is a ClickHouse DateTime or DateTime64
 // (unwrapping Nullable/LowCardinality). Date/Date32 are excluded — day-precision,
 // no zone or spelling ambiguity.
-func IsTimestampType(chType string) bool {
+func isTimestampType(chType string) bool {
 	return strings.HasPrefix(unwrapType(chType), "DateTime")
 }
 
@@ -69,7 +69,7 @@ type timestampSpec struct {
 func resolveTimestampSpecs(ts *TableSchema, serverTZ *time.Location, logger *slog.Logger) {
 	for i := range ts.Columns {
 		col := &ts.Columns[i]
-		if !IsTimestampType(col.Type) {
+		if !isTimestampType(col.Type) {
 			continue
 		}
 		spec, err := resolveTimestampSpec(col.Type, serverTZ)
@@ -257,18 +257,18 @@ func parseUnixDigits(s string, isDT64 bool) (time.Time, bool) {
 	if hasFrac && (!isDT64 || frac == "" || !isDigits(frac)) {
 		return time.Time{}, false
 	}
-	sec, err := strconv.ParseInt(intPart, 10, 64)
-	if err != nil {
-		return time.Time{}, false
-	}
+	sec, _ := strconv.ParseInt(intPart, 10, 64) // 9-10 digits by construction
 	var ns int64
 	if hasFrac {
 		f := frac
 		if len(f) > 9 {
 			f = f[:9]
 		}
-		f += strings.Repeat("0", 9-len(f))
 		ns, _ = strconv.ParseInt(f, 10, 64) // all digits by construction
+		// Zero-fill the fraction out to nanosecond scale.
+		for range 9 - len(f) {
+			ns *= 10
+		}
 	}
 	return time.Unix(sec, ns), true
 }

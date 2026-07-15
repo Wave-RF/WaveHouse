@@ -48,7 +48,7 @@ type schemaConn struct {
 }
 
 func (c *schemaConn) QueryRow(context.Context, string, ...any) driver.Row {
-	return utcRow{}
+	return UTCRow{}
 }
 
 func (c *schemaConn) Query(context.Context, string, ...any) (driver.Rows, error) {
@@ -65,9 +65,12 @@ func (c *schemaConn) Query(context.Context, string, ...any) (driver.Rows, error)
 	return r, nil
 }
 
-type utcRow struct{ driver.Row }
+// UTCRow is a driver.Row stub answering the SELECT timezone() probe Refresh
+// issues with "UTC" — for any mock driver.Conn that must satisfy the
+// schema-refresh path.
+type UTCRow struct{ driver.Row }
 
-func (utcRow) Scan(dest ...any) error {
+func (UTCRow) Scan(dest ...any) error {
 	if len(dest) == 1 {
 		if s, ok := dest[0].(*string); ok {
 			*s = "UTC"

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
 // errsThenSuccessConn drives the boot Refresh/RetryRefresh chain in tests.
@@ -41,19 +42,7 @@ func (c *errsThenSuccessConn) Query(_ context.Context, _ string, _ ...any) (driv
 // QueryRow answers the SELECT timezone() probe Refresh issues before the
 // system.columns query (#372); the error sequencing above stays keyed on Query.
 func (c *errsThenSuccessConn) QueryRow(context.Context, string, ...any) driver.Row {
-	return chainTZRow{}
-}
-
-type chainTZRow struct{ driver.Row }
-
-func (chainTZRow) Scan(dest ...any) error {
-	if len(dest) == 1 {
-		if s, ok := dest[0].(*string); ok {
-			*s = "UTC"
-			return nil
-		}
-	}
-	return errors.New("unexpected timezone scan")
+	return testutil.UTCRow{}
 }
 
 type chainEmptyRows struct{ driver.Rows }

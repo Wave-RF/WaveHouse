@@ -29,8 +29,8 @@ One process consumes a single durable JetStream consumer and fans events out to
 a goroutine per table. Each table batches independently and POSTs to ClickHouse
 over the HTTP interface (`JSONEachRow`, pinning `date_time_input_format=best_effort` —
 the server default since ClickHouse 26.5; on older servers the `basic` default
-rejects the canonical RFC 3339 timestamps' zone suffix (#372). A superset of
-`basic`, so pre-canonical spellings still parse). Failed rows go to a
+rejects the canonical RFC 3339 form's zone suffix — a superset of `basic`, so
+pre-canonical spellings still parse (#372)). Failed rows go to a
 dead-letter stream; a separate sweeper reclaims stream storage.
 
 ```mermaid

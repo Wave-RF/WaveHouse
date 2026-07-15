@@ -34,7 +34,7 @@ func TestIsTimestampType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.chType, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, IsTimestampType(tt.chType))
+			assert.Equal(t, tt.want, isTimestampType(tt.chType))
 		})
 	}
 }
