@@ -50,12 +50,28 @@ func (ts *TableSchema) ColumnNames() []string {
 // what used to be five parallel maps. Rebuilt wholesale on every successful Refresh
 // and guarded by SchemaRegistry.mu.
 type tableInfo struct {
-	schema    *TableSchema // columns in physical order; drives Get/List/ColumnNames
-	isView    bool         // engine is a View family — a view, which ingest never writes
-	sources   []string     // a view's immediate source tables (nil for a base table)
-	asSelect  string       // a view's SELECT text — diffed across refreshes to catch a redefinition
-	foldable  bool         // derived: a view that flattens cleanly to known base tables
-	defPruned bool         // EXPLAIN dead-branch-pruned this view's definition: its source set may be incomplete, so it is never foldable (readers TTL-cap)
+	schema   *TableSchema // columns in physical order; drives Get/List/ColumnNames
+	isView   bool         // engine is a View family — a view, which ingest never writes
+	sources  []string     // a view's immediate source tables (nil for a base table)
+	asSelect string       // a view's SELECT text — diffed across refreshes to catch a redefinition
+	// attached: the materialized views an INSERT into this table fires
+	// (system.tables dependencies_table — the write-side trigger edges). Distinct
+	// from a view's sources: a join/dictGet in an MV's definition is a read that
+	// never fires it, and these edges stay authoritative even when EXPLAIN can't
+	// resolve the definition. buildDeps walks them to carry a write through an MV
+	// into its TO target.
+	attached []string
+	// toTarget: a materialized view's same-database TO target table, parsed from
+	// create_table_query (parseMVTarget). ClickHouse populates the target on every
+	// insert the view fires on — but the target is an ordinary base table whose
+	// version no ingest write would otherwise bump, so buildDeps must fan a source
+	// write out to it or a pipe reading the target directly would serve stale at
+	// full TTL. Empty for non-MVs, implicit-inner targets (".inner…", which the
+	// registry never tracks), and cross-database targets (reads of those are
+	// External and TTL-cap).
+	toTarget  string
+	foldable  bool // derived: a view that flattens cleanly to known base tables
+	defPruned bool // EXPLAIN dead-branch-pruned this view's definition: its source set may be incomplete, so it is never foldable (readers TTL-cap)
 	// defExternal: this view's definition reads something no table version can
 	// watch (a table function, a cross-database table, a non-local dictionary
 	// source). The cascade can't observe writes to it, so the view is never
@@ -71,8 +87,7 @@ type SchemaRegistry struct {
 	refreshInterval time.Duration
 	logger          *slog.Logger
 	// refreshMu serializes whole Refresh invocations (auto-refresh ticker, boot
-	// retry, and the manual /v1/admin/schema/refresh trigger can otherwise
-	// overlap). mu alone only guards the state swap; without total ordering, an
+	// retry, and the manual /v1/schema/refresh trigger can otherwise overlap). mu alone only guards the state swap; without total ordering, an
 	// older refresh finishing last could install its older cascade over a newer
 	// one, and computeChangedViews would diff against whichever swap happened to
 	// land in between. Serializing also stops racing callers from duplicating the
@@ -87,12 +102,13 @@ type SchemaRegistry struct {
 	// tableInfo). The single source of per-name truth; rebuilt and swapped atomically
 	// on each successful Refresh. Guarded by mu.
 	tables map[string]*tableInfo
-	// cascade maps a base table to the dependent views a write to it must ALSO
-	// invalidate, both NATS-encoded to match the read/write sides. It is the
-	// precomputed transitive reverse of the view->source edges: the graph walk
-	// happens once at refresh (buildDeps), never per request. Pushed into the cache
-	// via onRefresh so Cache.Invalidate can fan a base-table bump out to its views.
-	// Guarded by mu.
+	// cascade maps a base table to the dependent names a write to it must ALSO
+	// invalidate — the views reading it and the MV TO targets ClickHouse populates
+	// from it, transitively — both sides NATS-encoded to match the read/write
+	// sides. It is precomputed from the view->source and trigger->target edges:
+	// the graph walk happens once at refresh (buildDeps), never per request.
+	// Pushed into the cache via onRefresh so Cache.Invalidate can fan a base-table
+	// bump out to its dependents. Guarded by mu.
 	cascade map[string][]string
 	// onRefresh, if set, is invoked after every CONTENT-CHANGED refresh with the new
 	// dependency snapshot, so the cache can install the updated cascade and bump any
@@ -119,11 +135,12 @@ type SchemaRegistry struct {
 }
 
 // DependencySnapshot is the per-refresh hand-off from the schema registry to the
-// cache. Cascade is the full base-table -> dependent-views map (NATS-encoded) to
-// install; ChangedViews are the (NATS-encoded) views whose definition changed this
-// refresh and must be invalidated directly (a redefinition with the same sources
-// changes results but no base-table write would signal it). Both are ready to use
-// as-is — the cache neither parses nor re-encodes them.
+// cache. Cascade is the full base-table -> dependents map (NATS-encoded; the views
+// reading each table plus the MV TO targets it feeds) to install; ChangedViews are
+// the (NATS-encoded) views whose definition changed this refresh and must be
+// invalidated directly (a redefinition with the same sources changes results but
+// no base-table write would signal it). Both are ready to use as-is — the cache
+// neither parses nor re-encodes them.
 type DependencySnapshot struct {
 	Cascade      map[string][]string
 	ChangedViews []string
@@ -226,12 +243,13 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// buildDeps walks the view->source graph ONCE — the only place it is walked, done
-// here at refresh so neither read nor write does it per call. It marks each view
-// foldable (flattens cleanly to known base tables) directly on its tableInfo, and
-// returns the write-side cascade: each base table mapped to the foldable views
-// reading it (transitively), NATS-encoded to match the worker (write) and handler
-// (read) sides. Only sets the foldable bit on the entries; no lock, no query.
+// buildDeps walks the view->source and trigger->target graphs ONCE — the only
+// place they are walked, done here at refresh so neither read nor write does it
+// per call. It marks each view foldable (flattens cleanly to known base tables)
+// directly on its tableInfo, and returns the write-side cascade: each base table
+// mapped to the foldable views reading it and the MV TO targets an insert into it
+// populates (both transitively), NATS-encoded to match the worker (write) and
+// handler (read) sides. Only sets the foldable bit on the entries; no lock, no query.
 func buildDeps(tables map[string]*tableInfo) map[string][]string {
 	cascade := make(map[string][]string)
 
@@ -295,6 +313,52 @@ func buildDeps(tables map[string]*tableInfo) map[string][]string {
 			cascade[eb] = append(cascade[eb], ev)
 		}
 	}
+
+	// Write flow through materialized-view targets: an insert into a table fires
+	// its attached MVs, and ClickHouse writes each MV's output into its TO target
+	// — so a write to the source IS a write to the target. The target is an
+	// ordinary base table (IsKnown folds it at full TTL) that no ingest write
+	// would otherwise bump, so without these edges a pipe reading the target
+	// directly serves stale for its whole TTL. writesTo is the one-step flow;
+	// the walk below closes it over chains (mv1: a->t1; mv2 attached to t1: ->t2)
+	// and carries each reached target's own foldable-view cascade along. Trigger
+	// edges (attached), not the EXPLAIN-resolved read set, drive this: a join or
+	// dictGet in an MV's definition never fires it, and the trigger edges stay
+	// authoritative even for a view whose definition didn't resolve.
+	writesTo := make(map[string][]string)
+	for name, t := range tables {
+		for _, m := range t.attached {
+			mt := tables[m]
+			if mt == nil || mt.toTarget == "" {
+				continue
+			}
+			if tt := tables[mt.toTarget]; tt == nil || tt.isView || tt.schema == nil {
+				continue // a target we don't track as a base table (dropped, or exotic)
+			}
+			writesTo[name] = append(writesTo[name], mt.toTarget)
+		}
+	}
+	for name, t := range tables {
+		if t.isView || t.schema == nil || len(writesTo[name]) == 0 {
+			continue // write events originate at base tables
+		}
+		eb := chsql.SafeEncodeNATS(name)
+		seen := map[string]struct{}{name: {}} // cycle guard (an MV targeting its own source)
+		queue := slices.Clone(writesTo[name])
+		for len(queue) > 0 {
+			tgt := queue[0]
+			queue = queue[1:]
+			if _, dup := seen[tgt]; dup {
+				continue
+			}
+			seen[tgt] = struct{}{}
+			et := chsql.SafeEncodeNATS(tgt)
+			cascade[eb] = append(cascade[eb], et)
+			cascade[eb] = append(cascade[eb], cascade[et]...) // the foldable views over the target
+			queue = append(queue, writesTo[tgt]...)           // chained MVs attached to the target
+		}
+	}
+
 	for b := range cascade {
 		slices.Sort(cascade[b])
 		cascade[b] = slices.Compact(cascade[b])
@@ -418,27 +482,37 @@ func (sr *SchemaRegistry) discoverViewMeta(ctx context.Context, infos map[string
 
 	var toResolve []viewDef
 	rows, err := sr.conn.Query(ctx,
-		"SELECT name, engine, as_select, dependencies_table FROM system.tables WHERE database = ?",
+		"SELECT name, engine, as_select, dependencies_table, create_table_query FROM system.tables WHERE database = ?",
 		sr.database)
 	if err != nil {
 		return nil, fmt.Errorf("query system.tables: %w", err)
 	}
 	for rows.Next() {
-		var name, engine, asSelect string
+		var name, engine, asSelect, createQuery string
 		var dependents []string
-		if err := rows.Scan(&name, &engine, &asSelect, &dependents); err != nil {
+		if err := rows.Scan(&name, &engine, &asSelect, &dependents, &createQuery); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan table row: %w", err)
 		}
 		t := get(name)
 		if strings.Contains(engine, "View") {
 			t.isView = true
+			// A materialized view's TO target, rendered only in its DDL (system.tables
+			// grew first-class target_* columns in ClickHouse 26.6 — too new to require;
+			// an unknown column would fail schema discovery wholesale on ≤26.5). A
+			// cross-database target is skipped: reads of it are External and TTL-cap.
+			if db, target, ok := parseMVTarget(createQuery); ok && (db == "" || db == sr.database) {
+				t.toTarget = target
+			}
 		}
 		if asSelect != "" {
 			t.asSelect = asSelect
 			toResolve = append(toResolve, viewDef{name, asSelect})
 		}
-		// Reverse edge: this row is a SOURCE table; each dependent is an attached MV.
+		// Reverse edges: this row is a SOURCE table; each dependent is an attached MV
+		// an insert here fires. Kept both ways — as the MV's source (the read-side
+		// tree) and as this table's trigger (the write-side flow into MV targets).
+		t.attached = dependents
 		for _, d := range dependents {
 			get(d).sources = append(get(d).sources, name)
 		}
@@ -494,6 +568,107 @@ func (sr *SchemaRegistry) resolveViewSources(ctx context.Context, infos map[stri
 	return allResolved
 }
 
+// parseMVTarget extracts a materialized view's TO target from ClickHouse's
+// normalized create_table_query rendering: the first standalone TO keyword,
+// scanned back-quote- and string-literal-aware so quoted content can never arm
+// it, and bounded by the first '(' or AS/ENGINE keyword — the column list, the
+// SELECT body, and an implicit-inner engine clause — so nothing inside a
+// definition (a TTL … TO DISK, a literal, an alias) can be mistaken for the
+// clause. Identifiers decode per ClickHouse's writeBackQuotedString (backslash
+// escapes); keywords are matched exactly, as the normalized rendering uppercases
+// them. ok=false when there is no TO clause (a plain view, an implicit-inner MV)
+// or the rendering is malformed; db is empty for an unqualified target.
+//
+// This is the version-portable seam: selecting system.tables' target_database/
+// target_table (added in ClickHouse 26.6) would break schema discovery on every
+// older server, so the target is read off the canonical DDL instead — swap to
+// the columns once the supported floor passes 26.6. Failure posture matches the
+// EXPLAIN couplings (explain.go): a rendering this doesn't recognize yields no
+// target edge, and the tests/integration MV-target test pins the parse against
+// the ClickHouse version we ship.
+func parseMVTarget(q string) (db, table string, ok bool) {
+	i, n := 0, len(q)
+	// readIdent consumes one identifier at i — back-quoted (escapes resolved) or
+	// bare — reporting ok=false for anything else (incl. an unterminated quote).
+	readIdent := func() (string, bool) {
+		if i < n && q[i] == '`' {
+			var b strings.Builder
+			for i++; i < n; i++ {
+				switch q[i] {
+				case '\\':
+					if i+1 < n {
+						i++
+						b.WriteByte(q[i])
+					}
+				case '`':
+					i++
+					return b.String(), true
+				default:
+					b.WriteByte(q[i])
+				}
+			}
+			return "", false
+		}
+		start := i
+		for i < n && isIdentByte(q[i]) {
+			i++
+		}
+		return q[start:i], i > start
+	}
+
+	for i < n {
+		switch c := q[i]; {
+		case c == '`': // a quoted identifier (e.g. the view's own name) — skip whole
+			if _, idOK := readIdent(); !idOK {
+				return "", "", false
+			}
+		case c == '\'': // a string literal (defensive; skip whole, honoring escapes)
+			for i++; i < n; i++ {
+				if q[i] == '\\' {
+					i++
+				} else if q[i] == '\'' {
+					i++
+					break
+				}
+			}
+		case c == '(':
+			return "", "", false // the column list — every TO clause precedes it
+		case isIdentByte(c):
+			w, _ := readIdent()
+			switch w {
+			case "AS", "ENGINE":
+				return "", "", false // the SELECT body / an implicit-inner engine clause
+			case "TO":
+				for i < n && (q[i] == ' ' || q[i] == '\t' || q[i] == '\n' || q[i] == '\r') {
+					i++
+				}
+				first, firstOK := readIdent()
+				if !firstOK {
+					return "", "", false
+				}
+				if i < n && q[i] == '.' {
+					i++
+					second, secondOK := readIdent()
+					if !secondOK {
+						return "", "", false
+					}
+					return first, second, true
+				}
+				return "", first, true
+			}
+		default:
+			i++ // whitespace, digits/punctuation in a REFRESH clause, etc.
+		}
+	}
+	return "", "", false
+}
+
+// isIdentByte reports whether c can appear in a bare (unquoted) ClickHouse
+// identifier or keyword — the token alphabet parseMVTarget scans by.
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 // Database returns the configured ClickHouse database this registry tracks.
 func (sr *SchemaRegistry) Database() string { return sr.database }
 
@@ -541,17 +716,24 @@ func contentHash(infos map[string]*tableInfo) uint64 {
 			write("q")
 			write(t.asSelect)
 		}
+		// An MV re-pointed at a different TO target (DROP + CREATE with the same
+		// SELECT) changes neither columns, sources, nor asSelect — only this.
+		if t.toTarget != "" {
+			write("t")
+			write(t.toTarget)
+		}
 	}
 	return h.Sum64()
 }
 
 // IsKnown reports whether name is SAFE to fold directly into a cache key — i.e.
 // its version is reliably maintained on writes. That is true for a real base
-// table (ingest writes it) and for a foldable view (a write to a source bumps it
-// via the cascade), but NOT for an unfoldable view (unparsed definition, or a
-// cross-database/unknown source) nor an unknown name: the caller treats those as
-// unresolved and TTL-caps the result rather than trust an unmaintained version.
-// Pure in-memory lookup over the map built during Refresh — no query.
+// table (ingest writes it; an MV TO target is bumped by writes to the MV's
+// source via the cascade) and for a foldable view (likewise cascade-bumped),
+// but NOT for an unfoldable view (unparsed definition, or a cross-database/
+// unknown source) nor an unknown name: the caller treats those as unresolved and
+// TTL-caps the result rather than trust an unmaintained version. Pure in-memory
+// lookup over the map built during Refresh — no query.
 func (sr *SchemaRegistry) IsKnown(name string) bool {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
@@ -566,10 +748,11 @@ func (sr *SchemaRegistry) IsKnown(name string) bool {
 }
 
 // Dependents returns a copy of the current cascade: each (NATS-encoded) base table
-// mapped to the (NATS-encoded) views a write to it must also invalidate. The cache
-// installs this so a base-table bump fans out to the views reading it. main pushes
-// it through onRefresh; an out-of-band caller (e.g. a test wiring its own cache)
-// can pull the current value directly.
+// mapped to the (NATS-encoded) dependents a write to it must also invalidate — the
+// views reading it and the MV TO targets it feeds. The cache installs this so a
+// base-table bump fans out to them. main pushes it through onRefresh; an
+// out-of-band caller (e.g. a test wiring its own cache) can pull the current
+// value directly.
 func (sr *SchemaRegistry) Dependents() map[string][]string {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()

@@ -317,11 +317,12 @@ type resolveOutcome struct {
 // resolveDeps returns the cache namespaces a pipe's result depends on, by asking
 // ClickHouse which tables the bound query reads (EXPLAIN QUERY TREE, via
 // resolveTablesFn), memoized per bound query. A table EXPLAIN reports is folded
-// as its own versioned namespace; a write to it — or, for a view, a write to the
-// view's base via the cascade — evicts the result. When ClickHouse can't analyze
-// the query (a write/DDL pipe, a missing table, an unreachable server) the pipe
-// folds the single database-version namespace, which any write bumps: coarse, but
-// never a stale read and O(1) per request.
+// as its own versioned namespace; a write to it — or one that reaches it via the
+// cascade: a write to a view's base, or to the source of an MV populating it —
+// evicts the result. When ClickHouse can't analyze the query (a write/DDL pipe, a
+// missing table, an unreachable server) the pipe folds the single database-version
+// namespace, which any write bumps: coarse, but never a stale read and O(1) per
+// request.
 //
 // The second return reports whether the result must be TTL-capped because it
 // can't be reliably version-invalidated — see resolvedDeps.unresolved for the

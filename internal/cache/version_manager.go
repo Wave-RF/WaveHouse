@@ -34,10 +34,11 @@ func NewVersionManager(conn *nats.Conn) *VersionManager {
 	}
 }
 
-// SetDependents installs the base-table -> dependent-view cascade (NATS-encoded on
-// both sides), replacing any prior one. Called on each schema refresh. A nil map
-// clears the cascade. The slice values are retained as-is; the caller must not
-// mutate them afterward (the registry hands over a fresh map each refresh).
+// SetDependents installs the base-table -> dependents cascade (NATS-encoded on
+// both sides; the views reading each table plus the MV TO targets it feeds),
+// replacing any prior one. Called on each schema refresh. A nil map clears the
+// cascade. The slice values are retained as-is; the caller must not mutate them
+// afterward (the registry hands over a fresh map each refresh).
 func (vm *VersionManager) SetDependents(dependents map[string][]string) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -47,11 +48,11 @@ func (vm *VersionManager) SetDependents(dependents map[string][]string) {
 	vm.dependents = dependents
 }
 
-// DependentsOf returns the view namespaces a write to table must also bump. Nil
-// when table feeds no views. The result is a copy, so no caller can reach the
-// manager's internal state — a structural guarantee instead of a "don't mutate"
-// contract. It runs per invalidation batch (per flush, not per row), so the
-// allocation is negligible.
+// DependentsOf returns the namespaces a write to table must also bump — the views
+// reading it and the MV TO targets it feeds. Nil when table feeds nothing. The
+// result is a copy, so no caller can reach the manager's internal state — a
+// structural guarantee instead of a "don't mutate" contract. It runs per
+// invalidation batch (per flush, not per row), so the allocation is negligible.
 func (vm *VersionManager) DependentsOf(table string) []string {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()

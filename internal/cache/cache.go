@@ -37,16 +37,18 @@ type Cache interface {
 	// Invalidate bumps the version for each namespace, orphaning every cached query
 	// that depends on it. A namespace with an empty Scope bumps the whole table
 	// (every scope); a non-empty Scope bumps just that scope plus the whole-table
-	// view. A write also fans out to the namespace's dependent views (SetDependents),
-	// and any non-empty batch bumps the DATABASE version once (DatabaseNamespace),
-	// so a result folding only that one namespace is evicted by any write at all.
-	// Returns the number of namespaces processed.
+	// view. A write also fans out to the namespace's dependents (SetDependents —
+	// the views reading it and the MV TO targets it feeds), and any non-empty batch
+	// bumps the DATABASE version once (DatabaseNamespace), so a result folding only
+	// that one namespace is evicted by any write at all. Returns the number of
+	// namespaces processed.
 	Invalidate(ctx context.Context, namespaces []Namespace) (uint64, error)
 
-	// SetDependents installs the base-table -> dependent-view cascade that Invalidate
+	// SetDependents installs the base-table -> dependents cascade that Invalidate
 	// fans out through, so a write to a base table also evicts pipes reading a view
-	// over it. Both sides are NATS-encoded. The schema registry pushes a fresh map on
-	// every content-changed refresh; replaces any prior one.
+	// over it or a table its attached MVs populate. Both sides are NATS-encoded. The
+	// schema registry pushes a fresh map on every content-changed refresh; replaces
+	// any prior one.
 	SetDependents(dependents map[string][]string)
 
 	// TODO: for local cache, we can just store the versions in memory, but for distributed/L2 cache, we will need to be able to either have stored procedures/pipelines etc to query them and attach them to a query, or sync them to each edge api server.

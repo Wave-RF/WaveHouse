@@ -61,11 +61,12 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 // scope at once); a non-empty Scope bumps just that scope plus the whole-table
 // view. Returns the number of namespaces processed.
 //
-// Each written table also fans out to its dependent views (SetDependents): a write
-// to a base table whole-table-bumps every view reading it, so a pipe that folds a
-// VIEW's namespace directly is evicted without the read path ever walking the view
-// graph. The fan-out is whole-table (the view's result depends on the table, not a
-// scope) and deduped, so a view fed by several written tables bumps once.
+// Each written table also fans out to its dependents (SetDependents) — the views
+// reading it and the MV TO targets ClickHouse populates from it: a write to a
+// base table whole-table-bumps each, so a pipe that folds a view's or target's
+// namespace directly is evicted without the read path ever walking the graph.
+// The fan-out is whole-table (the dependent's result depends on the table, not a
+// scope) and deduped, so a dependent fed by several written tables bumps once.
 //
 // This bumps exactly what it's given (plus the fan-out). A whole-table bump already
 // subsumes every per-scope bump for the same table (the table version is embedded
@@ -78,19 +79,19 @@ func (l *LocalCache) Set(_ context.Context, key string, value []byte, ttl time.D
 // namespace — the dependency-resolution fallback — is evicted by any write, in O(1)
 // instead of folding every base table.
 func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint64, error) {
-	bumpedViews := make(map[string]struct{})
+	bumped := make(map[string]struct{})
 	for _, ns := range namespaces {
 		if ns.Scope == "" {
 			l.versionManager.BumpTable(ns.Table)
 		} else {
 			l.versionManager.BumpNamespace(ns.Table, ns.Scope)
 		}
-		for _, view := range l.versionManager.DependentsOf(ns.Table) {
-			if _, done := bumpedViews[view]; done {
+		for _, dep := range l.versionManager.DependentsOf(ns.Table) {
+			if _, done := bumped[dep]; done {
 				continue
 			}
-			bumpedViews[view] = struct{}{}
-			l.versionManager.BumpTable(view)
+			bumped[dep] = struct{}{}
+			l.versionManager.BumpTable(dep)
 		}
 	}
 	if len(namespaces) > 0 {
@@ -99,9 +100,9 @@ func (l *LocalCache) Invalidate(_ context.Context, namespaces []Namespace) (uint
 	return uint64(len(namespaces)), nil
 }
 
-// SetDependents installs the base-table -> dependent-view cascade used by
-// Invalidate to fan a base-table write out to the views reading it. The schema
-// registry pushes a fresh map on every content-changed refresh.
+// SetDependents installs the base-table -> dependents cascade used by Invalidate
+// to fan a base-table write out to the views reading it and the MV targets it
+// feeds. The schema registry pushes a fresh map on every content-changed refresh.
 func (l *LocalCache) SetDependents(dependents map[string][]string) {
 	l.versionManager.SetDependents(dependents)
 }

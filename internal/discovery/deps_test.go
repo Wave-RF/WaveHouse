@@ -189,6 +189,190 @@ func TestDependents(t *testing.T) {
 	}
 }
 
+// A materialized view's TO target is an ordinary base table ClickHouse populates
+// whenever the MV's source takes an insert — nothing else ever writes it, so the
+// write-side cascade must carry a source write through the MV into the target,
+// to the foldable views over it, and through chained MVs — or a pipe reading the
+// target directly would sit at full TTL with nothing ever bumping its version.
+// Trigger edges (attached), not the resolved read set, drive the flow: they stay
+// authoritative even for an MV whose definition didn't resolve (defExternal).
+func TestDependents_MVTargets(t *testing.T) {
+	enc := chsql.SafeEncodeNATS
+	base := func() *tableInfo { return &tableInfo{schema: &TableSchema{}} }
+
+	tests := []struct {
+		name   string
+		tables map[string]*tableInfo
+		want   map[string][]string // base -> full dependent set (pre-encode)
+	}{
+		{
+			name: "source write reaches the MV target",
+			tables: map[string]*tableInfo{
+				"src": {schema: &TableSchema{}, attached: []string{"mv"}},
+				"tgt": base(),
+				"mv":  {isView: true, sources: []string{"src"}, toTarget: "tgt"},
+			},
+			want: map[string][]string{"src": {"mv", "tgt"}},
+		},
+		{
+			name: "views over the target ride along",
+			tables: map[string]*tableInfo{
+				"src": {schema: &TableSchema{}, attached: []string{"mv"}},
+				"tgt": base(),
+				"mv":  {isView: true, sources: []string{"src"}, toTarget: "tgt"},
+				"v_t": {isView: true, sources: []string{"tgt"}},
+			},
+			want: map[string][]string{
+				"src": {"mv", "tgt", "v_t"},
+				"tgt": {"v_t"},
+			},
+		},
+		{
+			name: "chained MVs propagate transitively",
+			tables: map[string]*tableInfo{
+				"src":  {schema: &TableSchema{}, attached: []string{"mv1"}},
+				"tgt1": {schema: &TableSchema{}, attached: []string{"mv2"}},
+				"tgt2": base(),
+				"mv1":  {isView: true, sources: []string{"src"}, toTarget: "tgt1"},
+				"mv2":  {isView: true, sources: []string{"tgt1"}, toTarget: "tgt2"},
+			},
+			want: map[string][]string{
+				"src":  {"mv1", "tgt1", "mv2", "tgt2"},
+				"tgt1": {"mv2", "tgt2"},
+			},
+		},
+		{
+			name: "an unresolvable MV definition still feeds its target (trigger edges are authoritative)",
+			tables: map[string]*tableInfo{
+				"src": {schema: &TableSchema{}, attached: []string{"mv"}},
+				"tgt": base(),
+				"mv":  {isView: true, sources: []string{"src"}, toTarget: "tgt", defExternal: true},
+			},
+			// mv itself is unfoldable (its readers TTL-cap), so only the target cascades.
+			want: map[string][]string{"src": {"tgt"}},
+		},
+		{
+			name: "a missing or non-base target contributes no edge",
+			tables: map[string]*tableInfo{
+				"src": {schema: &TableSchema{}, attached: []string{"mv", "mv2"}},
+				"mv":  {isView: true, sources: []string{"src"}, toTarget: "ghost"},
+				"mv2": {isView: true, sources: []string{"src"}, toTarget: "v"},
+				"v":   {isView: true, sources: []string{"src"}},
+			},
+			want: map[string][]string{"src": {"mv", "mv2", "v"}},
+		},
+		{
+			name: "an MV targeting its own source terminates",
+			tables: map[string]*tableInfo{
+				"src": {schema: &TableSchema{}, attached: []string{"mv"}},
+				"mv":  {isView: true, sources: []string{"src"}, toTarget: "src"},
+			},
+			want: map[string][]string{"src": {"mv"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildDeps(tt.tables)
+			want := make(map[string][]string, len(tt.want))
+			for b, deps := range tt.want {
+				ed := make([]string, len(deps))
+				for i, d := range deps {
+					ed[i] = enc(d)
+				}
+				want[enc(b)] = ed
+			}
+			require.Len(t, got, len(want))
+			for b, deps := range want {
+				assert.ElementsMatch(t, deps, got[b], "cascade for %s", b)
+			}
+		})
+	}
+}
+
+// parseMVTarget reads the TO target off ClickHouse's normalized DDL renderings —
+// the exact strings a 26.6 server produces (pinned live by the integration
+// MV-target test). It must never scan past the column list / ENGINE clause /
+// SELECT body, so definition text (a TTL ... TO DISK, a string literal) can't
+// fabricate a target.
+func TestParseMVTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		q         string
+		db, table string
+		ok        bool
+	}{
+		{
+			name: "plain TO target",
+			q:    "CREATE MATERIALIZED VIEW mvtest.mv TO mvtest.tgt (`id` UInt64, `val` String) AS SELECT id, val FROM mvtest.src",
+			db:   "mvtest", table: "tgt", ok: true,
+		},
+		{
+			name: "quoted target with an embedded dot stays one identifier",
+			q:    "CREATE MATERIALIZED VIEW mvtest.mv TO mvtest.`dot.ted` (`id` UInt64) AS SELECT id FROM mvtest.src",
+			db:   "mvtest", table: "dot.ted", ok: true,
+		},
+		{
+			name: "quoted target with a space",
+			q:    "CREATE MATERIALIZED VIEW mvtest.mv TO mvtest.`we ird` (`id` UInt64) AS SELECT id FROM mvtest.src",
+			db:   "mvtest", table: "we ird", ok: true,
+		},
+		{
+			name: "backslash-escaped backtick decodes",
+			q:    "CREATE MATERIALIZED VIEW mvtest.mv TO mvtest.`tick\\`name` (`id` UInt64) AS SELECT id FROM mvtest.src",
+			db:   "mvtest", table: "tick`name", ok: true,
+		},
+		{
+			name: "refreshable MV: REFRESH clause precedes TO",
+			q:    "CREATE MATERIALIZED VIEW mvtest.mv_refresh REFRESH EVERY 1 HOUR TO mvtest.tgt2 (`id` UInt64, `val` String) DEFINER = default SQL SECURITY DEFINER AS SELECT id, val FROM mvtest.src",
+			db:   "mvtest", table: "tgt2", ok: true,
+		},
+		{
+			name: "implicit-inner MV (no TO; column list first)",
+			q:    "CREATE MATERIALIZED VIEW mvtest.mv_inner (`id` UInt64) ENGINE = MergeTree ORDER BY id AS SELECT id FROM mvtest.src",
+			ok:   false,
+		},
+		{
+			name: "TTL ... TO DISK after ENGINE is never a target",
+			q:    "CREATE MATERIALIZED VIEW db.m ENGINE = MergeTree ORDER BY id TTL ts + INTERVAL 1 DAY TO DISK 'cold' AS SELECT id FROM db.src",
+			ok:   false,
+		},
+		{
+			name: "plain view has no TO clause",
+			q:    "CREATE VIEW test.v (`x` UInt64) AS SELECT x FROM base",
+			ok:   false,
+		},
+		{
+			name: "a view literally named TO is skipped as a quoted identifier",
+			q:    "CREATE MATERIALIZED VIEW db.`TO` TO db.tgt (`x` UInt64) AS SELECT x FROM db.src",
+			db:   "db", table: "tgt", ok: true,
+		},
+		{
+			name: "a string literal containing TO does not arm",
+			q:    "CREATE MATERIALIZED VIEW db.m REFRESH EVERY 1 HOUR SETTINGS note = 'go TO disk' TO db.t (`x` UInt64) AS SELECT 1",
+			db:   "db", table: "t", ok: true,
+		},
+		{
+			name: "unqualified target maps to the configured database",
+			q:    "CREATE MATERIALIZED VIEW mv TO tgt AS SELECT 1",
+			db:   "", table: "tgt", ok: true,
+		},
+		{
+			name: "unterminated quote is malformed",
+			q:    "CREATE MATERIALIZED VIEW db.mv TO db.`broken AS SELECT 1",
+			ok:   false,
+		},
+		{name: "empty", q: "", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, table, ok := parseMVTarget(tt.q)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.db, db)
+			assert.Equal(t, tt.table, table)
+		})
+	}
+}
+
 // mkInfos assembles a tableInfo map the way Refresh would, for contentHash tests:
 // base tables carry a schema; a name in sources/defs is marked a view.
 func mkInfos(tables map[string]*TableSchema, sources map[string][]string, defs map[string]string) map[string]*tableInfo {
@@ -235,6 +419,16 @@ func TestContentHash_DeterministicAndSensitive(t *testing.T) {
 	assert.NotEqual(t, base, contentHash(mkInfos(map[string]*TableSchema{"a": tbl("a", "x", "y", "extra"), "b": tbl("b", "z")}, mv, defs)), "a new column must change the hash")
 	assert.NotEqual(t, base, contentHash(mkInfos(tables, map[string][]string{"v": {"a", "b"}}, defs)), "a new view->source edge must change the hash")
 	assert.NotEqual(t, base, contentHash(mkInfos(tables, mv, map[string]string{"v": "SELECT x, y FROM a WHERE z > 1"})), "a redefined view body (same sources) must change the hash")
+
+	// An MV re-pointed at a different TO target (DROP + CREATE with an identical
+	// SELECT) changes neither columns, sources, nor asSelect — only this fold.
+	withTarget := func(target string) uint64 {
+		infos := mkInfos(tables, mv, defs)
+		infos["v"].toTarget = target
+		return contentHash(infos)
+	}
+	assert.NotEqual(t, base, withTarget("t1"), "gaining a TO target must change the hash")
+	assert.NotEqual(t, withTarget("t1"), withTarget("t2"), "a re-pointed TO target must change the hash")
 }
 
 // scriptedConn returns canned rows for the system.columns and system.tables
@@ -243,7 +437,7 @@ func TestContentHash_DeterministicAndSensitive(t *testing.T) {
 type scriptedConn struct {
 	driver.Conn
 	columnRows     [][]any  // [table, name, type, default_kind]
-	tableRows      [][]any  // [name, engine, as_select, dependencies_table([]string)]
+	tableRows      [][]any  // [name, engine, as_select, dependencies_table([]string), create_table_query]
 	explainSources []string // tables ResolveTables (EXPLAIN QUERY TREE) reports for a view
 	explainCalls   int      // EXPLAIN queries issued (pass-2 runs) — proves the no-op skip
 	failTables     bool
@@ -311,7 +505,7 @@ func TestRefresh_NotifiesOnChange(t *testing.T) {
 	enc := chsql.SafeEncodeNATS
 	conn := &scriptedConn{
 		columnRows:     [][]any{{"base", "x", "UInt64", ""}},
-		tableRows:      [][]any{{"v", "View", "SELECT x FROM base", nil}},
+		tableRows:      [][]any{{"v", "View", "SELECT x FROM base", nil, "CREATE VIEW test.v (`x` UInt64) AS SELECT x FROM base"}},
 		explainSources: []string{"base"},
 	}
 	sr := newScriptedRegistry(conn)
@@ -332,7 +526,7 @@ func TestRefresh_NotifiesOnChange(t *testing.T) {
 	assert.Equal(t, explainsAfterFirst, conn.explainCalls, "an identical refresh must NOT re-run EXPLAIN — pass 2 is skipped on a no-op")
 
 	// Redefine the view body (same source set) — must be detected and reported.
-	conn.tableRows = [][]any{{"v", "View", "SELECT x FROM base WHERE x > 1", nil}}
+	conn.tableRows = [][]any{{"v", "View", "SELECT x FROM base WHERE x > 1", nil, "CREATE VIEW test.v (`x` UInt64) AS SELECT x FROM base WHERE x > 1"}}
 	require.NoError(t, sr.Refresh(ctx))
 	require.Len(t, snaps, 2, "a view-body redefinition must notify")
 	assert.Greater(t, conn.explainCalls, explainsAfterFirst, "a redefinition changes the cheap signals, so EXPLAIN re-runs")
@@ -343,10 +537,49 @@ func TestRefresh_NotifiesOnChange(t *testing.T) {
 	assert.ElementsMatch(t, []string{enc("v")}, sr.Dependents()[enc("base")])
 }
 
+// An MV's TO target rides the cascade end-to-end: pass 1 parses the target off
+// create_table_query, buildDeps carries a source write into it, and re-pointing
+// the MV at a different target (DROP + CREATE, SAME SELECT — only the DDL
+// differs) is a content change that re-fires onRefresh with the new cascade —
+// the one change only the toTarget hash fold can catch.
+func TestRefresh_MVTargetCascade(t *testing.T) {
+	enc := chsql.SafeEncodeNATS
+	mvRow := func(target string) []any {
+		return []any{
+			"mv", "MaterializedView", "SELECT x FROM src", nil,
+			"CREATE MATERIALIZED VIEW test.mv TO test." + target + " (`x` UInt64) AS SELECT x FROM src",
+		}
+	}
+	conn := &scriptedConn{
+		columnRows: [][]any{{"src", "x", "UInt64", ""}, {"tgt_a", "x", "UInt64", ""}, {"tgt_b", "x", "UInt64", ""}},
+		tableRows: [][]any{
+			{"src", "MergeTree", "", []string{"mv"}, "CREATE TABLE test.src (`x` UInt64) ENGINE = MergeTree ORDER BY x"},
+			{"tgt_a", "MergeTree", "", nil, "CREATE TABLE test.tgt_a (`x` UInt64) ENGINE = MergeTree ORDER BY x"},
+			{"tgt_b", "MergeTree", "", nil, "CREATE TABLE test.tgt_b (`x` UInt64) ENGINE = MergeTree ORDER BY x"},
+			mvRow("tgt_a"),
+		},
+		explainSources: []string{"src"},
+	}
+	sr := newScriptedRegistry(conn)
+	var snaps []DependencySnapshot
+	sr.SetOnRefresh(func(s DependencySnapshot) { snaps = append(snaps, s) })
+
+	require.NoError(t, sr.Refresh(context.Background()))
+	require.Len(t, snaps, 1)
+	assert.ElementsMatch(t, []string{enc("mv"), enc("tgt_a")}, snaps[0].Cascade[enc("src")],
+		"a source write must bump the MV and its TO target")
+
+	conn.tableRows[3] = mvRow("tgt_b")
+	require.NoError(t, sr.Refresh(context.Background()))
+	require.Len(t, snaps, 2, "a re-pointed TO target must notify")
+	assert.ElementsMatch(t, []string{enc("mv"), enc("tgt_b")}, snaps[1].Cascade[enc("src")])
+	assert.Empty(t, snaps[1].ChangedViews, "the MV body is unchanged — no direct eviction")
+}
+
 func TestRefresh_AtomicNoOpOnViewDiscoveryError(t *testing.T) {
 	conn := &scriptedConn{
 		columnRows:     [][]any{{"base", "x", "UInt64", ""}},
-		tableRows:      [][]any{{"v", "View", "SELECT x FROM base", nil}},
+		tableRows:      [][]any{{"v", "View", "SELECT x FROM base", nil, "CREATE VIEW test.v (`x` UInt64) AS SELECT x FROM base"}},
 		explainSources: []string{"base"},
 	}
 	sr := newScriptedRegistry(conn)

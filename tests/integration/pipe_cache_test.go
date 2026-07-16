@@ -208,6 +208,53 @@ func TestPipeCacheInvalidation_MaterializedViewSource(t *testing.T) {
 	require.Equal(t, "MISS", exec().Header().Get("X-Cache"))
 }
 
+// TestPipeCacheInvalidation_MaterializedViewTarget proves a pipe reading an MV's
+// TO TARGET table — the common `CREATE MATERIALIZED VIEW mv TO tgt` pattern, where
+// ingest writes the source and ClickHouse populates the target — invalidates on
+// writes to the source. The target is an ordinary base table, so the pipe folds
+// its namespace at FULL TTL with no TTL-cap safety net: without the
+// trigger→target cascade edge nothing would ever bump it, and the pipe would
+// serve stale for its whole TTL. The edge is parsed from the MV's rendered
+// create_table_query at refresh (discovery.parseMVTarget), so the target's name
+// is deliberately dotted (backtick-quoted in the DDL): this pins the parse — and
+// its quoted-identifier decode — against the ClickHouse version we ship, the same
+// way the pruning test pins the EXPLAIN rendering.
+func TestPipeCacheInvalidation_MaterializedViewTarget(t *testing.T) {
+	e := env(t)
+	ctx := context.Background()
+
+	src := createTable(t, "id String", "ORDER BY id")
+	target := createRawTable(t, fmt.Sprintf("it_mv.target_%d", tableCounter.Add(1)), map[string]string{"id": "seed"})
+
+	mv := src + "_to_mv"
+	require.NoError(t, e.chConn.Exec(ctx, fmt.Sprintf(
+		"CREATE MATERIALIZED VIEW `%s` TO %s AS SELECT id FROM `%s`",
+		mv, chQuoteIdent(target), src)))
+	t.Cleanup(func() { _ = e.chConn.Exec(context.Background(), "DROP VIEW IF EXISTS `"+mv+"`") })
+
+	// The trigger→target edge is discovered at refresh; refresh now that the MV
+	// exists (createRawTable refreshed before it did).
+	require.NoError(t, e.registry.Refresh(ctx))
+	require.Contains(t, e.registry.Dependents()[chsql.SafeEncodeNATS(src)], chsql.SafeEncodeNATS(target),
+		"the cascade must carry a source write into the MV's TO target")
+
+	h, localCache := newPipeHandler(t, e, "tgtpipe",
+		fmt.Sprintf("SELECT count() AS c FROM %s.%s", chQuoteIdent(testCHDatabase), chQuoteIdent(target)),
+		"viewer")
+	exec := func() *httptest.ResponseRecorder { return execPipe(t, h, localCache, "tgtpipe", "viewer") }
+
+	w := exec()
+	require.Equal(t, "MISS", w.Header().Get("X-Cache")) // folds the target's own namespace, full TTL
+	require.Equal(t, `[{"c":1}]`, w.Body.String())      // the seeded row
+	require.Equal(t, "HIT", exec().Header().Get("X-Cache"))
+
+	// A write to the SOURCE (what ingest bumps; ClickHouse populates the target
+	// through the MV) must evict the target-reading pipe.
+	_, err := localCache.Invalidate(ctx, []cache.Namespace{{Table: chsql.SafeEncodeNATS(src)}})
+	require.NoError(t, err)
+	require.Equal(t, "MISS", exec().Header().Get("X-Cache"))
+}
+
 // TestPipeCacheInvalidation_WeirdIdentifier proves the pipe dependency-invalidation
 // path operates on a table whose name a safe-identifier allowlist would reject — here
 // an embedded-dot name that also LOOKS like a qualified `db.table` reference, the most
