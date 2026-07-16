@@ -48,22 +48,22 @@ func TestTimestampCanonicalization_DifferentialAgainstClickHouse(t *testing.T) {
 	// pass-through side: they must reach ClickHouse verbatim and get its
 	// verdict, never a rewrite.
 	corpus := []any{
-		"2026-06-21T04:00:00Z",       // canonical already
-		"2026-06-21T06:30:00+02:30",  // offset form
-		"2026-06-21 04:00:00",        // zone-less space form
-		"2026-06-21T04:00:00",        // zone-less T form
-		"2026-06-21",                 // date-only
-		"2026-06-21 04:00:00.123456", // zone-less with fraction
-		"2026-06-21T04:00:00.9999Z",  // fraction beyond column precision
-		"2026-06-21T04:00:00,999Z",   // comma fraction: ISO 8601 yes, ClickHouse no
-		"1750478400",                 // 10-digit Unix string
-		"999999999",                  // 9-digit Unix string
-		"1750478400.5",               // fractional Unix string: DateTime64-only to ClickHouse
-		"1750478400.123456789",       // ns-exact fraction (float64 would corrupt it)
-		"1750478400.9999999995",      // >9 fraction digits: ClickHouse truncates, never rounds
-		float64(1750478400),          // integer number: seconds to DateTime, *ticks* to DateTime64
-		float64(1750478400.5),        // non-integer number: ClickHouse rejects for every kind
-		float64(1750478400500),       // epoch-ms number: DateTime64(3)'s natural ticks shape
+		"2026-06-21T04:00:00Z",             // canonical already
+		"2026-06-21T06:30:00+02:30",        // offset form
+		"2026-06-21 04:00:00",              // zone-less space form
+		"2026-06-21T04:00:00",              // zone-less T form
+		"2026-06-21",                       // date-only
+		"2026-06-21 04:00:00.123456",       // zone-less with fraction
+		"2026-06-21T04:00:00.9999Z",        // fraction beyond column precision
+		"2026-06-21T04:00:00,999Z",         // comma fraction: ISO 8601 yes, ClickHouse no
+		"1750478400",                       // 10-digit Unix string
+		"999999999",                        // 9-digit Unix string
+		"1750478400.5",                     // fractional Unix string: DateTime64-only to ClickHouse
+		"1750478400.123456789",             // ns-exact fraction (float64 would corrupt it)
+		"1750478400.9999999995",            // >9 fraction digits: ClickHouse truncates, never rounds
+		float64(1750478400),                // integer number: seconds to DateTime, *ticks* to DateTime64
+		float64(1750478400.5),              // non-integer number: ClickHouse rejects for every kind
+		float64(1750478400500),             // epoch-ms number: DateTime64(3)'s natural ticks shape
 		json.Number("1750478400"),          // integer seconds as the production-decoded type
 		json.Number("1750478400.5"),        // non-integer json.Number: pass-through, ClickHouse rejects
 		json.Number("1750478400123456789"), // 19-digit ns epoch > 2^53: rewritten only on DateTime64(9)
