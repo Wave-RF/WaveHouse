@@ -64,25 +64,28 @@ func TestTimestampCanonicalization_DifferentialAgainstClickHouse(t *testing.T) {
 		float64(1750478400),          // integer number: seconds to DateTime, *ticks* to DateTime64
 		float64(1750478400.5),        // non-integer number: ClickHouse rejects for every kind
 		float64(1750478400500),       // epoch-ms number: DateTime64(3)'s natural ticks shape
-		"20260711",                   // 8 digits: YYYYMMDD to ClickHouse
-		"20260711150000",             // 14 digits: YYYYMMDDhhmmss
-		"202607111500",               // 12 digits: ClickHouse rejects
-		"1752278400000",              // 13 digits: epoch milliseconds to ClickHouse
-		"1750478400123456",           // 16 digits: epoch microseconds to ClickHouse
-		"2026",                       // 4 digits: a year to ClickHouse
-		"1e9",                        // not a timestamp
-		"-100",                       // not a timestamp
-		"banana",                     // garbage
-		"2026-11-01 01:30:00",        // DST fall-back: ambiguous local time
-		"2026-03-08 02:30:00",        // DST spring-forward: nonexistent local time
-		"1960-01-01T00:00:00Z",       // pre-range: ClickHouse saturates, spelling-dependently
-		"2300-06-30 12:30:00",        // beyond DateTime64's ceiling, zone-less
+		json.Number("1750478400"),          // integer seconds as the production-decoded type
+		json.Number("1750478400.5"),        // non-integer json.Number: pass-through, ClickHouse rejects
+		json.Number("1750478400123456789"), // 19-digit ns epoch > 2^53: rewritten only on DateTime64(9)
+		"20260711",                         // 8 digits: YYYYMMDD to ClickHouse
+		"20260711150000",                   // 14 digits: YYYYMMDDhhmmss
+		"202607111500",                     // 12 digits: ClickHouse rejects
+		"1752278400000",                    // 13 digits: epoch milliseconds to ClickHouse
+		"1750478400123456",                 // 16 digits: epoch microseconds to ClickHouse
+		"2026",                             // 4 digits: a year to ClickHouse
+		"1e9",                              // not a timestamp
+		"-100",                             // not a timestamp
+		"banana",                           // garbage
+		"2026-11-01 01:30:00",              // DST fall-back: ambiguous local time
+		"2026-03-08 02:30:00",              // DST spring-forward: nonexistent local time
+		"1960-01-01T00:00:00Z",             // pre-range: ClickHouse saturates, spelling-dependently
+		"2300-06-30 12:30:00",              // beyond DateTime64's ceiling, zone-less
 	}
 
 	for _, ct := range colTypes {
 		t.Run(ct.name, func(t *testing.T) {
 			// Independent tables per shape; parallel keeps the six shapes from
-			// serializing ~350 single-row inserts against the suite timeout.
+			// serializing ~380 single-row inserts against the suite timeout.
 			t.Parallel()
 			rawTable := createTable(t, "id UInt32, v "+ct.ddl, "ORDER BY id")
 			canonTable := createTable(t, "id UInt32, v "+ct.ddl, "ORDER BY id")
