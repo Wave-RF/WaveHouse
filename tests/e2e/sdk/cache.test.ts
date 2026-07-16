@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { chQuery, dataClient, makeJWT, testId, WH_URL, waitForCondition } from "./helpers.js";
+import {
+  adminClient,
+  chQuery,
+  dataClient,
+  makeJWT,
+  testId,
+  WH_URL,
+  waitForCondition,
+} from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 describe("Cache", () => {
@@ -62,6 +70,85 @@ describe("Cache", () => {
     expect(res3.ok).toBe(true);
     expect(res3.headers.get("x-cache")).toEqual("MISS");
   });
+
+  it("invalidates a pipe reading a materialized view's TO target on source ingest", async () => {
+    const admin = adminClient();
+    const stamp = Date.now();
+    const src = `mv_src_${stamp}`;
+    const tgt = `mv_tgt_${stamp}`;
+    const mv = `mv_${stamp}`;
+    const pipeName = `pipe_mv_target_${stamp}`;
+
+    // Source + TO target are both ordinary tables; ClickHouse populates the
+    // target through the MV on every insert into the source. Nothing ever
+    // writes the target directly, so the pipe below stays fresh only if
+    // WaveHouse carries a source write through the MV into the target's
+    // cache version (the trigger→target cascade).
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${src}\` (event_id String) ENGINE = MergeTree() ORDER BY event_id`,
+    );
+    await chQuery(
+      `CREATE TABLE IF NOT EXISTS default.\`${tgt}\` (event_id String) ENGINE = MergeTree() ORDER BY event_id`,
+    );
+    await chQuery(
+      `CREATE MATERIALIZED VIEW IF NOT EXISTS default.\`${mv}\` TO default.\`${tgt}\` AS SELECT event_id FROM default.\`${src}\``,
+    );
+
+    // Discover the MV (and its trigger→target edge) before the pipe first runs.
+    const refreshRes = await admin.schema.refresh();
+    expect(refreshRes.error).toBeNull();
+
+    const setRes = await admin.pipes.set(pipeName, {
+      sql: `SELECT count() AS c FROM default.\`${tgt}\``,
+      description: "E2E: MV TO-target invalidation",
+    });
+    expect(setRes.error).toBeNull();
+
+    // Raw fetch (as in the header test above) so X-Cache is visible. Admin
+    // bypasses the pipe's allowed_roles allowlist, so no policy edits needed.
+    const token = makeJWT({ sub: "cache-mv-test", role: "admin", tenant_id: "acme" });
+    const exec = () =>
+      fetch(`${WH_URL}/v1/pipes/${pipeName}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+    const res1 = await exec();
+    if (!res1.ok) throw new Error(`Pipe failed: ${await res1.text()}`);
+    expect(res1.headers.get("x-cache")).toEqual("MISS");
+    expect(await res1.json()).toEqual([{ c: 0 }]); // target starts empty
+
+    const res2 = await exec();
+    expect(res2.headers.get("x-cache")).toBe("HIT");
+
+    // Ingest into the SOURCE. The worker's flush inserts into ClickHouse
+    // (firing the MV into the target) and then invalidates the source's
+    // namespace; the cascade must carry that bump into the target the pipe
+    // folded.
+    const eventId = testId();
+    const insertRes = await admin.from(src).insert({ event_id: eventId });
+    expect(insertRes.error).toBeNull();
+
+    // The row landing in the TARGET proves the MV fired and the flush ran...
+    await waitForCondition(async () => {
+      const r = await chQuery(
+        `SELECT event_id FROM default.\`${tgt}\` WHERE event_id = '${eventId}'`,
+      );
+      return r.length === 1;
+    }, 10_000);
+
+    // ...and the eviction follows the flush, so poll to MISS (a HIT poll
+    // doesn't re-prime anything; the first MISS is the eviction).
+    await waitForCondition(async () => (await exec()).headers.get("x-cache") === "MISS", 5_000);
+
+    // Whatever we fetch now is post-eviction: the pipe sees the new row.
+    const res3 = await exec();
+    expect(await res3.json()).toEqual([{ c: 1 }]);
+
+    await admin.pipes.delete(pipeName);
+    await chQuery(`DROP VIEW IF EXISTS default.\`${mv}\``);
+    await chQuery(`DROP TABLE IF EXISTS default.\`${tgt}\``);
+    await chQuery(`DROP TABLE IF EXISTS default.\`${src}\``);
+  }, 30_000);
 
   it("expires cache naturally based on TTL", async () => {
     const token = makeJWT({
