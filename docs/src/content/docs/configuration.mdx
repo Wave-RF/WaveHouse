@@ -28,7 +28,7 @@ A running server can re-read its config file without a restart, triggered either
 ```bash
 kill -HUP <pid>                                  # the classic Unix signal
 # or, authenticated as the admin role (or operator key):
-curl -X POST http://localhost:8080/v1/admin/config/reload
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8080/v1/admin/config/reload
 ```
 
 Both re-run the full load (file + environment overrides + validation) and then apply **only the hot-reloadable subset** to the running process:
@@ -38,7 +38,7 @@ Both re-run the full load (file + environment overrides + validation) and then a
 | `dedupe.id_field` | Subsequent records dedupe on the new key field. |
 | `dedupe.require_id` | Strict/lenient missing-id handling flips for subsequent records. |
 
-Everything else — ports, `data_dir`, ClickHouse connection, cache and NATS sizing, auth, `dedupe.enabled` (it owns the Pebble store lifecycle), and the rest — is **restart-only**: a changed value is *reported* (in the reload log line and the endpoint's `restart_required` list) but deliberately not applied, so an edit never half-applies silently. The list is expected to grow (per-table dedupe overrides land with [#222](https://github.com/Wave-RF/WaveHouse/issues/222); the effort is tracked in [#48](https://github.com/Wave-RF/WaveHouse/issues/48)).
+Everything else — ports, `data_dir`, ClickHouse connection, cache and NATS sizing, auth, `dedupe.enabled` (it owns the Pebble store lifecycle), and the rest — is **restart-only**: a changed value is *reported* (in the reload log line and the endpoint's `restart_required` list) but deliberately not applied, so an edit never half-applies silently. The list is expected to grow (per-table dedupe overrides land with [#222](https://github.com/Wave-RF/WaveHouse/issues/222); log-level hot reload with [#415](https://github.com/Wave-RF/WaveHouse/issues/415)).
 
 Two guarantees worth knowing:
 
