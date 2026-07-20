@@ -28,6 +28,7 @@ type Dependencies struct {
 	Policy          *PolicyHandler
 	Pipes           *PipesHandler
 	StructuredQuery *StructuredQueryHandler
+	ConfigReload    *ConfigReloadHandler
 	AuthMW          func(http.Handler) http.Handler
 	// PolicyStore backs the RequireAdmin gate: the admin role (policy.AdminRole)
 	// is read live from the policy, so admin_role changes apply without a restart.
@@ -184,6 +185,11 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Get("/pipes/{name}", deps.Pipes.Get)
 				r.Put("/pipes/{name}", deps.Pipes.Put)
 				r.Delete("/pipes/{name}", deps.Pipes.Delete)
+			}
+			// Config hot reload — the HTTP twin of SIGHUP (#48); see
+			// internal/config/reload.go.
+			if deps.ConfigReload != nil {
+				r.Post("/config/reload", deps.ConfigReload.Handle)
 			}
 		})
 	})

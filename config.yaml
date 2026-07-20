@@ -68,7 +68,8 @@ mq:
   max_bytes_gb: 50
 
 dedupe:
-  enabled: false
+  enabled: false            # restart-only (owns the Pebble store lifecycle)
+  # id_field and require_id are hot-reloadable — see docs/configuration § Hot Reload.
   id_field: event_id
   # Reject rows missing id_field instead of publishing them un-deduped. Off by
   # default (they are logged + counted via wavehouse_ingest_dedupe_missing_id_total).

@@ -336,9 +336,33 @@ func run() int {
 	ingestHandler.PolicyStore = policyStore
 	if dedup != nil {
 		ingestHandler.Dedup = dedup
-		ingestHandler.IDField = cfg.Dedupe.IDField
-		ingestHandler.RequireID = cfg.Dedupe.RequireID
 	}
+
+	ingestHandler.SetDedupeSettings(api.DedupeSettings{
+		IDField:   cfg.Dedupe.IDField,
+		RequireID: cfg.Dedupe.RequireID,
+	})
+
+	reloader := config.NewReloader(cfgPath, cfg, logger)
+	reloader.OnReload(func(next *config.Config) {
+		ingestHandler.SetDedupeSettings(api.DedupeSettings{
+			IDField:   next.Dedupe.IDField,
+			RequireID: next.Dedupe.RequireID,
+		})
+	})
+	go func() {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				_, _ = reloader.Reload() // Reload logs its own outcome
+			}
+		}
+	}()
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
@@ -395,6 +419,7 @@ func run() int {
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
+		ConfigReload:    api.NewConfigReloadHandler(reloader),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,

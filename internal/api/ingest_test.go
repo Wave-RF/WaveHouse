@@ -163,7 +163,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -495,7 +495,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
 
 	// Payload omits event_id and require_id is off (the default): the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
@@ -514,8 +514,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.IDField = "event_id"
-	h.RequireID = true
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id", RequireID: true})
 
 	w := httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
@@ -530,6 +529,30 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	assert.NotNil(t, pub.LastMessage(), "a record carrying the id is still accepted")
 }
 
+// TestIngest_Dedup_SettingsHotSwap pins the hot-reload contract: swapping the
+// snapshot on a live handler changes behavior between requests.
+func TestIngest_Dedup_SettingsHotSwap(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
+	h.Dedup = testutil.NewMockDeduplicator()
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id", RequireID: true})
+
+	// Strict mode: a row missing the id is rejected.
+	w := httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Nil(t, pub.LastMessage())
+
+	// Reload flips require_id off and moves the key to org_id: the same row
+	// now publishes (un-deduped), keyed checks follow the new field.
+	h.SetDedupeSettings(DedupeSettings{IDField: "org_id"})
+	w = httptest.NewRecorder()
+	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "relaxed settings must apply without rebuilding the handler")
+}
+
 // TestIngest_NDJSON_RequireID_Rejects confirms strict mode is per-record: the
 // missing-id line fails while the rest of the batch is published.
 func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
@@ -537,8 +560,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.IDField = "event_id"
-	h.RequireID = true
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id", RequireID: true})
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -790,7 +812,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.IDField = "event_id"
+	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),

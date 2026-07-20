@@ -746,6 +746,23 @@ Returns a specific named pipe definition.
 
 #### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 
+#### `POST /v1/admin/config/reload` — Reload Configuration
+
+The HTTP twin of `SIGHUP`: re-reads the config file, applies the [hot-reloadable subset](/configuration#hot-reload) to the running process, and reports the classification. Takes no request body.
+
+**Response (200):**
+
+```json
+{
+  "applied": ["dedupe.id_field", "dedupe.require_id"],
+  "restart_required": ["server"]
+}
+```
+
+`applied` lists hot-reloadable fields whose values changed and now apply; `restart_required` lists config sections that changed on disk but are restart-only — the running process keeps its boot values for those. Both are `[]` when the file matches the running config.
+
+**Errors:** if the edited file fails to parse or validate, the reload changes nothing and returns `500 {"error":"config reload failed (previous config still active): …"}` with the loader's reason.
+
 ## Event Message Format
 
 ### Internal Wire Format (NATS)

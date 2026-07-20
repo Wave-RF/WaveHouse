@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -34,15 +35,22 @@ import (
 // with the admin query handler — see internal/api/query.go.
 const maxReportedResults = 10000
 
+type DedupeSettings struct {
+	IDField   string // dedup key field name (e.g. "event_id"); "" disables dedup
+	RequireID bool   // reject rows missing IDField instead of publishing un-deduped
+}
+
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	Registry    *discovery.SchemaRegistry
 	Dedup       dedupe.Deduplicator // nil if dedup disabled
-	IDField     string              // dedup key field name (e.g. "event_id")
-	RequireID   bool                // reject rows missing IDField instead of publishing un-deduped (dedupe.require_id)
 	Publisher   mq.Publisher
 	PolicyStore *policy.Store
 	logger      *slog.Logger
+
+	// dedupeSettings is the current snapshot — written by SetDedupeSettings,
+	// read once per record.
+	dedupeSettings atomic.Pointer[DedupeSettings]
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
@@ -53,6 +61,21 @@ type IngestHandler struct {
 
 func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
 	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
+}
+
+// SetDedupeSettings atomically replaces the dedupe settings snapshot, safe to
+// call while the handler is serving traffic.
+func (h *IngestHandler) SetDedupeSettings(s DedupeSettings) {
+	h.dedupeSettings.Store(&s)
+}
+
+// dedupeSnapshot returns the current settings, or the zero value (dedupe off)
+// when none were ever set — handlers built without wiring stay safe.
+func (h *IngestHandler) dedupeSnapshot() DedupeSettings {
+	if p := h.dedupeSettings.Load(); p != nil {
+		return *p
+	}
+	return DedupeSettings{}
 }
 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
@@ -401,19 +424,21 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Optional deduplication.
-	if h.Dedup != nil && h.IDField != "" {
-		idVal, ok := data[h.IDField]
+	// Optional deduplication — one snapshot read per record, so a reload lands
+	// at a record boundary.
+	ds := h.dedupeSnapshot()
+	if h.Dedup != nil && ds.IDField != "" {
+		idVal, ok := data[ds.IDField]
 		if !ok {
 			dedupeMissingIDCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("table", table)))
-			if h.RequireID {
-				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", h.IDField, "table", table)
+			if ds.RequireID {
+				h.logger.WarnContext(ctx, "dedupe id_field missing; rejecting", "id_field", ds.IDField, "table", table)
 				return false, &recordReject{
 					Status:  http.StatusBadRequest,
-					Message: fmt.Sprintf("missing dedupe id field %q", h.IDField),
+					Message: fmt.Sprintf("missing dedupe id field %q", ds.IDField),
 				}, nil
 			}
-			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", h.IDField, "table", table)
+			h.logger.WarnContext(ctx, "dedupe id_field missing; publishing without idempotency", "id_field", ds.IDField, "table", table)
 		} else {
 			eventID := fmt.Sprint(idVal)
 			dup, err := h.Dedup.CheckAndMark(ctx, eventID)

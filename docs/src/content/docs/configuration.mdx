@@ -21,6 +21,30 @@ Set `WH_CONFIG` to change the config file path:
 export WH_CONFIG=/etc/wavehouse/config.yaml
 ```
 
+## Hot Reload
+
+A running server can re-read its config file without a restart, triggered either way:
+
+```bash
+kill -HUP <pid>                                  # the classic Unix signal
+# or, authenticated as the admin role (or operator key):
+curl -X POST http://localhost:8080/v1/admin/config/reload
+```
+
+Both re-run the full load (file + environment overrides + validation) and then apply **only the hot-reloadable subset** to the running process:
+
+| Hot-reloadable | Effect |
+| -------------- | ------ |
+| `dedupe.id_field` | Subsequent records dedupe on the new key field. |
+| `dedupe.require_id` | Strict/lenient missing-id handling flips for subsequent records. |
+
+Everything else — ports, `data_dir`, ClickHouse connection, cache and NATS sizing, auth, `dedupe.enabled` (it owns the Pebble store lifecycle), and the rest — is **restart-only**: a changed value is *reported* (in the reload log line and the endpoint's `restart_required` list) but deliberately not applied, so an edit never half-applies silently. The list is expected to grow (per-table dedupe overrides land with [#222](https://github.com/Wave-RF/WaveHouse/issues/222); the effort is tracked in [#48](https://github.com/Wave-RF/WaveHouse/issues/48)).
+
+Two guarantees worth knowing:
+
+- **A bad edit can't take the server down.** If the edited file fails to parse or validate, the reload returns an error and the previous config stays fully active.
+- **Environment variables can't hot-reload.** A process's environment is fixed at start, and environment overrides re-apply on every load — so a key set via `WH_*` shadows any file edit until the process restarts. If a reload reports no change for a key you edited, check whether the environment pins it.
+
 ## Full Reference
 
 ### State
@@ -128,8 +152,8 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
 | `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
-| `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. |
-| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. Default (`false`): it is then published un-deduped. Set `true` to reject it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. |
+| `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. [Hot-reloadable](#hot-reload). |
+| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. Default (`false`): it is then published un-deduped. Set `true` to reject it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. [Hot-reloadable](#hot-reload). |
 
 ### Cache
 

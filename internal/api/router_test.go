@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/config"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
@@ -394,6 +395,49 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 
 		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
 	})
+}
+
+// TestNewRouter_ConfigReloadAdminGate pins POST /v1/admin/config/reload behind
+// the admin gate: a non-admin (or roleless) caller must never trigger a reload.
+func TestNewRouter_ConfigReloadAdminGate(t *testing.T) {
+	t.Parallel()
+
+	reg := discovery.NewSchemaRegistryFromMap(nil)
+	hub := stream.NewHub(nil, nil)
+
+	reloads := 0
+	router := NewRouter(Dependencies{
+		Ingest: NewIngestHandler(reg, &testutil.MockPublisher{}, testutil.NopLogger()),
+		Query:  &QueryHandler{},
+		SSE:    NewStreamHandler(hub, nil),
+		Health: &HealthHandler{},
+		Schema: NewSchemaHandler(reg),
+		ConfigReload: &ConfigReloadHandler{reload: func() (config.ReloadResult, error) {
+			reloads++
+			return config.ReloadResult{Applied: []string{}, RestartRequired: []string{}}, nil
+		}},
+		AuthMW:      func(next http.Handler) http.Handler { return next },
+		PolicyStore: policy.NewMemoryStore(&policy.Policy{}),
+		Logger:      testutil.NopLogger(),
+	})
+
+	post := func(role string) *httptest.ResponseRecorder {
+		ctx := context.Background()
+		if role != "" {
+			ctx = auth.WithRole(ctx, role)
+		}
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/admin/config/reload", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	assert.Equal(t, http.StatusForbidden, post("").Code, "roleless caller must not reach the reload handler")
+	assert.Equal(t, http.StatusForbidden, post("viewer").Code, "non-admin role must not reach the reload handler")
+	assert.Zero(t, reloads, "no denied request may have triggered a reload")
+
+	assert.Equal(t, http.StatusOK, post("admin").Code, "admin triggers the reload")
+	assert.Equal(t, 1, reloads)
 }
 
 // TestNewRouter_RawSQLAdminGate pins the contract for POST /v1/admin/query:
