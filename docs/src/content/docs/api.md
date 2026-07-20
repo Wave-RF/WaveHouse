@@ -759,7 +759,7 @@ The HTTP twin of `SIGHUP`: re-reads the config file, applies the [hot-reloadable
 }
 ```
 
-`applied` lists hot-reloadable fields whose values changed and now apply; `restart_required` lists config sections that changed on disk but are restart-only — the running process keeps its boot values for those. Both are `[]` when the file matches the running config.
+`applied` lists hot-reloadable fields whose values changed and now apply; `restart_required` lists restart-only config sections that changed **since the previous reload** (or boot) — the running process keeps its boot values for those until it restarts. Each reload reports only the delta from the last successful load, so a restart-only edit shows up on the first reload after it, not on later ones: an empty `restart_required` means *nothing changed since the last reload*, not *everything on disk is now live*. Both are `[]` on a reload that finds no change.
 
 **Errors:** if the edited file fails to parse or validate, the reload changes nothing and returns `500 {"error":"config reload failed (previous config still active): …"}` with the loader's reason.
 
