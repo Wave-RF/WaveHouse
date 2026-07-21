@@ -49,7 +49,7 @@ type IngestHandler struct {
 	logger      *slog.Logger
 
 	// dedupeSettings is the current snapshot — written by SetDedupeSettings,
-	// read once per record.
+	// read once per request in Handle.
 	dedupeSettings atomic.Pointer[DedupeSettings]
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
@@ -184,6 +184,11 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Like the policy above, dedupe settings are read once for the whole
+	// request, so a reload lands at a request boundary — old and new settings
+	// never mix within one batch.
+	ds := h.dedupeSnapshot()
+
 	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
 	scope := ""
 
@@ -204,10 +209,10 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if batch {
-		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now)
+		h.handleBatch(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, ds)
 		return
 	}
-	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now)
+	h.handleSingle(ctx, w, rr, reqCap, table, scope, schema, perms, role, now, ds)
 }
 
 // handleSingle ingests a lone flat JSON object and preserves the GA response
@@ -223,6 +228,7 @@ func (h *IngestHandler) handleSingle(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
+	ds DedupeSettings,
 ) {
 	data, err := rr.Next()
 	if err != nil {
@@ -234,7 +240,7 @@ func (h *IngestHandler) handleSingle(
 		return
 	}
 
-	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
+	dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, ds)
 	if abort != nil {
 		writeAbort(w, abort)
 		return
@@ -271,6 +277,7 @@ func (h *IngestHandler) handleBatch(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
+	ds DedupeSettings,
 ) {
 	result := batchResult{Results: []recordResult{}}
 
@@ -299,7 +306,7 @@ func (h *IngestHandler) handleBatch(
 
 		result.Total++
 		idx := result.Total
-		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now)
+		dup, reject, abort := h.processRecord(ctx, table, scope, schema, perms, role, data, now, ds)
 		if abort != nil {
 			// Whole-request failure (backpressure / publish / dedup backend):
 			// stop and surface the status so the caller retries the batch
@@ -377,6 +384,7 @@ func (h *IngestHandler) processRecord(
 	role string,
 	data map[string]any,
 	now time.Time,
+	ds DedupeSettings,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
 	if err := discovery.Validate(schema, data); err != nil {
 		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)
@@ -424,9 +432,7 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
-	// Optional deduplication — one snapshot read per record, so a reload lands
-	// at a record boundary.
-	ds := h.dedupeSnapshot()
+	// Optional deduplication, using the caller's request-scoped settings.
 	if h.Dedup != nil && ds.IDField != "" {
 		idVal, ok := data[ds.IDField]
 		if !ok {

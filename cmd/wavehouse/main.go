@@ -338,18 +338,16 @@ func run() int {
 		ingestHandler.Dedup = dedup
 	}
 
-	ingestHandler.SetDedupeSettings(api.DedupeSettings{
-		IDField:   cfg.Dedupe.IDField,
-		RequireID: cfg.Dedupe.RequireID,
-	})
-
-	reloader := config.NewReloader(cfgPath, cfg, logger)
-	reloader.OnReload(func(next *config.Config) {
+	// One mapping for boot and reload, so the two can't drift apart.
+	applyDedupeSettings := func(c *config.Config) {
 		ingestHandler.SetDedupeSettings(api.DedupeSettings{
-			IDField:   next.Dedupe.IDField,
-			RequireID: next.Dedupe.RequireID,
+			IDField:   c.Dedupe.IDField,
+			RequireID: c.Dedupe.RequireID,
 		})
-	})
+	}
+	applyDedupeSettings(cfg)
+
+	reloader := config.NewReloader(cfgPath, cfg, logger, applyDedupeSettings)
 	go func() {
 		hup := make(chan os.Signal, 1)
 		signal.Notify(hup, syscall.SIGHUP)

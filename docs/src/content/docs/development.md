@@ -138,7 +138,7 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config edits don't trigger a rebuild (air watches neither root config file): `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev` — or `kill -HUP` the running binary to apply the [hot-reloadable fields](/configuration#hot-reload) without one.
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
@@ -147,7 +147,7 @@ dev: deps-up $(AIR)
 - WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
 - A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config files aren't watched — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes (the [hot-reloadable fields](/configuration#hot-reload) also apply via `kill -HUP`). Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets
 

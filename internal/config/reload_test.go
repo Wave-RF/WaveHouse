@@ -19,21 +19,20 @@ func writeConfigFile(t *testing.T, path, contents string) {
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
 }
 
-func newTestReloader(t *testing.T, boot string) (*Reloader, string) {
+func newTestReloader(t *testing.T, boot string, apply func(*Config)) (*Reloader, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeConfigFile(t, path, boot)
 	cfg, err := Load(path)
 	require.NoError(t, err)
-	return NewReloader(path, cfg, testutil.NopLogger()), path
+	return NewReloader(path, cfg, testutil.NopLogger(), apply), path
 }
 
 func TestReloader_AppliesHotFieldsAndFlagsRestartOnly(t *testing.T) {
 	t.Parallel()
-	r, path := newTestReloader(t, "dedupe:\n  id_field: event_id\n  require_id: false\nserver:\n  port: 8080\n")
-
 	var got *Config
-	r.OnReload(func(next *Config) { got = next })
+	r, path := newTestReloader(t, "dedupe:\n  id_field: event_id\n  require_id: false\nserver:\n  port: 8080\n",
+		func(next *Config) { got = next })
 
 	// Hot fields and a restart-only section change together: the hot ones
 	// apply, the port is only reported.
@@ -43,12 +42,23 @@ func TestReloader_AppliesHotFieldsAndFlagsRestartOnly(t *testing.T) {
 
 	assert.ElementsMatch(t, []string{"dedupe.id_field", "dedupe.require_id"}, res.Applied)
 	assert.Equal(t, []string{"server"}, res.RestartRequired)
-	require.NotNil(t, got, "apply hook must run on a successful reload")
+	require.NotNil(t, got, "apply must run on a successful reload")
 	assert.Equal(t, "view_id", got.Dedupe.IDField)
 	assert.True(t, got.Dedupe.RequireID)
 
-	// A second reload with an unchanged file is a clean no-op — empty (not
-	// nil) slices, so the endpoint's JSON renders [] rather than null.
+	// A second reload with an unchanged file: no new hot changes, but the
+	// pending port edit keeps being reported — restart_required diffs the file
+	// against the booted config, not the previous reload, so the report can't
+	// be missed by whoever reloads next.
+	res, err = r.Reload()
+	require.NoError(t, err)
+	assert.Empty(t, res.Applied)
+	assert.Equal(t, []string{"server"}, res.RestartRequired)
+
+	// Reverting the port clears the report: the file again matches what the
+	// process is running, so nothing is pending — empty (not nil) slices, so
+	// the endpoint's JSON renders [] rather than null.
+	writeConfigFile(t, path, "dedupe:\n  id_field: view_id\n  require_id: true\nserver:\n  port: 8080\n")
 	res, err = r.Reload()
 	require.NoError(t, err)
 	assert.Empty(t, res.Applied)
@@ -59,16 +69,14 @@ func TestReloader_AppliesHotFieldsAndFlagsRestartOnly(t *testing.T) {
 
 func TestReloader_InvalidConfigKeepsRunningConfig(t *testing.T) {
 	t.Parallel()
-	r, path := newTestReloader(t, "dedupe:\n  id_field: event_id\n")
+	applyRuns := 0
+	r, path := newTestReloader(t, "dedupe:\n  id_field: event_id\n", func(*Config) { applyRuns++ })
 
-	hookRuns := 0
-	r.OnReload(func(*Config) { hookRuns++ })
-
-	// A file that fails validation must change nothing: error out, no hook.
+	// A file that fails validation must change nothing: error out, no apply.
 	writeConfigFile(t, path, "clickhouse:\n  http_scheme: gopher\n")
 	_, err := r.Reload()
 	require.Error(t, err)
-	assert.Zero(t, hookRuns, "a failed reload must not apply anything")
+	assert.Zero(t, applyRuns, "a failed reload must not apply anything")
 
 	// Fixing the file works on the next attempt, and the diff runs against
 	// the still-current boot config — proving the bad load didn't clobber it.
@@ -76,7 +84,7 @@ func TestReloader_InvalidConfigKeepsRunningConfig(t *testing.T) {
 	res, err := r.Reload()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"dedupe.id_field"}, res.Applied)
-	assert.Equal(t, 1, hookRuns)
+	assert.Equal(t, 1, applyRuns)
 }
 
 // TestReloader_EnvPinnedKeyShadowsFileEdit documents the caveat: an env-pinned
@@ -84,7 +92,7 @@ func TestReloader_InvalidConfigKeepsRunningConfig(t *testing.T) {
 func TestReloader_EnvPinnedKeyShadowsFileEdit(t *testing.T) {
 	t.Setenv("WH_DEDUPE_ID_FIELD", "pinned_id") // no t.Parallel with Setenv
 
-	r, path := newTestReloader(t, "dedupe:\n  id_field: event_id\n")
+	r, path := newTestReloader(t, "dedupe:\n  id_field: event_id\n", nil)
 
 	writeConfigFile(t, path, "dedupe:\n  id_field: view_id\n")
 	res, err := r.Reload()

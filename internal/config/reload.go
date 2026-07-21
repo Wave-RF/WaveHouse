@@ -6,8 +6,10 @@ import (
 	"sync"
 )
 
-// ReloadResult reports what one reload applied (hot fields) and which changed
-// sections stay at boot values until restart.
+// ReloadResult reports what one reload did: Applied lists hot fields whose
+// values changed and now apply; RestartRequired lists restart-only sections
+// where the file differs from the config the process booted with — exactly
+// what a restart would pick up, re-reported on every reload until one happens.
 type ReloadResult struct {
 	Applied         []string `json:"applied"`
 	RestartRequired []string `json:"restart_required"`
@@ -47,31 +49,28 @@ var restartSections = []fieldProbe{
 }
 
 // Reloader re-runs Load on demand (SIGHUP or POST /v1/admin/config/reload) and
-// applies the hotFields whitelist via registered hooks.
+// applies the hotFields whitelist via apply.
 type Reloader struct {
 	path   string
 	logger *slog.Logger
+	// apply pushes a successfully loaded config's hot fields into the running
+	// process. It runs under mu on every successful reload — even a no-change
+	// one — so it must be idempotent and fast.
+	apply func(*Config)
 
-	mu       sync.Mutex
-	current  *Config
-	applyFns []func(*Config)
+	mu      sync.Mutex
+	boot    *Config // as loaded at process start; restart-only diffs compare against this
+	current *Config // last successful load; hot-field diffs compare against this
 }
 
-// NewReloader tracks the config loaded at boot from path.
-func NewReloader(path string, boot *Config, logger *slog.Logger) *Reloader {
-	return &Reloader{path: path, current: boot, logger: logger}
+// NewReloader tracks the config loaded at boot from path; apply (optional) runs
+// on every successful reload.
+func NewReloader(path string, boot *Config, logger *slog.Logger, apply func(*Config)) *Reloader {
+	return &Reloader{path: path, boot: boot, current: boot, logger: logger, apply: apply}
 }
 
-// OnReload registers fn to run on every successful reload; fn must be
-// idempotent and fast, as it runs under the lock even when nothing changed.
-func (r *Reloader) OnReload(fn func(*Config)) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.applyFns = append(r.applyFns, fn)
-}
-
-// Reload re-runs Load, diffs against the running config, applies hooks, and
-// reports the classification; a load that fails changes nothing.
+// Reload re-runs Load, diffs, applies, and reports the classification; a load
+// that fails changes nothing.
 func (r *Reloader) Reload() (ReloadResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -82,9 +81,9 @@ func (r *Reloader) Reload() (ReloadResult, error) {
 		return ReloadResult{}, err
 	}
 
-	res := diffConfigs(r.current, next)
-	for _, fn := range r.applyFns {
-		fn(next)
+	res := diffConfigs(r.current, r.boot, next)
+	if r.apply != nil {
+		r.apply(next)
 	}
 	r.current = next
 
@@ -93,17 +92,18 @@ func (r *Reloader) Reload() (ReloadResult, error) {
 	return res, nil
 }
 
-// diffConfigs classifies every change as applied (hot) or restart-only, with
-// non-nil slices so the JSON renders [] not null.
-func diffConfigs(old, next *Config) ReloadResult {
+// diffConfigs classifies changes: hot fields against the previous load (what
+// this reload newly applies), restart-only sections against boot (what a
+// restart would change). Non-nil slices so the JSON renders [] not null.
+func diffConfigs(current, boot, next *Config) ReloadResult {
 	res := ReloadResult{Applied: []string{}, RestartRequired: []string{}}
 	for _, f := range hotFields {
-		if !reflect.DeepEqual(f.get(old), f.get(next)) {
+		if !reflect.DeepEqual(f.get(current), f.get(next)) {
 			res.Applied = append(res.Applied, f.name)
 		}
 	}
 	for _, s := range restartSections {
-		if !reflect.DeepEqual(s.get(old), s.get(next)) {
+		if !reflect.DeepEqual(s.get(boot), s.get(next)) {
 			res.RestartRequired = append(res.RestartRequired, s.name)
 		}
 	}
