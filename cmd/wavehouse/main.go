@@ -338,16 +338,12 @@ func run() int {
 		ingestHandler.Dedup = dedup
 	}
 
-	// One mapping for boot and reload, so the two can't drift apart.
-	applyDedupeSettings := func(c *config.Config) {
-		ingestHandler.SetDedupeSettings(api.DedupeSettings{
-			IDField:   c.Dedupe.IDField,
-			RequireID: c.Dedupe.RequireID,
-		})
-	}
-	applyDedupeSettings(cfg)
+	// Hot-field wiring: the returned apply runs here at boot and again on
+	// every successful reload.
+	apply := applyHotFields(ingestHandler)
+	apply(cfg)
 
-	reloader := config.NewReloader(cfgPath, cfg, logger, applyDedupeSettings)
+	reloader := config.NewReloader(cfgPath, cfg, logger, apply)
 	go func() {
 		hup := make(chan os.Signal, 1)
 		signal.Notify(hup, syscall.SIGHUP)

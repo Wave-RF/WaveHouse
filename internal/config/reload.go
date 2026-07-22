@@ -23,6 +23,9 @@ type fieldProbe struct {
 
 // hotFields whitelists the only values a Reload applies live: pure values read
 // via a swappable snapshot, no lifecycle attached (extension point for #222).
+// Every entry needs a matching push in applyHotFields
+// (cmd/wavehouse/hotfields.go) — an entry without one is reported as applied
+// without taking effect.
 var hotFields = []fieldProbe{
 	{"dedupe.id_field", func(c *Config) any { return c.Dedupe.IDField }},
 	{"dedupe.require_id", func(c *Config) any { return c.Dedupe.RequireID }},
