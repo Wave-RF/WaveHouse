@@ -305,6 +305,13 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// Normalize here, not in the caller: the Reloader diffs each reload's
+	// Load result against the boot config, so post-Load normalization in
+	// main would surface as a phantom restart_required on every reload
+	// (e.g. an env-injected operator key carrying a secret file's trailing
+	// newline).
+	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}

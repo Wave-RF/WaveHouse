@@ -105,6 +105,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 ### `config/` — Configuration
 
 - **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](/configuration).
+- **reload.go** — `Reloader` re-runs `Load` on `SIGHUP` or `POST /v1/admin/config/reload` (both serialize on one mutex), applies the hot-field whitelist (`dedupe.id_field`, `dedupe.require_id`) to the running process through an atomically swapped snapshot, and reports every other changed section as `restart_required` instead of silently ignoring it; a file that fails to parse or validate changes nothing. See [Hot Reload](/configuration#hot-reload).
 
 ### `dedupe/` — Deduplication (Optional)
 

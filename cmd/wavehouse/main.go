@@ -78,7 +78,6 @@ func run() int {
 		logger.Warn("WH_AUTH_JWT_SECRET is using the default insecure value")
 	}
 
-	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
 	if cfg.Auth.OperatorKey == "" {
 		logger.Warn("no auth.operator_key set: if you lose the JWT secret, lose control of the JWKS endpoint, or lose your HMAC secret — or the policy is wiped — you will be locked out remotely and will need SSH access to restore the policy file and reboot")
 	} else {

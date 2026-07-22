@@ -77,6 +77,18 @@ func TestLoad_OperatorKey_FromEnv(t *testing.T) {
 	assert.Equal(t, "env-operator-key", cfg.Auth.OperatorKey)
 }
 
+func TestLoad_OperatorKey_Trimmed(t *testing.T) {
+	// Load owns the trim: boot (cmd/wavehouse) and every hot reload go
+	// through the same Load, so a key padded at the source — e.g. a secret
+	// file's trailing newline fed via WH_AUTH_OPERATOR_KEY — must come back
+	// identical on both, or the reload diff reports a phantom "auth"
+	// restart_required.
+	t.Setenv("WH_AUTH_OPERATOR_KEY", " env-operator-key\n")
+	cfg, err := Load("nonexistent.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "env-operator-key", cfg.Auth.OperatorKey)
+}
+
 func TestLoad_QueryLimits_Defaults(t *testing.T) {
 	t.Parallel()
 	cfg, err := Load("nonexistent.yaml")
