@@ -20,6 +20,7 @@
 #   branding/mark-{light,dark}.png  1024x1024 transparent raster marks
 #   branding/lockup-{light,dark}.png 1200-wide transparent raster lockups
 #   favicon.ico                     (site root, for /favicon.ico auto-probe)
+#   docs/src/assets/branding/lockup-themed.svg  CSS-var-themed lockup, inlined by Logo.astro
 #
 # To change the brand: edit a hue in docs/src/styles/global.css (--brand-*) or
 # a source SVG, then run `make branding-docs` from the repo root. The live site
@@ -202,6 +203,17 @@ cat > "$OUT_KIT/lockup-light.svg" <<EOF
 EOF
 outline_lockup_svg "$OUT_KIT/lockup-light.svg"
 
+# Themeable inline lockup for in-app components (Logo.astro inlines it via
+# set:html). Same OUTLINED art as lockup-dark, but colours swapped for CSS hooks
+# so ONE asset themes itself with no light/dark variants: mark → currentColor
+# (the consumer sets color: var(--wh-accent)), wordmark → var(--wh-ink). The
+# substitution is case-insensitive because usvg may lower-case the hex on outline.
+# No provenance comment in the file itself: XML forbids `--` inside comments, so
+# naming var(--wh-ink) there makes browsers/GitHub reject the whole SVG (PR #368
+# review). The generated/do-not-hand-edit note lives in Logo.astro instead.
+sed -E -e "s|$COLOR_DARK|currentColor|Ig" -e "s|fill=\"$OG_INK\"|style=\"fill:var(--wh-ink)\"|Ig" \
+  "$OUT_KIT/lockup-dark.svg" > "$SRC/lockup-themed.svg"
+
 # --- 4. favicon.ico (16/32/48) → kit + site root ------------------------------
 rsvg-convert -w 16 -h 16 "$OUT_KIT/favicon.svg" -o "$TMP/fav-16.png"
 rsvg-convert -w 32 -h 32 "$OUT_KIT/favicon.svg" -o "$TMP/fav-32.png"
@@ -261,3 +273,4 @@ for out in favicon.svg favicon-light.svg favicon-dark.svg favicon.ico \
   printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/branding/$out"
 done
 printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/public/favicon.ico (site root)"
+printf '  %s✓%s %s\n' "$GREEN" "$RESET" "docs/src/assets/branding/lockup-themed.svg (inlined by Logo.astro)"
