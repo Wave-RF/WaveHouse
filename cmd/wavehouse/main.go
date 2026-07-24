@@ -246,7 +246,7 @@ func run() int {
 	// provider and RegisterCallback silently no-ops, making this look
 	// authoritative when it's actually doing nothing.
 	if cfg.OTel.Enabled || cfg.Prometheus.Enabled {
-		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup); err != nil {
+		if err := observability.RegisterSystemMetrics(embeddedMQ.GetServer(), dedup, chConn, cfg.ClickHouse.Database); err != nil {
 			logger.Error("failed to register system metrics", "error", err)
 		}
 	}
