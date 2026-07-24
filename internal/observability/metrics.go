@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
@@ -26,7 +27,7 @@ func RegisterSystemMetrics(natsServer *server.Server, dedup dedupe.Deduplicator,
 	pebbleTableCount, _ := meter.Int64ObservableGauge("wavehouse_pebble_table_count", metric.WithDescription("Total Pebble SSTables"))
 
 	// ClickHouse storage Instruments
-	chUncompressedBytes, _ := meter.Int64ObservableGauge("wavehouse_clickhouse_uncompressed_bytes", metric.WithDescription("Uncompressed bytes of live data per table (active parts) — the ingested size"))
+	chUncompressedBytes, _ := meter.Int64ObservableGauge("wavehouse_clickhouse_uncompressed_bytes", metric.WithDescription("Uncompressed bytes of live data per table (active parts)"))
 	chBytesOnDisk, _ := meter.Int64ObservableGauge("wavehouse_clickhouse_bytes_on_disk", metric.WithDescription("Bytes on disk per table (active parts): compressed data plus marks/index files"))
 
 	// Register the scraper callback (runs every 15 seconds)
@@ -52,6 +53,10 @@ func RegisterSystemMetrics(natsServer *server.Server, dedup dedupe.Deduplicator,
 		// per table. Active parts only, so TTL expiry and merges shrink these —
 		// "currently stored", not a lifetime ingest counter.
 		if chConn != nil {
+			// Bound the query so a hung ClickHouse can't stall the whole
+			// collection (the driver's default read timeout is minutes).
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
 			rows, err := chConn.Query(ctx,
 				`SELECT table, sum(data_uncompressed_bytes), sum(bytes_on_disk)
 				 FROM system.parts
@@ -60,16 +65,33 @@ func RegisterSystemMetrics(natsServer *server.Server, dedup dedupe.Deduplicator,
 				chDatabase,
 			)
 			if err == nil {
+				// Buffer before observing: a partial per-table set (mid-stream
+				// error) would skew dashboard-layer totals, so observe all
+				// rows or none.
+				type tableBytes struct {
+					table                string
+					uncompressed, onDisk uint64
+				}
+				var scraped []tableBytes
 				for rows.Next() {
-					var table string
-					var uncompressed, onDisk uint64
-					if err := rows.Scan(&table, &uncompressed, &onDisk); err == nil {
-						attrs := metric.WithAttributes(attribute.String("table", table))
-						o.ObserveInt64(chUncompressedBytes, int64(uncompressed), attrs)
-						o.ObserveInt64(chBytesOnDisk, int64(onDisk), attrs)
+					var tb tableBytes
+					if err := rows.Scan(&tb.table, &tb.uncompressed, &tb.onDisk); err != nil {
+						scraped = nil
+						break
 					}
+					scraped = append(scraped, tb)
+				}
+				if rows.Err() != nil {
+					scraped = nil
 				}
 				_ = rows.Close()
+				for _, tb := range scraped {
+					attrs := metric.WithAttributes(attribute.String("table", tb.table))
+					// #nosec G115 -- byte totals from system.parts can't exceed MaxInt64 (~9.2 EB).
+					o.ObserveInt64(chUncompressedBytes, int64(tb.uncompressed), attrs)
+					// #nosec G115 -- same bound as above.
+					o.ObserveInt64(chBytesOnDisk, int64(tb.onDisk), attrs)
+				}
 			}
 		}
 

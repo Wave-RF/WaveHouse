@@ -106,15 +106,22 @@ func TestRegisterSystemMetrics_NilDedupStats(t *testing.T) {
 }
 
 // stubCHConn returns canned system.parts rows (or an error) for the storage
-// scraper. The embedded nil driver.Conn keeps every method we don't stub out
-// of the way — calling one panics, which is what we want in a test.
+// scraper, capturing the query and bind args so tests can assert the active
+// filter and database bind. The embedded nil driver.Conn keeps every method
+// we don't stub out of the way — calling one panics, which is what we want
+// in a test. Local rather than in testutil: testutil → mq → observability is
+// an import cycle (see stubDeduplicator above).
 type stubCHConn struct {
 	driver.Conn
 	rows     driver.Rows
 	queryErr error
+	gotQuery string
+	gotArgs  []any
 }
 
-func (c *stubCHConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+func (c *stubCHConn) Query(_ context.Context, query string, args ...any) (driver.Rows, error) {
+	c.gotQuery = query
+	c.gotArgs = args
 	return c.rows, c.queryErr
 }
 
@@ -124,10 +131,12 @@ type partsRow struct {
 }
 
 // stubPartsRows implements driver.Rows for the (table, uncompressed, on_disk)
-// tuples the storage scraper selects.
+// tuples the storage scraper selects. A non-nil err surfaces via Err() after
+// iteration, like a mid-stream failure in the real driver.
 type stubPartsRows struct {
 	driver.Rows
 	rows []partsRow
+	err  error
 	i    int
 }
 
@@ -141,74 +150,91 @@ func (r *stubPartsRows) Scan(dest ...any) error {
 	return nil
 }
 
+func (r *stubPartsRows) Err() error { return r.err }
+
 func (*stubPartsRows) Close() error { return nil }
 
 func TestRegisterSystemMetrics_ClickHouseStorage(t *testing.T) {
 	// No t.Parallel(): see TestRegisterSystemMetrics_NilInputs.
-	savedMP := otel.GetMeterProvider()
-	reader := metric.NewManualReader()
-	mp := metric.NewMeterProvider(metric.WithReader(reader))
-	otel.SetMeterProvider(mp)
-	t.Cleanup(func() {
-		_ = mp.Shutdown(context.Background())
-		otel.SetMeterProvider(savedMP)
-	})
+	tests := []struct {
+		name             string
+		conn             *stubCHConn
+		wantUncompressed map[string]int64
+		wantOnDisk       map[string]int64
+	}{
+		{
+			name: "per-table gauges observed",
+			conn: &stubCHConn{rows: &stubPartsRows{rows: []partsRow{
+				{table: "events", uncompressed: 75_000_000_000, onDisk: 1_400_000_000},
+				{table: "clicks", uncompressed: 10, onDisk: 3},
+			}}},
+			wantUncompressed: map[string]int64{"events": 75_000_000_000, "clicks": 10},
+			wantOnDisk:       map[string]int64{"events": 1_400_000_000, "clicks": 3},
+		},
+		{
+			// A failing query must not panic — the storage gauges just go
+			// unobserved for the cycle.
+			name:             "query error observes nothing",
+			conn:             &stubCHConn{queryErr: errors.New("clickhouse down")},
+			wantUncompressed: map[string]int64{},
+			wantOnDisk:       map[string]int64{},
+		},
+		{
+			// A mid-stream failure must discard the whole scrape: a partial
+			// per-table set would skew dashboard-layer totals.
+			name: "mid-stream error discards the partial scrape",
+			conn: &stubCHConn{rows: &stubPartsRows{
+				rows: []partsRow{{table: "events", uncompressed: 1, onDisk: 1}},
+				err:  errors.New("stream aborted"),
+			}},
+			wantUncompressed: map[string]int64{},
+			wantOnDisk:       map[string]int64{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			savedMP := otel.GetMeterProvider()
+			reader := metric.NewManualReader()
+			mp := metric.NewMeterProvider(metric.WithReader(reader))
+			otel.SetMeterProvider(mp)
+			t.Cleanup(func() {
+				_ = mp.Shutdown(context.Background())
+				otel.SetMeterProvider(savedMP)
+			})
 
-	conn := &stubCHConn{rows: &stubPartsRows{rows: []partsRow{
-		{table: "events", uncompressed: 75_000_000_000, onDisk: 1_400_000_000},
-		{table: "clicks", uncompressed: 10, onDisk: 3},
-	}}}
-	require.NoError(t, RegisterSystemMetrics(nil, nil, conn, "wavehouse"))
+			require.NoError(t, RegisterSystemMetrics(nil, nil, tt.conn, "wavehouse"))
 
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
+			var rm metricdata.ResourceMetrics
+			require.NoError(t, reader.Collect(context.Background(), &rm))
 
-	// Both gauges must carry one data point per table, keyed by the `table`
-	// attribute.
-	uncompressed := map[string]int64{}
-	onDisk := map[string]int64{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			g, ok := m.Data.(metricdata.Gauge[int64])
-			if !ok {
-				continue
-			}
-			for _, dp := range g.DataPoints {
-				table, _ := dp.Attributes.Value("table")
-				switch m.Name {
-				case "wavehouse_clickhouse_uncompressed_bytes":
-					uncompressed[table.AsString()] = dp.Value
-				case "wavehouse_clickhouse_bytes_on_disk":
-					onDisk[table.AsString()] = dp.Value
+			// The scraper must aggregate only active parts of the configured
+			// database.
+			require.Contains(t, tt.conn.gotQuery, "system.parts")
+			require.Contains(t, tt.conn.gotQuery, "active")
+			require.Equal(t, []any{"wavehouse"}, tt.conn.gotArgs)
+
+			// Gather both gauges' data points, keyed by the `table` attribute.
+			uncompressed := map[string]int64{}
+			onDisk := map[string]int64{}
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					g, ok := m.Data.(metricdata.Gauge[int64])
+					if !ok {
+						continue
+					}
+					for _, dp := range g.DataPoints {
+						table, _ := dp.Attributes.Value("table")
+						switch m.Name {
+						case "wavehouse_clickhouse_uncompressed_bytes":
+							uncompressed[table.AsString()] = dp.Value
+						case "wavehouse_clickhouse_bytes_on_disk":
+							onDisk[table.AsString()] = dp.Value
+						}
+					}
 				}
 			}
-		}
-	}
-	require.Equal(t, map[string]int64{"events": 75_000_000_000, "clicks": 10}, uncompressed)
-	require.Equal(t, map[string]int64{"events": 1_400_000_000, "clicks": 3}, onDisk)
-}
-
-func TestRegisterSystemMetrics_ClickHouseQueryError(t *testing.T) {
-	// No t.Parallel(): see TestRegisterSystemMetrics_NilInputs.
-	savedMP := otel.GetMeterProvider()
-	reader := metric.NewManualReader()
-	mp := metric.NewMeterProvider(metric.WithReader(reader))
-	otel.SetMeterProvider(mp)
-	t.Cleanup(func() {
-		_ = mp.Shutdown(context.Background())
-		otel.SetMeterProvider(savedMP)
-	})
-
-	// A failing query must not panic — the storage gauges just go unobserved
-	// for the cycle.
-	conn := &stubCHConn{queryErr: errors.New("clickhouse down")}
-	require.NoError(t, RegisterSystemMetrics(nil, nil, conn, "wavehouse"))
-
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			require.NotContains(t, m.Name, "wavehouse_clickhouse_", "no storage gauge should be observed on query error")
-		}
+			require.Equal(t, tt.wantUncompressed, uncompressed)
+			require.Equal(t, tt.wantOnDisk, onDisk)
+		})
 	}
 }
