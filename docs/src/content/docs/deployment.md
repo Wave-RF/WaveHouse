@@ -422,6 +422,23 @@ By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API se
 
 For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
 
+Exposure isn't the only concern: `/metrics` is unauthenticated, and each scrape runs one metadata-only ClickHouse aggregate (the [per-table storage gauges](#per-table-storage-gauges) below) — so, like a public `/readyz` (see [Health Checks](#health-checks)), a public `/metrics` lets an unauthenticated flood become per-request backend queries. Keep it internal in production: dedicated `prometheus.port`, firewalled.
+
+### Per-table storage gauges
+
+Each metrics collection reports two ClickHouse storage gauges per table, labeled by `table` — one metadata-only aggregate over `system.parts` (active parts only) for the configured `clickhouse.database`:
+
+- `wavehouse_clickhouse_uncompressed_bytes` — live data size before compression: the closest `system.parts` analog to "bytes ingested".
+- `wavehouse_clickhouse_bytes_on_disk` — what that data actually occupies: compressed data plus marks and index files.
+
+Sum across the `table` label for instance-wide totals, and divide for the compression ratio (footprint-inclusive, since `bytes_on_disk` counts marks/index files, not just compressed data). These are the capacity signals for disk sizing, retention decisions, and growth alerts — the storage dimension the exported metric surface lacked when the [#360](https://github.com/Wave-RF/WaveHouse/issues/360) disk-full incident hit. Scope notes for that alert:
+
+- "Live data" means **currently stored**: TTL expiry and merges shrink these gauges. They are not a lifetime ingest odometer.
+- Only tables in the configured database are covered — growth in ClickHouse's own `system` tables (the actual #360 culprit) is not.
+- A series exists only once a table has active parts: a freshly created or empty table has no data point at all, not a `0`.
+
+Failure semantics matter for alerting too. The scrape is bounded at 5 seconds and observes all-or-nothing: if the query fails, exceeds the bound, or errors mid-stream, both gauges go **absent** for that cycle rather than reporting stale or partial values. A gap means "scrape failed", not "the table shrank" — alert on growth or thresholds over a window rather than on a naive `absent()`, which any ClickHouse hiccup would trip.
+
 ### Local Observability Stack
 
 We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.

@@ -195,7 +195,7 @@ The master switch is `otel.enabled`. When `true`, each signal (traces/metrics/lo
 
 ### Prometheus
 
-Prometheus exposition is its own top-level config block, independent of `otel.*`. Operators using a scrape-based pipeline (Grafana Alloy, Mimir, the standalone Prometheus server) can leave the entire `[otel]` block at its `enabled: false` default and turn on only `prometheus.enabled` — no OTLP collector required. Conversely, OTLP push and Prometheus can both be on at once (the underlying OTel MeterProvider drives both readers, same `Meter()` API). Disabled by default since enabling adds an unauthenticated endpoint, so opt-in is explicit.
+Prometheus exposition is its own top-level config block, independent of `otel.*`. Operators using a scrape-based pipeline (Grafana Alloy, Mimir, the standalone Prometheus server) can leave the entire `[otel]` block at its `enabled: false` default and turn on only `prometheus.enabled` — no OTLP collector required. Conversely, OTLP push and Prometheus can both be on at once (the underlying OTel MeterProvider drives both readers, same `Meter()` API). Disabled by default since enabling adds an unauthenticated endpoint — one whose every scrape also runs a small ClickHouse metadata query (the [per-table storage gauges](/deployment#per-table-storage-gauges)) — so opt-in is explicit.
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
