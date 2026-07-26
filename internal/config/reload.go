@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"sync"
 )
@@ -56,6 +58,7 @@ var restartSections = []fieldProbe{
 type Reloader struct {
 	path   string
 	logger *slog.Logger
+	fileBacked bool
 	// apply pushes a successfully loaded config's hot fields into the running
 	// process. It runs under mu on every successful reload — even a no-change
 	// one — so it must be idempotent and fast.
@@ -67,9 +70,11 @@ type Reloader struct {
 }
 
 // NewReloader tracks the config loaded at boot from path; apply (optional) runs
-// on every successful reload.
+// on every successful reload. Whether path exists is captured now, so a later
+// Reload can refuse the env-only fallback if the file disappears.
 func NewReloader(path string, boot *Config, logger *slog.Logger, apply func(*Config)) *Reloader {
-	return &Reloader{path: path, boot: boot, current: boot, logger: logger, apply: apply}
+	_, statErr := os.Stat(path)
+	return &Reloader{path: path, fileBacked: statErr == nil, boot: boot, current: boot, logger: logger, apply: apply}
 }
 
 // Reload re-runs Load, diffs, applies, and reports the classification; a load
@@ -77,6 +82,18 @@ func NewReloader(path string, boot *Config, logger *slog.Logger, apply func(*Con
 func (r *Reloader) Reload() (ReloadResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// A file-backed process whose file is gone (renamed, deleted, mount lost)
+	// must fail here: falling through to Load would "succeed" from env +
+	// defaults and revert every live hot field, the opposite of the
+	// previous-config-stays-active promise.
+	if r.fileBacked {
+		if _, err := os.Stat(r.path); err != nil {
+			err = fmt.Errorf("stat config file: %w", err)
+			r.logger.Error("config reload failed; previous config still active", "path", r.path, "error", err)
+			return ReloadResult{}, err
+		}
+	}
 
 	next, err := Load(r.path)
 	if err != nil {

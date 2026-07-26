@@ -69,9 +69,11 @@ func (h *IngestHandler) SetDedupeSettings(s DedupeSettings) {
 	h.dedupeSettings.Store(&s)
 }
 
-// dedupeSnapshot returns the current settings, or the zero value (dedupe off)
-// when none were ever set — handlers built without wiring stay safe.
-func (h *IngestHandler) dedupeSnapshot() DedupeSettings {
+// DedupeSettings returns the current settings, or the zero value (dedupe off)
+// when none were ever set — handlers built without wiring stay safe. Exported
+// so the wiring's apply path (cmd/wavehouse/hotfields.go) can be tested
+// against what the handler actually serves.
+func (h *IngestHandler) DedupeSettings() DedupeSettings {
 	if p := h.dedupeSettings.Load(); p != nil {
 		return *p
 	}
@@ -187,7 +189,7 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Like the policy above, dedupe settings are read once for the whole
 	// request, so a reload lands at a request boundary — old and new settings
 	// never mix within one batch.
-	ds := h.dedupeSnapshot()
+	ds := h.DedupeSettings()
 
 	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
 	scope := ""

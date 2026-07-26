@@ -87,6 +87,45 @@ func TestReloader_InvalidConfigKeepsRunningConfig(t *testing.T) {
 	assert.Equal(t, 1, applyRuns)
 }
 
+func TestReloader_MissingFileKeepsRunningConfig(t *testing.T) {
+	t.Parallel()
+	applyRuns := 0
+	r, path := newTestReloader(t, "dedupe:\n  id_field: view_id\n", func(*Config) { applyRuns++ })
+
+	// The file the process booted from disappears (renamed, deleted, mount
+	// lost). Load alone would fall back to env + defaults and revert
+	// dedupe.id_field to event_id — the reload must refuse instead.
+	require.NoError(t, os.Remove(path))
+	_, err := r.Reload()
+	require.Error(t, err)
+	assert.Zero(t, applyRuns, "a reload without the boot config file must not apply anything")
+
+	// Restoring the file recovers on the next attempt: the guard rejects the
+	// vanished file per reload, it doesn't latch a failed state.
+	writeConfigFile(t, path, "dedupe:\n  id_field: event_id\n")
+	res, err := r.Reload()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dedupe.id_field"}, res.Applied)
+	assert.Equal(t, 1, applyRuns)
+}
+
+// TestReloader_EnvOnlyBootReloadsWithoutFile pins the guard's boundary: a
+// process that booted with no file at all (the container/env-only mode) keeps
+// reloading without error — honestly reporting nothing to apply.
+func TestReloader_EnvOnlyBootReloadsWithoutFile(t *testing.T) {
+	t.Setenv("WH_DEDUPE_ID_FIELD", "env_id") // no t.Parallel with Setenv
+
+	path := filepath.Join(t.TempDir(), "config.yaml") // never created
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	r := NewReloader(path, cfg, testutil.NopLogger(), nil)
+
+	res, err := r.Reload()
+	require.NoError(t, err)
+	assert.Empty(t, res.Applied)
+	assert.Empty(t, res.RestartRequired)
+}
+
 // TestReloader_EnvPinnedKeyShadowsFileEdit documents the caveat: an env-pinned
 // key shadows file edits, so the reload honestly reports no change.
 func TestReloader_EnvPinnedKeyShadowsFileEdit(t *testing.T) {

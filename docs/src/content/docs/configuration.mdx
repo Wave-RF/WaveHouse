@@ -27,9 +27,13 @@ A running server can re-read its config file without a restart, triggered either
 
 ```bash
 kill -HUP <pid>                                  # the classic Unix signal
+# in the Docker Compose deployment (the binary runs as PID 1):
+docker compose -f deployments/compose/standalone.yaml kill -s HUP wavehouse
 # or, authenticated as the admin role (or operator key):
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8080/v1/admin/config/reload
 ```
+
+In a container, hot reload needs a config file to re-read — the image ships none, so an env-only deployment honestly reports nothing to apply. Bind-mount one (e.g. at `/app/config.yaml`, or point `WH_CONFIG` at a mounted path) **and** drop the matching `WH_*` variables: the shipped Compose file pins `dedupe.require_id` via `WH_DEDUPE_REQUIRE_ID`, which would shadow your file edit (the second guarantee below).
 
 Both re-run the full load (file + environment overrides + validation) and then apply **only the hot-reloadable subset** to the running process:
 
@@ -42,7 +46,7 @@ Everything else — ports, `data_dir`, ClickHouse connection, cache and NATS siz
 
 Two guarantees worth knowing:
 
-- **A bad edit can't take the server down.** If the edited file fails to parse or validate, the reload returns an error and the previous config stays fully active.
+- **A bad edit can't take the server down.** If the edited file fails to parse or validate — or the file a file-backed process booted from has since vanished (renamed, deleted, mount lost) — the reload returns an error and the previous config stays fully active.
 - **Environment variables can't hot-reload.** A process's environment is fixed at start, and environment overrides re-apply on every load — so a key set via `WH_*` shadows any file edit until the process restarts. If a reload reports no change for a key you edited, check whether the environment pins it.
 
 ## Full Reference

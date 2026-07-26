@@ -62,7 +62,7 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 `admin_role` (default: `"admin"`) is the one role that bypasses the entire policy:
 
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
-- It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
+- It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD, config reload), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 

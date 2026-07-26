@@ -201,7 +201,7 @@ Active Sweeper (async goroutine, every 60s):
 Client POST /v1/admin/query
   → JWT auth middleware (always runs; no/invalid token → empty role)
   → /v1/admin RequireAdmin (role == policy.admin_role, or the operator-key bit) — single gate shared
-    with the rest of /v1/admin/* (policy CRUD, pipes CRUD). Raw SQL has
+    with the rest of /v1/admin/* (policy CRUD, pipes CRUD, config reload). Raw SQL has
     no per-statement scope check (a full SQL parser would be needed to
     authorize predicates), so the role gate is the entire authorization
     story. /v1/admin/query is the only sanctioned surface for non-SELECT

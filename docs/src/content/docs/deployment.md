@@ -113,6 +113,8 @@ git push origin v0.1.0
 
 All configuration can be set via environment variables. This is the recommended approach for container deployments. See [Configuration Reference](/configuration) for the full list.
 
+One trade-off to know: a container's environment is fixed at start, and an env-set key shadows any config-file edit — so env-only configuration forecloses [hot reload](/configuration#hot-reload) (the image ships no config file to re-read). If you want to hot-reload a field, put it in a bind-mounted config file instead of the environment.
+
 Key variables for production:
 
 ```bash
