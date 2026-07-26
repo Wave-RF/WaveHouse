@@ -56,8 +56,8 @@ var restartSections = []fieldProbe{
 // Reloader re-runs Load on demand (SIGHUP or POST /v1/admin/config/reload) and
 // applies the hotFields whitelist via apply.
 type Reloader struct {
-	path   string
-	logger *slog.Logger
+	path       string
+	logger     *slog.Logger
 	fileBacked bool
 	// apply pushes a successfully loaded config's hot fields into the running
 	// process. It runs under mu on every successful reload — even a no-change
