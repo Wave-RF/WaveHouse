@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/require"
@@ -106,20 +107,23 @@ func TestRegisterSystemMetrics_NilDedupStats(t *testing.T) {
 }
 
 // stubCHConn returns canned system.parts rows (or an error) for the storage
-// scraper, capturing the query and bind args so tests can assert the active
-// filter and database bind. The embedded nil driver.Conn keeps every method
-// we don't stub out of the way — calling one panics, which is what we want
-// in a test. Local rather than in testutil: testutil → mq → observability is
-// an import cycle (see stubDeduplicator above).
+// scraper, capturing the query context, text, and bind args so tests can
+// assert the scrape bound, the active filter, and the database bind. The
+// embedded nil driver.Conn keeps every method we don't stub out of the way —
+// calling one panics, which is what we want in a test. Local rather than in
+// testutil: testutil → mq → observability is an import cycle (see
+// stubDeduplicator above).
 type stubCHConn struct {
 	driver.Conn
 	rows     driver.Rows
 	queryErr error
+	gotCtx   context.Context
 	gotQuery string
 	gotArgs  []any
 }
 
-func (c *stubCHConn) Query(_ context.Context, query string, args ...any) (driver.Rows, error) {
+func (c *stubCHConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	c.gotCtx = ctx
 	c.gotQuery = query
 	c.gotArgs = args
 	return c.rows, c.queryErr
@@ -212,6 +216,13 @@ func TestRegisterSystemMetrics_ClickHouseStorage(t *testing.T) {
 			require.Contains(t, tt.conn.gotQuery, "system.parts")
 			require.Contains(t, tt.conn.gotQuery, "active")
 			require.Equal(t, []any{"wavehouse"}, tt.conn.gotArgs)
+
+			// The scrape must be bounded — a hung ClickHouse must not stall
+			// the whole collection cycle (the driver's default read timeout
+			// is minutes).
+			deadline, ok := tt.conn.gotCtx.Deadline()
+			require.True(t, ok, "storage scrape context must carry a deadline")
+			require.WithinDuration(t, time.Now().Add(5*time.Second), deadline, 2*time.Second)
 
 			// Gather both gauges' data points, keyed by the `table` attribute.
 			uncompressed := map[string]int64{}
