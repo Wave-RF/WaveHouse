@@ -54,6 +54,17 @@ func TestOpen_AppliesMigrationsIdempotently(t *testing.T) {
 	}
 }
 
+// TestOpen_CreatesParentDir proves a first boot works when data_dir itself
+// doesn't exist yet (fresh clone, the e2e orchestrator's clean-slate
+// RemoveAll): SQLite won't create missing parent directories, so Open must.
+func TestOpen_CreatesParentDir(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "data", "control.db"), testLogger())
+	if err != nil {
+		t.Fatalf("Open with missing parent dir: %v", err)
+	}
+	_ = db.Close()
+}
+
 // TestForeignKeysEnforced proves the per-connection pragma is active: SQLite
 // ships with foreign keys OFF, and without the pragma every delete rule in
 // the schema would be decoration.

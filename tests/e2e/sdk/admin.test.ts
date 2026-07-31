@@ -1,6 +1,6 @@
 import type { Policy } from "@wavehouse/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { adminClient } from "./helpers.js";
+import { adminClient, makeJWT, testId, WH_URL } from "./helpers.js";
 import { suiteTables } from "./tables.js";
 
 describe("Admin", () => {
@@ -208,6 +208,119 @@ describe("Admin", () => {
         expect(result.error).toBeNull();
         expect(result.data).toBeInstanceOf(Array);
       }
+    });
+  });
+
+  // Runtime settings are an operator surface, deliberately not in the SDK
+  // (docs/sdk/admin.md) — so this block exercises the HTTP API directly.
+  // Settings are server-global; test files run sequentially (maxWorkers: 1),
+  // and the DELETE below (plus the afterAll backstop) restores compiled
+  // defaults so later files never see the require_id=true window.
+  describe("Settings", () => {
+    const settingsURL = `${WH_URL}/v1/admin/settings`;
+    const adminHeaders = (extra?: Record<string, string>) => ({
+      Authorization: `Bearer ${makeJWT({ sub: "e2e-settings", role: "admin" })}`,
+      "Content-Type": "application/json",
+      ...extra,
+    });
+    const dedupeSource = (body: any) => body.sources.find((s: any) => s.section === "dedupe");
+
+    afterAll(async () => {
+      // Revert to compiled defaults even if an assertion failed mid-flow.
+      await fetch(`${settingsURL}/dedupe`, { method: "DELETE", headers: adminHeaders() });
+    });
+
+    it("reports compiled defaults when no override is stored", async () => {
+      const res = await fetch(settingsURL, { headers: adminHeaders() });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.values.dedupe).toEqual({ id_field: "event_id", require_id: false });
+      expect(dedupeSource(body).source).toBe("default");
+    });
+
+    it("is admin-gated", async () => {
+      const res = await fetch(settingsURL, {
+        headers: { Authorization: `Bearer ${makeJWT({ sub: "e2e-viewer", role: "viewer" })}` },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("PUT with If-Match applies live: require_id rejects id-less rows at the next request", async () => {
+      const put = await fetch(`${settingsURL}/dedupe`, {
+        method: "PUT",
+        headers: adminHeaders({ "If-Match": "0" }), // 0 = no override stored yet
+        body: JSON.stringify({ id_field: "event_id", require_id: true }),
+      });
+      expect(put.status).toBe(200);
+
+      // No restart, no signal: the very next ingest request must enforce it.
+      // users tables have no event_id column, so an id-less row passes schema
+      // validation but can never be deduped — the case require_id turns into
+      // a 400 (clicks/events declare event_id required, so schema validation
+      // already rejects id-less rows there before dedupe is consulted).
+      const missing = await wh
+        .from(T.users)
+        .insert({ user_id: testId(), name: "Settings", email: "s@e2e.test" });
+      expect(missing.error).not.toBeNull();
+      expect(missing.error!.status).toBe(400);
+      expect(missing.error!.message).toContain("dedupe");
+
+      // Rows that carry the id are unaffected.
+      const withId = await wh.from(T.clicks).insert({
+        event_id: testId(),
+        page: "/settings",
+        user_id: "u-settings",
+        session_id: "s-settings",
+      });
+      expect(withId.error).toBeNull();
+    });
+
+    it("stale If-Match gets 409 and the write changes nothing", async () => {
+      const res = await fetch(`${settingsURL}/dedupe`, {
+        method: "PUT",
+        headers: adminHeaders({ "If-Match": "0" }), // override now exists — 0 is stale
+        body: JSON.stringify({ id_field: "event_id", require_id: false }),
+      });
+      expect(res.status).toBe(409);
+
+      const body = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
+      expect(body.values.dedupe.require_id).toBe(true); // survived the lost race
+      expect(dedupeSource(body).source).toBe("db");
+      expect(dedupeSource(body).revision).toBeGreaterThan(0);
+    });
+
+    it("rejects an invalid document and an unknown field with 400", async () => {
+      const invalid = await fetch(`${settingsURL}/dedupe`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({ id_field: "", require_id: true }),
+      });
+      expect(invalid.status).toBe(400);
+
+      const typo = await fetch(`${settingsURL}/dedupe`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({ id_field: "event_id", requireid: true }),
+      });
+      expect(typo.status).toBe(400);
+    });
+
+    it("DELETE reverts to compiled defaults, applied live", async () => {
+      const del = await fetch(`${settingsURL}/dedupe`, {
+        method: "DELETE",
+        headers: adminHeaders(),
+      });
+      expect(del.status).toBe(200);
+
+      const body = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
+      expect(body.values.dedupe).toEqual({ id_field: "event_id", require_id: false });
+      expect(dedupeSource(body).source).toBe("default");
+
+      // Back to the default posture: the id-less row is WARN'd and accepted.
+      const ok = await wh
+        .from(T.users)
+        .insert({ user_id: testId(), name: "Settings", email: "s@e2e.test" });
+      expect(ok.error).toBeNull();
     });
   });
 });

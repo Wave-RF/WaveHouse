@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,12 +29,20 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Open opens (or creates) the control-plane database at path and applies any
-// pending migrations. The connection enforces foreign keys (SQLite ships with
-// them OFF), uses WAL for crash safety, and is capped at one connection —
-// control-plane traffic is boot loads and admin edits, so serializing writes
-// costs nothing and removes SQLITE_BUSY handling entirely.
+// Open opens (or creates) the control-plane database at path — creating the
+// parent directory if missing — and applies any pending migrations. The
+// connection enforces foreign keys (SQLite ships with them OFF), uses WAL for
+// crash safety, and is capped at one connection — control-plane traffic is
+// boot loads and admin edits, so serializing writes costs nothing and removes
+// SQLITE_BUSY handling entirely.
 func Open(path string, logger *slog.Logger) (*sql.DB, error) {
+	// SQLite creates the file on demand but never its parent directory —
+	// unlike NATS and Pebble, which make their own state dirs. (For
+	// ":memory:", Dir is "." and MkdirAll is a no-op.)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, fmt.Errorf("create control db dir %q: %w", dir, err)
+	}
 	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
