@@ -2,7 +2,9 @@ package pipes
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,10 +15,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/Wave-RF/WaveHouse/internal/controldb"
+	"github.com/google/uuid"
 )
-
-const kvBucket = "WAVEHOUSE_PIPES"
 
 // NamedQuery is a pre-defined SQL template with parameter support.
 type NamedQuery struct {
@@ -38,26 +39,22 @@ type ParamDef struct {
 	Default  any    `json:"default,omitempty"`
 }
 
-// Store manages named query persistence via NATS KV with optional file bootstrap.
+// Store manages named query persistence in the control-plane database with
+// optional file bootstrap. A NamedQuery is decomposed into a pipes row plus
+// pipe_params and pipe_roles child rows on Put and recomposed on load; the
+// in-memory cache is the read path, so no request touches SQLite.
 type Store struct {
-	kv     jetstream.KeyValue
+	db     *sql.DB
 	logger *slog.Logger
 	mu     sync.RWMutex
 	cached map[string]*NamedQuery
 }
 
-// NewStore creates a pipes store backed by NATS KV.
-// If directory is non-empty, .sql files in it are loaded on startup.
-func NewStore(ctx context.Context, js jetstream.JetStream, directory string, logger *slog.Logger) (*Store, error) {
-	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket:  kvBucket,
-		History: 3,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create pipes kv bucket: %w", err)
-	}
-
-	s := &Store{kv: kv, logger: logger, cached: make(map[string]*NamedQuery)}
+// NewStore creates a pipes store backed by the control-plane database.
+// If directory is non-empty, .sql files in it are loaded on startup (a seed:
+// a pipe name already in the database is never overwritten).
+func NewStore(ctx context.Context, db *sql.DB, directory string, logger *slog.Logger) (*Store, error) {
+	s := &Store{db: db, logger: logger, cached: make(map[string]*NamedQuery)}
 
 	// Bootstrap from SQL files.
 	if directory != "" {
@@ -66,9 +63,11 @@ func NewStore(ctx context.Context, js jetstream.JetStream, directory string, log
 		}
 	}
 
-	// Load all existing pipes from KV into cache.
+	// Load all stored pipes into the cache. Unlike the old KV backend this is
+	// fatal: the control db is a local file, so a read failure means a broken
+	// deployment, and refusing boot beats silently serving zero pipes.
 	if err := s.refresh(ctx); err != nil {
-		logger.Warn("pipes initial cache load failed", "error", err)
+		return nil, fmt.Errorf("load pipes from control db: %w", err)
 	}
 
 	return s, nil
@@ -92,7 +91,10 @@ func (s *Store) List() []*NamedQuery {
 	return result
 }
 
-// Put saves a named query to the NATS KV store.
+// Put saves a named query: the pipes row is upserted by name (the surrogate
+// id survives an update, so a future rename surface keeps child rows), and
+// the parameter and role child rows are fully replaced — all in one
+// transaction.
 func (s *Store) Put(ctx context.Context, q *NamedQuery) error {
 	if q.Name == "" {
 		return fmt.Errorf("pipe name is required")
@@ -101,15 +103,8 @@ func (s *Store) Put(ctx context.Context, q *NamedQuery) error {
 		return fmt.Errorf("pipe SQL is required")
 	}
 
-	data, err := json.Marshal(q)
-	if err != nil {
-		return fmt.Errorf("marshal pipe: %w", err)
-	}
-
-	if s.kv != nil {
-		if _, err := s.kv.Put(ctx, q.Name, data); err != nil {
-			return fmt.Errorf("put pipe to kv: %w", err)
-		}
+	if err := s.persist(ctx, q); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -120,12 +115,80 @@ func (s *Store) Put(ctx context.Context, q *NamedQuery) error {
 	return nil
 }
 
-// Delete removes a named query from the store.
-func (s *Store) Delete(ctx context.Context, name string) error {
-	if s.kv != nil {
-		if err := s.kv.Delete(ctx, name); err != nil {
-			return fmt.Errorf("delete pipe: %w", err)
+// persist writes the decomposed pipe inside one transaction. The pipes row
+// is one insert-or-update statement (the no-op on conflict keeps the existing
+// surrogate id, which RETURNING yields either way); child rows are replaced
+// wholesale — a PUT is the full document.
+func (s *Store) persist(ctx context.Context, q *NamedQuery) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin pipe write: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var pipeID string
+	if err := tx.QueryRowContext(ctx, `INSERT INTO pipes (id, name, sql, description) VALUES (?, ?, ?, ?)
+		ON CONFLICT (name) DO UPDATE SET sql = excluded.sql, description = excluded.description
+		RETURNING id`, uuid.NewString(), q.Name, q.SQL, q.Description).Scan(&pipeID); err != nil {
+		return fmt.Errorf("upsert pipe %q: %w", q.Name, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pipe_params WHERE pipe_id = ?`, pipeID); err != nil {
+		return fmt.Errorf("clear pipe params: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pipe_roles WHERE pipe_id = ?`, pipeID); err != nil {
+		return fmt.Errorf("clear pipe roles: %w", err)
+	}
+
+	seenParams := make(map[string]bool, len(q.Parameters))
+	for i, p := range q.Parameters {
+		if p.Name == "" || seenParams[p.Name] {
+			continue // duplicate declarations: first wins, matching BindParams' lookup map
 		}
+		seenParams[p.Name] = true
+		var defaultVal any
+		if p.Default != nil {
+			data, err := json.Marshal(p.Default)
+			if err != nil {
+				return fmt.Errorf("marshal default for param %q: %w", p.Name, err)
+			}
+			defaultVal = string(data)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pipe_params
+			(pipe_id, param_name, position, type, required, default_val) VALUES (?, ?, ?, ?, ?, ?)`,
+			pipeID, p.Name, i, p.Type, p.Required, defaultVal); err != nil {
+			return fmt.Errorf("insert pipe param %q: %w", p.Name, err)
+		}
+	}
+
+	seenRoles := make(map[string]bool, len(q.AllowedRoles))
+	for i, roleName := range q.AllowedRoles {
+		if roleName == "" || seenRoles[roleName] {
+			continue
+		}
+		seenRoles[roleName] = true
+		roleID, err := controldb.UpsertRole(ctx, tx, roleName)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pipe_roles (pipe_id, role_id, position) VALUES (?, ?, ?)`,
+			pipeID, roleID, i); err != nil {
+			return fmt.Errorf("insert pipe role %q: %w", roleName, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit pipe write: %w", err)
+	}
+	return nil
+}
+
+// Delete removes a named query from the store; deleting the pipes row
+// cascades its parameter and role rows. Deleting an absent pipe is a no-op
+// success (idempotent DELETE, the same contract as the KV backend this
+// replaced).
+func (s *Store) Delete(ctx context.Context, name string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM pipes WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("delete pipe: %w", err)
 	}
 
 	s.mu.Lock()
@@ -298,31 +361,92 @@ func jsonKind(v any) string {
 	}
 }
 
-// refresh reloads all pipes from NATS KV into the cache.
+// refresh recomposes every stored pipe from its rows into the cache.
 func (s *Store) refresh(ctx context.Context) error {
-	keys, err := s.kv.Keys(ctx)
+	cached := make(map[string]*NamedQuery)
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, sql, description FROM pipes`)
 	if err != nil {
-		return err
+		return fmt.Errorf("read pipes: %w", err)
 	}
-	cached := make(map[string]*NamedQuery, len(keys))
-	for _, key := range keys {
-		entry, err := s.kv.Get(ctx, key)
-		if err != nil {
-			continue
+	defer func() { _ = rows.Close() }()
+	idsByName := map[string]string{}
+	for rows.Next() {
+		var id, name, sqlText, description string
+		if err := rows.Scan(&id, &name, &sqlText, &description); err != nil {
+			return fmt.Errorf("scan pipe: %w", err)
 		}
-		var q NamedQuery
-		if err := json.Unmarshal(entry.Value(), &q); err != nil {
-			continue
-		}
-		cached[key] = &q
+		idsByName[name] = id
+		cached[name] = &NamedQuery{Name: name, SQL: sqlText, Description: description}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read pipes: %w", err)
+	}
+
+	for name, id := range idsByName {
+		q := cached[name]
+		if q.Parameters, err = s.loadParams(ctx, id); err != nil {
+			return fmt.Errorf("pipe %q: %w", name, err)
+		}
+		if q.AllowedRoles, err = s.loadRoles(ctx, id); err != nil {
+			return fmt.Errorf("pipe %q: %w", name, err)
+		}
+	}
+
 	s.mu.Lock()
 	s.cached = cached
 	s.mu.Unlock()
 	return nil
 }
 
-// loadFromDirectory scans a directory for .sql files and bootstraps them into KV.
+// loadParams recomposes a pipe's parameter list in declaration order; nil
+// when the pipe declares none (matching the omitempty JSON shape).
+func (s *Store) loadParams(ctx context.Context, pipeID string) ([]ParamDef, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT param_name, type, required, default_val FROM pipe_params WHERE pipe_id = ? ORDER BY position`, pipeID)
+	if err != nil {
+		return nil, fmt.Errorf("read pipe params: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var params []ParamDef
+	for rows.Next() {
+		var p ParamDef
+		var defaultVal sql.NullString
+		if err := rows.Scan(&p.Name, &p.Type, &p.Required, &defaultVal); err != nil {
+			return nil, fmt.Errorf("scan pipe param: %w", err)
+		}
+		if defaultVal.Valid {
+			if err := json.Unmarshal([]byte(defaultVal.String), &p.Default); err != nil {
+				return nil, fmt.Errorf("unmarshal default for param %q: %w", p.Name, err)
+			}
+		}
+		params = append(params, p)
+	}
+	return params, rows.Err()
+}
+
+// loadRoles recomposes a pipe's allowed-role names in declaration order; nil
+// when the pipe has none (admin-only, fails closed).
+func (s *Store) loadRoles(ctx context.Context, pipeID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.name FROM pipe_roles pr
+		JOIN roles r ON r.id = pr.role_id WHERE pr.pipe_id = ? ORDER BY pr.position`, pipeID)
+	if err != nil {
+		return nil, fmt.Errorf("read pipe roles: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var roles []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan pipe role: %w", err)
+		}
+		roles = append(roles, name)
+	}
+	return roles, rows.Err()
+}
+
+// loadFromDirectory scans a directory for .sql files and seeds them into the
+// database. A pipe name that already exists is never overwritten.
 func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -342,9 +466,14 @@ func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 			s.logger.Warn("failed to read pipe file", "file", entry.Name(), "error", err)
 			continue
 		}
-		// Check if already exists in KV — don't overwrite.
-		if _, err := s.kv.Get(ctx, name); err == nil {
+		// Check if already stored — don't overwrite.
+		var exists int
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM pipes WHERE name = ?`, name).Scan(&exists)
+		if err == nil {
 			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("look up pipe %q: %w", name, err)
 		}
 		q := &NamedQuery{
 			Name: name,
@@ -357,13 +486,18 @@ func (s *Store) loadFromDirectory(ctx context.Context, dir string) error {
 	return nil
 }
 
-// NewMemoryStore creates an in-memory pipes store for testing without NATS.
+// NewMemoryStore creates a pipes store over an in-memory control database,
+// pre-loaded with the given queries. Intended for testing: same engine, same
+// constraints, same code paths as production — only the storage lives in RAM.
+// Seeds populate the cache directly (a later Put replaces that pipe's rows
+// wholesale, and Delete of a never-persisted name is a no-op).
 func NewMemoryStore(queries ...*NamedQuery) *Store {
 	cached := make(map[string]*NamedQuery, len(queries))
 	for _, q := range queries {
 		cached[q.Name] = q
 	}
 	return &Store{
+		db:     controldb.MustOpenMemory(),
 		cached: cached,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -132,10 +134,13 @@ type MQ struct {
 	MaxBytesGB       int `yaml:"max_bytes_gb" env:"WH_MQ_MAX_BYTES_GB" env-default:"50"`
 }
 
+// Dedupe holds the dedupe subsystem's boot config: just the lifecycle switch
+// (it owns the Pebble store). The live-tunable knobs — id_field, require_id —
+// are runtime settings (internal/settings), changed via
+// PUT /v1/admin/settings/dedupe and never read from the file or environment;
+// Load refuses the retired keys (see retired.go).
 type Dedupe struct {
-	Enabled   bool   `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
-	IDField   string `yaml:"id_field" env:"WH_DEDUPE_ID_FIELD" env-default:"event_id"`
-	RequireID bool   `yaml:"require_id" env:"WH_DEDUPE_REQUIRE_ID" env-default:"false"`
+	Enabled bool `yaml:"enabled" env:"WH_DEDUPE_ENABLED" env-default:"false"`
 }
 
 type Cache struct {
@@ -182,7 +187,7 @@ type Policy struct {
 // Pipes configures named query pipes.
 //
 // Dir is an OPTIONAL bootstrap source: on startup, any `.sql` files in it are
-// loaded into the NATS KV pipe store. After bootstrap, the API/KV is the
+// loaded into the control-plane pipe store. After bootstrap, the API/db is the
 // authoritative store — the directory is read-only at runtime and not
 // rewritten. Empty default skips bootstrap entirely (most users will create
 // pipes via the API). When set, mount the directory read-only in containers
@@ -293,28 +298,42 @@ func (c *Config) Validate() error {
 }
 
 // Load reads config from a YAML file (if it exists) with env var overrides.
+// It runs exactly once, at boot: cold config is immutable for the process
+// lifetime, and a file that exists but can't be read is an error — never a
+// silent switch to env + defaults.
 func Load(path string) (*Config, error) {
 	var cfg Config
-	if _, err := os.Stat(path); err == nil {
+	var rawFile []byte
+	// #nosec G304 -- path is the operator-provided config path (WH_CONFIG), not request input.
+	raw, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		rawFile = raw
 		if err := cleanenv.ReadConfig(path, &cfg); err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
-	} else {
+	case errors.Is(err, fs.ErrNotExist):
 		if err := cleanenv.ReadEnv(&cfg); err != nil {
 			return nil, fmt.Errorf("read env: %w", err)
 		}
+	default:
+		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	// Normalize here, not in the caller: the Reloader diffs each reload's
-	// Load result against the boot config, so post-Load normalization in
-	// main would surface as a phantom restart_required on every reload
-	// (e.g. an env-injected operator key carrying a secret file's trailing
-	// newline).
+	// A retired key still present means the operator's intent would be
+	// silently ignored — refuse to start instead (see retired.go).
+	if err := checkRetiredKeys(rawFile); err != nil {
+		return nil, err
+	}
+
+	// Normalize in the loader, not the caller, so a secret padded at the
+	// source — e.g. a secret file's trailing newline fed via
+	// WH_AUTH_OPERATOR_KEY — can never make the credential include
+	// whitespace.
 	cfg.Auth.OperatorKey = strings.TrimSpace(cfg.Auth.OperatorKey)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
-
 	return &cfg, nil
 }

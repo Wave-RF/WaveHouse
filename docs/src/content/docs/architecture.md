@@ -54,13 +54,14 @@ internal/
 ├── cache/       In-process Ristretto cache with singleflight coalescing
 ├── chsql/       Shared ClickHouse SQL helpers (identifier quoting, bind-safety)
 ├── config/      YAML + env var configuration loading
+├── controldb/   Control-plane SQLite database (schema migrations, role upserts)
 ├── dedupe/      Optional deduplication (Pebble)
 ├── discovery/   ClickHouse schema introspection and validation
 ├── ingest/      Batch buffering, DLQ, and Active Sweeper
 ├── mq/          Message queue abstraction (embedded NATS)
 ├── observability/ OpenTelemetry pipeline (traces/metrics/logs + Prometheus exposition)
-├── pipes/       Named query pipes (NATS KV store + SQL file bootstrap)
-├── policy/      Hasura-style access control (policy types, evaluation, NATS KV store)
+├── pipes/       Named query pipes (control-db store + SQL file bootstrap)
+├── policy/      Hasura-style access control (policy types, evaluation, control-db store)
 ├── query/       Structured query AST, SQL builder, and timestamp bucketing
 └── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
 ```
@@ -69,9 +70,10 @@ internal/
 
 The API layer uses [Chi](https://github.com/go-chi/chi) for routing with RequestID, a CORS middleware, and a custom JSON recoverer (`jsonRecoverer`) that emits a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
 
-- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`), `/v1/admin/config/reload` ([config hot reload](/configuration#hot-reload)).
+- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`), `/v1/admin/settings` ([runtime settings](/configuration#runtime-settings)).
 - **auth middleware** — the JWT/JWKS authentication middleware is its own package, [`auth/`](#auth--authentication); the router runs it on every `/v1/*` route.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
+- **settings.go** — Admin handler for [runtime settings](/configuration#runtime-settings) (`/v1/admin/settings`): read effective values + their source, replace a section (validated before stored, applied live), reset a section to compiled defaults. Backed by [`settings/`](#settings--runtime-settings).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
 - **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set (#219).
@@ -104,8 +106,8 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 
 ### `config/` — Configuration
 
-- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](/configuration).
-- **reload.go** — `Reloader` re-runs `Load` on `SIGHUP` or `POST /v1/admin/config/reload` (both serialize on one mutex), applies the hot-field whitelist (`dedupe.id_field`, `dedupe.require_id`) to the running process through an atomically swapped snapshot, and reports every other changed section as `restart_required` instead of silently ignoring it; a file that fails to parse or validate changes nothing. See [Hot Reload](/configuration#hot-reload).
+- **config.go** — Loads boot configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)), exactly once at startup — cold config is immutable for the process lifetime; live-tunable values live in [`settings/`](#settings--runtime-settings) instead. All settings use `WH_` prefixed env vars. See [Configuration Reference](/configuration).
+- **retired.go** — Refuses boot when a key that moved to the runtime-settings store is still present in the file or environment (cleanenv would silently ignore it, quietly reverting the operator's intent to defaults), with an error pointing at the settings API.
 
 ### `dedupe/` — Deduplication (Optional)
 
@@ -141,11 +143,24 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 ### `policy/` — Access Control
 
 - **policy.go** — Hasura-style policy types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`), `Evaluate()` function that resolves permissions against JWT claims (including `{{ jwt.claim.path }}` template resolution), the per-column decision `IsColumnAllowed()` plus its batch/projection forms `AllowedProjection()` and `RestrictsColumns()` (used to expand a `select_all` request into a role's allowed columns), `IsAggregationAllowed()`, `Validate()`.
-- **store.go** — `Store` backed by NATS KV bucket `WAVEHOUSE_POLICY`. Supports file-based bootstrap (YAML/JSON), cluster-wide sync via KV Watch, local caching.
+- **store.go** — `Store` backed by the [control-plane database](#controldb--control-plane-database): `Put` decomposes the policy document into relational rows (roles, `policy_globals`, `table_policies`, one `policy_predicates` row per filter/check condition) in a single transaction; boot recomposes the exact document. The schema enforces what SQL can express — operator whitelist, check-operator restriction ([#224](https://github.com/Wave-RF/WaveHouse/issues/224)), role foreign keys — in storage. Supports file-based bootstrap (YAML/JSON, a one-shot seed for an empty database) and local caching (no request touches SQLite).
 
 ### `pipes/` — Named Query Pipes
 
-- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists). A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw.
+- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by the [control-plane database](#controldb--control-plane-database) (a `pipes` row plus `pipe_params`/`pipe_roles` child rows per pipe, replaced transactionally on PUT). Supports `.sql` file directory bootstrap. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists). A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw.
+
+### `settings/` — Runtime Settings
+
+- **settings.go** — `Values`, the full runtime-settings document (one struct per section, JSON tags only), with compiled `Defaults()` and `Validate()`. The live-tunable tier of the two-tier config split: boot config (`config/`) is file/env + restart, runtime settings are control-db + admin API, applied live — and a knob lives in exactly one tier.
+- **store.go** — `Store` backed by the [control-plane database](#controldb--control-plane-database): one table per section (`dedupe_settings`, a singleton row whose CHECK constraints repeat the validation rules in storage), local cache as the read path (`Get()` returns a value-copy snapshot, one per request), validated writes via `PutDedupe`/`ResetDedupe` with optimistic concurrency, expressed as single conditional statements — a guarded `UPDATE … WHERE id = 1 AND revision = ?` (or an insert-only `ON CONFLICT DO NOTHING` when the caller expects no stored override); zero rows affected means another admin won the race → `ErrRevisionConflict`/409, nothing changes. Differs from policy deliberately: no file seed and no fail-closed empty state — an absent row means the compiled defaults, and a reset deletes the row to revert to them.
+- **disjoint.go** — Init-time guard for the tier split: panics (refusing to start any binary that imports the package) if a field is declared in both `config.Config` and `settings.Values`, or if a settings field carries a `yaml`/`env` tag — so no knob can ever be fed from two stores or shadowed by the environment. The operator-facing half is `config/retired.go`.
+
+### `controldb/` — Control-Plane Database
+
+The single SQLite file (`<data_dir>/control.db`, pure-Go `modernc.org/sqlite` driver — no cgo) that stores all control-plane state: policy, pipes, and runtime settings. The database is the durable source of truth; each store keeps an in-memory snapshot as its read path, so no request ever waits on SQLite.
+
+- **controldb.go** — `Open()` (enforces `foreign_keys=ON` — SQLite ships with foreign keys **off** — plus WAL mode and a single-connection cap, which serializes the control plane's boot-and-admin-edit traffic and eliminates `SQLITE_BUSY` handling), an embedded-`.sql` migration runner tracked in `schema_migrations`, `UpsertRole()` (a single `INSERT … ON CONFLICT … RETURNING id` — roles are created on demand by whatever references them and never garbage-collected), and `MustOpenMemory()` (the same engine backed by RAM instead of a file; it powers every store's `NewMemoryStore` test constructor, so tests run the production code paths against real constraints — there is no separate fake storage mode).
+- **migrations/001_control_plane.sql** — the schema. `STRICT` tables throughout; integrity rules live in the storage layer: CHECK constraints (predicate operator whitelist, insert-check operator restriction, the dedupe require-without-field rule), foreign keys with deliberate delete rules — parts cascade (a grant's predicates, a pipe's params/roles), dependencies refuse (`roles` referenced by grants, pipe allowlists, or `policy_globals`). The schema-catalog tables (`tables`, `columns`) exist but are **dormant** — nothing writes or references them yet; policy and settings rows key on ClickHouse table/column **names**, because WaveHouse is Bring-Your-Own-Schema and ClickHouse remains the source of truth for what exists. They go live (and the name keys graduate to id foreign keys) when WaveHouse takes ownership of ClickHouse DDL.
 
 ### `query/` — Structured Query Engine
 
@@ -168,8 +183,8 @@ Client POST /v1/ingest?table={table}
   → Validate JSON body against schema (type checks, required columns)
   → Policy column rules + check clauses (disallowed columns rejected;
     claim-derived values enforced or injected)
-  → Optional deduplication check (configurable ID field; a row missing that
-    field is published un-deduped + logged/counted, or rejected under require_id)
+  → Optional deduplication check (the id_field runtime setting; a row missing
+    that field is published un-deduped + logged/counted, or rejected under require_id)
   → Publish to NATS JetStream (ingest.{table})
   → 200 OK returned immediately
   → (If NATS stream is full: 503 + Retry-After header)
@@ -201,7 +216,7 @@ Active Sweeper (async goroutine, every 60s):
 Client POST /v1/admin/query
   → JWT auth middleware (always runs; no/invalid token → empty role)
   → /v1/admin RequireAdmin (role == policy.admin_role, or the operator-key bit) — single gate shared
-    with the rest of /v1/admin/* (policy CRUD, pipes CRUD, config reload). Raw SQL has
+    with the rest of /v1/admin/* (policy CRUD, pipes CRUD, runtime settings). Raw SQL has
     no per-statement scope check (a full SQL parser would be needed to
     authorize predicates), so the role gate is the entire authorization
     story. /v1/admin/query is the only sanctioned surface for non-SELECT

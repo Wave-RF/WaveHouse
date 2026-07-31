@@ -218,7 +218,7 @@ func TestStore_Put_ValidatesRequiredFields(t *testing.T) {
 	assert.Contains(t, err.Error(), "SQL is required")
 }
 
-func TestStore_Put_CachesWithoutKV(t *testing.T) {
+func TestStore_Put_CachesWithoutDB(t *testing.T) {
 	t.Parallel()
 	store := NewMemoryStore()
 	ctx := context.Background()
@@ -231,7 +231,7 @@ func TestStore_Put_CachesWithoutKV(t *testing.T) {
 	assert.Equal(t, q.SQL, got.SQL)
 }
 
-func TestStore_Delete_RemovesFromCacheWithoutKV(t *testing.T) {
+func TestStore_Delete_RemovesFromCacheWithoutDB(t *testing.T) {
 	t.Parallel()
 	store := NewMemoryStore(
 		&NamedQuery{Name: "a", SQL: "SELECT 1"},

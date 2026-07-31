@@ -113,7 +113,7 @@ git push origin v0.1.0
 
 All configuration can be set via environment variables. This is the recommended approach for container deployments. See [Configuration Reference](/configuration) for the full list.
 
-One trade-off to know: a container's environment is fixed at start, and an env-set key shadows any config-file edit — so env-only configuration forecloses [hot reload](/configuration#hot-reload) (the image ships no config file to re-read). If you want to hot-reload a field, put it in a bind-mounted config file instead of the environment.
+Environment variables (like the config file) cover **boot config only** — read once at startup, changed by recreating the container. Live-tunable values are [runtime settings](/configuration#runtime-settings): they have no `WH_*` form, persist in the data volume alongside policy and pipes, and are changed through the admin API with no restart.
 
 Key variables for production:
 
@@ -154,12 +154,10 @@ WH_PIPES_DIR=/etc/wavehouse/pipes
 # Cache tuning
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60
 
-# Optional dedup
+# Optional dedup. The tunables (id_field, require_id) are runtime settings —
+# set them via PUT /v1/admin/settings/dedupe, not env (a retired WH_DEDUPE_*
+# var refuses boot).
 WH_DEDUPE_ENABLED=true
-WH_DEDUPE_ID_FIELD=event_id
-# Reject rows missing the id field instead of publishing them un-deduped
-# (default false → such rows are logged + counted, not rejected).
-WH_DEDUPE_REQUIRE_ID=false
 
 # Standalone tuning
 WH_MQ_GAP_WINDOW_MINUTES=15       # Minutes of NATS history for SSE gap-fill
@@ -172,8 +170,9 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 ## Persistent Storage (REQUIRED for containers)
 
-WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
+WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Paths under it are convention, not config:
 
+- `<data_dir>/control.db` — the control-plane SQLite database: access-control policy, named query pipes, and runtime settings. Small (kilobytes) but precious: losing it reverts pipes to their `.sql` seeds and runtime settings to compiled defaults — and if no `policy.file_path` seed is configured, the policy is gone and **every token-based request is denied (fail-closed, including admin)** until a policy is restored via the operator key or a re-seed.
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
@@ -241,7 +240,7 @@ Read-only mounts don't need write permission for the container user, so `chown` 
 
 ## Pipes Bootstrap (optional, read-only)
 
-Named query pipes live in NATS KV (`WAVEHOUSE_PIPES`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
+Named query pipes live in the control-plane database (`<data_dir>/control.db`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
 
 ```yaml
 services:
@@ -253,7 +252,7 @@ services:
       - ./my-pipes:/app/pipes:ro     # ← read-only seed
 ```
 
-The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/admin/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
+The directory is a *seed*, not authoritative storage: after bootstrap, the API + the control-plane database are the source of truth. Runtime pipe edits go through `PUT /v1/admin/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
 
 ## Health Checks
 

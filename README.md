@@ -59,7 +59,7 @@ If you're building user-facing analytics, WaveHouse is like **Supabase for Click
 - **Ingest** — async durable WAL (embedded NATS JetStream), `200 OK` instantly, background batch-flush; schema-validated against `system.columns`; optional ID-based dedup (idempotent ingest); dead-letter queue for failed inserts.
 - **Query** — in-process Ristretto cache + `singleflight` coalescing; type-safe structured query AST; Tinybird-style named pipes (parameterized SQL endpoints).
 - **Real-time** — native SSE push, broadcast *before* the ClickHouse flush, with JetStream gap-fill for late/reconnecting clients.
-- **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in NATS KV.
+- **Security** — Hasura-style per-table, per-role column + row policies with JWT claim templating, stored in the embedded control-plane database.
 - **Client** — `@wavehouse/sdk`: zero-dependency TypeScript client with query builder, live queries, streaming, and schema codegen.
 
 ## 📊 How it compares

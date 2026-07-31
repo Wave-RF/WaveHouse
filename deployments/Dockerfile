@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -tags="${BUILD_TAGS}" -ldflags="-s -w" -o /bin/wavehouse ./cmd/wavehouse
 
 # Create the parent state and pipes-bootstrap directories owned by the nonroot
-# user (UID 65532 in distroless). The binary creates `nats/` and `pebble/`
+# user (UID 65532 in distroless). The binary creates `control.db`, `nats/`, and `pebble/`
 # subdirectories itself when NATS/Pebble open their stores — pre-creating
 # them here would buy nothing and obscures intent. Named-volume copy-up runs
 # against `/app/data` regardless; bind mounts mask the image dir entirely

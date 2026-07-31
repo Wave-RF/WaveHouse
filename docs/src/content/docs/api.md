@@ -235,7 +235,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
-| 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
+| 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled, the `dedupe.require_id` [runtime setting](/configuration#runtime-settings) is `true`, and the row lacks the configured `id_field`. With `require_id` at its default `false` the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
@@ -352,7 +352,7 @@ The proxy buffers the upstream response in memory before forwarding (no row-stre
 This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
 
 :::note[Admin only]
-The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD, config reload). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) — or one presenting the non-JWT [operator key](/access-control#operator-key) — may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD, runtime settings). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
 :::
 
 `/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
@@ -672,7 +672,7 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 
 Admin endpoints require the policy `admin_role` (`"admin"` by default, exact case-sensitive match). There is no separate `service` role. The JWT middleware always runs — a request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied.
 
-The admin endpoints that accept a request body — `PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, and `PUT /v1/admin/pipes/{name}` — cap it at 1 MiB (the same control-plane backstop as the public read endpoints); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use.
+The admin endpoints that accept a request body — `PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, `PUT /v1/admin/pipes/{name}`, and `PUT /v1/admin/settings/dedupe` — cap it at 1 MiB (the same control-plane backstop as the public read endpoints); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use.
 
 #### `GET /v1/admin/policy` — Get Access Control Policy
 
@@ -746,22 +746,48 @@ Returns a specific named pipe definition.
 
 #### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 
-#### `POST /v1/admin/config/reload` — Reload Configuration
+**Response (200):** `{"ok": true}`. Idempotent — deleting a pipe that doesn't exist is also a `200`.
 
-The HTTP twin of `SIGHUP`: re-reads the config file, applies the [hot-reloadable subset](/configuration#hot-reload) to the running process, and reports the classification. Takes no request body.
+#### `GET /v1/admin/settings` — Runtime Settings
+
+Returns every [runtime setting](/configuration#runtime-settings)'s effective value plus, per section, whether it comes from a stored override or the compiled default.
 
 **Response (200):**
 
 ```json
 {
-  "applied": ["dedupe.id_field", "dedupe.require_id"],
-  "restart_required": ["server"]
+  "values": {
+    "dedupe": {"id_field": "event_id", "require_id": false}
+  },
+  "sources": [
+    {"section": "dedupe", "source": "default"}
+  ]
 }
 ```
 
-`applied` lists hot-reloadable fields whose values changed **since the last successful reload** and now apply — a repeat reload with no further edit reports `[]`, with the value still applied; `restart_required` lists restart-only config sections where the file differs from the config the process **booted** with — exactly what a restart would pick up. A pending edit keeps being reported on every reload until a restart applies it, so an empty `restart_required` means the running process matches the file everywhere a restart matters. Both are `[]` when there is nothing to report.
+`source` is `"db"` — with the `revision` that produced the values — when an override is stored in the control-plane database, `"default"` otherwise.
 
-**Errors:** if the edited file fails to parse or validate — or the config file the process booted from no longer exists — the reload changes nothing and returns `500 {"error":"config reload failed (previous config still active): …"}` with the loader's reason.
+#### `PUT /v1/admin/settings/dedupe` — Update Dedupe Settings
+
+Replaces the dedupe section and applies it live: no restart, no signal. This is a **full-section PUT** — an omitted field takes its zero value, not its previous one, so send the whole section. Unknown fields are rejected, so a typo'd key fails loudly instead of silently half-applying.
+
+**Concurrent edits.** Optionally send `If-Match: <revision>` carrying the section revision you read (`sources[].revision` from the GET; `0` means "no override stored yet"; ETag-style quotes are accepted). The write then lands only if the section is still at that revision — if another admin wrote in between, the response is `409` and nothing changes: re-read, reapply your change to the fresh values, and retry with the new revision, so both edits survive. Different sections are separate tables with independent revisions and never conflict with each other. Without `If-Match` the PUT replaces unconditionally.
+
+**Request:**
+
+```json
+{"id_field": "event_id", "require_id": true}
+```
+
+**Response (200):** `{"ok": true}`
+
+**Errors:** `400 {"error":"invalid settings: dedupe.require_id requires a non-empty dedupe.id_field"}` — validation runs before anything is stored, so a rejected write changes nothing; `400 {"error":"invalid json: …"}` for a malformed body or an unknown field; `409 {"error":"settings revision conflict: …"}` when `If-Match` carries a stale revision (another admin wrote first — nothing changes); `400 {"error":"invalid If-Match \"…\": expected a section revision number"}` for a non-numeric `If-Match` value.
+
+#### `DELETE /v1/admin/settings/dedupe` — Reset Dedupe Settings
+
+Deletes the stored override; the section reverts to its compiled defaults (the state of a deployment that never touched the settings API).
+
+**Response (200):** `{"ok": true}`
 
 ## Event Message Format
 

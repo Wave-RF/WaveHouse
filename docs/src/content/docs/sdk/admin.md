@@ -92,4 +92,4 @@ if (result.ok) {
 
 > Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.
 >
-> Config reload (`POST /v1/admin/config/reload`) is likewise intentionally not exposed — reloading server config is an operator action (`SIGHUP`, `curl`, config-management tooling), not something application code calls. See [Configuration → Hot Reload](/configuration#hot-reload).
+> Runtime settings (`/v1/admin/settings`) are likewise intentionally not exposed — tuning server settings is an operator action (`curl`, config-management tooling), not something application code calls. See [Configuration → Runtime settings](/configuration#runtime-settings).

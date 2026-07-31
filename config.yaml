@@ -1,6 +1,7 @@
-# Root for embedded state. NATS lives at <data_dir>/nats; Pebble (when dedupe
-# is enabled) lives at <data_dir>/pebble. In a container, this MUST be on a
-# host-backed volume — the relative default is for local binary use only.
+# Root for embedded state. The control-plane database (policy, pipes, runtime
+# settings) lives at <data_dir>/control.db; NATS at <data_dir>/nats; Pebble
+# (when dedupe is enabled) at <data_dir>/pebble. In a container, this MUST be
+# on a host-backed volume — the relative default is for local binary use only.
 data_dir: ./data
 
 server:
@@ -68,12 +69,10 @@ mq:
   max_bytes_gb: 50
 
 dedupe:
-  enabled: false            # restart-only (owns the Pebble store lifecycle)
-  # id_field and require_id are hot-reloadable — see docs/configuration § Hot Reload.
-  id_field: event_id
-  # Reject rows missing id_field instead of publishing them un-deduped. Off by
-  # default (they are logged + counted via wavehouse_ingest_dedupe_missing_id_total).
-  require_id: false
+  enabled: false
+  # id_field and require_id are runtime settings, not config keys — set them via
+  # PUT /v1/admin/settings/dedupe (docs/configuration § Runtime settings). A
+  # retired key left here refuses boot.
 
 cache:
   l1_max_cost: 67108864
@@ -98,7 +97,7 @@ dlq:
 
 
 # Optional bootstrap source for named query pipes. When set, .sql files in
-# this directory are loaded into the NATS KV pipe store on startup. Empty
+# this directory are loaded into the control-plane pipe store on startup. Empty
 # default skips bootstrap. Mount read-only in containers (e.g. `:ro`) — the
 # directory is a seed, not authoritative storage.
 pipes:

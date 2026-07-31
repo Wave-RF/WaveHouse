@@ -19,6 +19,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/cache"
 	"github.com/Wave-RF/WaveHouse/internal/config"
+	"github.com/Wave-RF/WaveHouse/internal/controldb"
 	"github.com/Wave-RF/WaveHouse/internal/dedupe"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
@@ -26,6 +27,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/observability"
 	"github.com/Wave-RF/WaveHouse/internal/pipes"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
@@ -218,6 +220,16 @@ func run() int {
 	natsDir := filepath.Join(cfg.DataDir, "nats")
 	pebbleDir := filepath.Join(cfg.DataDir, "pebble")
 
+	// Control-plane database (SQLite): policy, pipes, and runtime settings.
+	// Opened before the stores that read it; migrations apply here.
+	controlDBPath := filepath.Join(cfg.DataDir, "control.db")
+	controlDB, err := controldb.Open(controlDBPath, logger)
+	if err != nil {
+		config.LogStorageInitError(logger, "control db", controlDBPath, err)
+		return 1
+	}
+	defer func() { _ = controlDB.Close() }()
+
 	// Optional embedded dedupe (Pebble).
 	var dedup dedupe.Deduplicator
 	if cfg.Dedupe.Enabled {
@@ -268,17 +280,26 @@ func run() int {
 	cache := l1
 	defer func() { _ = cache.Close() }()
 
-	// Policy store (NATS KV + optional file bootstrap).
-	policyStore, err := policy.NewStore(ctx, embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
+	// Policy store (control db + optional file bootstrap).
+	policyStore, err := policy.NewStore(ctx, controlDB, cfg.Policy.FilePath, logger)
 	if err != nil {
 		logger.Error("policy store init", "error", err)
 		return 1
 	}
 
-	// Pipes store (NATS KV + optional SQL file directory).
-	pipesStore, err := pipes.NewStore(ctx, embeddedMQ.JetStream(), cfg.Pipes.Dir, logger)
+	// Pipes store (control db + optional SQL file directory).
+	pipesStore, err := pipes.NewStore(ctx, controlDB, cfg.Pipes.Dir, logger)
 	if err != nil {
 		logger.Error("pipes store init", "error", err)
+		return 1
+	}
+
+	// Runtime-settings store (control db): the live-tunable tier of the
+	// config split. Compiled defaults apply until an override is stored via
+	// the admin API; see internal/settings.
+	settingsStore, err := settings.NewStore(ctx, controlDB, logger)
+	if err != nil {
+		logger.Error("settings store init", "error", err)
 		return 1
 	}
 
@@ -292,9 +313,6 @@ func run() int {
 	// per (topic, role) and pushes it to that role's subscribers.
 	sseMetrics := stream.NewMetrics()
 	streamHub := stream.NewHub(policyStore, sseMetrics)
-
-	// Start policy watch for cluster-wide updates.
-	go policyStore.Watch(ctx)
 
 	// Start batch consumer → ClickHouse.
 	ingestCleanup, err := ingest.StartIngestWorker(
@@ -337,25 +355,7 @@ func run() int {
 		ingestHandler.Dedup = dedup
 	}
 
-	// Hot-field wiring: the returned apply runs here at boot and again on
-	// every successful reload.
-	apply := applyHotFields(ingestHandler)
-	apply(cfg)
-
-	reloader := config.NewReloader(cfgPath, cfg, logger, apply)
-	go func() {
-		hup := make(chan os.Signal, 1)
-		signal.Notify(hup, syscall.SIGHUP)
-		defer signal.Stop(hup)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-hup:
-				_, _ = reloader.Reload() // Reload logs its own outcome
-			}
-		}
-	}()
+	ingestHandler.Settings = settingsStore
 
 	var dlqHandler *api.DLQHandler
 	if cfg.DLQ.Enabled {
@@ -412,7 +412,7 @@ func run() int {
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
 		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
-		ConfigReload:    api.NewConfigReloadHandler(reloader),
+		Settings:        api.NewSettingsHandler(settingsStore),
 		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,

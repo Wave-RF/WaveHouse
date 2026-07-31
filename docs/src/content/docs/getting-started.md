@@ -28,7 +28,7 @@ This exposes:
 - WaveHouse API on `http://localhost:8080`
 - ClickHouse on ports `8123` (HTTP) and `9000` (native)
 
-WaveHouse is **fail-closed** — with no policy loaded, every request is denied. So the standalone stack ships a permissive **trial policy** (`deployments/compose/dev-policy.yaml`, mounted read-only and wired in via `WH_POLICY_FILE_PATH`): a non-admin [`public` role](/access-control#default_role--public-unauthenticated-access) that can read and write the demo tables (`clicks`, `events`) with no token, so the quickstart just works. It's *not* admin — it can't run raw SQL or manage policy/pipes — and it names specific tables, so it grants nothing in a real deployment (those tables won't exist there). It seeds into NATS KV on first boot; after that KV is authoritative (see [Access Control — Bootstrapping](/access-control#bootstrapping-and-the-policy-lifecycle)). It's deliberately lenient for trialing — a real deployment should [tune it](/access-control): your own roles, real tables, scoped columns, and usually tokens instead of a public default.
+WaveHouse is **fail-closed** — with no policy loaded, every request is denied. So the standalone stack ships a permissive **trial policy** (`deployments/compose/dev-policy.yaml`, mounted read-only and wired in via `WH_POLICY_FILE_PATH`): a non-admin [`public` role](/access-control#default_role--public-unauthenticated-access) that can read and write the demo tables (`clicks`, `events`) with no token, so the quickstart just works. It's *not* admin — it can't run raw SQL or manage policy/pipes — and it names specific tables, so it grants nothing in a real deployment (those tables won't exist there). It seeds into the control-plane database on first boot; after that the database is authoritative (see [Access Control — Bootstrapping](/access-control#bootstrapping-and-the-policy-lifecycle)). It's deliberately lenient for trialing — a real deployment should [tune it](/access-control): your own roles, real tables, scoped columns, and usually tokens instead of a public default.
 
 ## 2. Create a ClickHouse table
 
@@ -113,4 +113,4 @@ The handful of things that most often trip up a first session — each is expect
 ## Going further
 
 - **Validate JWTs**: set `WH_AUTH_JWT_SECRET=<secret>` (the middleware always runs; without a secret every request is the policy `default_role`) and replace the shipped trial policy (`deployments/compose/dev-policy.yaml`) with a least-privilege one — see [API Reference — Authentication](/api#authentication) and [Access Control](/access-control).
-- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id` — see [Configuration — Deduplication](/configuration#deduplication).
+- **Enable deduplication**: set `WH_DEDUPE_ENABLED=true` — the dedup key field defaults to `event_id`, tunable live via [runtime settings](/configuration#runtime-settings) — see [Configuration — Deduplication](/configuration#deduplication).

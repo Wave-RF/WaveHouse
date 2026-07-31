@@ -14,6 +14,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -163,7 +164,7 @@ func TestIngest_Dedup_FirstTime(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id"}})
 
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "evt-1"})
 	w := httptest.NewRecorder()
@@ -179,7 +180,7 @@ func TestIngest_Dedup_Duplicate(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id"}})
 
 	// First call.
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "event_id": "dup-1"})
@@ -495,7 +496,7 @@ func TestIngest_Dedup_MissingIDField(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id"}})
 
 	// Payload omits event_id and require_id is off (the default): the row skips
 	// dedup and is still published — the warn+counter path, not a rejection (#219).
@@ -514,7 +515,7 @@ func TestIngest_Dedup_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id", RequireID: true})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id", RequireID: true}})
 
 	w := httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
@@ -536,7 +537,7 @@ func TestIngest_Dedup_SettingsHotSwap(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id", RequireID: true})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id", RequireID: true}})
 
 	// Strict mode: a row missing the id is rejected.
 	w := httptest.NewRecorder()
@@ -544,9 +545,10 @@ func TestIngest_Dedup_SettingsHotSwap(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Nil(t, pub.LastMessage())
 
-	// Reload flips require_id off and moves the key to org_id: the same row
-	// now publishes (un-deduped), keyed checks follow the new field.
-	h.SetDedupeSettings(DedupeSettings{IDField: "org_id"})
+	// A runtime-settings update flips require_id off and moves the key to
+	// org_id: the same row now publishes (un-deduped), keyed checks follow
+	// the new field.
+	require.NoError(t, h.Settings.PutDedupe(t.Context(), settings.Dedupe{IDField: "org_id"}, nil))
 	w = httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -560,7 +562,7 @@ func TestIngest_NDJSON_RequireID_Rejects(t *testing.T) {
 	pub := &testutil.MockPublisher{}
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = testutil.NewMockDeduplicator()
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id", RequireID: true})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id", RequireID: true}})
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),
@@ -812,7 +814,7 @@ func TestIngest_NDJSON_Dedup(t *testing.T) {
 	dedup := testutil.NewMockDeduplicator()
 	h := NewIngestHandler(testRegistry(), pub, testutil.NopLogger())
 	h.Dedup = dedup
-	h.SetDedupeSettings(DedupeSettings{IDField: "event_id"})
+	h.Settings = settings.NewMemoryStore(settings.Values{Dedupe: settings.Dedupe{IDField: "event_id"}})
 
 	req := ndjsonRequest(t, "clicks",
 		jsonLine(t, map[string]any{"page": "/a", "event_id": "e1"}),

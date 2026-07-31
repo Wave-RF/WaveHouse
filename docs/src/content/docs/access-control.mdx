@@ -62,7 +62,7 @@ Setting `default_role` equal to `admin_role` is permitted — it makes every una
 `admin_role` (default: `"admin"`) is the one role that bypasses the entire policy:
 
 - It is granted **full, unrestricted access** to every table and operation. An admin is **never** column-scoped or row-scoped, even by a policy entry that explicitly names the admin role — admin is an unconditional bypass, not a scoped grant.
-- It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD, config reload), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
+- It is the gate for every admin surface: `/v1/admin/*` (raw SQL, policy CRUD, pipe CRUD, runtime settings), plus the schema and DLQ endpoints. The gate reads `admin_role` live from the policy, so changing it applies without a restart.
 
 There is no separate `service` role. To reach an admin endpoint or to read data beyond what `default_role` grants, present a valid token whose `role_claim` is the admin role (or another granted role) — **or** present the non-JWT [operator key](#operator-key) described below.
 
@@ -388,7 +388,7 @@ The policy lives behind three admin endpoints (all require `admin_role`):
 | `PUT` | `/v1/admin/policy` | Replace the **entire** policy. Validated before it is saved. |
 | `POST` | `/v1/admin/policy/validate` | Dry-run validation — returns `{"valid": true}` or the error, without saving. |
 
-`PUT` is a full replace, not a merge: send the complete document every time. Validation rejects empty role names and negative limits (but intentionally allows `default_role == admin_role`, warning instead). Once accepted, the policy is written to NATS KV and propagated to every node via KV Watch — changes apply cluster-wide within moments, no restart.
+`PUT` is a full replace, not a merge: send the complete document every time. Validation rejects empty role names and negative limits (but intentionally allows `default_role == admin_role`, warning instead). Once accepted, the policy is written to the control-plane database (decomposed into relational rows) and applied immediately — no restart.
 
 ```bash
 # Replace the policy (admin token required). POST the same body to
@@ -403,11 +403,11 @@ The full request and response shapes for these endpoints live in the [API Refere
 
 ## Bootstrapping and the policy lifecycle
 
-NATS KV is the **source of truth** for the live policy. A file is only ever a *seed* for an empty store:
+The control-plane database is the **source of truth** for the live policy. A file is only ever a *seed* for an empty store:
 
-- `policy.file_path` (config) points at a YAML or JSON policy file. On startup, **if and only if the KV store is empty**, the file is loaded, validated, and written to KV. On every subsequent boot the file is ignored — KV already has the authoritative copy, and runtime edits flow through `PUT /v1/admin/policy`.
+- `policy.file_path` (config) points at a YAML or JSON policy file. On startup, **if and only if the database holds no policy**, the file is loaded, validated, and written to the database. On every subsequent boot the file is ignored — the database already has the authoritative copy, and runtime edits flow through `PUT /v1/admin/policy`.
 - **When `policy.file_path` is set, the file must exist and parse**, or WaveHouse refuses to boot. That turns a typo or a missing mount into a loud failure instead of a silent fail-closed deployment that denies everything.
-- **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every request is denied (logged loudly) until you seed one via `PUT /v1/admin/policy`.
+- **When `policy.file_path` is empty and the database holds no policy**, the store comes up with no policy — every request is denied (logged loudly) until you seed one via `PUT /v1/admin/policy`.
 
 In `config.yaml` (or the matching environment variable):
 
@@ -415,7 +415,7 @@ In `config.yaml` (or the matching environment variable):
 <TabItem label="YAML">
 ```yaml
 policy:
-  # seed on first boot only; KV wins thereafter
+  # seed on first boot only; the control-plane db wins thereafter
   file_path: /etc/wavehouse/policy.yaml
 ```
 </TabItem>
@@ -426,7 +426,7 @@ WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 </TabItem>
 </Tabs>
 
-Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by clearing KV state and rebooting. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
+Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by deleting `<data_dir>/control.db` and rebooting (this also resets pipes and runtime settings — the database holds all three). See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
 
 ## A complete example
 

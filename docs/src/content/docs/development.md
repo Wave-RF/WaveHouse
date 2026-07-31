@@ -138,7 +138,7 @@ dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config edits don't trigger a rebuild (air watches neither root config file): `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev` — or `pkill -HUP -f tmp/wavehouse` (air runs the build as `./tmp/wavehouse`) to apply the [hot-reloadable fields](/configuration#hot-reload) without one.
+`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config edits don't trigger a rebuild (air watches neither root config file): `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`. ([Runtime settings](/configuration#runtime-settings) need neither file nor restart — change them live via the admin API.)
 
 `air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
 
@@ -147,7 +147,7 @@ dev: deps-up $(AIR)
 - WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
 - A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
 - ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config files aren't watched — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes (the [hot-reloadable fields](/configuration#hot-reload) also apply via `pkill -HUP -f tmp/wavehouse`). Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config files aren't watched — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes ([runtime settings](/configuration#runtime-settings) instead apply live via the admin API). Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
 
 ### Dev convenience targets
 
@@ -230,10 +230,10 @@ curl -s -X POST http://localhost:8080/v1/admin/query \
 
 ### Enable Dedup (Optional)
 
-Set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id`:
+Set `WH_DEDUPE_ENABLED=true` — the dedup key field defaults to `event_id` and is a [runtime setting](/configuration#runtime-settings) if you need a different one:
 
 ```bash
-WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
+WH_DEDUPE_ENABLED=true make dev
 ```
 
 Then include the dedup field in your ingest body:
@@ -425,8 +425,8 @@ WaveHouse/
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
 │   ├── mq/                 # NATS message queue abstraction
 │   ├── observability/      # OpenTelemetry pipeline (traces/metrics/logs + Prometheus)
-│   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
-│   ├── policy/             # Access control policies (evaluation + NATS KV store)
+│   ├── pipes/              # Named query pipes (control-db store + .sql bootstrap)
+│   ├── policy/             # Access control policies (evaluation + control-db store)
 │   ├── query/              # Structured query AST + SQL builder
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests

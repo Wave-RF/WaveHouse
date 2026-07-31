@@ -27,7 +27,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "role", cfg.Auth.RoleClaim)
 	assert.Empty(t, cfg.Auth.OperatorKey, "operator key is empty by default (feature off)")
 	assert.False(t, cfg.Dedupe.Enabled)
-	assert.Equal(t, "event_id", cfg.Dedupe.IDField)
 	assert.True(t, cfg.DLQ.Enabled)
 	assert.Empty(t, cfg.Policy.FilePath, "no default bootstrap file — operators opt in explicitly so a missing file never produces a silent fail-closed boot")
 	assert.Equal(t, "", cfg.Pipes.Dir)
@@ -78,11 +77,9 @@ func TestLoad_OperatorKey_FromEnv(t *testing.T) {
 }
 
 func TestLoad_OperatorKey_Trimmed(t *testing.T) {
-	// Load owns the trim: boot (cmd/wavehouse) and every hot reload go
-	// through the same Load, so a key padded at the source — e.g. a secret
-	// file's trailing newline fed via WH_AUTH_OPERATOR_KEY — must come back
-	// identical on both, or the reload diff reports a phantom "auth"
-	// restart_required.
+	// Load owns the trim: a key padded at the source — e.g. a secret file's
+	// trailing newline fed via WH_AUTH_OPERATOR_KEY — must never make the
+	// credential include whitespace.
 	t.Setenv("WH_AUTH_OPERATOR_KEY", " env-operator-key\n")
 	cfg, err := Load("nonexistent.yaml")
 	require.NoError(t, err)
@@ -531,4 +528,52 @@ func TestValidate_InvalidHTTPScheme(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clickhouse.http_scheme must be 'http' or 'https'")
+}
+
+func TestLoad_RetiredDedupeEnvRefusesBoot(t *testing.T) {
+	tests := []struct {
+		name, envVar string
+	}{
+		{"require_id", "WH_DEDUPE_REQUIRE_ID"},
+		{"id_field", "WH_DEDUPE_ID_FIELD"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A retired env var must refuse boot: cleanenv would silently
+			// ignore it, quietly reverting the operator's intent to defaults.
+			t.Setenv(tt.envVar, "anything")
+			_, err := Load("nonexistent.yaml")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.envVar)
+			assert.Contains(t, err.Error(), "/v1/admin/settings/dedupe")
+		})
+	}
+}
+
+func TestLoad_RetiredDedupeYAMLKeyRefusesBoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yamlContent := `
+dedupe:
+  enabled: true
+  id_field: event_id
+`
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o600))
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dedupe.id_field")
+	assert.Contains(t, err.Error(), "runtime-settings")
+}
+
+func TestLoad_DedupeEnabledAloneStillLoads(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("dedupe:\n  enabled: true\n"), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.Dedupe.Enabled)
 }

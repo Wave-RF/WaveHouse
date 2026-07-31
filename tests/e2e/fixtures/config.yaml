@@ -14,9 +14,11 @@ mq:
   # writes anywhere near that.
   max_bytes_gb: 1
 
+# Dedupe tunables (id_field, require_id) are runtime settings
+# (PUT /v1/admin/settings/dedupe), not config keys — the rig runs on the
+# default id_field (event_id).
 dedupe:
   enabled: true
-  id_field: event_id
 
 # JWT validation. The suite signs test tokens with this fixed dev secret;
 # don't reuse outside the e2e rig.

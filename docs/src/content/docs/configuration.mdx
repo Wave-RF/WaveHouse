@@ -21,33 +21,43 @@ Set `WH_CONFIG` to change the config file path:
 export WH_CONFIG=/etc/wavehouse/config.yaml
 ```
 
-## Hot Reload
+## Runtime settings
 
-A running server can re-read its config file without a restart, triggered either way:
+Configuration splits into two disjoint tiers, and every knob lives in exactly one:
+
+- **Boot config** — everything in the [reference below](#full-reference): the YAML file plus `WH_*` environment variables, read once at startup. Changing it means restarting the process; nothing re-reads the file while the server runs.
+- **Runtime settings** — live-tunable values stored in WaveHouse's control-plane database (`<data_dir>/control.db`, SQLite — alongside policy and pipes) and changed through the admin API. Updates take effect immediately — no restart, no signal.
+
+Today's runtime settings are the dedupe tunables (per-table dedupe overrides join with [#222](https://github.com/Wave-RF/WaveHouse/issues/222); log level with [#415](https://github.com/Wave-RF/WaveHouse/issues/415)):
+
+| Setting | Default | Effect |
+| ------- | ------- | ------ |
+| `dedupe.id_field` | `event_id` | JSON field in the ingest body used as the dedup key; subsequent records dedupe on the new field. `""` pauses dedup lookups. |
+| `dedupe.require_id` | `false` | A row missing `id_field` (which can't be deduped) is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`; by default it is then published un-deduped. `true` rejects it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. |
+
+Authenticated as the admin role (or the operator key):
 
 ```bash
-kill -HUP <pid>                                  # the classic Unix signal
-# in the Docker Compose deployment (the binary runs as PID 1):
-docker compose -f deployments/compose/standalone.yaml kill -s HUP wavehouse
-# or, authenticated as the admin role (or operator key):
-curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8080/v1/admin/config/reload
+# Effective values, plus where each section comes from (stored override vs. compiled default):
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8080/v1/admin/settings
+
+# Update the dedupe section (full-section PUT — send every field you want set):
+curl -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"id_field": "event_id", "require_id": true}' \
+  http://localhost:8080/v1/admin/settings/dedupe
+
+# Reset the section to its compiled defaults:
+curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8080/v1/admin/settings/dedupe
 ```
 
-In a container, hot reload needs a config file to re-read — the image ships none, so an env-only deployment honestly reports nothing to apply. Bind-mount one (e.g. at `/app/config.yaml`, or point `WH_CONFIG` at a mounted path) **and** drop the matching `WH_*` variables: the shipped Compose file pins `dedupe.require_id` via `WH_DEDUPE_REQUIRE_ID`, which would shadow your file edit (the second guarantee below).
+The semantics worth knowing:
 
-Both re-run the full load (file + environment overrides + validation) and then apply **only the hot-reloadable subset** to the running process:
+- **Defaults are the fallback, and they're safe.** A deployment that never touches the settings API runs on the compiled defaults above, and deleting a section's override reverts to them — there is no fail-closed state, unlike a deleted policy.
+- **A bad write can't take the server down.** The API validates before storing (an invalid document is a `400` and changes nothing), and each update applies atomically at a request boundary — requests never see a half-applied section.
+- **The environment can't pin a runtime setting.** Runtime settings have no `WH_*` or YAML form at all, so an env-set value can never shadow a live update. The retired keys — `dedupe.id_field` / `WH_DEDUPE_ID_FIELD` and `dedupe.require_id` / `WH_DEDUPE_REQUIRE_ID` — now **refuse boot** with a pointer here, so an upgraded deployment can't silently lose the values it had set.
+- **Concurrent admins can't silently overwrite each other.** Different sections are separate tables with independent revisions and never interact. Within a section, send the revision you read as an `If-Match` header on the PUT (`0` for a section still on defaults): a write that lost a race returns `409 Conflict` and changes nothing — re-read and retry on the fresh values, and both edits survive.
 
-| Hot-reloadable | Effect |
-| -------------- | ------ |
-| `dedupe.id_field` | Subsequent records dedupe on the new key field. |
-| `dedupe.require_id` | Strict/lenient missing-id handling flips for subsequent records. |
-
-Everything else — ports, `data_dir`, ClickHouse connection, cache and NATS sizing, auth, `dedupe.enabled` (it owns the Pebble store lifecycle), and the rest — is **restart-only**: a reload *reports* such an edit (in the reload log line and the endpoint's `restart_required` list) but deliberately does not apply it, so an edit never half-applies silently. The report compares the file against the config the process booted with, so a pending edit keeps showing up on every reload until a restart picks it up — an empty `restart_required` means a restart would change nothing. The list of hot-reloadable fields is expected to grow (per-table dedupe overrides land with [#222](https://github.com/Wave-RF/WaveHouse/issues/222); log-level hot reload with [#415](https://github.com/Wave-RF/WaveHouse/issues/415)).
-
-Two guarantees worth knowing:
-
-- **A bad edit can't take the server down.** If the edited file fails to parse or validate — or the file a file-backed process booted from has since vanished (renamed, deleted, mount lost) — the reload returns an error and the previous config stays fully active.
-- **Environment variables can't hot-reload.** A process's environment is fixed at start, and environment overrides re-apply on every load — so a key set via `WH_*` shadows any file edit until the process restarts. If a reload reports no change for a key you edited, check whether the environment pins it.
+Endpoint details (request/response shapes, error contract) are in the [API Reference](/api).
 
 ## Full Reference
 
@@ -55,7 +65,7 @@ Two guarantees worth knowing:
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. NATS JetStream lives at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
+| `data_dir` | `WH_DATA_DIR` | `./data` | Root directory for embedded state. The control-plane database (policy, pipes, runtime settings) lives at `<data_dir>/control.db`; NATS JetStream at `<data_dir>/nats`; Pebble (when dedupe is enabled) at `<data_dir>/pebble`. Subdirectory names are conventions, not config — one knob, one mount. **In a container this MUST resolve to a host-backed volume**; the relative default is for local binary use. WaveHouse logs a startup `WARN` when the directory is missing or empty (no prior state). See [Persistent Storage](/deployment#persistent-storage-required-for-containers). |
 
 ### Server
 
@@ -155,9 +165,7 @@ WaveHouse's per-role caps are sent as per-query `SETTINGS` on its connection, so
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication. When enabled, the ingest handler checks for duplicates using the configured ID field. |
-| `dedupe.id_field` | `WH_DEDUPE_ID_FIELD` | `event_id` | JSON field name in the ingest body used as the dedup key. [Hot-reloadable](#hot-reload). |
-| `dedupe.require_id` | `WH_DEDUPE_REQUIRE_ID` | `false` | With dedupe enabled, controls what happens to a row missing `id_field` (which can't be deduped, so idempotency wouldn't apply to it). Such a row is always logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`, in both modes. Default (`false`): it is then published un-deduped. Set `true` to reject it instead (`400` for a single insert; a per-record failure in a batch) — a server-side tripwire for producers that must guarantee the id. [Hot-reloadable](#hot-reload). |
+| `dedupe.enabled` | `WH_DEDUPE_ENABLED` | `false` | Enable event deduplication (restart-only — it owns the Pebble store lifecycle). The dedup key field and strict missing-id handling are [runtime settings](#runtime-settings), not config keys. |
 
 ### Cache
 
@@ -196,13 +204,13 @@ See [API — Authentication](/api#authentication).
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `policy.file_path` | `WH_POLICY_FILE_PATH` | *(empty)* | Optional path to a YAML/JSON policy file used to seed the policy store on first startup (when NATS KV is empty). **When set, the file MUST exist and parse — WaveHouse refuses to boot otherwise**, so a typo or missing mount surfaces immediately instead of silently denying every request (`Evaluate` fails closed on a `nil` policy, including the admin role). Empty default — no implicit `policy.yaml` lookup — so operators opt into the bootstrap file explicitly; without one, seed the policy via `PUT /v1/admin/policy`. Once KV is populated, the file is ignored on subsequent boots (KV is the source of truth; runtime updates flow through the API and KV Watch). |
+| `policy.file_path` | `WH_POLICY_FILE_PATH` | *(empty)* | Optional path to a YAML/JSON policy file used to seed the policy store on first startup (when the control-plane database holds no policy). **When set, the file MUST exist and parse — WaveHouse refuses to boot otherwise**, so a typo or missing mount surfaces immediately instead of silently denying every request (`Evaluate` fails closed on a `nil` policy, including the admin role). Empty default — no implicit `policy.yaml` lookup — so operators opt into the bootstrap file explicitly; without one, seed the policy via `PUT /v1/admin/policy`. Once the database is populated, the file is ignored on subsequent boots (the database is the source of truth; runtime updates flow through the API). |
 
 ### Named Pipes
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `pipes.dir` | `WH_PIPES_DIR` | *(empty)* | Optional bootstrap source for named query pipes. When set, `.sql` files in this directory are loaded into the NATS KV pipe store on startup. The directory is **read-only at runtime** — it's a seed, not authoritative storage. After bootstrap, the API and KV are the source of truth (runtime pipe edits go through the API, not the files). Empty default skips bootstrap entirely. Mount read-only in containers (e.g. `./my-pipes:/app/pipes:ro`). |
+| `pipes.dir` | `WH_PIPES_DIR` | *(empty)* | Optional bootstrap source for named query pipes. When set, `.sql` files in this directory are loaded into the control-plane pipe store on startup. The directory is **read-only at runtime** — it's a seed, not authoritative storage. After bootstrap, the API and the database are the source of truth (runtime pipe edits go through the API, not the files). Empty default skips bootstrap entirely. Mount read-only in containers (e.g. `./my-pipes:/app/pipes:ro`). |
 
 ### OTel
 
@@ -244,7 +252,7 @@ Every key, with its default. Save the YAML as `config.yaml` next to the binary (
 <Tabs syncKey="cfg">
 <TabItem label="YAML">
 ```yaml
-data_dir: ./data         # nats → ./data/nats, pebble → ./data/pebble
+data_dir: ./data         # control db → ./data/control.db, nats → ./data/nats, pebble → ./data/pebble
 
 server:
   port: 8080
@@ -274,8 +282,6 @@ mq:
 
 dedupe:
   enabled: false
-  id_field: event_id
-  require_id: false
 
 cache:
   l1_max_cost: 67108864
@@ -345,8 +351,6 @@ WH_MQ_GAP_WINDOW_MINUTES=15
 WH_MQ_MAX_BYTES_GB=50
 
 WH_DEDUPE_ENABLED=false
-WH_DEDUPE_ID_FIELD=event_id
-WH_DEDUPE_REQUIRE_ID=false
 
 WH_CACHE_L1_MAX_COST=67108864
 WH_CACHE_TIMESTAMP_BUCKET_SECONDS=60

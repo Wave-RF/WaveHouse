@@ -26,21 +26,23 @@ One binary:
 
 - **`cmd/wavehouse/`** — Standalone mode (all-in-one with embedded NATS, optional Pebble dedup)
 
-Fourteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
+Sixteen internal packages under `internal/` (plus `internal/testutil/` for shared test helpers):
 
 - **`api/`** — Chi HTTP router, JWT/JWKS middleware (from `auth/`), ingest/query/structured-query/SSE/schema/DLQ/policy/pipes handlers
 - **`auth/`** — JWT auth middleware: HMAC **or** JWKS verification with `alg` pinned to the active verifier, role extraction from a configurable claim path; always runs, never rejects (bad token → empty role + stashed reason)
 - **`cache/`** — `Cache` interface → `LocalCache` (Ristretto) + `SharedCache` (TBD) + `TieredCache` (singleflight)
 - **`chsql/`** — dependency-free ClickHouse SQL helpers shared by `query`/`policy` (avoids an import cycle): `QuoteIdent` (backtick-quote every identifier) + `BindUnsafe` (reject names with a literal `?`)
-- **`config/`** — YAML + env var config loading (cleanenv)
+- **`config/`** — Boot-config loading: YAML + env vars (cleanenv), read once at startup; refuses retired keys that moved to `settings/`
+- **`controldb/`** — Control-plane SQLite database (`<data_dir>/control.db`, pure-Go driver): embedded schema migrations, `UpsertRole`, `MustOpenMemory` (RAM-backed database behind the `NewMemoryStore` test constructors — one code path, no fake storage mode); policy/pipes/settings stores persist here — the schema's CHECK constraints and foreign keys enforce integrity in storage
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) — optional, controlled by `dedupe.enabled`
 - **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
 - **`ingest/`** — Ingest worker pipeline (`worker.go`: JetStream input → per-table batch INSERT with DLQ output). The pipeline is **insert-only**. The wire format `EventMessage` (`types.go`) carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker accepts whatever table name the envelope carries (table existence was already checked by the HTTP ingest handler, which `404`s an unknown table before publish; the worker doesn't re-validate), then bulk-INSERTs. In the embedded-NATS deployment (the default), the server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (the same `RequireAdmin` gate as the rest of `/v1/admin/*`), so non-admin callers never reach the proxy. A request with no token (or an invalid one) resolves to the `default_role`, which in a production config is not the admin role (setting them equal is a loudly-warned dev-only setting), so it can't reach this endpoint. Plus `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
 - **`observability/`** — OpenTelemetry pipeline: `InitProvider` wires trace/metric/log providers via OTLP gRPC (each signal independently gated). A top-level `Prometheus` config block drives an optional `/metrics` scrape endpoint that runs independently of OTLP push — standalone (Alloy/Mimir scrape, no collector), alongside OTLP, or off. `NewLogger` produces a slog handler that fans out to stdout AND OTLP (stdout always 100%, OTLP sample-rate-aware). `TraceHandler` injects trace_id/span_id from active spans. `tracer.go` provides W3C trace context propagation over NATS headers.
-- **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
-- **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
+- **`pipes/`** — Named query pipes: `NamedQuery` type + control-db store (`pipes`/`pipe_params`/`pipe_roles` rows) + `.sql` file bootstrap
+- **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, control-db store (document decomposed into `roles`/`policy_globals`/`table_policies`/`policy_predicates` rows, recomposed on load)
 - **`query/`** — Structured query AST types + SQL builder with schema validation, permission injection, timestamp bucketing
+- **`settings/`** — Runtime settings: live-tunable values (dedupe `id_field`/`require_id`) in the control db (`dedupe_settings` singleton row, revision-guarded writes), changed via `/v1/admin/settings`, applied live; disjoint from boot config by init-time guard (`disjoint.go`)
 - **`stream/`** — SSE fan-out: the event `Hub` (registers subscribers by `(topic, role)`; `Broadcast` projects + serializes each event once per role, the #294 delivery hot path), `Subscriber` (per-connection outbound `Frame` queue, `Send`/`Frames`), the `Bucket` fan-out set (`subscriberSet`, one per `(topic, role)`), the `Heartbeater` keepalive wheel, and `Metrics` (the `wavehouse_sse_*` stream instruments)
 
 ## Key Design Decisions
@@ -54,7 +56,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 5. **Per-table batching** — the worker groups events by table and bulk-INSERTs in schema column order; each table's batch is independent.
 6. **Dead Letter Queue** — failed batch inserts publish to `WAVEHOUSE_DLQ` (`dlq.<table>`), gated by `dlq.enabled`. No silent data loss.
 7. **Auth: always on, fail-loud, decoupled from authz (security)** — the JWT middleware always runs (no `auth.enabled`/`dev_mode` flag); it verifies with HMAC **or** JWKS (not both), with accepted `alg` pinned to the active verifier and checked before any key is used (rejects `alg:none` and cross-family confusion). No/invalid/expired token → empty role → policy `default_role`, with the bad-token reason stashed so a denying gate returns a loud `401`, not a bare `403`. Elevated access needs a valid granted role. **Sanctioned exception:** a configured non-JWT operator key (`auth.operator_key`; presented via `Authorization: Operator <key>` or the `X-Operator-Key` alias) deliberately couples authN+authZ — a constant-time match authorizes a full-access platform operator (stamps the admin role plus an operator bit) independent of the verifier (see #11). Detail: architecture.md § `api/` + `internal/auth`; see also #11, §Security Considerations.
-8. **Optional dedup** — opt-in via `dedupe.enabled`; `dedupe.id_field` selects the JSON key.
+8. **Optional dedup** — opt-in via `dedupe.enabled` (boot config — owns the Pebble lifecycle); the dedup key field (`id_field`) and strict missing-id mode (`require_id`) are runtime settings (see #19).
 9. **Singleflight** — `TieredCache` coalesces concurrent misses (`x/sync/singleflight`) to prevent cache stampede.
 10. **Active Sweeper** — purges NATS messages that are both ACKed (written to CH) and older than the gap window; SSE gap-fill uses `DeliverByStartTime`, no in-process ring buffer.
 11. **Hasura-style access control: fail-closed (security)** — `policy.IsAdmin` (role == `admin_role`, **exact case-sensitive**, default `"admin"`) is the single admin check, shared by `Evaluate`/`ResolveRole`/`Validate`/the `/v1/admin` gate/`RoleAllowed`. Empty/absent role matches nothing (no `"*"` wildcard); `Validate` rejects empty role keys; a `nil` policy (deleted) denies **everyone incl. admin** via a role — a total lockout for token-based callers, so bootstrap from the policy file, never an implicit admin grant (**exception:** the operator key's `auth.IsOperator` bit passes the `/v1/admin` gate even under a `nil` policy — a deliberate break-glass restore over HTTP, see #7). `default_role` is the one sanctioned roleless exception (`ResolveRole` maps empty → it pre-eval); `default_role == admin_role` is permitted but dev-only and loudly warned (`policy.DefaultRoleGrantsAdmin`). Preserve when touching `internal/policy` (policy twin of #13; see #159). Detail: architecture.md § `policy/`.
@@ -65,6 +67,8 @@ The invariant index — what must stay true. Full narrative and rationale live i
 16. **Bearer-token-only CORS posture (security)** — Bearer JWT on every request, no cookies/sessions; `corsMiddleware` deliberately **never** emits `Access-Control-Allow-Credentials` (not needed, and `*` + credentials is a spec violation browsers reject). `cors_allowed_origins` controls who can *read* responses, not cookie scope; CSRF protection is structural. Don't reintroduce cookie auth or `Allow-Credentials` without a design discussion — answers GitHub #29/#30. Code: `internal/api/router.go`.
 17. **Non-fatal boot** — schema-discovery failure on boot is non-fatal: `cmd/wavehouse` records an `api.BootState`, binds `:8080`, serves 503 on `/livez`/`/readyz` with the diagnostic, and retries via `SchemaRegistry.RetryRefresh` (backoff 2s → 60s). Bounds supervisor restart loops.
 18. **Health endpoints** — liveness `/livez`, readiness `/readyz` (k8s convention); `/healthz` is a permanent alias of `/livez`; `/health` + `/ready` are deprecated (removal v0.2.0, CHANGELOG #144). `/v1/health` is the SDK's content-free public ping (no ClickHouse check), a `/v1` route so it survives reverse-proxy probe-path filtering. Point k8s at `/livez`/`/readyz`, SDK/online-checks at `/v1/health`, never the deprecated aliases.
+19. **Two-tier config: a knob lives in exactly one tier** — boot config (`internal/config`: yaml + `WH_*` env, read once at boot, restart to change; wiring, secrets, lifecycle owners) vs. runtime settings (`internal/settings`: compiled defaults + control-db overrides via `/v1/admin/settings`, applied live; pure values only). Disjointness is enforced, not conventional: `settings/disjoint.go` panics at init on a clash or on a settings field with `yaml`/`env` tags, and `config.Load` refuses boot when a retired key is still in the file/env (`config/retired.go`). Never give a runtime setting an env form, never re-declare a knob in both tiers, and promote a field between tiers as an explicit refactor. There is no SIGHUP handling and no config reload endpoint — the file's contract is edits-apply-on-restart. Detail: architecture.md § `settings/`.
+20. **Control plane lives in SQLite; integrity lives in the schema** — policy, pipes, and runtime settings persist in `<data_dir>/control.db` (`internal/controldb`, STRICT tables, `foreign_keys=ON`, WAL, single connection). Every rule SQL can express is a constraint, not a convention: predicate operator whitelist, insert-check operator restriction (#224), the dedupe require-without-field CHECK, role foreign keys (parts cascade, dependencies refuse). Admin writes are single transactions; stores keep in-memory snapshots so no request touches SQLite; settings writes are revision-guarded (`If-Match` → conditional UPDATE, zero rows affected → 409 on a lost race). Tests use the same engine via `controldb.MustOpenMemory` — there is no fake storage mode. NATS remains the data plane (ingest streams, DLQ, SSE) — it no longer stores control state. Detail: architecture.md § `controldb/`.
 
 ## Code Conventions
 
@@ -121,8 +125,9 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 - **Shared mocks in `internal/testutil/`**: Use `MockPublisher`, `MockCache`, `MockDeduplicator`, `MockSubscriber` instead of creating ad-hoc mocks. See `testutil/mocks.go`.
 - **JWT helpers**: Use `testutil.MakeJWT(t, claims)` and `testutil.MakeExpiredJWT(t, claims)` for auth tests. See `testutil/jwt.go`.
 - **Schema helpers**: Use `testutil.NewTestSchemaRegistry(tables)` or `discovery.NewSchemaRegistryFromMap(tables)` for schema-aware tests.
-- **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
-- **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without NATS.
+- **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without the control db.
+- **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without the control db.
+- **Settings helpers**: Use `settings.NewMemoryStore(values)` for in-memory runtime-settings testing without the control db.
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
 - **Coverage target**: 80% project-wide (CI enforces `threshold.total` in `.testcoverage.yml` against the merged unit + integration + e2e profile). Per-suite minima also enforced: unit 80%, integration 20%, e2e 60%, sdk 50%. Aim for 80%+ on new code. Coverage is published as a README badge (Go merged-total) and as PR comments via GitHub Code Quality — see `.github/workflows/README.md` "Coverage publishing"; the gate is unchanged.
 - **Every new function should have corresponding test cases.** Run `make lint` and `make test` before considering work complete.
@@ -392,14 +397,16 @@ internal/auth/          → JWT/JWKS authentication middleware (HMAC or JWKS, ro
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)
 internal/chsql/         → Shared ClickHouse SQL helpers (identifier quoting + bind-safety)
 internal/config/        → Configuration structs + loader
+internal/controldb/     → Control-plane SQLite database (migrations, role upserts)
 internal/dedupe/        → Optional deduplication (interface + embedded/distributed)
 internal/discovery/     → ClickHouse schema introspection + ingest validation
 internal/ingest/        → Batch buffer with DLQ + Active Sweeper (NATS message lifecycle)
 internal/mq/            → MQ abstraction (interface + embedded/remote NATS)
 internal/observability/ → OpenTelemetry pipeline (traces/metrics/logs providers, Prometheus exporter, slog fan-out, NATS trace propagation)
-internal/pipes/         → Named query pipes (NATS KV store + SQL file bootstrap)
-internal/policy/        → Access control policies (types, evaluation, NATS KV store)
+internal/pipes/         → Named query pipes (control-db store + SQL file bootstrap)
+internal/policy/        → Access control policies (types, evaluation, control-db store)
 internal/query/         → Structured query AST + SQL builder
+internal/settings/      → Runtime settings (control-db store + admin API tier of the config split)
 internal/stream/        → SSE fan-out (event Hub: project once per role, Subscriber outbound queue, Bucket fan-out, keepalive Heartbeater wheel)
 internal/testutil/      → Shared test helpers (NopLogger, etc.)
 tests/                  → Integration & E2E tests

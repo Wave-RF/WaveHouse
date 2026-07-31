@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
@@ -19,6 +18,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/mq"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
 	"github.com/Wave-RF/WaveHouse/internal/query"
+	"github.com/Wave-RF/WaveHouse/internal/settings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -35,22 +35,18 @@ import (
 // with the admin query handler — see internal/api/query.go.
 const maxReportedResults = 10000
 
-type DedupeSettings struct {
-	IDField   string // dedup key field name (e.g. "event_id"); "" disables dedup
-	RequireID bool   // reject rows missing IDField instead of publishing un-deduped
-}
-
 // IngestHandler handles POST /v1/ingest?table={table}
 type IngestHandler struct {
 	Registry    *discovery.SchemaRegistry
 	Dedup       dedupe.Deduplicator // nil if dedup disabled
 	Publisher   mq.Publisher
 	PolicyStore *policy.Store
-	logger      *slog.Logger
-
-	// dedupeSettings is the current snapshot — written by SetDedupeSettings,
-	// read once per request in Handle.
-	dedupeSettings atomic.Pointer[DedupeSettings]
+	// Settings, when non-nil, is the runtime-settings store; Handle reads one
+	// dedupe snapshot from it per request. Nil (a handler built without the
+	// wiring) means zero-value dedupe settings — dedup lookups off — so
+	// partial wirings and tests stay safe.
+	Settings *settings.Store
+	logger   *slog.Logger
 
 	// maxRequestBytes optionally overrides the default inbound request body cap
 	// (maxRequestBodyBytes). When 0, the default applies. Exists so same-package
@@ -61,23 +57,6 @@ type IngestHandler struct {
 
 func NewIngestHandler(registry *discovery.SchemaRegistry, pub mq.Publisher, logger *slog.Logger) *IngestHandler {
 	return &IngestHandler{Registry: registry, Publisher: pub, logger: logger}
-}
-
-// SetDedupeSettings atomically replaces the dedupe settings snapshot, safe to
-// call while the handler is serving traffic.
-func (h *IngestHandler) SetDedupeSettings(s DedupeSettings) {
-	h.dedupeSettings.Store(&s)
-}
-
-// DedupeSettings returns the current settings, or the zero value (dedupe off)
-// when none were ever set — handlers built without wiring stay safe. Exported
-// so the wiring's apply path (cmd/wavehouse/hotfields.go) can be tested
-// against what the handler actually serves.
-func (h *IngestHandler) DedupeSettings() DedupeSettings {
-	if p := h.dedupeSettings.Load(); p != nil {
-		return *p
-	}
-	return DedupeSettings{}
 }
 
 var dedupeMissingIDCounter, _ = otel.Meter("wavehouse-ingest").Int64Counter(
@@ -189,7 +168,12 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Like the policy above, dedupe settings are read once for the whole
 	// request, so a reload lands at a request boundary — old and new settings
 	// never mix within one batch.
-	ds := h.DedupeSettings()
+	// One runtime-settings snapshot per request: a concurrent update lands at
+	// a request boundary, never mixing old and new within one request.
+	var ds settings.Dedupe
+	if h.Settings != nil {
+		ds = h.Settings.Get().Dedupe
+	}
 
 	// TODO: set a scope (e.g., "org_id:123") – but scope requires us to know if a table is globally shared or scoped fully by roles/org/tenant. Currently we have no real way to set this, so scopes will be empty.
 	scope := ""
@@ -230,7 +214,7 @@ func (h *IngestHandler) handleSingle(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
-	ds DedupeSettings,
+	ds settings.Dedupe,
 ) {
 	data, err := rr.Next()
 	if err != nil {
@@ -279,7 +263,7 @@ func (h *IngestHandler) handleBatch(
 	perms *policy.ResolvedPermissions,
 	role string,
 	now time.Time,
-	ds DedupeSettings,
+	ds settings.Dedupe,
 ) {
 	result := batchResult{Results: []recordResult{}}
 
@@ -386,7 +370,7 @@ func (h *IngestHandler) processRecord(
 	role string,
 	data map[string]any,
 	now time.Time,
-	ds DedupeSettings,
+	ds settings.Dedupe,
 ) (duplicate bool, reject *recordReject, abort *requestAbort) {
 	if err := discovery.Validate(schema, data); err != nil {
 		h.logger.WarnContext(ctx, "schema validation failed", "error", err, "table", table)

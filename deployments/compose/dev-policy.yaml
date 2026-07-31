@@ -18,7 +18,7 @@
 # and `max_rows` limits, and usually tokens (drop the public default_role to
 # require auth). See docs/src/content/docs/access-control.md for the full model.
 #
-# Seeds NATS KV on FIRST boot only; after that KV is authoritative and runtime
+# Seeds the control-plane db on FIRST boot only; after that it is authoritative and runtime
 # edits go through PUT /v1/admin/policy. Wired in via WH_POLICY_FILE_PATH.
 default_role: public
 tables:
