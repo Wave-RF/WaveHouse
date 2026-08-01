@@ -151,7 +151,7 @@ func (s *Store) PutDedupe(ctx context.Context, d Dedupe, expected *uint64) error
 	s.mu.RUnlock()
 	candidate.Dedupe = d
 	if err := candidate.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalid, err)
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
 	// One writer at a time from here on: the statement and the cache update

@@ -292,7 +292,9 @@ describe("Admin", () => {
       });
       expect(res.status).toBe(409);
 
-      const body: SettingsBody = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
+      const body: SettingsBody = await (
+        await fetch(settingsURL, { headers: adminHeaders() })
+      ).json();
       expect(body.values.dedupe.require_id).toBe(true); // survived the lost race
       expect(dedupeSource(body).source).toBe("db");
       expect(dedupeSource(body).revision).toBeGreaterThan(0);
@@ -321,7 +323,9 @@ describe("Admin", () => {
       });
       expect(del.status).toBe(200);
 
-      const body: SettingsBody = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
+      const body: SettingsBody = await (
+        await fetch(settingsURL, { headers: adminHeaders() })
+      ).json();
       expect(body.values.dedupe).toEqual({ id_field: "event_id", require_id: false });
       expect(dedupeSource(body).source).toBe("default");
 
