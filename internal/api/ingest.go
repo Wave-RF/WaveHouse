@@ -165,9 +165,6 @@ func (h *IngestHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Like the policy above, dedupe settings are read once for the whole
-	// request, so a reload lands at a request boundary — old and new settings
-	// never mix within one batch.
 	// One runtime-settings snapshot per request: a concurrent update lands at
 	// a request boundary, never mixing old and new within one request.
 	var ds settings.Dedupe

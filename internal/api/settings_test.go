@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Wave-RF/WaveHouse/internal/settings"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +55,25 @@ func TestSettingsHandler_PutDedupe_InvalidJSON(t *testing.T) {
 		strings.NewReader(`{`)))
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Equal(t, settings.Defaults(), store.Get(), "a rejected body changes nothing")
+}
+
+func TestSettingsHandler_PutDedupe_TrailingDataRejected(t *testing.T) {
+	t.Parallel()
+	store := settings.NewMemoryStore(settings.Defaults())
+	h := NewSettingsHandler(store)
+
+	// A second JSON value after the section object must fail loudly, not
+	// half-apply the first object and silently discard the rest.
+	rec := httptest.NewRecorder()
+	h.PutDedupe(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/v1/admin/settings/dedupe",
+		strings.NewReader(`{"id_field": "view_id"}{"id_field": "org_id"}`)))
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unexpected data after the settings object")
+	testutil.AssertJSONErrorResponse(t, rec)
+	assert.Equal(t, settings.Defaults(), store.Get())
 }
 
 func TestSettingsHandler_PutDedupe_UnknownFieldRejected(t *testing.T) {
@@ -69,6 +88,7 @@ func TestSettingsHandler_PutDedupe_UnknownFieldRejected(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "unknown field")
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Equal(t, settings.Defaults(), store.Get())
 }
 
@@ -83,6 +103,7 @@ func TestSettingsHandler_PutDedupe_ValidationError(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "dedupe.id_field")
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Equal(t, settings.Defaults(), store.Get())
 }
 
@@ -96,6 +117,7 @@ func TestSettingsHandler_PutDedupe_BodyTooLarge(t *testing.T) {
 		strings.NewReader(`{"id_field": "way-over-the-tiny-test-cap"}`)))
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	testutil.AssertJSONErrorResponse(t, rec)
 }
 
 func TestSettingsHandler_PutDedupe_IfMatch(t *testing.T) {
@@ -121,16 +143,18 @@ func TestSettingsHandler_PutDedupe_IfMatch(t *testing.T) {
 	rec := put(`"0"`, `{"id_field": "org_id"}`)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "revision conflict")
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Equal(t, "view_id", store.Get().Dedupe.IDField)
 
 	// Retrying with the revision from a fresh read succeeds.
-	rev := store.States()[0].Revision
-	require.Equal(t, http.StatusOK, put(strconv.FormatUint(rev, 10), `{"id_field": "org_id"}`).Code)
+	_, states := store.Snapshot()
+	require.Equal(t, http.StatusOK, put(strconv.FormatUint(states[0].Revision, 10), `{"id_field": "org_id"}`).Code)
 	assert.Equal(t, "org_id", store.Get().Dedupe.IDField)
 
 	// Garbage If-Match is a 400, never a silent unconditional write.
 	rec = put(`not-a-revision`, `{"id_field": "nope"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	testutil.AssertJSONErrorResponse(t, rec)
 	assert.Equal(t, "org_id", store.Get().Dedupe.IDField)
 }
 

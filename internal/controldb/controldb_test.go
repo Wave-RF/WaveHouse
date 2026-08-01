@@ -57,6 +57,20 @@ func TestOpen_AppliesMigrationsIdempotently(t *testing.T) {
 // TestOpen_CreatesParentDir proves a first boot works when data_dir itself
 // doesn't exist yet (fresh clone, the e2e orchestrator's clean-slate
 // RemoveAll): SQLite won't create missing parent directories, so Open must.
+// TestMigrationVersion_RejectsBadNames pins the packaging-bug refusals: a
+// migration file whose name can't yield a version must fail loudly at boot,
+// never be silently skipped.
+func TestMigrationVersion_RejectsBadNames(t *testing.T) {
+	for _, name := range []string{"no-extension", "nounderscore.sql", "abc_bad.sql"} {
+		if _, err := migrationVersion(name); err == nil {
+			t.Errorf("migrationVersion(%q): expected error, got nil", name)
+		}
+	}
+	if v, err := migrationVersion("001_control_plane.sql"); err != nil || v != 1 {
+		t.Errorf("migrationVersion(001_control_plane.sql) = %d, %v; want 1, nil", v, err)
+	}
+}
+
 func TestOpen_CreatesParentDir(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "data", "control.db"), testLogger())
 	if err != nil {

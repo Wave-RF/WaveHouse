@@ -49,7 +49,7 @@ The `parameters` array formally declares a parameter with metadata:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `name` | string | Placeholder name; matches `{{name}}` in the SQL. |
+| `name` | string | Placeholder name; matches `{{name}}` in the SQL. Must be non-empty and unique within the pipe — a duplicate or empty name rejects the `PUT` with a `400`. |
 | `type` | string | Documents the expected value type (`"string"`, `"number"`, `"boolean"`, `"array"`). Descriptive — it advertises intent to callers and the SDK; binding itself keys off the runtime value. |
 | `required` | bool | If `true`, the caller must supply a value, even if the placeholder doesn't appear in the SQL. A missing required parameter is a `400`. |
 | `default` | any | Value used when the caller supplies none. |

@@ -35,10 +35,14 @@ type settingsResponse struct {
 	Sources []settings.SectionState `json:"sources"`
 }
 
-// Get returns every runtime setting's effective value and source.
+// Get returns every runtime setting's effective value and source. Values and
+// sources come from one store snapshot: read separately, a concurrent PUT
+// could pair stale values with the new revision, and a caller replaying that
+// revision in If-Match would overwrite a change it never saw.
 func (h *SettingsHandler) Get(w http.ResponseWriter, _ *http.Request) {
+	values, sources := h.Store.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(settingsResponse{Values: h.Store.Get(), Sources: h.Store.States()})
+	_ = json.NewEncoder(w).Encode(settingsResponse{Values: values, Sources: sources})
 }
 
 // PutDedupe replaces the dedupe section, applied live (no restart, no signal).
@@ -70,13 +74,24 @@ func (h *SettingsHandler) PutDedupe(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
+	if dec.More() {
+		// Same fail-loud contract as DisallowUnknownFields: trailing content
+		// would be silently discarded, reading as applied.
+		writeJSONError(w, http.StatusBadRequest, "invalid json: unexpected data after the settings object")
+		return
+	}
 
 	if err := h.Store.PutDedupe(r.Context(), d, expected); err != nil {
-		if errors.Is(err, settings.ErrRevisionConflict) {
+		switch {
+		case errors.Is(err, settings.ErrRevisionConflict):
 			writeJSONError(w, http.StatusConflict, err.Error()+"; GET /v1/admin/settings and retry with the new revision")
-			return
+		case errors.Is(err, settings.ErrInvalid):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+		default:
+			// A storage failure, not a bad request. The body stays generic —
+			// driver detail is server-side information, logged by the store.
+			writeJSONError(w, http.StatusInternalServerError, "store dedupe settings failed")
 		}
-		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -103,7 +118,9 @@ func parseIfMatch(r *http.Request) (*uint64, error) {
 // compiled defaults (the state of a deployment that never touched the API).
 func (h *SettingsHandler) ResetDedupe(w http.ResponseWriter, r *http.Request) {
 	if err := h.Store.ResetDedupe(r.Context()); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		// Generic for the same reason as the PUT's 500: the store logged the
+		// driver detail.
+		writeJSONError(w, http.StatusInternalServerError, "reset dedupe settings failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

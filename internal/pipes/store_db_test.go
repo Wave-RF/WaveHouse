@@ -97,6 +97,31 @@ func TestStore_Put_UpdateReplacesChildRows(t *testing.T) {
 	assert.Equal(t, updated, store2.Get("q"))
 }
 
+// TestStore_Put_RejectsBadParameterNames: duplicate and empty declarations
+// are rejected up front — silently dropping them would make the cached
+// document and the stored rows resolve differently across a restart.
+func TestStore_Put_RejectsBadParameterNames(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, err := NewStore(ctx, openControlDB(t), "", testutil.NopLogger())
+	require.NoError(t, err)
+
+	err = store.Put(ctx, &NamedQuery{
+		Name: "q", SQL: "SELECT 1",
+		Parameters: []ParamDef{{Name: "a", Type: "string"}, {Name: "a", Type: "number"}},
+	})
+	require.ErrorContains(t, err, `duplicate parameter "a"`)
+
+	err = store.Put(ctx, &NamedQuery{
+		Name: "q", SQL: "SELECT 1",
+		Parameters: []ParamDef{{Name: "", Type: "string"}},
+	})
+	require.ErrorContains(t, err, "parameter name is required")
+
+	// A rejected put stores nothing and caches nothing.
+	assert.Nil(t, store.Get("q"))
+}
+
 func TestStore_Delete_BackedByDB(t *testing.T) {
 	t.Parallel()
 	db := openControlDB(t)

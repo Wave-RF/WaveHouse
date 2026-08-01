@@ -420,6 +420,7 @@ WaveHouse/
 │   ├── cache/              # L1 (Ristretto) + L2 caching
 │   ├── chsql/              # Shared ClickHouse SQL helpers (quoting + bind-safety)
 │   ├── config/             # YAML + env var configuration
+│   ├── controldb/          # Control-plane SQLite database (migrations, role upserts)
 │   ├── dedupe/             # Optional deduplication (Pebble)
 │   ├── discovery/          # ClickHouse schema introspection + validation
 │   ├── ingest/             # Batch buffering + DLQ + Active Sweeper
@@ -428,6 +429,8 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (control-db store + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + control-db store)
 │   ├── query/              # Structured query AST + SQL builder
+│   ├── settings/           # Runtime settings (control-db store + admin API)
+│   ├── stream/             # SSE fan-out (Hub, Subscriber, Bucket, Heartbeater)
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)

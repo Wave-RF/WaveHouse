@@ -543,6 +543,8 @@ func TestIngest_Dedup_SettingsHotSwap(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Handle(w, ingestRequest(t, "clicks", map[string]any{"page": "/home"}))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "missing dedupe id field")
+	testutil.AssertJSONErrorResponse(t, w)
 	assert.Nil(t, pub.LastMessage())
 
 	// A runtime-settings update flips require_id off and moves the key to

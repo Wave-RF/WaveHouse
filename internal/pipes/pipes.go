@@ -46,6 +46,13 @@ type ParamDef struct {
 type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
+
+	// writeMu serializes writers across the database write AND the cache
+	// mutation that follows, so the cache always lands in database-commit
+	// order — without it a racing Put/Delete pair can leave the cache holding
+	// the losing document until the next boot. Readers never take it.
+	writeMu sync.Mutex
+
 	mu     sync.RWMutex
 	cached map[string]*NamedQuery
 }
@@ -102,6 +109,29 @@ func (s *Store) Put(ctx context.Context, q *NamedQuery) error {
 	if q.SQL == "" {
 		return fmt.Errorf("pipe SQL is required")
 	}
+	// Reject rather than dedupe: a silently-dropped declaration would make
+	// the cached document (full slice) and the stored rows (survivors only)
+	// resolve differently across a restart.
+	seen := make(map[string]bool, len(q.Parameters))
+	for _, p := range q.Parameters {
+		if p.Name == "" {
+			return fmt.Errorf("pipe %q: parameter name is required", q.Name)
+		}
+		if seen[p.Name] {
+			return fmt.Errorf("pipe %q: duplicate parameter %q", q.Name, p.Name)
+		}
+		seen[p.Name] = true
+	}
+	// Roles get normalization, not rejection: allowed_roles is a set (empty
+	// entries authorize nobody, duplicates are idempotent — see RoleAllowed),
+	// so dropping them here keeps the lenient API contract while making the
+	// cached document identical to the stored rows across a restart.
+	q.AllowedRoles = normalizeRoles(q.AllowedRoles)
+
+	// One writer at a time: persist and the cache update must apply in the
+	// same order (see writeMu).
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	if err := s.persist(ctx, q); err != nil {
 		return err
@@ -139,12 +169,7 @@ func (s *Store) persist(ctx context.Context, q *NamedQuery) error {
 		return fmt.Errorf("clear pipe roles: %w", err)
 	}
 
-	seenParams := make(map[string]bool, len(q.Parameters))
 	for i, p := range q.Parameters {
-		if p.Name == "" || seenParams[p.Name] {
-			continue // duplicate declarations: first wins, matching BindParams' lookup map
-		}
-		seenParams[p.Name] = true
 		var defaultVal any
 		if p.Default != nil {
 			data, err := json.Marshal(p.Default)
@@ -160,12 +185,7 @@ func (s *Store) persist(ctx context.Context, q *NamedQuery) error {
 		}
 	}
 
-	seenRoles := make(map[string]bool, len(q.AllowedRoles))
 	for i, roleName := range q.AllowedRoles {
-		if roleName == "" || seenRoles[roleName] {
-			continue
-		}
-		seenRoles[roleName] = true
 		roleID, err := controldb.UpsertRole(ctx, tx, roleName)
 		if err != nil {
 			return err
@@ -182,11 +202,29 @@ func (s *Store) persist(ctx context.Context, q *NamedQuery) error {
 	return nil
 }
 
+// normalizeRoles drops empty and duplicate entries, preserving first-seen
+// order; nil when nothing survives (matching loadRoles' shape for "none").
+func normalizeRoles(roles []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	return out
+}
+
 // Delete removes a named query from the store; deleting the pipes row
 // cascades its parameter and role rows. Deleting an absent pipe is a no-op
 // success (idempotent DELETE, the same contract as the KV backend this
 // replaced).
 func (s *Store) Delete(ctx context.Context, name string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM pipes WHERE name = ?`, name); err != nil {
 		return fmt.Errorf("delete pipe: %w", err)
 	}

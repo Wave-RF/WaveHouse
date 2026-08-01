@@ -63,6 +63,7 @@ internal/
 ├── pipes/       Named query pipes (control-db store + SQL file bootstrap)
 ├── policy/      Hasura-style access control (policy types, evaluation, control-db store)
 ├── query/       Structured query AST, SQL builder, and timestamp bucketing
+├── settings/    Runtime settings: live-tunable values (control-db store + admin API)
 └── stream/      SSE fan-out: event Hub (project once per role), Subscriber queue, Bucket fan-out, keepalive Heartbeater wheel
 ```
 
@@ -160,7 +161,7 @@ The package's design invariants — stdout always 100%, WARN+ERROR always export
 The single SQLite file (`<data_dir>/control.db`, pure-Go `modernc.org/sqlite` driver — no cgo) that stores all control-plane state: policy, pipes, and runtime settings. The database is the durable source of truth; each store keeps an in-memory snapshot as its read path, so no request ever waits on SQLite.
 
 - **controldb.go** — `Open()` (enforces `foreign_keys=ON` — SQLite ships with foreign keys **off** — plus WAL mode and a single-connection cap, which serializes the control plane's boot-and-admin-edit traffic and eliminates `SQLITE_BUSY` handling), an embedded-`.sql` migration runner tracked in `schema_migrations`, `UpsertRole()` (a single `INSERT … ON CONFLICT … RETURNING id` — roles are created on demand by whatever references them and never garbage-collected), and `MustOpenMemory()` (the same engine backed by RAM instead of a file; it powers every store's `NewMemoryStore` test constructor, so tests run the production code paths against real constraints — there is no separate fake storage mode).
-- **migrations/001_control_plane.sql** — the schema. `STRICT` tables throughout; integrity rules live in the storage layer: CHECK constraints (predicate operator whitelist, insert-check operator restriction, the dedupe require-without-field rule), foreign keys with deliberate delete rules — parts cascade (a grant's predicates, a pipe's params/roles), dependencies refuse (`roles` referenced by grants, pipe allowlists, or `policy_globals`). The schema-catalog tables (`tables`, `columns`) exist but are **dormant** — nothing writes or references them yet; policy and settings rows key on ClickHouse table/column **names**, because WaveHouse is Bring-Your-Own-Schema and ClickHouse remains the source of truth for what exists. They go live (and the name keys graduate to id foreign keys) when WaveHouse takes ownership of ClickHouse DDL.
+- **migrations/001_control_plane.sql** — the schema. `STRICT` tables throughout; integrity rules live in the storage layer: CHECK constraints (predicate operator whitelist, insert-check operator restriction, the dedupe require-without-field rule), foreign keys with deliberate delete rules — parts cascade (a grant's predicates, a pipe's params/roles), dependencies refuse (`roles` referenced by grants, pipe allowlists, or `policy_globals`). Policy and settings rows key on ClickHouse table/column **names**, because WaveHouse is Bring-Your-Own-Schema and ClickHouse remains the source of truth for what exists; if WaveHouse ever takes ownership of ClickHouse DDL, the migration introducing a schema catalog graduates those name keys to id foreign keys.
 
 ### `query/` — Structured Query Engine
 

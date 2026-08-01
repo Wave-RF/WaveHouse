@@ -426,7 +426,7 @@ WH_POLICY_FILE_PATH=/etc/wavehouse/policy.yaml
 </TabItem>
 </Tabs>
 
-Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by deleting `<data_dir>/control.db` and rebooting (this also resets pipes and runtime settings — the database holds all three). See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
+Because a deleted policy locks out every *token-based* caller (including admin), treat the bootstrap file as your recovery path — unless you configured an [operator key](#operator-key), which restores a policy over HTTP without a reboot. Keep the bootstrap file in version control, mount it read-only, and you can always restore a known-good policy by stopping WaveHouse, removing `<data_dir>/control.db` **and its SQLite `-wal`/`-shm` sidecars** when present (back the three files up first if you might need the old state), then restarting so bootstrap runs against a fresh database — this also resets pipes and runtime settings, since the database holds all three. Delete only with the server stopped: the running process keeps the old database open, and a leftover sidecar can carry stale control-plane writes into the next boot. See [Configuration — Access Control Policy](/configuration#access-control-policy) for the exact knobs.
 
 ## A complete example
 

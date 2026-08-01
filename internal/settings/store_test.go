@@ -38,12 +38,18 @@ func newTestStore(t *testing.T, db *sql.DB) *Store {
 
 func uintPtr(v uint64) *uint64 { return &v }
 
+// dedupeState returns the dedupe section's state from a consistent snapshot.
+func dedupeState(s *Store) SectionState {
+	_, states := s.Snapshot()
+	return states[0]
+}
+
 func TestNewStore_EmptyDBServesDefaults(t *testing.T) {
 	s := newTestStore(t, openControlDB(t))
 	if got := s.Get(); got != Defaults() {
 		t.Fatalf("expected defaults, got %+v", got)
 	}
-	states := s.States()
+	_, states := s.Snapshot()
 	if len(states) != 1 || states[0].Section != "dedupe" || states[0].Source != "default" || states[0].Revision != 0 {
 		t.Fatalf("unexpected states: %+v", states)
 	}
@@ -61,9 +67,8 @@ func TestPutDedupe_PersistsAcrossReopen(t *testing.T) {
 	if got := s.Get().Dedupe; got != want {
 		t.Fatalf("cache not updated: %+v", got)
 	}
-	states := s.States()
-	if states[0].Source != "db" || states[0].Revision != 1 {
-		t.Fatalf("unexpected state after put: %+v", states[0])
+	if st := dedupeState(s); st.Source != "db" || st.Revision != 1 {
+		t.Fatalf("unexpected state after put: %+v", st)
 	}
 
 	// A fresh store over the same database sees the stored override — the
@@ -72,7 +77,7 @@ func TestPutDedupe_PersistsAcrossReopen(t *testing.T) {
 	if got := s2.Get().Dedupe; got != want {
 		t.Fatalf("reopened store lost override: %+v", got)
 	}
-	if st := s2.States()[0]; st.Source != "db" || st.Revision != 1 {
+	if st := dedupeState(s2); st.Source != "db" || st.Revision != 1 {
 		t.Fatalf("reopened store state: %+v", st)
 	}
 }
@@ -110,7 +115,7 @@ func TestPutDedupe_RevisionGuard(t *testing.T) {
 	if err := s.PutDedupe(ctx, Dedupe{IDField: "c"}, uintPtr(1)); err != nil {
 		t.Fatalf("conditional update: %v", err)
 	}
-	if st := s.States()[0]; st.Revision != 2 {
+	if st := dedupeState(s); st.Revision != 2 {
 		t.Fatalf("expected revision 2, got %+v", st)
 	}
 	// Stale revision conflicts.
@@ -121,7 +126,7 @@ func TestPutDedupe_RevisionGuard(t *testing.T) {
 	if err := s.PutDedupe(ctx, Dedupe{IDField: "e"}, nil); err != nil {
 		t.Fatalf("unconditional put: %v", err)
 	}
-	if st := s.States()[0]; st.Revision != 3 {
+	if st := dedupeState(s); st.Revision != 3 {
 		t.Fatalf("expected revision 3, got %+v", st)
 	}
 }
@@ -140,7 +145,7 @@ func TestResetDedupe_RevertsToDefaultsAndPersists(t *testing.T) {
 	if s.Get() != Defaults() {
 		t.Fatalf("expected defaults after reset, got %+v", s.Get())
 	}
-	if st := s.States()[0]; st.Source != "default" || st.Revision != 0 {
+	if st := dedupeState(s); st.Source != "default" || st.Revision != 0 {
 		t.Fatalf("unexpected state after reset: %+v", st)
 	}
 	// Reset is idempotent.
@@ -165,7 +170,7 @@ func TestStore_ConcurrentEditsBothSurviveWithRetry(t *testing.T) {
 
 	write := func(field string) error {
 		for range 10 {
-			rev := s.States()[0].Revision
+			rev := dedupeState(s).Revision
 			err := s.PutDedupe(ctx, Dedupe{IDField: field}, &rev)
 			if err == nil {
 				return nil
@@ -193,7 +198,7 @@ func TestStore_ConcurrentEditsBothSurviveWithRetry(t *testing.T) {
 		}
 	}
 	// Both writes applied: seed(1) + two successful conditional writes.
-	if st := s.States()[0]; st.Revision != 3 {
+	if st := dedupeState(s); st.Revision != 3 {
 		t.Fatalf("expected revision 3 after two racing writes, got %+v", st)
 	}
 }

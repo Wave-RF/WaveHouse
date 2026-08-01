@@ -11,30 +11,11 @@
 --     never die in the same statement as its target; edges that can share a
 --     cascade keep the default NO ACTION (checked at end of statement) so a
 --     whole-entity delete doesn't trip over its own ordering.
---   * Where the future schema catalog would supply table/column ids, rows key
---     on ClickHouse table/column NAMES: WaveHouse is Bring-Your-Own-Schema
---     today, so ClickHouse remains the source of truth for what exists.
-
--- Schema catalog: ClickHouse tables and their columns. DORMANT for now —
--- nothing writes or references these yet. They become live (and the name-keyed
--- policy/settings rows below graduate to id-based foreign keys) when WaveHouse
--- takes ownership of ClickHouse DDL; until then ClickHouse is user-managed
--- (Bring-Your-Own-Schema), so a populated catalog could only mirror it, and
--- constraints against a mirror cannot protect the real schema.
-CREATE TABLE tables (
-    id   TEXT NOT NULL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE CHECK (name <> '')
-) STRICT;
-
-CREATE TABLE columns (
-    id           TEXT NOT NULL PRIMARY KEY,
-    table_id     TEXT NOT NULL REFERENCES tables(id) ON DELETE CASCADE,
-    name         TEXT NOT NULL CHECK (name <> ''),
-    type         TEXT NOT NULL,
-    default_expr TEXT,
-    UNIQUE (table_id, name),
-    UNIQUE (table_id, id) -- target for future composite foreign keys
-) STRICT;
+--   * Where a schema catalog would supply table/column ids, rows key on
+--     ClickHouse table/column NAMES: WaveHouse is Bring-Your-Own-Schema, so
+--     ClickHouse remains the source of truth for what exists. If WaveHouse
+--     ever takes ownership of ClickHouse DDL, the migration that introduces
+--     catalog tables graduates these name keys to id foreign keys.
 
 -- Roles referenced by policy grants, pipe allowlists, and the globals row.
 -- Rows are upserted on demand when a policy or pipe references a new name and

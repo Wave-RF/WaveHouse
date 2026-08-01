@@ -176,7 +176,7 @@ WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DI
 - `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
 - `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
 
-In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
+In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates `control.db` and the `nats/`/`pebble/` subdirectories under `/app/data` itself on first run.
 
 If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
 
@@ -194,7 +194,7 @@ On a first-ever run this is expected. On every subsequent run it should be silen
 
 ### Distroless Permission Traps (named volume vs bind mount)
 
-WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong produces a hard-to-read permission error from NATS or Pebble at startup.
+WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong produces a hard-to-read permission error at startup from the first store that touches the volume: the control-plane database.
 
 **Named volumes** (the recommended pattern):
 
@@ -212,12 +212,11 @@ volumes:
   - /srv/wavehouse:/app/data
 ```
 
-Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
+Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup when the control-plane database can't create its file:
 
 ```text wrap=false
-ERROR  mq init failed  error="..."  path=/app/data/nats
-       hint="if running in a container with a host bind mount, the host
-       directory must be owned by UID 65532..."
+ERROR  control db init failed  error="ping control db \"/app/data/control.db\":
+       unable to open database file (14)"  path=/app/data/control.db
 ```
 
 The fix is one host-side command before first start:
@@ -227,7 +226,7 @@ sudo mkdir -p /srv/wavehouse
 sudo chown -R 65532:65532 /srv/wavehouse
 ```
 
-UID 65532 is the canonical distroless `nonroot` user; the same number works regardless of whether your host has a matching name in `/etc/passwd`. The error log includes this remediation hint, so if you see "permission denied" at startup, copy the suggested `chown` command and re-run.
+UID 65532 is the canonical distroless `nonroot` user; the same number works regardless of whether your host has a matching name in `/etc/passwd`. Note the SQLite error is terse — `unable to open database file (14)` doesn't say "permission denied" — so on a first start with a bind mount, treat it as an ownership problem until proven otherwise. (The NATS and Pebble failures later in the boot sequence do attach a `hint=` line with the `chown` remediation.)
 
 **Pipes bind mount** follows the same rule — but mount it **read-only** since pipes is a seed, not state:
 

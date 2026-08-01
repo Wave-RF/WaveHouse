@@ -27,6 +27,11 @@ var sections = []string{sectionDedupe}
 // edits survive instead of the second silently overwriting the first.
 var ErrRevisionConflict = errors.New("settings revision conflict: section changed since it was read")
 
+// ErrInvalid marks a rejected candidate document: the caller's input broke a
+// validation rule. Distinct from a storage failure so the API can answer 400
+// (fix your request) instead of 500 (server trouble).
+var ErrInvalid = errors.New("invalid settings")
+
 // SectionState reports where one section's live values come from: a stored
 // database override (with the revision that produced them) or the compiled
 // defaults.
@@ -45,9 +50,16 @@ type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
 
-	mu       sync.RWMutex
-	cached   Values
-	revision uint64 // dedupe section revision; 0 = no stored override
+	// writeMu serializes writers across the database statement AND the cache
+	// update that follows, so the cache always lands in database-commit order.
+	// Without it two racing unconditional writes can commit as A→B but cache
+	// as B→A, serving the losing document until the next boot. Readers never
+	// take it — mu alone guards the cache.
+	writeMu sync.Mutex
+
+	mu        sync.RWMutex
+	cached    Values
+	revisions map[string]uint64 // section → revision; absent/0 = no stored override
 }
 
 // NewStore loads any stored override on top of Defaults(). A stored row that
@@ -55,7 +67,7 @@ type Store struct {
 // impossible, but a refusal beats silently reverting a tunable the operator
 // set.
 func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, error) {
-	s := &Store{db: db, logger: logger, cached: Defaults()}
+	s := &Store{db: db, logger: logger, cached: Defaults(), revisions: map[string]uint64{}}
 
 	var (
 		idField   string
@@ -78,7 +90,7 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 		return nil, fmt.Errorf("stored dedupe settings: %w", err)
 	}
 	s.cached = candidate
-	s.revision = revision
+	s.revisions[sectionDedupe] = revision
 	return s, nil
 }
 
@@ -87,9 +99,10 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 // constraints, same code paths as production — only the storage lives in RAM.
 func NewMemoryStore(v Values) *Store {
 	return &Store{
-		db:     controldb.MustOpenMemory(),
-		cached: v,
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:        controldb.MustOpenMemory(),
+		cached:    v,
+		revisions: map[string]uint64{},
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -102,20 +115,23 @@ func (s *Store) Get() Values {
 	return s.cached
 }
 
-// States reports, per section, whether the live values come from a stored
-// database override or the compiled defaults.
-func (s *Store) States() []SectionState {
+// Snapshot returns the live values and their per-section states as one
+// consistent read: a revision in the result always describes the values
+// returned beside it. Two separate accessors would let a concurrent write
+// land between them, and a caller replaying that torn revision in If-Match
+// would overwrite values it never saw.
+func (s *Store) Snapshot() (Values, []SectionState) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]SectionState, 0, len(sections))
 	for _, section := range sections {
 		st := SectionState{Section: section, Source: "default"}
-		if s.revision > 0 {
-			st.Source, st.Revision = "db", s.revision
+		if rev := s.revisions[section]; rev > 0 {
+			st.Source, st.Revision = "db", rev
 		}
 		out = append(out, st)
 	}
-	return out
+	return s.cached, out
 }
 
 // PutDedupe validates the candidate document and stores the dedupe section.
@@ -135,8 +151,13 @@ func (s *Store) PutDedupe(ctx context.Context, d Dedupe, expected *uint64) error
 	s.mu.RUnlock()
 	candidate.Dedupe = d
 	if err := candidate.Validate(); err != nil {
-		return fmt.Errorf("invalid settings: %w", err)
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
+
+	// One writer at a time from here on: the statement and the cache update
+	// below must apply in the same order (see writeMu).
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	var newRev uint64
 	var err error
@@ -149,7 +170,7 @@ func (s *Store) PutDedupe(ctx context.Context, d Dedupe, expected *uint64) error
 				require_id = excluded.require_id, revision = dedupe_settings.revision + 1
 			RETURNING revision`, d.IDField, d.RequireID).Scan(&newRev)
 		if err != nil {
-			return fmt.Errorf("put dedupe settings: %w", err)
+			return s.writeFailed(ctx, err)
 		}
 	case *expected == 0:
 		// "No override stored yet": insert-only; a conflict means another
@@ -157,7 +178,7 @@ func (s *Store) PutDedupe(ctx context.Context, d Dedupe, expected *uint64) error
 		res, execErr := s.db.ExecContext(ctx, `INSERT INTO dedupe_settings (id, id_field, require_id, revision)
 			VALUES (1, ?, ?, 1) ON CONFLICT (id) DO NOTHING`, d.IDField, d.RequireID)
 		if execErr != nil {
-			return fmt.Errorf("put dedupe settings: %w", execErr)
+			return s.writeFailed(ctx, execErr)
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("%w (expected no stored override, but one exists)", ErrRevisionConflict)
@@ -168,7 +189,7 @@ func (s *Store) PutDedupe(ctx context.Context, d Dedupe, expected *uint64) error
 			SET id_field = ?, require_id = ?, revision = revision + 1
 			WHERE id = 1 AND revision = ?`, d.IDField, d.RequireID, *expected)
 		if execErr != nil {
-			return fmt.Errorf("put dedupe settings: %w", execErr)
+			return s.writeFailed(ctx, execErr)
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("%w (expected revision %d)", ErrRevisionConflict, *expected)
@@ -178,23 +199,37 @@ func (s *Store) PutDedupe(ctx context.Context, d Dedupe, expected *uint64) error
 
 	s.mu.Lock()
 	s.cached.Dedupe = d
-	s.revision = newRev
+	s.revisions[sectionDedupe] = newRev
 	s.mu.Unlock()
 	s.logger.Info("runtime settings updated", "section", sectionDedupe, "revision", newRev)
 	return nil
+}
+
+// writeFailed logs a storage failure at ERROR — the API returns a generic 500
+// for these, so this log line is where the driver detail survives — and wraps
+// it for the caller.
+func (s *Store) writeFailed(ctx context.Context, err error) error {
+	s.logger.ErrorContext(ctx, "runtime settings write failed", "section", sectionDedupe, "error", err)
+	return fmt.Errorf("write dedupe settings: %w", err)
 }
 
 // ResetDedupe deletes the stored override; the section reverts to Defaults()
 // — never a fail-closed lockout, unlike a deleted policy, because every
 // default is safe by design.
 func (s *Store) ResetDedupe(ctx context.Context) error {
+	// Same writer ordering as PutDedupe: without writeMu a concurrent put's
+	// cache update could land after this reset's, leaving the cache holding an
+	// override while the database holds no row.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM dedupe_settings WHERE id = 1`); err != nil {
-		return fmt.Errorf("delete dedupe settings: %w", err)
+		return s.writeFailed(ctx, err)
 	}
 
 	s.mu.Lock()
 	s.cached.Dedupe = Defaults().Dedupe
-	s.revision = 0
+	delete(s.revisions, sectionDedupe)
 	s.mu.Unlock()
 	s.logger.Info("runtime settings reset to defaults", "section", sectionDedupe)
 	return nil

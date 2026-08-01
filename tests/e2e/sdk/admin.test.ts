@@ -223,7 +223,16 @@ describe("Admin", () => {
       "Content-Type": "application/json",
       ...extra,
     });
-    const dedupeSource = (body: any) => body.sources.find((s: any) => s.section === "dedupe");
+    type SectionState = { section: string; source: "db" | "default"; revision?: number };
+    type SettingsBody = {
+      values: { dedupe: { id_field: string; require_id: boolean } };
+      sources: SectionState[];
+    };
+    const dedupeSource = (body: SettingsBody): SectionState => {
+      const s = body.sources.find((x) => x.section === "dedupe");
+      if (!s) throw new Error(`no dedupe section in ${JSON.stringify(body.sources)}`);
+      return s;
+    };
 
     afterAll(async () => {
       // Revert to compiled defaults even if an assertion failed mid-flow.
@@ -233,7 +242,7 @@ describe("Admin", () => {
     it("reports compiled defaults when no override is stored", async () => {
       const res = await fetch(settingsURL, { headers: adminHeaders() });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body: SettingsBody = await res.json();
       expect(body.values.dedupe).toEqual({ id_field: "event_id", require_id: false });
       expect(dedupeSource(body).source).toBe("default");
     });
@@ -283,7 +292,7 @@ describe("Admin", () => {
       });
       expect(res.status).toBe(409);
 
-      const body = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
+      const body: SettingsBody = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
       expect(body.values.dedupe.require_id).toBe(true); // survived the lost race
       expect(dedupeSource(body).source).toBe("db");
       expect(dedupeSource(body).revision).toBeGreaterThan(0);
@@ -312,7 +321,7 @@ describe("Admin", () => {
       });
       expect(del.status).toBe(200);
 
-      const body = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
+      const body: SettingsBody = await (await fetch(settingsURL, { headers: adminHeaders() })).json();
       expect(body.values.dedupe).toEqual({ id_field: "event_id", require_id: false });
       expect(dedupeSource(body).source).toBe("default");
 

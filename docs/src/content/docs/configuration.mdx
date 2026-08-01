@@ -14,6 +14,7 @@ WaveHouse is configured via a YAML file with environment variable overrides. All
 1. If a config file exists at the specified path (default: `config.yaml`), it is loaded first.
 2. Environment variables override any values from the YAML file.
 3. If no config file exists, all values are read from environment variables (with defaults).
+4. If the file exists but cannot be read (permissions, a directory at the path), startup fails with `read config: …` — WaveHouse never silently falls back to environment-only loading.
 
 Set `WH_CONFIG` to change the config file path:
 

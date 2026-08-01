@@ -742,7 +742,9 @@ Returns a specific named pipe definition.
 }
 ```
 
-**`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
+**`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored (dropped on save, along with duplicates, so `GET` returns the normalized list). An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
+
+**Errors:** `400 {"error":"pipe SQL is required"}` for a missing `sql`; `400 {"error":"pipe \"<name>\": parameter name is required"}` and `400 {"error":"pipe \"<name>\": duplicate parameter \"<param>\""}` — declared parameter names must be non-empty and unique within the pipe.
 
 #### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 
@@ -781,13 +783,15 @@ Replaces the dedupe section and applies it live: no restart, no signal. This is 
 
 **Response (200):** `{"ok": true}`
 
-**Errors:** `400 {"error":"invalid settings: dedupe.require_id requires a non-empty dedupe.id_field"}` — validation runs before anything is stored, so a rejected write changes nothing; `400 {"error":"invalid json: …"}` for a malformed body or an unknown field; `409 {"error":"settings revision conflict: …"}` when `If-Match` carries a stale revision (another admin wrote first — nothing changes); `400 {"error":"invalid If-Match \"…\": expected a section revision number"}` for a non-numeric `If-Match` value.
+**Errors:** `400 {"error":"invalid settings: dedupe.require_id requires a non-empty dedupe.id_field"}` — validation runs before anything is stored, so a rejected write changes nothing; `400 {"error":"invalid json: …"}` for a malformed body, an unknown field, or trailing content after the section object; `409 {"error":"settings revision conflict: …"}` when `If-Match` carries a stale revision (another admin wrote first — nothing changes); `400 {"error":"invalid If-Match \"…\": expected a section revision number"}` for a non-numeric `If-Match` value; `500 {"error":"store dedupe settings failed"}` when the write to the control-plane database itself fails — deliberately generic, the driver detail lands in the server log.
 
 #### `DELETE /v1/admin/settings/dedupe` — Reset Dedupe Settings
 
 Deletes the stored override; the section reverts to its compiled defaults (the state of a deployment that never touched the settings API).
 
 **Response (200):** `{"ok": true}`
+
+**Errors:** `500 {"error":"reset dedupe settings failed"}` when the delete itself fails — generic for the same reason as the `PUT`'s `500`.
 
 ## Event Message Format
 

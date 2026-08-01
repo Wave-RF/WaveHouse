@@ -26,6 +26,13 @@ import (
 type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
+
+	// writeMu serializes writers across the transaction commit AND the cache
+	// swap, so the cache always lands in database-commit order. Without it two
+	// racing Puts can commit as A→B but swap the cache B→A, serving the losing
+	// policy until the next boot. Readers never take it — mu guards the cache.
+	writeMu sync.Mutex
+
 	mu     sync.RWMutex
 	cached *Policy
 }
@@ -89,6 +96,11 @@ func (s *Store) Put(ctx context.Context, p *Policy) error {
 	if err := Validate(p); err != nil {
 		return fmt.Errorf("invalid policy: %w", err)
 	}
+
+	// One writer at a time: persist and the cache swap must apply in the same
+	// order (see writeMu).
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	if err := s.persist(ctx, p); err != nil {
 		return err

@@ -83,11 +83,18 @@ func migrate(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	}
 	sort.Strings(names)
 
+	seen := make(map[int64]string, len(names))
 	for _, name := range names {
 		version, err := migrationVersion(name)
 		if err != nil {
 			return err
 		}
+		// Two files sharing a prefix would record the version once and skip
+		// the other file forever — a packaging bug, so refuse to boot.
+		if prev, dup := seen[version]; dup {
+			return fmt.Errorf("migrations %q and %q share version %d", prev, name, version)
+		}
+		seen[version] = name
 		var applied int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, version).Scan(&applied); err != nil {
 			return fmt.Errorf("check migration %d: %w", version, err)
