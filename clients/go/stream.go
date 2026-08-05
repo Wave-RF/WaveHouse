@@ -56,11 +56,8 @@ func (sc *StreamController) Subscribe(sub *StreamSubscriber) func() {
 	currentStatus := sc.status
 	sc.mu.Unlock()
 
-	// Benign race: if setStatus fires between the unlock above and the
-	// callback below, the subscriber may see a stale status here. This is
-	// harmless because setStatus also invokes the subscriber's callback,
-	// so the subscriber will receive the up-to-date status immediately
-	// after. Matches the TS SDK's registration behavior.
+	// Benign race: setStatus also calls the subscriber, so a stale
+	// status here is immediately followed by the correct one.
 	if sub.Status != nil {
 		sub.Status(currentStatus)
 	}

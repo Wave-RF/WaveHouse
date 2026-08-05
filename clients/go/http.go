@@ -68,14 +68,8 @@ func doRequest(hctx httpContext, ctx context.Context, opts requestOptions, dst a
 	var lastErr error
 	maxAttempts := hctx.maxRetries + 1
 
-	// Retries below are not restricted by HTTP method — this matches the TS
-	// SDK's http.ts, which retries POST the same as GET on network errors,
-	// 503/Retry-After, and other retryable 5xx. For /v1/ingest, at-least-once
-	// delivery on retry is a documented contract (see docs/api.md's
-	// "At-least-once on retry" note); dedup is the prescribed server-side
-	// safety net when duplicate suppression matters. The only other mutation
-	// path, /v1/admin/query, is gated by admin_role, so repeated execution on
-	// retry is assumed to be an accepted risk for admin-only raw SQL.
+	// Retries all methods including POST. For /v1/ingest, at-least-once delivery
+	// is the documented contract; dedup is the server-side safety net.
 	for attempt := range maxAttempts {
 		var bodyReader io.Reader
 		if bodyBytes != nil {

@@ -428,13 +428,7 @@ endif
 tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 	$(call run,go.mod tidy,go mod tidy -diff,run make fix to tidy go.mod and go.sum)
 
-# verify-go-sdk: static checks for clients/go/ — a nested Go module (its own
-# go.mod), so it's invisible to `go list ./...` from the root and every leaf
-# above (GO_DIRS, lint-go, vulncheck, tidy) silently skips it. Scoped and run
-# explicitly here instead. `go vet` needs its own module context (cd
-# clients/go), but gofumpt is a pure syntax formatter with no module
-# resolution of its own, so the repo-pinned $(GOFUMPT) binary can format it
-# directly by path from the root — no second tool pin needed.
+# verify-go-sdk: nested module at clients/go/ — invisible to root go list.
 .PHONY: verify-go-sdk
 verify-go-sdk: ## Static checks for the Go SDK (clients/go, a nested module) — go vet + gofumpt
 	$(call run,go vet (Go SDK),cd clients/go && go vet ./...,)
@@ -732,21 +726,13 @@ test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against sui
 
 # test-go-sdk: unit tests for clients/go/ — a nested Go module (its own
 # go.mod), so it's outside test-unit's ./internal/... ./cmd/... scope and
-# needs its own leaf; a root `go test ./...` wouldn't reach it either. Zero
-# third-party runtime or test deps (stdlib only, no go.sum), so no
-# go-mod-download prereq. Not yet wired into the Go/TS coverage gate — see
-# verify-go-sdk above for the same "nested module, own leaf" reasoning.
+# test-go-sdk: nested module — needs its own target.
 .PHONY: test-go-sdk
 test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests
 	@printf "$(CYAN)==> Running Go SDK tests...$(RESET)\n"
 	@cd clients/go && go test ./...
 
-# test-go-sdk-e2e: runs the Go SDK's E2E tests against a live WaveHouse
-# instance. Requires a running server (e.g. `make dev` in the main repo).
-# Env vars:
-#   WAVEHOUSE_URL   base URL of the server    (default: http://localhost:8080)
-#   WAVEHOUSE_AUTH  bearer token for auth      (optional; omit for default_role)
-# The tests skip gracefully when the server is unreachable.
+# test-go-sdk-e2e: E2E against live server. WAVEHOUSE_URL + WAVEHOUSE_AUTH env vars.
 .PHONY: test-go-sdk-e2e
 test-go-sdk-e2e: ## Run Go SDK E2E tests against a live WaveHouse instance (WAVEHOUSE_URL, WAVEHOUSE_AUTH)
 	@printf "$(CYAN)==> Running Go SDK E2E tests...$(RESET)\n"

@@ -25,15 +25,9 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     items: [
       { label: "API Reference", slug: "api" },
       {
-        // Topic-first SDK pages: the multi-language plan on record (PR #313)
-        // was for a second language to grow <Tabs syncKey="lang"> on these
-        // shared pages instead of a parallel tree. The Go SDK launched as
-        // its own docs/src/content/docs/sdk/go/* tree instead — its API
-        // shape (context.Context, (T, error), generics on package-level
-        // funcs) diverges enough from the TS builder that shared prose read
-        // worse than dedicated pages. Revisit folding these into tabs if a
-        // third language lands and the duplication becomes a maintenance
-        // cost.
+        // Separate trees per SDK — API shapes diverge enough that shared
+        // prose reads worse than dedicated pages. Revisit with tabs if a
+        // third language lands.
         label: "TypeScript SDK",
         items: [
           { label: "Overview", slug: "sdk" },

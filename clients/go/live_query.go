@@ -89,16 +89,9 @@ func newLiveQuery(
 			}
 		}
 
-		// Step 5: Flush buffered events newer than the fetch.
-		//
-		// buffering stays true for the whole flush: events that arrive
-		// concurrently (after Subscribe's Next handler releases mu but
-		// before we're done here) must keep landing in buffer rather than
-		// being dispatched directly by the live path, or two goroutines
-		// could call sub.Next at once. We only flip buffering to false
-		// once a lock-protected check finds the buffer empty, which
-		// guarantees no event is ever handed to sub.Next by both paths
-		// and that delivery stays in arrival order.
+		// Step 5: Flush buffered events. buffering stays true until the
+		// buffer is provably empty under the lock — prevents concurrent
+		// sub.Next calls and preserves delivery order.
 		for {
 			mu.Lock()
 			if closed {
@@ -121,12 +114,8 @@ func newLiveQuery(
 				if c {
 					return
 				}
-				// Use <= (not <) to filter events whose timestamp matches the last
-				// historical row — those rows were already delivered in the backfill
-				// response. If two distinct events share a timestamp and only one
-				// appeared in the backfill, the duplicate is lost; this matches the
-				// TS SDK's dedup behavior and is acceptable because received_timestamp
-				// has sub-millisecond precision in practice.
+				// <= dedupes events already delivered in the backfill.
+				// Sub-millisecond received_timestamp precision makes collisions rare.
 				if lastTimestamp != "" && event.Timestamp <= lastTimestamp {
 					continue
 				}
