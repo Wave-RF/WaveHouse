@@ -3,6 +3,7 @@ package wavehouse
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -117,29 +118,35 @@ func (t *TableRef) insertSingle(ctx context.Context, data any) (*InsertResult, e
 	return result, nil
 }
 
-func (t *TableRef) insertBatch(ctx context.Context, rows []map[string]any) (*InsertResult, error) {
-	if len(rows) == 0 {
-		zero := 0
-		return &InsertResult{
-			OK:         true,
-			Total:      &zero,
-			Succeeded:  &zero,
-			Failed:     &zero,
-			Duplicates: &zero,
-		}, nil
-	}
+func emptyInsertResult() *InsertResult {
+	z := 0
+	return &InsertResult{OK: true, Total: &z, Succeeded: &z, Failed: &z, Duplicates: &z}
+}
+
+func marshalNDJSON(n int, elem func(int) any) (string, error) {
 	var sb strings.Builder
-	for i, row := range rows {
+	for i := range n {
 		if i > 0 {
 			sb.WriteByte('\n')
 		}
-		raw, err := json.Marshal(row)
+		raw, err := json.Marshal(elem(i))
 		if err != nil {
-			return nil, err
+			return "", fmt.Errorf("wavehouse: marshal row %d: %w", i, err)
 		}
 		sb.Write(raw)
 	}
-	return t.sendNDJSON(ctx, sb.String())
+	return sb.String(), nil
+}
+
+func (t *TableRef) insertBatch(ctx context.Context, rows []map[string]any) (*InsertResult, error) {
+	if len(rows) == 0 {
+		return emptyInsertResult(), nil
+	}
+	ndjson, err := marshalNDJSON(len(rows), func(i int) any { return rows[i] })
+	if err != nil {
+		return nil, err
+	}
+	return t.sendNDJSON(ctx, ndjson)
 }
 
 // insertBatchReflect is the fallback batch path for any slice type other
@@ -149,29 +156,14 @@ func (t *TableRef) insertBatch(ctx context.Context, rows []map[string]any) (*Ins
 // insertBatch, so the server's per-record batch summary (failed, results,
 // etc.) is preserved instead of being silently dropped by insertSingle.
 func (t *TableRef) insertBatchReflect(ctx context.Context, rows reflect.Value) (*InsertResult, error) {
-	n := rows.Len()
-	if n == 0 {
-		zero := 0
-		return &InsertResult{
-			OK:         true,
-			Total:      &zero,
-			Succeeded:  &zero,
-			Failed:     &zero,
-			Duplicates: &zero,
-		}, nil
+	if rows.Len() == 0 {
+		return emptyInsertResult(), nil
 	}
-	var sb strings.Builder
-	for i := 0; i < n; i++ {
-		if i > 0 {
-			sb.WriteByte('\n')
-		}
-		raw, err := json.Marshal(rows.Index(i).Interface())
-		if err != nil {
-			return nil, err
-		}
-		sb.Write(raw)
+	ndjson, err := marshalNDJSON(rows.Len(), func(i int) any { return rows.Index(i).Interface() })
+	if err != nil {
+		return nil, err
 	}
-	return t.sendNDJSON(ctx, sb.String())
+	return t.sendNDJSON(ctx, ndjson)
 }
 
 func (t *TableRef) sendNDJSON(ctx context.Context, ndjson string) (*InsertResult, error) {

@@ -33,10 +33,7 @@ func (e *Error) Error() string {
 // IsRetryable reports whether err wraps a retryable [*Error].
 func IsRetryable(err error) bool {
 	var e *Error
-	if errors.As(err, &e) {
-		return e.Retryable
-	}
-	return false
+	return errors.As(err, &e) && e.Retryable
 }
 
 // parseErrorResponse creates an Error from an HTTP response.

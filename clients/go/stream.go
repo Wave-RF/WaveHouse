@@ -426,20 +426,13 @@ func evaluateFilter(actual any, op string, expected any) bool {
 		return ok && c <= 0
 	case "in":
 		return evaluateIn(actual, expected)
-	case "like":
+	case "like", "not_like":
 		aStr, aOK := actual.(string)
 		eStr, eOK := expected.(string)
 		if !aOK || !eOK {
 			return false
 		}
-		return matchLike(aStr, eStr)
-	case "not_like":
-		aStr, aOK := actual.(string)
-		eStr, eOK := expected.(string)
-		if !aOK || !eOK {
-			return false
-		}
-		return !matchLike(aStr, eStr)
+		return (op == "like") == matchLike(aStr, eStr)
 	default:
 		return false
 	}

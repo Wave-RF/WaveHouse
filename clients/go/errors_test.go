@@ -8,63 +8,69 @@ import (
 	"testing"
 )
 
-func TestParseErrorResponse_JSONError(t *testing.T) {
-	res := &http.Response{
-		StatusCode: 404,
-		Body:       io.NopCloser(strings.NewReader(`{"error":"unknown table: foo"}`)),
-		Header:     http.Header{},
+func TestParseErrorResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantMsg    string
+		wantCode   string
+		wantRetry  bool
+		nilDetails bool
+	}{
+		{
+			name:     "JSONError",
+			status:   404,
+			body:     `{"error":"unknown table: foo"}`,
+			wantMsg:  "unknown table: foo",
+			wantCode: "HTTP_404",
+		},
+		{
+			name:    "MessageField",
+			status:  400,
+			body:    `{"message":"bad request"}`,
+			wantMsg: "bad request",
+		},
+		{
+			name:      "FallsBackToStatusText",
+			status:    500,
+			body:      `{"code":123}`,
+			wantMsg:   "Internal Server Error",
+			wantRetry: true,
+		},
+		{
+			name:       "NonJSONBody",
+			status:     502,
+			body:       "plain text",
+			wantMsg:    "Bad Gateway",
+			wantRetry:  true,
+			nilDetails: true,
+		},
 	}
-	e := parseErrorResponse(res)
-	if e.Status != 404 {
-		t.Fatalf("want status 404, got %d", e.Status)
-	}
-	if e.Code != "HTTP_404" {
-		t.Fatalf("want code HTTP_404, got %s", e.Code)
-	}
-	if e.Message != "unknown table: foo" {
-		t.Fatalf("want message 'unknown table: foo', got %s", e.Message)
-	}
-	if e.Retryable {
-		t.Fatal("4xx should not be retryable")
-	}
-}
-
-func TestParseErrorResponse_MessageField(t *testing.T) {
-	res := &http.Response{
-		StatusCode: 400,
-		Body:       io.NopCloser(strings.NewReader(`{"message":"bad request"}`)),
-		Header:     http.Header{},
-	}
-	e := parseErrorResponse(res)
-	if e.Message != "bad request" {
-		t.Fatalf("want 'bad request', got %s", e.Message)
-	}
-}
-
-func TestParseErrorResponse_FallsBackToStatusText(t *testing.T) {
-	res := &http.Response{
-		StatusCode: 500,
-		Body:       io.NopCloser(strings.NewReader(`{"code":123}`)),
-		Header:     http.Header{},
-	}
-	e := parseErrorResponse(res)
-	if e.Message != "Internal Server Error" {
-		t.Fatalf("want status text fallback, got %s", e.Message)
-	}
-}
-
-func TestParseErrorResponse_NonJSONBody(t *testing.T) {
-	res := &http.Response{
-		StatusCode: 502,
-		Body:       io.NopCloser(strings.NewReader("plain text")),
-		Header:     http.Header{},
-	}
-	e := parseErrorResponse(res)
-	if e.Message != "Bad Gateway" {
-		t.Fatalf("want 'Bad Gateway', got %s", e.Message)
-	}
-	if e.Details != nil {
-		t.Fatal("details should be nil for non-JSON body")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := &http.Response{
+				StatusCode: tt.status,
+				Body:       io.NopCloser(strings.NewReader(tt.body)),
+				Header:     http.Header{},
+			}
+			e := parseErrorResponse(res)
+			if e.Status != tt.status {
+				t.Fatalf("want status %d, got %d", tt.status, e.Status)
+			}
+			if tt.wantCode != "" && e.Code != tt.wantCode {
+				t.Fatalf("want code %s, got %s", tt.wantCode, e.Code)
+			}
+			if e.Message != tt.wantMsg {
+				t.Fatalf("want message %q, got %q", tt.wantMsg, e.Message)
+			}
+			if e.Retryable != tt.wantRetry {
+				t.Fatalf("want retryable=%v, got %v", tt.wantRetry, e.Retryable)
+			}
+			if tt.nilDetails && e.Details != nil {
+				t.Fatal("details should be nil")
+			}
+		})
 	}
 }
 

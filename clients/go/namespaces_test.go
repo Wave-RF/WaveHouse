@@ -97,32 +97,34 @@ func TestPolicyNamespace_GetSetValidate(t *testing.T) {
 	}
 }
 
-func TestDLQNamespace_List(t *testing.T) {
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
-	}))
-	stats, err := c.DLQ.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.Total != 3 {
-		t.Fatalf("want total=3, got %d", stats.Total)
-	}
-}
+func TestDLQNamespace(t *testing.T) {
+	t.Run("List", func(t *testing.T) {
+		c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
+		}))
+		stats, err := c.DLQ.List(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.Total != 3 {
+			t.Fatalf("want total=3, got %d", stats.Total)
+		}
+	})
 
-func TestDLQNamespace_Table(t *testing.T) {
-	var gotParam string
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotParam = r.URL.Query().Get("table")
-		_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2})
-	}))
-	_, err := c.DLQ.Table(context.Background(), "clicks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotParam != "clicks" {
-		t.Fatalf("want table=clicks, got %s", gotParam)
-	}
+	t.Run("Table", func(t *testing.T) {
+		var gotParam string
+		c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotParam = r.URL.Query().Get("table")
+			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2})
+		}))
+		_, err := c.DLQ.Table(context.Background(), "clicks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotParam != "clicks" {
+			t.Fatalf("want table=clicks, got %s", gotParam)
+		}
+	})
 }
 
 func TestPipesNamespace_CRUD(t *testing.T) {

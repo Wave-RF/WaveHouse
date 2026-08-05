@@ -257,10 +257,7 @@ func TestE2E_SQLQuery(t *testing.T) {
 
 	rows, err := SQL[map[string]any](ctx, c, "SELECT 1 AS n")
 	if err != nil {
-		// SQL requires admin role — skip gracefully if forbidden.
-		if isHTTPStatus(err, 401) || isHTTPStatus(err, 403) {
-			t.Skipf("e2e: SQL query requires admin auth: %v", err)
-		}
+		skipIfUnauthorized(t, err, "SQL query")
 		t.Fatalf("SQL query failed: %v", err)
 	}
 	if len(rows) != 1 {
@@ -289,9 +286,7 @@ func TestE2E_PolicyGetSet(t *testing.T) {
 
 	pol, err := c.Policy.Get(ctx)
 	if err != nil {
-		if isHTTPStatus(err, 401) || isHTTPStatus(err, 403) {
-			t.Skipf("e2e: Policy.Get requires admin auth: %v", err)
-		}
+		skipIfUnauthorized(t, err, "Policy.Get")
 		t.Fatalf("Policy.Get failed: %v", err)
 	}
 
@@ -322,9 +317,7 @@ func TestE2E_PipesCRUD(t *testing.T) {
 		Description: "E2E test pipe — safe to delete",
 	}
 	if err := c.Pipes.Set(ctx, pipeName, def); err != nil {
-		if isHTTPStatus(err, 401) || isHTTPStatus(err, 403) {
-			t.Skipf("e2e: Pipes.Set requires admin auth: %v", err)
-		}
+		skipIfUnauthorized(t, err, "Pipes.Set")
 		t.Fatalf("Pipes.Set (create) failed: %v", err)
 	}
 
@@ -422,6 +415,15 @@ func buildMarkerRow(t *testing.T, ts TableSchema, mk string) map[string]any {
 		t.Skipf("e2e: table %q has no non-default string column for marker", ts.Name)
 	}
 	return row
+}
+
+// skipIfUnauthorized skips the test when err indicates a 401 or 403,
+// meaning the operation requires admin auth the current token lacks.
+func skipIfUnauthorized(t *testing.T, err error, op string) {
+	t.Helper()
+	if isHTTPStatus(err, 401) || isHTTPStatus(err, 403) {
+		t.Skipf("%s requires admin auth, skipping", op)
+	}
 }
 
 // isHTTPStatus checks whether err is a wavehouse.Error with the given status.

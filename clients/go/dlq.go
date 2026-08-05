@@ -13,23 +13,20 @@ type DLQNamespace struct {
 
 // List returns DLQ statistics (message counts per table). Admin-only.
 func (d *DLQNamespace) List(ctx context.Context) (*DLQStats, error) {
-	var stats DLQStats
-	if err := doRequest(ctx, d.ctx, requestOptions{
-		method: "GET",
-		path:   "/v1/dlq/stats",
-	}, &stats); err != nil {
-		return nil, err
-	}
-	return &stats, nil
+	return d.stats(ctx, nil)
 }
 
 // Table returns DLQ stats filtered by table name. Admin-only.
 func (d *DLQNamespace) Table(ctx context.Context, name string) (*DLQStats, error) {
+	return d.stats(ctx, url.Values{"table": {name}})
+}
+
+func (d *DLQNamespace) stats(ctx context.Context, params url.Values) (*DLQStats, error) {
 	var stats DLQStats
 	if err := doRequest(ctx, d.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/dlq/stats",
-		params: url.Values{"table": {name}},
+		params: params,
 	}, &stats); err != nil {
 		return nil, err
 	}

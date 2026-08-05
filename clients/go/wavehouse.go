@@ -14,6 +14,7 @@ package wavehouse
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 // Config configures a [Client].
@@ -135,8 +136,5 @@ func (c *Client) createStream(table string, opts *StreamOptions) *StreamControll
 }
 
 func trimTrailingSlashes(s string) string {
-	for len(s) > 0 && s[len(s)-1] == '/' {
-		s = s[:len(s)-1]
-	}
-	return s
+	return strings.TrimRight(s, "/")
 }

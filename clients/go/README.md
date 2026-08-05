@@ -200,19 +200,7 @@ go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen \
     --package myapp
 ```
 
-The CLI reads `/v1/schema` (admin-only) and maps ClickHouse types to Go types:
-
-| ClickHouse | Go |
-|---|---|
-| `String`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt8/16/32/64` | `uint8/16/32/64` |
-| `Int8/16/32/64` | `int8/16/32/64` |
-| `Float32/64` | `float32/64` |
-| `Bool` | `bool` |
-| `Nullable(T)` | `*T` |
-| `Array(T)` | `[]T` |
-| `Map(K,V)` | `map[K]V` |
-| `UInt128/256`, `Int128/256`, `Decimal*` | `string` |
+See the [full type mapping in the docs](https://wavehouse.dev/sdk/go/reference/#codegen-cli).
 
 ## Error Handling
 

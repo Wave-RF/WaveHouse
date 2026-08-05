@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+var errAborted = &Error{Status: 0, Code: "ABORTED", Message: "Request aborted", Retryable: false}
+
 // httpContext carries per-client state needed by every request.
 type httpContext struct {
 	baseURL    string
@@ -90,17 +92,12 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		if err != nil {
 			// Context cancellation — return immediately, no retry.
 			if ctx.Err() != nil {
-				return &Error{
-					Status:    0,
-					Code:      "ABORTED",
-					Message:   "Request aborted",
-					Retryable: false,
-				}
+				return errAborted
 			}
 			lastErr = networkError(err)
 			if attempt < maxAttempts-1 {
 				if sleepErr := sleepWithContext(ctx, backoff(attempt)); sleepErr != nil {
-					return &Error{Status: 0, Code: "ABORTED", Message: "Request aborted", Retryable: false}
+					return errAborted
 				}
 			}
 			continue
@@ -145,7 +142,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 					}
 				}
 				if sleepErr := sleepWithContext(ctx, delay); sleepErr != nil {
-					return &Error{Status: 0, Code: "ABORTED", Message: "Request aborted", Retryable: false}
+					return errAborted
 				}
 				lastErr = apiErr
 				continue
@@ -155,7 +152,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		// Retryable server errors (5xx).
 		if apiErr.Retryable && attempt < maxAttempts-1 {
 			if sleepErr := sleepWithContext(ctx, backoff(attempt)); sleepErr != nil {
-				return &Error{Status: 0, Code: "ABORTED", Message: "Request aborted", Retryable: false}
+				return errAborted
 			}
 			lastErr = apiErr
 			continue

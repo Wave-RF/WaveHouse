@@ -48,16 +48,8 @@ func newLiveQuery(
 				sub.Next(event)
 			}
 		},
-		Status: func(s StreamStatus) {
-			if sub.Status != nil {
-				sub.Status(s)
-			}
-		},
-		Error: func(err error) {
-			if sub.Error != nil {
-				sub.Error(err)
-			}
-		},
+		Status: sub.Status,
+		Error:  sub.Error,
 	})
 
 	// Step 2–5: Fetch historical and flush.

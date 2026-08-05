@@ -37,20 +37,10 @@ func TestNewClient_CustomMaxRetries(t *testing.T) {
 
 func TestNewClient_HasNamespaces(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://localhost:8080"})
-	if c.Schema == nil {
-		t.Fatal("Schema namespace nil")
-	}
-	if c.Policy == nil {
-		t.Fatal("Policy namespace nil")
-	}
-	if c.DLQ == nil {
-		t.Fatal("DLQ namespace nil")
-	}
-	if c.Sys == nil {
-		t.Fatal("Sys namespace nil")
-	}
-	if c.Pipes == nil {
-		t.Fatal("Pipes namespace nil")
+	for name, ns := range map[string]any{"Sys": c.Sys, "Schema": c.Schema, "Policy": c.Policy, "Pipes": c.Pipes, "DLQ": c.DLQ} {
+		if ns == nil {
+			t.Fatalf("%s namespace is nil", name)
+		}
 	}
 }
 

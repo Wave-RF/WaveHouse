@@ -35,61 +35,30 @@ every example on these pages assumes it.
 ## Quick Start
 
 ```go
-package main
-
 import (
     "context"
     "fmt"
-    "log"
 
     wavehouse "github.com/Wave-RF/WaveHouse/clients/go"
 )
 
-func main() {
-    ctx := context.Background()
+wh := wavehouse.NewClient(wavehouse.Config{
+    BaseURL: "http://localhost:8080",
+    Auth:    wavehouse.StaticToken("your-jwt"),
+})
 
-    // Create a client. Auth is optional — omit it for public/unauthenticated
-    // access (the server falls back to policy.default_role).
-    wh := wavehouse.NewClient(wavehouse.Config{
-        BaseURL: "http://localhost:8080",
-        Auth:    wavehouse.StaticToken("your-jwt"),
-    })
-
-    // Health check.
-    if err := wh.Sys.Health(ctx); err != nil {
-        log.Fatal(err)
-    }
-
-    // Insert a row.
-    if _, err := wh.From("clicks").Insert(ctx, map[string]any{
-        "page": "/home", "button": "signup",
-    }); err != nil {
-        log.Fatal(err)
-    }
-
-    // Query with the fluent builder.
-    page, err := wh.From("clicks").
-        Select("page", "button").
-        Where("page", wavehouse.OpEq, "/home").
-        Limit(10).
-        FetchUntyped(ctx)
-    if err != nil {
-        log.Fatal(err)
-    }
-    for _, row := range page.Data {
-        fmt.Println(row["page"], row["button"])
-    }
-
-    // Stream.
-    stream := wh.From("clicks").Stream(nil)
-    defer stream.Close()
-    unsub := stream.Subscribe(&wavehouse.StreamSubscriber{
-        Next:   func(e wavehouse.StreamEvent) { fmt.Println(e.Data) },
-        Status: func(s wavehouse.StreamStatus) { fmt.Println("Stream:", s) },
-    })
-    defer unsub()
+page, err := wh.From("clicks").
+    Select("page", "button").
+    Where("page", wavehouse.OpEq, "/home").
+    Limit(10).
+    FetchUntyped(context.Background())
+if err != nil { /* handle */ }
+for _, row := range page.Data {
+    fmt.Println(row["page"], row["button"])
 }
 ```
+
+See the [README](https://github.com/Wave-RF/WaveHouse/blob/main/clients/go/README.md) for more quick-start examples.
 
 ## Creating a Client
 
@@ -179,10 +148,7 @@ parameter.
 
 ## Error Handling
 
-Every SDK operation returns `(T, error)` — the idiomatic Go shape, and the
-direct equivalent of the TypeScript SDK's
-[`Result<T>`](/sdk#result-type) discriminated union. Errors are always
-`*wavehouse.Error`; unwrap with `errors.As`:
+All SDK operations return `(T, error)`. Errors are `*wavehouse.Error`; unwrap with `errors.As`:
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)
@@ -195,19 +161,7 @@ if err != nil {
 }
 ```
 
-```go
-type Error struct {
-    Status    int            // HTTP status (0 for network/abort errors)
-    Code      string         // e.g. "HTTP_400", "NETWORK_ERROR", "ABORTED"
-    Message   string         // Human-readable error message
-    Details   map[string]any // Parsed response body, if available
-    Retryable bool           // Whether the SDK would retry this error
-}
-```
-
-`wavehouse.IsRetryable(err)` is a shortcut for `errors.As` + `.Retryable`.
-The full error-code table lives in
-[Reference → Error Handling](/sdk/go/reference#error-handling).
+See [Reference → Error Handling](/sdk/go/reference/#error-handling) for retry behavior and error codes.
 
 ## Differences from the TypeScript SDK
 

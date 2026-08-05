@@ -82,42 +82,27 @@ func (q *QueryBuilder) Count(column, alias string) *QueryBuilder {
 
 // Sum adds a SUM aggregation.
 func (q *QueryBuilder) Sum(column, alias string) *QueryBuilder {
-	if alias == "" {
-		alias = "sum_" + column
-	}
-	return q.addAgg("sum", column, alias)
+	return q.aggDefault("sum", "sum_", column, alias)
 }
 
 // Avg adds an AVG aggregation.
 func (q *QueryBuilder) Avg(column, alias string) *QueryBuilder {
-	if alias == "" {
-		alias = "avg_" + column
-	}
-	return q.addAgg("avg", column, alias)
+	return q.aggDefault("avg", "avg_", column, alias)
 }
 
 // Min adds a MIN aggregation.
 func (q *QueryBuilder) Min(column, alias string) *QueryBuilder {
-	if alias == "" {
-		alias = "min_" + column
-	}
-	return q.addAgg("min", column, alias)
+	return q.aggDefault("min", "min_", column, alias)
 }
 
 // Max adds a MAX aggregation.
 func (q *QueryBuilder) Max(column, alias string) *QueryBuilder {
-	if alias == "" {
-		alias = "max_" + column
-	}
-	return q.addAgg("max", column, alias)
+	return q.aggDefault("max", "max_", column, alias)
 }
 
 // CountDistinct adds a COUNT DISTINCT aggregation.
 func (q *QueryBuilder) CountDistinct(column, alias string) *QueryBuilder {
-	if alias == "" {
-		alias = "count_distinct_" + column
-	}
-	return q.addAgg("countDistinct", column, alias)
+	return q.aggDefault("countDistinct", "count_distinct_", column, alias)
 }
 
 // Aggregate adds a custom aggregation function.
@@ -228,6 +213,13 @@ func (q *QueryBuilder) LiveQuery(sub *StreamSubscriber, opts *StreamOptions) *Li
 		return page.Data, nil
 	}
 	return newLiveQuery(stream, fetchFn, sub, q.state.filters)
+}
+
+func (q *QueryBuilder) aggDefault(fn, prefix, column, alias string) *QueryBuilder {
+	if alias == "" {
+		alias = prefix + column
+	}
+	return q.addAgg(fn, column, alias)
 }
 
 func (q *QueryBuilder) addAgg(fn, column, alias string) *QueryBuilder {
