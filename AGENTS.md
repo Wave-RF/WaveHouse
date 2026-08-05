@@ -60,7 +60,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 11. **Hasura-style access control: fail-closed (security)** — `policy.IsAdmin` (role == `admin_role`, **exact case-sensitive**, default `"admin"`) is the single admin check, shared by `Evaluate`/`ResolveRole`/`Validate`/the `/v1/admin` gate/`RoleAllowed`. Empty/absent role matches nothing (no `"*"` wildcard); `Validate` rejects empty role keys; a `nil` policy (deleted) denies **everyone incl. admin** via a role — a total lockout for token-based callers, so bootstrap from the policy file, never an implicit admin grant (**exception:** the operator key's `auth.IsOperator` bit passes the `/v1/admin` gate even under a `nil` policy — a deliberate break-glass restore over HTTP, see #7). `default_role` is the one sanctioned roleless exception (`ResolveRole` maps empty → it pre-eval); `default_role == admin_role` is permitted but dev-only and loudly warned (`policy.DefaultRoleGrantsAdmin`). Preserve when touching `internal/policy` (policy twin of #13; see #159). Detail: architecture.md § `policy/`.
 12. **Structured queries: column authz fail-closed (security)** — `POST /v1/query?table={table}`: typed AST validated against schema, permission-enforced, timestamp-bucketed for cache, `DefaultMaxRows` (10,000) cap. Every column reference — projection, aggregation args, `filters`, `group_by`, `order_by`, `time_range` — is authorized inside `query.Build` (the single chokepoint that enumerates them all), so no clause can skip the role's `allow_columns`/`deny_columns` check (#223). A `select_all` read by a *column-restricted* role expands to its allowed columns via `policy.AllowedProjection`, never a bare `SELECT *`; *unrestricted*/admin roles keep `SELECT *` (`policy.RestrictsColumns` decides). Omitting `columns` selects nothing (`ErrEmptyProjection` → `200 []`); `["*"]` is the literal column `*` (schema-gated, not a wildcard); a table-granted role with no readable columns fails closed (`ErrNoReadableColumns` → `403`). Structured and live-stream (`stream.filterColumns`) reads share the one per-column decision `policy.IsColumnAllowed`, so column visibility can't drift. Preserve when touching `internal/query` or the structured-query handler. Detail: architecture.md § `query/`.
 13. **Named query pipes: fail-closed (security)** — pre-defined SQL templates (Tinybird-style) with param binding + caching; `GET/POST /v1/pipes/{name}` sit outside `RequireAdmin`, so per-pipe `allowed_roles` is the *only* execute-path gate, via `policy.RoleAllowed`: exact allowlist membership (no `"*"`), admin always passes, empty/absent role and empty-string entries authorize nobody, and no `allowed_roles` → admin-only. Preserve and exercise via `testutil.RunRoleMatrix` / `StandardRoleMatrix` (see #159). Detail: architecture.md § `pipes/`.
-14. **TypeScript SDK** — `@wavehouse/sdk`: zero-dep client, typed query builder, real-time SSE, live queries (incrementable/decomposable/poll aggregation), codegen CLI. The canonical client (see §SDK Sync).
+14. **Client SDKs** — TypeScript (`@wavehouse/sdk` in `clients/ts/`) and Go (`wavehouse-go` in `clients/go/`) are both canonical, officially supported clients with full API-tree parity. Zero third-party runtime dependencies in both. Each ships a typed query builder, real-time SSE streaming, live queries, and a codegen CLI. See §SDK Sync.
 15. **Observability invariants** — stdout always 100% (sampling is OTLP-push-only); WARN+ERROR always export at 100% (a non-configurable floor — don't expose it); gRPC OTel exporters dial lazily so an unreachable collector never blocks startup; the OTel Prometheus exporter uses a **private** `prometheus.Registry`. The OTLP endpoint/TLS/custom-CA/mTLS/headers are delegated to the OpenTelemetry SDK's standard `OTEL_EXPORTER_OTLP_*` env vars — `InitProvider` passes **no** endpoint/header options. Known gap, intentionally not patched in WaveHouse app code: the pinned gRPC logs exporter (`otlploggrpc` v0.19/v0.20) ignores the env TLS-cert vars, so a custom/private CA and mutual TLS apply to traces/metrics but **not** the logs signal (public-CA/system-roots TLS and plaintext still work for logs) — upstream bug open-telemetry/opentelemetry-go#6661. A malformed `OTEL_EXPORTER_OTLP_HEADERS` is logged and skipped by the SDK (fail-soft), not fatal. Preserve when touching the logger/sampler/provider. Detail: architecture.md § `observability/`.
 16. **Bearer-token-only CORS posture (security)** — Bearer JWT on every request, no cookies/sessions; `corsMiddleware` deliberately **never** emits `Access-Control-Allow-Credentials` (not needed, and `*` + credentials is a spec violation browsers reject). `cors_allowed_origins` controls who can *read* responses, not cookie scope; CSRF protection is structural. Don't reintroduce cookie auth or `Allow-Credentials` without a design discussion — answers GitHub #29/#30. Code: `internal/api/router.go`.
 17. **Non-fatal boot** — schema-discovery failure on boot is non-fatal: `cmd/wavehouse` records an `api.BootState`, binds `:8080`, serves 503 on `/livez`/`/readyz` with the diagnostic, and retries via `SchemaRegistry.RetryRefresh` (backoff 2s → 60s). Bounds supervisor restart loops.
@@ -331,22 +331,22 @@ Diagrams render inside the Starlight content column (~46–58rem wide) as build-
 
 ## SDK Sync
 
-The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) is the canonical client and ships from this repo. When backend changes alter the public API surface, the SDK needs corresponding updates. The `pre-commit` git hook flags likely misses informationally; consult this table when deciding what to update.
+The TypeScript SDK (`@wavehouse/sdk` in `clients/ts/`) and Go SDK (`wavehouse-go` in `clients/go/`) are both canonical, officially supported clients. Both ship from this repo with full API-tree parity. When backend changes alter the public API surface, both SDKs need corresponding updates. The `pre-commit` git hook flags likely misses informationally; consult this table when deciding what to update.
 
 | Backend change | SDK considerations |
 | -------------- | ------------------ |
-| New user-facing API endpoint | Add a typed client method (in `clients/ts/src/client.ts` or the relevant subsystem file: `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`, etc.); update the matching SDK doc page under `docs/src/content/docs/sdk/` (`queries`, `streaming`, `pipes`, `admin`, or `reference` by topic — plus the API tree in `reference.md`) |
-| Change to JWT auth / role extraction | Update auth handling in `clients/ts/src/http.ts` and types in `clients/ts/src/client.ts` |
-| Change to `EventMessage` / ingest event format | Update payload types in `clients/ts/src/` (some are codegen-regenerated — re-run the SDK codegen CLI) |
-| New / changed structured query AST | Update `clients/ts/src/query-builder.ts` types + builder methods |
-| Change to live-query aggregation classification | Update live-query helpers in `clients/ts/src/stream/` |
-| Named pipes API change | Update `clients/ts/src/pipes.ts` |
-| Policy / access-control change | Update `clients/ts/src/policy.ts` |
-| ClickHouse schema-driven type changes | Re-run the SDK codegen CLI; commit regenerated types |
+| New user-facing API endpoint | Add a typed client method in **both** SDKs (TS: `clients/ts/src/` — `client.ts`, `query-builder.ts`, `pipes.ts`, `policy.ts`, `stream/`; Go: `clients/go/` — corresponding file). Update doc pages under `docs/src/content/docs/sdk/` for both `ts/` and `go/`. Add a wire case to `clients/go/testdata/wire_cases.json` with dispatch in both conformance runners. |
+| Change to JWT auth / role extraction | TS: `clients/ts/src/http.ts` + `client.ts`. Go: `clients/go/http.go` + `wavehouse.go`. |
+| Change to `EventMessage` / ingest event format | Update payload types in both SDKs (some are codegen-regenerated — re-run both codegen CLIs). |
+| New / changed structured query AST | TS: `clients/ts/src/query-builder.ts`. Go: `clients/go/query_builder.go` + `types.go`. |
+| Change to live-query aggregation classification | TS: `clients/ts/src/stream/`. Go: `clients/go/live_query.go`. |
+| Named pipes API change | TS: `clients/ts/src/pipes.ts`. Go: `clients/go/pipes.go`. |
+| Policy / access-control change | TS: `clients/ts/src/policy.ts`. Go: `clients/go/policy.go`. |
+| ClickHouse schema-driven type changes | Re-run both SDK codegen CLIs; commit regenerated types. |
 
 Internal-only backend changes (middleware refactors, observability internals, dedup implementation, sweeper logic, NATS plumbing) generally don't need SDK updates. Use judgement — table above is the source of truth; nothing automated nudges you.
 
-**The decision test**: would a `@wavehouse/sdk` user's *code* need to change to take advantage of (or be compatible with) this change? If yes, SDK update needed. If no (purely internal optimization), no.
+**The decision test**: would a user's *code* need to change to take advantage of (or be compatible with) this change? If yes, both SDKs need updates. If no (purely internal optimization), no.
 
 ## Common Tasks
 
@@ -387,6 +387,14 @@ Internal-only backend changes (middleware refactors, observability internals, de
 
 ```text
 cmd/                    → Binary entry points (thin — just wiring)
+clients/ts/             → TypeScript SDK (@wavehouse/sdk)
+clients/go/             → Go SDK (wavehouse-go)
+  wavehouse.go, http.go, errors.go, types.go       → Client core (constructor, transport, errors, shared types)
+  query_builder.go, table.go                        → Structured query builder + per-table typed client
+  stream.go, live_query.go                          → SSE streaming + live queries
+  pipes.go, policy.go, schema.go, dlq.go, sys.go   → Subsystem clients (pipes, policy, schema, DLQ, health)
+  cmd/wavehouse-codegen/main.go                     → Codegen CLI
+  testdata/wire_cases.json                          → Wire-format conformance fixtures
 internal/api/           → HTTP layer (handlers, router, middleware, schema/DLQ/policy/pipes endpoints)
 internal/auth/          → JWT/JWKS authentication middleware (HMAC or JWKS, role extraction from claims)
 internal/cache/         → Caching (interface + L1/L2/tiered implementations)

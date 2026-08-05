@@ -204,8 +204,8 @@ jobs:
         uses: ./.github/actions/setup-env
         with:
           go-cache-suffix: "-unit"
-      - name: Run Go unit tests + SDK vitest tests
-        run: make test-unit test-ts COV_DEFER=1
+      - name: Run Go unit tests + SDK vitest + Go SDK tests
+        run: make test-unit test-ts test-go-sdk COV_DEFER=1
       - name: Upload coverage fragment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
