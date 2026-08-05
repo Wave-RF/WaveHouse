@@ -276,4 +276,5 @@ Client GET /v1/stream
 | Embedded KV | Pebble | Optional deduplication |
 | Config | cleanenv | YAML + env var config loading |
 | Release | GoReleaser | Cross-platform binary builds |
+| Client SDKs | TypeScript, Go | Typed clients with the same feature set (ingest, query, pipes, streaming, admin) |
 | Containers | Docker (distroless) | Minimal production images |

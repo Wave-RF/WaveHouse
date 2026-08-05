@@ -7,6 +7,15 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
 
 `@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
 
+:::tip[Writing Go instead?]
+WaveHouse also ships an official Go SDK
+(`github.com/Wave-RF/WaveHouse/clients/go`) — zero third-party dependencies,
+`context.Context`-first, generics for typed rows. See the
+[Go SDK docs](/sdk/go). The two clients speak the same wire format, so
+everything below about tables, the query builder, streaming, and admin
+endpoints carries over conceptually — only the language idioms differ.
+:::
+
 ## Installation
 
 <Tabs syncKey="pkg">
@@ -409,5 +418,17 @@ The full error-code table lives in
     title="Reference & CLI"
     description="Error codes, AbortController, the full API tree, codegen, and E2E testing."
     href="/sdk/reference"
+  />
+</CardGrid>
+
+## Go SDK
+
+Prefer Go? The same server, the same wire format, an idiomatic Go client:
+
+<CardGrid>
+  <LinkCard
+    title="Go SDK"
+    description="Zero-dependency Go client — context.Context, generics for typed rows, and a codegen CLI."
+    href="/sdk/go"
   />
 </CardGrid>

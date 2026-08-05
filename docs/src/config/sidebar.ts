@@ -25,10 +25,15 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
     items: [
       { label: "API Reference", slug: "api" },
       {
-        // Topic-first SDK pages: when a second SDK language lands, these
-        // shared usage pages grow <Tabs syncKey="lang"> code tabs and each
-        // language gets its own setup/caveats page — the topic URLs never
-        // churn (decision in PR #313).
+        // Topic-first SDK pages: the multi-language plan on record (PR #313)
+        // was for a second language to grow <Tabs syncKey="lang"> on these
+        // shared pages instead of a parallel tree. The Go SDK launched as
+        // its own docs/src/content/docs/sdk/go/* tree instead — its API
+        // shape (context.Context, (T, error), generics on package-level
+        // funcs) diverges enough from the TS builder that shared prose read
+        // worse than dedicated pages. Revisit folding these into tabs if a
+        // third language lands and the duplication becomes a maintenance
+        // cost.
         label: "TypeScript SDK",
         items: [
           { label: "Overview", slug: "sdk" },
@@ -37,6 +42,17 @@ export const sidebar: StarlightUserConfig["sidebar"] = [
           { label: "Pipes", slug: "sdk/pipes" },
           { label: "Admin & System", slug: "sdk/admin" },
           { label: "Reference & CLI", slug: "sdk/reference" },
+        ],
+      },
+      {
+        label: "Go SDK",
+        items: [
+          { label: "Overview", slug: "sdk/go" },
+          { label: "Queries", slug: "sdk/go/queries" },
+          { label: "Streaming & Live Queries", slug: "sdk/go/streaming" },
+          { label: "Pipes", slug: "sdk/go/pipes" },
+          { label: "Admin & System", slug: "sdk/go/admin" },
+          { label: "Reference & CLI", slug: "sdk/go/reference" },
         ],
       },
     ],

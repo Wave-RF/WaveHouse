@@ -1,0 +1,233 @@
+---
+title: "Go SDK Reference & CLI"
+description: "Error codes, context cancellation, the full API tree, and the codegen CLI for the WaveHouse Go SDK."
+---
+
+Cross-cutting reference for `github.com/Wave-RF/WaveHouse/clients/go`:
+cancellation, the error model behind every SDK call's `(T, error)` return,
+the complete API tree at a glance, and the `wavehouse-codegen` tool that
+ships with the module. Compare with the TypeScript SDK's
+[Reference & CLI](/sdk/reference) page.
+
+## Context Cancellation
+
+Every non-streaming operation takes a `context.Context` as its first
+argument — Go's equivalent of the TypeScript SDK's `AbortSignal` support.
+Cancel it with a timeout or an explicit `cancel()`:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+page, err := wh.From("clicks").Fetch(ctx)
+var whErr *wavehouse.Error
+if errors.As(err, &whErr) && whErr.Code == "ABORTED" {
+    fmt.Println("Request timed out")
+}
+```
+
+Context cancellation returns immediately (no retry) with
+`&wavehouse.Error{Status: 0, Code: "ABORTED", Retryable: false}`.
+
+Streams work differently: `.Stream(opts)` doesn't take a `context.Context`
+at all — the returned `*StreamController` owns its own internal context and
+background goroutine, torn down explicitly via `.Close()`. See
+[Streaming](/sdk/go/streaming#streamoptions).
+
+---
+
+## Error Handling
+
+The SDK never panics on API or network failures — every operation returns
+`(T, error)`, and errors are always `*wavehouse.Error` (unwrap with
+`errors.As`). This is the direct Go equivalent of the TypeScript SDK's "the
+SDK never throws" guarantee.
+
+| Status | Code | Retryable | Description |
+|--------|------|-----------|--------------|
+| 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
+| 401 | `HTTP_401` | No | Missing or invalid JWT |
+| 403 | `HTTP_403` | No | Insufficient permissions |
+| 404 | `HTTP_404` | No | Table or pipe not found |
+| 500 | `HTTP_500` | Yes | Server error (retried per `ClientOptions.MaxRetries`) |
+| 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`) |
+| 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
+| 0 | `ABORTED` | No | Request canceled via `context.Context` |
+
+```go
+page, err := wh.From("clicks").Fetch(ctx)
+if err != nil {
+    var whErr *wavehouse.Error
+    if errors.As(err, &whErr) {
+        fmt.Println(whErr.Status, whErr.Code, whErr.Message, whErr.Retryable)
+    }
+    return err
+}
+```
+
+`wavehouse.IsRetryable(err)` is a shortcut for the `errors.As` + `.Retryable`
+check above.
+
+Retries apply uniformly to every HTTP method the SDK issues (not just GET) —
+matching the TypeScript SDK's `http.ts` behavior. For `/v1/ingest`,
+at-least-once delivery on retry is a documented contract (see the API
+docs' ["At-least-once on retry"](/api#post-v1ingesttabletable--ingest-data)
+note); dedup is the prescribed server-side safety net when duplicate
+suppression matters. `/v1/admin/query` (raw SQL) is gated by `admin_role`,
+so repeated execution on retry is an accepted risk for admin-only usage.
+
+---
+
+## Full API Tree
+
+```text
+NewClient(Config) → *Client
+├── .From(table) → *TableRef
+│   ├── .Fetch(ctx) → (*Page[map[string]any], error)
+│   ├── .Select(...cols) → *QueryBuilder
+│   │   ├── .Select() .SelectAll() .Where() .Count() .Sum() .Avg() .Min() .Max()
+│   │   │   .CountDistinct() .Aggregate() .GroupBy() .OrderBy()
+│   │   │   .Limit() .TimeRange() .CacheTTL()
+│   │   ├── FetchTyped[Row](ctx, q)  → (*Page[Row], error)          // package-level generic func
+│   │   ├── .FetchUntyped(ctx)       → (*Page[map[string]any], error)
+│   │   ├── .Stream(opts)            → *StreamController
+│   │   └── .LiveQuery(sub, opts)    → *LiveQueryHandle
+│   ├── .SelectAll() → *QueryBuilder
+│   ├── .Insert(ctx, data) → (*InsertResult, error)
+│   ├── .InsertNDJSON(ctx, ndjson) → (*InsertResult, error)
+│   ├── .Schema(ctx) → (*TableSchema, error)
+│   └── .Stream(opts) → *StreamController
+├── .Pipe(name, params) → *PipeRef
+│   ├── Fetch[Row](ctx, p) → ([]Row, error)          // package-level generic func
+│   ├── .FetchUntyped(ctx) → ([]map[string]any, error)
+│   └── .Stream(opts) → *StreamController
+├── .Pipes (admin) → *PipesNamespace
+│   ├── .List(ctx) → ([]Pipe, error)
+│   ├── .Get(ctx, name) → (*Pipe, error)
+│   ├── .Set(ctx, name, PipeDef) → error
+│   └── .Delete(ctx, name) → error
+├── SQL[Row](ctx, client, query) → ([]Row, error)     // package-level generic func, admin-only
+├── .Schema (admin) → *SchemaNamespace
+│   ├── .List(ctx) → (Schemas, error)
+│   └── .Refresh(ctx) → error
+├── .Policy (admin) → *PolicyNamespace
+│   ├── .Get(ctx) → (*Policy, error)
+│   ├── .Set(ctx, *Policy) → error
+│   └── .Validate(ctx, *Policy) → (*ValidationResult, error)
+├── .DLQ (admin) → *DLQNamespace
+│   ├── .List(ctx) → (*DLQStats, error)
+│   ├── .Table(ctx, name) → (*DLQStats, error)
+│   └── .Stream(opts) → *StreamController  // not yet functional server-side — #197
+└── .Sys → *SysNamespace
+    └── .Health(ctx) → error
+
+*StreamController
+├── .Subscribe(*StreamSubscriber) → func()  // unsubscribe
+├── .Events() → <-chan StreamEvent          // idiomatic Go alternative to an async iterator
+├── .Close()
+├── .Status() → StreamStatus
+└── .Connected(ctx) → error                 // Go-only addition, blocks until live
+```
+
+## Codegen CLI
+
+Generate Go structs from a running WaveHouse instance. The module ships a
+`wavehouse-codegen` command under `cmd/`:
+
+```bash
+go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen \
+    --url http://localhost:8080 \
+    --auth <admin-jwt> \
+    --out ./db_types.go \
+    --package myapp
+```
+
+Or, working inside this repo (`clients/go/`):
+
+```bash
+go run ./cmd/wavehouse-codegen --url http://localhost:8080 --out ./db_types.go
+```
+
+Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev
+server, pass an admin-role token with `--auth <jwt>` or the request is
+denied with `403`.
+
+**Options:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
+| `--out`, `-o` | Output `.go` file path | `./wavehouse_types.go` |
+| `--auth`, `-a` | Bearer token (if auth required) | — |
+| `--package`, `-p` | Go package name for the generated file | `main` |
+| `--help`, `-h` | Show usage and exit | — |
+
+The output is run through `go/format` before being written — if a table or
+column name would produce invalid Go source (rare, but possible with exotic
+names), codegen fails loudly instead of writing broken code.
+
+**Example output:**
+
+```go
+// Code generated by wavehouse-codegen. DO NOT EDIT.
+
+package myapp
+
+// ClicksRow represents a row in the "clicks" table.
+type ClicksRow struct {
+    EventID    string `json:"event_id"`
+    Page       string `json:"page"`
+    UserID     string `json:"user_id"`
+    DurationMS int    `json:"duration_ms"`
+    ReceivedTimestamp string `json:"received_timestamp"`
+}
+```
+
+Table and column names are converted to `PascalCase` for Go field/type names
+(a leading digit gets an `X` prefix — e.g. a table named `2fa_events`
+becomes `X2faEventsRow` — to stay a valid Go identifier). A column with
+`has_default: true` in the schema gets `,omitempty` appended to its JSON
+tag.
+
+**ClickHouse → Go type mapping:**
+
+| ClickHouse Type | Go Type |
+|------------------|---------|
+| `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum8`/`Enum16`, `IPv4`/`IPv6` | `string` |
+| `Bool` | `bool` |
+| `UInt8` / `UInt16` / `UInt32` / `UInt64` | `uint8` / `uint16` / `uint32` / `uint64` |
+| `Int8` / `Int16` / `Int32` / `Int64` | `int8` / `int16` / `int32` / `int64` |
+| `Float32` | `float32` |
+| `Float64` | `float64` |
+| `Decimal*`, `UInt128`/`UInt256`, `Int128`/`Int256` | `string` (big numbers are strings in JSON) |
+| `Nullable(T)` | `*T` |
+| `LowCardinality(T)` | same as `T` |
+| `Array(T)` | `[]T` |
+| `Map(K, V)` | `map[K]V` (falls back to `map[string]any` if `K`/`V` can't be split) |
+| anything unrecognized | `any` |
+
+This differs from the TypeScript SDK's mapping in one notable way: Go's
+codegen preserves ClickHouse's integer **widths** (`UInt32` → `uint32`, not
+a generic `number`), since Go — unlike TypeScript — has native fixed-width
+integer types.
+
+## Testing
+
+The Go SDK ships with unit tests colocated in `clients/go/` (its own Go
+module — `clients/go/go.mod` — separate from the root `WaveHouse` module),
+plus a wire-format **conformance suite**
+(`clients/go/conformance_test.go` + `clients/go/testdata/wire_cases.json`)
+that replays a shared fixture of builder calls and asserts the Go SDK
+produces the exact same HTTP method, path, content type, and body as the
+TypeScript SDK for each one — keeping the two clients honest about the wire
+format they both speak.
+
+```bash
+cd clients/go
+go test ./...
+```
+
+Unlike the TypeScript SDK, the Go SDK isn't (yet) wired into the repo's
+`make test-e2e` harness — see the TypeScript SDK's
+[E2E Testing](/sdk/reference#e2e-testing) section for that suite's
+architecture, which the Go client doesn't currently participate in.
