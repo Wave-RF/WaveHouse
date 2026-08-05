@@ -362,6 +362,10 @@ lint: lint-go lint-ts lint-md lint-prose ## Lint across Go (golangci-lint) + TS/
 lint-go: $(GOLANGCI_LINT) go-mod-download
 	$(call run,golangci-lint,$(GOLANGCI_LINT) run ./... --allow-parallel-runners,run make fix to auto-fix what is fixable)
 
+.PHONY: lint-go-sdk
+lint-go-sdk: $(GOLANGCI_LINT)
+	$(call run,golangci-lint (Go SDK),cd clients/go && $(GOLANGCI_LINT) run ./...,)
+
 .PHONY: lint-ts
 lint-ts: pnpm-install
 	$(call run,Biome (lint + format + imports),$(PNPM) -s -w run check,run make fix to auto-fix what is fixable)
@@ -424,6 +428,18 @@ endif
 tidy: ## Verify go.mod/go.sum are tidy (run `make fix` to apply)
 	$(call run,go.mod tidy,go mod tidy -diff,run make fix to tidy go.mod and go.sum)
 
+# verify-go-sdk: static checks for clients/go/ — a nested Go module (its own
+# go.mod), so it's invisible to `go list ./...` from the root and every leaf
+# above (GO_DIRS, lint-go, vulncheck, tidy) silently skips it. Scoped and run
+# explicitly here instead. `go vet` needs its own module context (cd
+# clients/go), but gofumpt is a pure syntax formatter with no module
+# resolution of its own, so the repo-pinned $(GOFUMPT) binary can format it
+# directly by path from the root — no second tool pin needed.
+.PHONY: verify-go-sdk
+verify-go-sdk: ## Static checks for the Go SDK (clients/go, a nested module) — go vet + gofumpt
+	$(call run,go vet (Go SDK),cd clients/go && go vet ./...,)
+	$(call run,gofumpt (Go SDK),$(GOFUMPT) -l clients/go | (! grep .),run make fix to apply formatting)
+
 # fix: apply auto-fixes everywhere, fanned out into three tracks that touch
 # disjoint files — Go (.go + go.mod/sum), TS/JS/JSON (Biome), Markdown — so they
 # run in parallel safely. The Go track is itself a serial chain (tidy → gofumpt →
@@ -467,7 +483,8 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (9): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck on the Go
+# Leaves (10): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck,
+# verify-go-sdk (go vet + gofumpt on the nested clients/go module) on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) for JS/TS + Markdown + prose;
 # check-docs (astro check — the only leaf that writes, to docs/.astro/, and
@@ -483,7 +500,7 @@ verify: ## Run all static checks across the repo (Go + TS + docs, parallelized)
 	@printf "$(GREEN)$(BOLD)✔ All static checks passed$(RESET)\n"
 
 .PHONY: verify-parallel
-verify-parallel: tidy fmt-go lint-go lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths vulncheck check-docs typecheck-ts
+verify-parallel: tidy fmt-go lint-go lint-go-sdk lint-ts lint-md lint-prose lint-sh lint-gha test-classify-paths vulncheck check-docs typecheck-ts verify-go-sdk
 
 # typecheck-ts: tsc --noEmit on the SDK. Its own target (was inline in verify's
 # recipe) so it can run as a parallel leaf of verify-parallel.
@@ -713,6 +730,28 @@ test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against sui
 		$(if $(COV_DEFER),,--coverage.thresholds.statements=$$(go run ./scripts/cov threshold ts-unit)) $(ARGS)
 	@if [ -z "$(COV_DEFER)" ]; then printf "$(GREEN)==> ts-unit gate passed$(RESET)  HTML: tmp/coverage/ts-unit/index.html\n"; fi
 
+# test-go-sdk: unit tests for clients/go/ — a nested Go module (its own
+# go.mod), so it's outside test-unit's ./internal/... ./cmd/... scope and
+# needs its own leaf; a root `go test ./...` wouldn't reach it either. Zero
+# third-party runtime or test deps (stdlib only, no go.sum), so no
+# go-mod-download prereq. Not yet wired into the Go/TS coverage gate — see
+# verify-go-sdk above for the same "nested module, own leaf" reasoning.
+.PHONY: test-go-sdk
+test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests
+	@printf "$(CYAN)==> Running Go SDK tests...$(RESET)\n"
+	@cd clients/go && go test ./...
+
+# test-go-sdk-e2e: runs the Go SDK's E2E tests against a live WaveHouse
+# instance. Requires a running server (e.g. `make dev` in the main repo).
+# Env vars:
+#   WAVEHOUSE_URL   base URL of the server    (default: http://localhost:8080)
+#   WAVEHOUSE_AUTH  bearer token for auth      (optional; omit for default_role)
+# The tests skip gracefully when the server is unreachable.
+.PHONY: test-go-sdk-e2e
+test-go-sdk-e2e: ## Run Go SDK E2E tests against a live WaveHouse instance (WAVEHOUSE_URL, WAVEHOUSE_AUTH)
+	@printf "$(CYAN)==> Running Go SDK E2E tests...$(RESET)\n"
+	@cd clients/go && go test -tags e2e -v -count=1 -timeout 60s ./...
+
 # Aggregator: recipe-based with $(MAKE) calls so suites run sequentially even
 # under `make -j N`. The suites bind ports / spin testcontainers / start the
 # release binary, so concurrent execution is unsafe.
@@ -749,7 +788,7 @@ cov: ## Consolidated coverage report (Go + TS) + gate against thresholds (auto-r
 # marker that standalone `make verify` writes is instead written by ci's own
 # `ci-marker.sh write` below — it touches both the ci and verify markers.
 .PHONY: ci-parallel
-ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts
+ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts test-go-sdk
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage
