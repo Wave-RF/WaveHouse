@@ -34,7 +34,7 @@ type requestOptions struct {
 
 // doRequest is the internal fetch wrapper with auth, retry, and backoff.
 // It decodes the response body into dst (unless dst is nil).
-func doRequest(hctx httpContext, ctx context.Context, opts requestOptions, dst any) error {
+func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst any) error {
 	reqURL := buildURL(hctx.baseURL, opts.path, opts.params)
 	ct := opts.contentType
 	if ct == "" {
@@ -107,7 +107,7 @@ func doRequest(hctx httpContext, ctx context.Context, opts requestOptions, dst a
 		}
 
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			if dst == nil {
 				_, _ = io.Copy(io.Discard, res.Body)
 				return nil
@@ -131,7 +131,7 @@ func doRequest(hctx httpContext, ctx context.Context, opts requestOptions, dst a
 		}
 
 		apiErr := parseErrorResponse(res)
-		res.Body.Close()
+		_ = res.Body.Close()
 
 		// 503 with Retry-After: wait the specified duration.
 		if res.StatusCode == http.StatusServiceUnavailable {

@@ -14,7 +14,7 @@ type DLQNamespace struct {
 // List returns DLQ statistics (message counts per table). Admin-only.
 func (d *DLQNamespace) List(ctx context.Context) (*DLQStats, error) {
 	var stats DLQStats
-	if err := doRequest(d.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, d.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/dlq/stats",
 	}, &stats); err != nil {
@@ -26,7 +26,7 @@ func (d *DLQNamespace) List(ctx context.Context) (*DLQStats, error) {
 // Table returns DLQ stats filtered by table name. Admin-only.
 func (d *DLQNamespace) Table(ctx context.Context, name string) (*DLQStats, error) {
 	var stats DLQStats
-	if err := doRequest(d.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, d.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/dlq/stats",
 		params: url.Values{"table": {name}},

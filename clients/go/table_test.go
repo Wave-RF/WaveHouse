@@ -14,8 +14,8 @@ func TestTableRef_InsertSingle(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), map[string]any{"page": "/home"})
@@ -40,7 +40,7 @@ func TestTableRef_InsertBatch(t *testing.T) {
 		gotCT = r.Header.Get("Content-Type")
 		raw, _ := io.ReadAll(r.Body)
 		gotBody = string(raw)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"total": 2, "succeeded": 2, "failed": 0, "duplicates": 0,
 		})
 	}))
@@ -79,7 +79,7 @@ func TestTableRef_InsertTypedSlice(t *testing.T) {
 		gotCT = r.Header.Get("Content-Type")
 		raw, _ := io.ReadAll(r.Body)
 		gotBody = string(raw)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"total": 2, "succeeded": 1, "failed": 1, "duplicates": 0,
 		})
 	}))
@@ -114,7 +114,7 @@ func TestTableRef_InsertByteSliceNotBatch(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), []byte(`{"page":"/home"}`))
@@ -151,7 +151,7 @@ func TestTableRef_InsertNDJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		gotBody = string(raw)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"total": 2, "succeeded": 2, "failed": 0, "duplicates": 0,
 		})
 	}))
@@ -174,7 +174,7 @@ func TestTableRef_Schema(t *testing.T) {
 		if r.URL.Query().Get("table") != "clicks" {
 			t.Errorf("want table=clicks")
 		}
-		json.NewEncoder(w).Encode(TableSchema{
+		_ = json.NewEncoder(w).Encode(TableSchema{
 			Name: "clicks",
 			Columns: []Column{
 				{Name: "page", Type: "String"},
@@ -196,7 +196,7 @@ func TestTableRef_Schema(t *testing.T) {
 
 func TestTableRef_InsertDuplicate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"duplicate": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"duplicate": true})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), map[string]any{"page": "/dup"})

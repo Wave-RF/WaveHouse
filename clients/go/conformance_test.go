@@ -64,31 +64,31 @@ func TestConformance_WireFormat(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			var cap captured
+			var capt captured
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				cap.method = r.Method
-				cap.path = r.URL.RequestURI()
-				cap.contentType = r.Header.Get("Content-Type")
+				capt.method = r.Method
+				capt.path = r.URL.RequestURI()
+				capt.contentType = r.Header.Get("Content-Type")
 				raw, _ := io.ReadAll(r.Body)
-				cap.body = string(raw)
+				capt.body = string(raw)
 
 				// Return valid JSON so the SDK doesn't error on decode.
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case strings.HasPrefix(r.URL.Path, "/v1/dlq"):
-					json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{}, Total: 0})
+					_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{}, Total: 0})
 				case strings.HasPrefix(r.URL.Path, "/v1/schema") && r.Method == "GET":
-					json.NewEncoder(w).Encode([]TableSchema{})
+					_ = json.NewEncoder(w).Encode([]TableSchema{})
 				case r.URL.Path == "/v1/admin/policy/validate" && r.Method == "POST":
-					json.NewEncoder(w).Encode(ValidationResult{Valid: true})
+					_ = json.NewEncoder(w).Encode(ValidationResult{Valid: true})
 				case strings.HasPrefix(r.URL.Path, "/v1/admin/policy") && r.Method == "GET":
-					json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
+					_ = json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
 				case strings.HasPrefix(r.URL.Path, "/v1/admin/pipes/") && r.Method == "GET":
-					json.NewEncoder(w).Encode(Pipe{Name: "test", SQL: "SELECT 1"})
+					_ = json.NewEncoder(w).Encode(Pipe{Name: "test", SQL: "SELECT 1"})
 				case r.URL.Path == "/v1/admin/pipes" && r.Method == "GET":
-					json.NewEncoder(w).Encode([]Pipe{})
+					_ = json.NewEncoder(w).Encode([]Pipe{})
 				default:
-					json.NewEncoder(w).Encode([]map[string]any{})
+					_ = json.NewEncoder(w).Encode([]map[string]any{})
 				}
 			}))
 			defer srv.Close()
@@ -186,29 +186,29 @@ func TestConformance_WireFormat(t *testing.T) {
 			}
 
 			// Verify method.
-			if tc.ExpectedMethod != "" && cap.method != tc.ExpectedMethod {
-				t.Errorf("method: want %s, got %s", tc.ExpectedMethod, cap.method)
+			if tc.ExpectedMethod != "" && capt.method != tc.ExpectedMethod {
+				t.Errorf("method: want %s, got %s", tc.ExpectedMethod, capt.method)
 			}
 
 			// Verify path.
 			if tc.ExpectedPath != "" {
 				// Normalize: the SDK may use different encoding (+ vs %20).
 				wantPath := normalizePath(tc.ExpectedPath)
-				gotPath := normalizePath(cap.path)
+				gotPath := normalizePath(capt.path)
 				if wantPath != gotPath {
-					t.Errorf("path: want %s, got %s", tc.ExpectedPath, cap.path)
+					t.Errorf("path: want %s, got %s", tc.ExpectedPath, capt.path)
 				}
 			}
 
 			// Verify content type.
-			if tc.ExpectedContentType != "" && cap.contentType != tc.ExpectedContentType {
-				t.Errorf("content-type: want %s, got %s", tc.ExpectedContentType, cap.contentType)
+			if tc.ExpectedContentType != "" && capt.contentType != tc.ExpectedContentType {
+				t.Errorf("content-type: want %s, got %s", tc.ExpectedContentType, capt.contentType)
 			}
 
 			// Verify raw body (for NDJSON).
 			if tc.ExpectedRawBody != nil {
-				if cap.body != *tc.ExpectedRawBody {
-					t.Errorf("raw body:\n  want: %s\n  got:  %s", *tc.ExpectedRawBody, cap.body)
+				if capt.body != *tc.ExpectedRawBody {
+					t.Errorf("raw body:\n  want: %s\n  got:  %s", *tc.ExpectedRawBody, capt.body)
 				}
 				return
 			}
@@ -219,8 +219,8 @@ func TestConformance_WireFormat(t *testing.T) {
 				if err := json.Unmarshal(tc.ExpectedBody, &want); err != nil {
 					t.Fatalf("parse expected_body: %v", err)
 				}
-				if err := json.Unmarshal([]byte(cap.body), &got); err != nil {
-					t.Fatalf("parse captured body: %v (body: %s)", err, cap.body)
+				if err := json.Unmarshal([]byte(capt.body), &got); err != nil {
+					t.Fatalf("parse captured body: %v (body: %s)", err, capt.body)
 				}
 				if !deepEqualJSON(want, got) {
 					wantJSON, _ := json.MarshalIndent(want, "", "  ")

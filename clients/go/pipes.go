@@ -13,7 +13,7 @@ type PipesNamespace struct {
 // List returns all registered pipes. Admin-only.
 func (p *PipesNamespace) List(ctx context.Context) ([]Pipe, error) {
 	var pipes []Pipe
-	if err := doRequest(p.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/admin/pipes",
 	}, &pipes); err != nil {
@@ -25,7 +25,7 @@ func (p *PipesNamespace) List(ctx context.Context) ([]Pipe, error) {
 // Get returns a single pipe definition by name. Admin-only.
 func (p *PipesNamespace) Get(ctx context.Context, name string) (*Pipe, error) {
 	var pipe Pipe
-	if err := doRequest(p.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/admin/pipes/" + url.PathEscape(name),
 	}, &pipe); err != nil {
@@ -36,7 +36,7 @@ func (p *PipesNamespace) Get(ctx context.Context, name string) (*Pipe, error) {
 
 // Set creates or updates a pipe. Admin-only.
 func (p *PipesNamespace) Set(ctx context.Context, name string, def PipeDef) error {
-	return doRequest(p.ctx, ctx, requestOptions{
+	return doRequest(ctx, p.ctx, requestOptions{
 		method: "PUT",
 		path:   "/v1/admin/pipes/" + url.PathEscape(name),
 		body:   def,
@@ -45,7 +45,7 @@ func (p *PipesNamespace) Set(ctx context.Context, name string, def PipeDef) erro
 
 // Delete removes a pipe by name. Admin-only.
 func (p *PipesNamespace) Delete(ctx context.Context, name string) error {
-	return doRequest(p.ctx, ctx, requestOptions{
+	return doRequest(ctx, p.ctx, requestOptions{
 		method: "DELETE",
 		path:   "/v1/admin/pipes/" + url.PathEscape(name),
 	}, nil)
@@ -74,7 +74,7 @@ func Fetch[Row any](ctx context.Context, p *PipeRef) ([]Row, error) {
 		body = map[string]any{}
 	}
 	var rows []Row
-	if err := doRequest(p.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "POST",
 		path:   "/v1/pipes/" + url.PathEscape(p.name),
 		body:   body,

@@ -118,7 +118,7 @@ func (c *Client) Pipe(name string, params map[string]any) *PipeRef {
 // are decoded into []T; use [map[string]any] for dynamic schemas.
 func SQL[Row any](ctx context.Context, c *Client, query string) ([]Row, error) {
 	var rows []Row
-	err := doRequest(c.ctx, ctx, requestOptions{
+	err := doRequest(ctx, c.ctx, requestOptions{
 		method: "POST",
 		path:   "/v1/admin/query",
 		body:   map[string]string{"sql": query},

@@ -11,7 +11,7 @@ type SchemaNamespace struct {
 func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
 	// The backend returns []TableSchema; transform to map[string]TableSchema.
 	var raw []TableSchema
-	if err := doRequest(s.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, s.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/schema",
 	}, &raw); err != nil {
@@ -26,7 +26,7 @@ func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
 
 // Refresh forces a schema re-discovery from ClickHouse. Admin-only.
 func (s *SchemaNamespace) Refresh(ctx context.Context) error {
-	return doRequest(s.ctx, ctx, requestOptions{
+	return doRequest(ctx, s.ctx, requestOptions{
 		method: "POST",
 		path:   "/v1/schema/refresh",
 	}, nil)

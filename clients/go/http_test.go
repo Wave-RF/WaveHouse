@@ -22,11 +22,11 @@ func testCtx(handler http.Handler) httpContext {
 func TestDoRequest_SuccessfulGET(t *testing.T) {
 	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 
 	var result map[string]string
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "GET",
 		path:   "/health",
 	}, &result)
@@ -43,11 +43,11 @@ func TestDoRequest_POSTWithBody(t *testing.T) {
 	var gotCT string
 	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("Content-Type")
-		json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(200)
 	}))
 
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "POST",
 		path:   "/v1/ingest",
 		body:   map[string]string{"page": "/home"},
@@ -71,10 +71,10 @@ func TestDoRequest_RawBody(t *testing.T) {
 		raw := make([]byte, 1024)
 		n, _ := r.Body.Read(raw)
 		gotBody = string(raw[:n])
-		json.NewEncoder(w).Encode(map[string]int{"total": 1})
+		_ = json.NewEncoder(w).Encode(map[string]int{"total": 1})
 	}))
 
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method:      "POST",
 		path:        "/v1/ingest",
 		rawBody:     `{"page":"/a"}`,
@@ -99,7 +99,7 @@ func TestDoRequest_AuthInjection(t *testing.T) {
 	}))
 	hctx.auth = StaticToken("my-token")
 
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "GET",
 		path:   "/v1/schema",
 	}, nil)
@@ -117,11 +117,11 @@ func TestDoRequest_4xxNotRetried(t *testing.T) {
 		count.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(404)
-		json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
 	}))
 	hctx.maxRetries = 2
 
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "GET",
 		path:   "/v1/schema",
 	}, nil)
@@ -141,15 +141,15 @@ func TestDoRequest_5xxRetried(t *testing.T) {
 		if n < 3 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
 	}))
 	hctx.maxRetries = 2
 
 	var result map[string]string
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "GET",
 		path:   "/health",
 	}, &result)
@@ -169,7 +169,7 @@ func TestDoRequest_AbortedOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	err := doRequest(hctx, ctx, requestOptions{
+	err := doRequest(ctx, hctx, requestOptions{
 		method: "GET",
 		path:   "/health",
 	}, nil)
@@ -185,7 +185,7 @@ func TestDoRequest_EmptyResponse(t *testing.T) {
 	}))
 
 	var result map[string]string
-	err := doRequest(hctx, context.Background(), requestOptions{
+	err := doRequest(context.Background(), hctx, requestOptions{
 		method: "POST",
 		path:   "/v1/schema/refresh",
 	}, &result)

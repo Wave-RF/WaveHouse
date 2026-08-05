@@ -174,7 +174,7 @@ func FetchTyped[Row any](ctx context.Context, q *QueryBuilder) (*Page[Row], erro
 	ast := q.buildAST(limit)
 
 	var rows []Row
-	if err := doRequest(q.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, q.ctx, requestOptions{
 		method: "POST",
 		path:   "/v1/query",
 		params: url.Values{"table": {q.state.table}},
@@ -244,11 +244,12 @@ func (q *QueryBuilder) buildAST(effectiveLimit int) *StructuredQuery {
 	// Projection: explicit select_all, then explicit columns, else — for a bare
 	// query with no projection and no aggregations — default to select_all so
 	// from(t).fetch() returns rows.
-	if q.state.selectAll {
+	switch {
+	case q.state.selectAll:
 		ast.SelectAll = true
-	} else if hasColumns {
+	case hasColumns:
 		ast.Columns = q.state.columns
-	} else if !hasAggs {
+	case !hasAggs:
 		ast.SelectAll = true
 	}
 

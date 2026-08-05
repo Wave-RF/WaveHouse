@@ -78,7 +78,7 @@ func (t *TableRef) InsertNDJSON(ctx context.Context, ndjson string) (*InsertResu
 // Schema returns the table's column definitions from ClickHouse. Admin-only.
 func (t *TableRef) Schema(ctx context.Context) (*TableSchema, error) {
 	var schema TableSchema
-	if err := doRequest(t.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, t.ctx, requestOptions{
 		method: "GET",
 		path:   "/v1/schema",
 		params: url.Values{"table": {t.table}},
@@ -98,7 +98,7 @@ func (t *TableRef) insertSingle(ctx context.Context, data any) (*InsertResult, e
 		OK        *bool `json:"ok"`
 		Duplicate *bool `json:"duplicate"`
 	}
-	if err := doRequest(t.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, t.ctx, requestOptions{
 		method: "POST",
 		path:   "/v1/ingest",
 		params: url.Values{"table": {t.table}},
@@ -182,7 +182,7 @@ func (t *TableRef) sendNDJSON(ctx context.Context, ndjson string) (*InsertResult
 		Duplicates int                  `json:"duplicates"`
 		Results    []InsertRecordResult `json:"results"`
 	}
-	if err := doRequest(t.ctx, ctx, requestOptions{
+	if err := doRequest(ctx, t.ctx, requestOptions{
 		method:      "POST",
 		path:        "/v1/ingest",
 		params:      url.Values{"table": {t.table}},

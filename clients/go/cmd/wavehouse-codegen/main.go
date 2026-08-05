@@ -89,7 +89,7 @@ func fetchSchemas(ctx context.Context, baseURL, auth string) (map[string]tableSc
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("schema fetch failed: HTTP %d", resp.StatusCode)
 	}
@@ -329,7 +329,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := os.WriteFile(args.out, formatted, 0o644); err != nil {
+	if err := os.WriteFile(args.out, formatted, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", args.out, err)
 		os.Exit(1)
 	}

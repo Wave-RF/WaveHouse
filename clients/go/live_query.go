@@ -21,7 +21,7 @@ func newLiveQuery(
 	sub *StreamSubscriber,
 	filters []QueryFilter,
 ) *LiveQueryHandle {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is called in Close()
 	lq := &LiveQueryHandle{
 		stream: stream,
 		cancel: cancel,

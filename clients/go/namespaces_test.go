@@ -35,7 +35,7 @@ func TestSchemaNamespace_List(t *testing.T) {
 		if r.URL.Path != "/v1/schema" {
 			t.Errorf("want /v1/schema, got %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode([]TableSchema{
+		_ = json.NewEncoder(w).Encode([]TableSchema{
 			{Name: "clicks", Columns: []Column{{Name: "page", Type: "String"}}},
 		})
 	}))
@@ -65,13 +65,13 @@ func TestSchemaNamespace_Refresh(t *testing.T) {
 
 func TestPolicyNamespace_GetSetValidate(t *testing.T) {
 	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "GET":
-			json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
-		case r.Method == "PUT":
+		switch r.Method {
+		case "GET":
+			_ = json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
+		case "PUT":
 			w.WriteHeader(200)
-		case r.Method == "POST":
-			json.NewEncoder(w).Encode(ValidationResult{Valid: true})
+		case "POST":
+			_ = json.NewEncoder(w).Encode(ValidationResult{Valid: true})
 		}
 	}))
 
@@ -99,7 +99,7 @@ func TestPolicyNamespace_GetSetValidate(t *testing.T) {
 
 func TestDLQNamespace_List(t *testing.T) {
 	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
+		_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
 	}))
 	stats, err := c.DLQ.List(context.Background())
 	if err != nil {
@@ -114,7 +114,7 @@ func TestDLQNamespace_Table(t *testing.T) {
 	var gotParam string
 	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotParam = r.URL.Query().Get("table")
-		json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2})
+		_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2})
 	}))
 	_, err := c.DLQ.Table(context.Background(), "clicks")
 	if err != nil {
@@ -130,9 +130,9 @@ func TestPipesNamespace_CRUD(t *testing.T) {
 		switch r.Method {
 		case "GET":
 			if r.URL.Path == "/v1/admin/pipes" {
-				json.NewEncoder(w).Encode([]Pipe{{Name: "p1", SQL: "SELECT 1"}})
+				_ = json.NewEncoder(w).Encode([]Pipe{{Name: "p1", SQL: "SELECT 1"}})
 			} else {
-				json.NewEncoder(w).Encode(Pipe{Name: "p1", SQL: "SELECT 1"})
+				_ = json.NewEncoder(w).Encode(Pipe{Name: "p1", SQL: "SELECT 1"})
 			}
 		case "PUT":
 			w.WriteHeader(200)
@@ -174,8 +174,8 @@ func TestPipeRef_Fetch(t *testing.T) {
 	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotMethod = r.Method
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode([]map[string]any{{"count": 42}})
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"count": 42}})
 	}))
 	rows, err := Fetch[map[string]any](context.Background(), c.Pipe("top_pages", map[string]any{"limit": 10}))
 	if err != nil {

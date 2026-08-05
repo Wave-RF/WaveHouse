@@ -47,7 +47,7 @@ func parseErrorResponse(res *http.Response) *Error {
 		_ = json.Unmarshal(raw, &body)
 	}
 
-	msg := ""
+	var msg string
 	if s, ok := body["error"].(string); ok {
 		msg = s
 	} else if s, ok := body["message"].(string); ok {

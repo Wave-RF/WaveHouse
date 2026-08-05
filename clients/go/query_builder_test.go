@@ -30,14 +30,14 @@ func captureQueryBody(t *testing.T, handler http.Handler) (*Client, func() map[s
 	c, _ := queryTestCtx(wrapper)
 	return c, func() map[string]any {
 		var m map[string]any
-		json.Unmarshal(body, &m)
+		_ = json.Unmarshal(body, &m)
 		return m
 	}
 }
 
 var emptyRows = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode([]map[string]any{{"page": "/home"}})
+	_ = json.NewEncoder(w).Encode([]map[string]any{{"page": "/home"}})
 })
 
 func TestQueryBuilder_Immutability(t *testing.T) {
@@ -199,7 +199,7 @@ func TestQueryBuilder_TimeRange(t *testing.T) {
 
 func TestQueryBuilder_Pagination_HasMore(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client(), Options: &ClientOptions{MaxRetries: 0}})
 
@@ -217,7 +217,7 @@ func TestQueryBuilder_Pagination_HasMore(t *testing.T) {
 
 func TestQueryBuilder_Pagination_NoOrderNoNext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client(), Options: &ClientOptions{MaxRetries: 0}})
 

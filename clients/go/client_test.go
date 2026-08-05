@@ -60,7 +60,7 @@ func TestClient_From(t *testing.T) {
 		if r.URL.Query().Get("table") != "events" {
 			t.Errorf("want table=events, got %s", r.URL.Query().Get("table"))
 		}
-		json.NewEncoder(w).Encode([]map[string]any{})
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	_, _ = c.From("events").Fetch(context.Background())
@@ -72,11 +72,11 @@ func TestClient_SQL(t *testing.T) {
 			t.Errorf("want /v1/admin/query, got %s", r.URL.Path)
 		}
 		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body["sql"] != "SELECT 1" {
 			t.Errorf("want sql=SELECT 1, got %s", body["sql"])
 		}
-		json.NewEncoder(w).Encode([]map[string]any{{"x": 1}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"x": 1}})
 	}))
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	rows, err := SQL[map[string]any](context.Background(), c, "SELECT 1")
