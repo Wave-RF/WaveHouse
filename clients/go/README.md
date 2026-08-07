@@ -194,7 +194,7 @@ Generate Go structs from a running WaveHouse instance:
 
 ```bash
 export WAVEHOUSE_AUTH=<admin-jwt>   # avoids leaking the token via argv
-go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen \
+go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
     --url http://localhost:8080 \
     --out ./db_types.go \
     --package myapp

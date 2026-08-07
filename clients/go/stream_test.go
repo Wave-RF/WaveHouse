@@ -245,7 +245,8 @@ func TestEvaluateFilter(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := evaluateFilter(tt.actual, tt.op, tt.expected); got != tt.want {
+			cf := compileFilters([]QueryFilter{{Column: "c", Op: tt.op, Value: tt.expected}})[0]
+			if got := evaluateFilter(tt.actual, tt.op, tt.expected, cf.re); got != tt.want {
 				t.Errorf("evaluateFilter(%v, %q, %v) = %v, want %v", tt.actual, tt.op, tt.expected, got, tt.want)
 			}
 		})
@@ -258,11 +259,11 @@ func TestMatchesFilters_AllMustMatch(t *testing.T) {
 		{Column: "page", Op: "eq", Value: "/home"},
 		{Column: "score", Op: "gt", Value: 5},
 	}
-	if !matchesFilters(row, both) {
+	if !matchesFilters(row, compileFilters(both)) {
 		t.Fatal("want match when every filter passes")
 	}
 	oneFails := append(append([]QueryFilter(nil), both...), QueryFilter{Column: "score", Op: "gt", Value: 99})
-	if matchesFilters(row, oneFails) {
+	if matchesFilters(row, compileFilters(oneFails)) {
 		t.Fatal("want no match when any filter fails")
 	}
 	if !matchesFilters(row, nil) {

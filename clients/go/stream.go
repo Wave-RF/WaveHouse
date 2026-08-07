@@ -396,6 +396,7 @@ func (sc *StreamController) handleSSEData(data, eventID string) {
 // newFilteredStreamController wraps a StreamController with client-side
 // filtering and column projection.
 func newFilteredStreamController(inner *StreamController, filters []QueryFilter, columns []string) *StreamController {
+	compiled := compileFilters(filters)
 	ctx, cancel := context.WithCancel(context.Background())
 	sc := &StreamController{
 		status:  inner.Status(),
@@ -416,7 +417,7 @@ func newFilteredStreamController(inner *StreamController, filters []QueryFilter,
 
 		unsub := inner.Subscribe(&StreamSubscriber{
 			Next: func(event StreamEvent) {
-				if !matchesFilters(event.Data, filters) {
+				if !matchesFilters(event.Data, compiled) {
 					return
 				}
 				if len(columns) > 0 {
@@ -443,18 +444,54 @@ func newFilteredStreamController(inner *StreamController, filters []QueryFilter,
 	return sc
 }
 
+// compiledFilter pairs a filter with its precompiled LIKE regex (nil for
+// every other operator, or when the pattern isn't a string / doesn't compile).
+type compiledFilter struct {
+	QueryFilter
+	re *regexp.Regexp
+}
+
+// compileFilters precompiles LIKE/NOT LIKE patterns once per stream. A
+// controller's filters never change after construction, so this replaces a
+// per-event compile (and avoids any process-global pattern cache).
+func compileFilters(filters []QueryFilter) []compiledFilter {
+	out := make([]compiledFilter, len(filters))
+	for i, f := range filters {
+		out[i] = compiledFilter{QueryFilter: f}
+		if f.Op == "like" || f.Op == "not_like" {
+			if pattern, ok := f.Value.(string); ok {
+				out[i].re = compileLike(pattern)
+			}
+		}
+	}
+	return out
+}
+
+// compileLike converts a SQL LIKE pattern to a case-insensitive anchored
+// regex (matching the TS SDK). Returns nil if the pattern doesn't compile.
+func compileLike(pattern string) *regexp.Regexp {
+	escaped := regexp.QuoteMeta(pattern)
+	escaped = strings.ReplaceAll(escaped, "%", ".*")
+	escaped = strings.ReplaceAll(escaped, "_", ".")
+	re, err := regexp.Compile("(?i)^" + escaped + "$")
+	if err != nil {
+		return nil
+	}
+	return re
+}
+
 // matchesFilters evaluates all filters against a data row (AND).
-func matchesFilters(row map[string]any, filters []QueryFilter) bool {
+func matchesFilters(row map[string]any, filters []compiledFilter) bool {
 	for _, f := range filters {
 		val := row[f.Column]
-		if !evaluateFilter(val, f.Op, f.Value) {
+		if !evaluateFilter(val, f.Op, f.Value, f.re) {
 			return false
 		}
 	}
 	return true
 }
 
-func evaluateFilter(actual any, op string, expected any) bool {
+func evaluateFilter(actual any, op string, expected any, re *regexp.Regexp) bool {
 	switch op {
 	case "eq":
 		return equalValues(actual, expected)
@@ -475,12 +512,11 @@ func evaluateFilter(actual any, op string, expected any) bool {
 	case "in":
 		return evaluateIn(actual, expected)
 	case "like", "not_like":
-		aStr, aOK := actual.(string)
-		eStr, eOK := expected.(string)
-		if !aOK || !eOK {
+		aStr, ok := actual.(string)
+		if !ok || re == nil {
 			return false
 		}
-		return (op == "like") == matchLike(aStr, eStr)
+		return (op == "like") == re.MatchString(aStr)
 	default:
 		return false
 	}
@@ -519,25 +555,6 @@ func evaluateIn(actual, expected any) bool {
 		}
 	}
 	return false
-}
-
-var likeRegexCache sync.Map // pattern string → *regexp.Regexp
-
-// matchLike converts a SQL LIKE pattern to a regex and tests it
-// (case-insensitive, matching the TS SDK).
-func matchLike(actual, pattern string) bool {
-	if cached, ok := likeRegexCache.Load(pattern); ok {
-		return cached.(*regexp.Regexp).MatchString(actual)
-	}
-	escaped := regexp.QuoteMeta(pattern)
-	escaped = strings.ReplaceAll(escaped, "%", ".*")
-	escaped = strings.ReplaceAll(escaped, "_", ".")
-	re, err := regexp.Compile("(?i)^" + escaped + "$")
-	if err != nil {
-		return false
-	}
-	likeRegexCache.Store(pattern, re)
-	return re.MatchString(actual)
 }
 
 // compareOrdered returns (-1, 0, or 1) and true for comparable ordered types,

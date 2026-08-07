@@ -143,6 +143,13 @@ type StreamEvent struct {
 }
 ```
 
+:::note[`Events()` starts feeding on first call]
+The channel only receives events emitted **after** the first `Events()`
+call — a stream you set up but don't consume yet buffers nothing for the
+channel. Call `Events()` immediately after `.Stream()` (or use
+`.Subscribe`) if you can't start ranging right away.
+:::
+
 ### Transport Behavior
 
 | Transport | Reconnect | Protocol |

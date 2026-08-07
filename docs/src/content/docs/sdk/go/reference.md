@@ -145,7 +145,7 @@ Generate Go structs from a running WaveHouse instance. The module ships a
 
 ```bash
 export WAVEHOUSE_AUTH=<admin-jwt>   # avoids leaking the token via argv
-go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen \
+go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
     --url http://localhost:8080 \
     --out ./db_types.go \
     --package myapp
@@ -215,23 +215,28 @@ value field with `omitempty` would silently drop.
 |------------------|---------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Time`/`Time64`, `Enum8`/`Enum16`, `IPv4`/`IPv6` | `string` |
 | `Bool` / `Boolean` | `bool` |
-| `UInt8` / `UInt16` / `UInt32` | `uint8` / `uint16` / `uint32` |
-| `Int8` / `Int16` / `Int32` | `int8` / `int16` / `int32` |
+| `UInt8` / `UInt16` / `UInt32` / `UInt64` | `uint8` / `uint16` / `uint32` / `uint64` |
+| `Int8` / `Int16` / `Int32` / `Int64` | `int8` / `int16` / `int32` / `int64` |
 | `Float32`, `BFloat16` | `float32` |
 | `Float64` | `float64` |
-| `UInt64`/`Int64`, `Decimal*`, `UInt128`/`UInt256`, `Int128`/`Int256` | `string` (ClickHouse quotes 64-bit-and-wider integers in JSON output — `output_format_json_quote_64bit_integers` — and the server forwards them verbatim) |
+| `UInt128`/`UInt256`, `Int128`/`Int256` | `json.Number` (arbitrary-width unquoted numbers on the structured-query path) |
+| `Decimal*` | `string` (marshaled as a quoted string on the structured-query path) |
 | `Nullable(T)` | `*T` |
 | `LowCardinality(T)` | same as `T` |
-| `Array(T)` | `[]T` |
+| `Array(T)` | `[]T` (`Array(UInt8)` → `[]uint16`: `[]byte` would JSON-encode as base64, not an array) |
 | `Map(K, V)` | `map[K]V` (falls back to `map[string]any` if `K`/`V` can't be split) |
 | `SimpleAggregateFunction(fn, T)` | same as `T` (rollup tables from `AggregatingMergeTree`/`SummingMergeTree` generate usable structs) |
 | anything unrecognized | `any` |
 
 This differs from the TypeScript SDK's mapping in one notable way: Go's
-codegen preserves ClickHouse's integer **widths** up to 32 bits (`UInt32` →
-`uint32`, not a generic `number`), since Go — unlike TypeScript — has
-native fixed-width integer types. 64-bit integers stay `string` because
-that is what actually arrives on the wire.
+codegen preserves ClickHouse's integer **widths** (`UInt64` → `uint64`, not
+a generic `number`), since Go — unlike TypeScript — has native fixed-width
+integer types; 64-bit columns decode exactly where TS hits the JS-number
+2^53 ceiling. Generated structs target the structured-query and pipe paths
+(`/v1/query`, `/v1/pipes/*`), where the server re-marshals values as plain
+JSON numbers. The raw-SQL path (`/v1/admin/query`) instead forwards
+ClickHouse's own JSON, which **quotes** 64-bit-and-wider integers — use
+`map[string]any` with `SQL[Row]` there rather than generated structs.
 
 ## Testing
 

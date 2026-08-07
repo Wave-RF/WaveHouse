@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-// TableRef is a reference to a table. Use it for queries, inserts, schema, and
-// streams. NOT safe to use concurrently from multiple goroutines for mutations;
-// reads (Fetch, Select, etc.) are safe.
+// TableRef is a reference to a table. Use it for queries, inserts, schema,
+// and streams. Safe for concurrent use: it holds no mutable state, and every
+// builder method returns a fresh value.
 type TableRef struct {
 	ctx          httpContext
 	table        string

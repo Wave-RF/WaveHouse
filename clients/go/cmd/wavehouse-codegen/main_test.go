@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"go/format"
 	"strings"
 	"testing"
 )
@@ -28,14 +30,14 @@ func TestChTypeToGo(t *testing.T) {
 		{"Float32", "float32"},
 		{"BFloat16", "float32"},
 		{"Float64", "float64"},
-		// 64-bit and wider integers are quoted in ClickHouse JSON output.
-		{"UInt64", "string"},
-		{"Int64", "string"},
-		{"UInt128", "string"},
-		{"Int256", "string"},
+		// /v1/query re-marshals server-side: 64-bit ints arrive unquoted.
+		{"UInt64", "uint64"},
+		{"Int64", "int64"},
+		{"UInt128", "json.Number"},
+		{"Int256", "json.Number"},
 		{"Decimal(18, 4)", "string"},
 		{"Nullable(Int32)", "*int32"},
-		{"Nullable(Int64)", "*string"},
+		{"Nullable(Int64)", "*int64"},
 		{"LowCardinality(String)", "string"},
 		{"LowCardinality(Nullable(String))", "*string"},
 		{"SimpleAggregateFunction(sum, UInt32)", "uint32"},
@@ -135,5 +137,45 @@ func TestGenerate_TypeCollisionFails(t *testing.T) {
 	}, "main")
 	if err == nil || !strings.Contains(err.Error(), "X2faRow") {
 		t.Fatalf("want type-collision error naming X2faRow, got %v", err)
+	}
+}
+
+// TestGeneratedShapeDecodesStructuredQueryPayload asserts the mapping choices
+// actually decode what /v1/query emits: the server scans ClickHouse values
+// into Go types and re-marshals, so 64-bit ints are unquoted numbers,
+// 128/256-bit ints are unquoted arbitrary-width numbers, and Decimals are
+// quoted strings.
+func TestGeneratedShapeDecodesStructuredQueryPayload(t *testing.T) {
+	type row struct {
+		ID    uint64      `json:"id"`
+		Delta int64       `json:"delta"`
+		Big   json.Number `json:"big"`
+		Price string      `json:"price"`
+	}
+	payload := `[{"id":18446744073709551615,"delta":-9007199254740993,"big":170141183460469231731687303715884105727,"price":"12.3400"}]`
+	var rows []row
+	if err := json.Unmarshal([]byte(payload), &rows); err != nil {
+		t.Fatalf("generated shape failed to decode /v1/query payload: %v", err)
+	}
+	if rows[0].ID != 18446744073709551615 || rows[0].Delta != -9007199254740993 {
+		t.Fatalf("64-bit values corrupted: %+v", rows[0])
+	}
+	if rows[0].Big.String() != "170141183460469231731687303715884105727" {
+		t.Fatalf("128-bit value corrupted: %s", rows[0].Big)
+	}
+}
+
+func TestGenerate_JSONNumberImport(t *testing.T) {
+	out, err := generate(map[string]tableSchema{
+		"t": {Name: "t", Columns: []column{{Name: "big", Type: "UInt128"}}},
+	}, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `import "encoding/json"`) {
+		t.Fatalf("json.Number field without encoding/json import:\n%s", out)
+	}
+	if _, err := format.Source([]byte(out)); err != nil {
+		t.Fatalf("generated output is not valid Go: %v", err)
 	}
 }

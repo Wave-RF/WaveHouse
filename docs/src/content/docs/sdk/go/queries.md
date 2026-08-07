@@ -136,9 +136,10 @@ page, err := clicks.Select("page", "button").
 
 Start a query that selects **every column your role is allowed to read** —
 the explicit form of what `.Fetch()` does. Mutually exclusive with
-`.Select(...)` and with aggregations (`.Count()`, `.Sum()`, etc.); the
-server expands it to your allowed columns (never a raw `SELECT *`) and never
-bypasses `deny_columns`/`allow_columns`. See
+`.Select(...)` and with aggregations (`.Count()`, `.Sum()`, etc.); for a
+column-restricted role the server expands it to exactly that role's allowed
+columns rather than a bare `SELECT *` (unrestricted/admin roles do get
+`SELECT *`), and it never bypasses `deny_columns`/`allow_columns`. See
 [Access control → Column permissions](/access-control#column-permissions).
 
 ```go
@@ -182,9 +183,10 @@ q := clicks.Select("page").Select("button") // SELECT page, button
 
 #### `.SelectAll()`
 
-Select every column your role may read (the all-columns wildcard, expanded
-server-side to your allowed columns). Mutually exclusive with `.Select(...)`
-and with aggregations (`.Count()`, `.Sum()`, etc.).
+Select every column your role may read (the all-columns wildcard; a
+column-restricted role's projection is expanded server-side to its allowed
+columns). Mutually exclusive with `.Select(...)` and with aggregations
+(`.Count()`, `.Sum()`, etc.).
 
 ```go
 q := clicks.Select().SelectAll().Where("country", wavehouse.OpEq, "US")
@@ -345,7 +347,8 @@ rows decode into `map[string]any`, where JSON numbers become `float64`, so an
 integer cursor column loses exactness past 2^53 and pagination can repeat or
 skip a row at that scale — the same ceiling the TypeScript SDK has with JS
 numbers. `FetchTyped` with an `int64` field keeps the cursor exact, and
-codegen structs are unaffected (their 64-bit integer columns are `string`).
+codegen structs are unaffected (their 64-bit integer columns are `int64`/
+`uint64`, decoded exactly).
 
 ```go
 page, err := clicks.Select().

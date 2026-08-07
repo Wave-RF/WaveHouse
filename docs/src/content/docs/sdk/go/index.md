@@ -35,26 +35,33 @@ every example on these pages assumes it.
 ## Quick Start
 
 ```go
+package main
+
 import (
     "context"
     "fmt"
+    "log"
 
     wavehouse "github.com/Wave-RF/WaveHouse/clients/go"
 )
 
-wh := wavehouse.NewClient(wavehouse.Config{
-    BaseURL: "http://localhost:8080",
-    Auth:    wavehouse.StaticToken("your-jwt"),
-})
+func main() {
+    wh := wavehouse.NewClient(wavehouse.Config{
+        BaseURL: "http://localhost:8080",
+        Auth:    wavehouse.StaticToken("your-jwt"),
+    })
 
-page, err := wh.From("clicks").
-    Select("page", "button").
-    Where("page", wavehouse.OpEq, "/home").
-    Limit(10).
-    FetchUntyped(context.Background())
-if err != nil { /* handle */ }
-for _, row := range page.Data {
-    fmt.Println(row["page"], row["button"])
+    page, err := wh.From("clicks").
+        Select("page", "button").
+        Where("page", wavehouse.OpEq, "/home").
+        Limit(10).
+        FetchUntyped(context.Background())
+    if err != nil {
+        log.Fatal(err)
+    }
+    for _, row := range page.Data {
+        fmt.Println(row["page"], row["button"])
+    }
 }
 ```
 
@@ -63,8 +70,6 @@ See the [README](https://github.com/Wave-RF/WaveHouse/blob/main/clients/go/READM
 ## Creating a Client
 
 ```go
-import wavehouse "github.com/Wave-RF/WaveHouse/clients/go"
-
 wh := wavehouse.NewClient(wavehouse.Config{
     BaseURL: "https://wavehouse.example.com",
     Auth: func(ctx context.Context) (string, error) {
@@ -90,6 +95,11 @@ wh := wavehouse.NewClient(wavehouse.Config{
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, network failures) |
+
+A `*Client` is safe for concurrent use by multiple goroutines — client state
+is immutable after `NewClient`, and every builder chain copies. Supply a
+concurrency-safe `Auth` func (it's called from any goroutine that issues a
+request).
 
 :::caution[`Options` opts you out of the default, not just in]
 The default of 2 retries only applies when `Config.Options` is `nil`. If you

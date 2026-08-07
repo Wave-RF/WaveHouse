@@ -293,7 +293,7 @@ Then run the reviewers relevant to the PR's diff (the same set from `scripts/pre
 
 Documentation *prose* — accuracy against the code, runnable examples, clarity, completeness — **and code↔docs sync** (code that changed but whose docs didn't) are reviewed by the **`docs-reviewer`** subagent, not the code-focused `pre-push-reviewer`. The canonical rubric is `.github/prompts/docs-review.md`. It complements the deterministic prose tools — misspell, markdownlint, starlight-links-validator — reviewing only what they can't, and it never edits docs or posts PR comments.
 
-**Scope** is the canonical docs-prose set from `scripts/docs-prose.sh` — a *denylist*: every tracked `.md`/`.mdx` EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`/`*.old.md`, `PERF-CLAIMS-REVIEW.md`, `docs/posthog-setup-report.md`. So it covers the Starlight site under `docs/src/content/` **and** the governance docs (`README.md`, the SDK readme `clients/ts/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — new docs are picked up automatically. `CODE_OF_CONDUCT.md`/`SUPPORT.md` are deep-reviewed only on change or material suspicion.
+**Scope** is the canonical docs-prose set from `scripts/docs-prose.sh` — a *denylist*: every tracked `.md`/`.mdx` EXCEPT `.claude/**`, `.github/**`, `CHANGELOG.md`, `AGENTS.md`, `CLAUDE.md`, `*.draft.md`/`*.old.md`, `PERF-CLAIMS-REVIEW.md`, `docs/posthog-setup-report.md`. So it covers the Starlight site under `docs/src/content/` **and** the governance docs (`README.md`, the SDK readmes `clients/ts/README.md` / `clients/go/README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`) — new docs are picked up automatically. `CODE_OF_CONDUCT.md`/`SUPPORT.md` are deep-reviewed only on change or material suspicion.
 
 **It is a hard pre-push gate**, run in parallel with the other pre-push reviewers (see §Pre-push self-review). Invoked with the **default (branch) scope** it emits a `VERDICT:` line; on `ship_it` the `review-marker.sh` SubagentStop hook writes `tmp/docs-reviewer-passed-<HEAD-sha>`, which the push gate requires — unconditionally, on every PR-branch push (even code-only ones). Run it via **`/docs-review`**; with **no arg** that's the gating review (branch scope), while an explicit **path/glob** or **`all`** is **advisory** (no `VERDICT:`, no marker) for ad-hoc audits. The whole dev team runs Claude Code and this command is tracked in-repo, so everyone runs it themselves; there is intentionally **no PR/cloud path** for docs review.
 
@@ -304,7 +304,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 | Change | Files to update |
 | ------ | --------------- |
 | Add/modify API endpoint | `docs/src/content/docs/api.md`, `README.md` (if user-facing) |
-| Add/modify config option | `docs/src/content/docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
+| Add/modify config option | `docs/src/content/docs/configuration.mdx`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
 | Change architecture / add a package | `docs/src/content/docs/architecture.md`, `AGENTS.md` |
 | Change ingest / event format | `docs/src/content/docs/api.md`, `docs/src/content/docs/deployment.md` (CH schema) |
 | Change deployment / Docker | `docs/src/content/docs/deployment.md`, compose files |
@@ -313,7 +313,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.md`, `config.yaml`, compose env blocks
+- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.mdx`, `config.yaml`, compose env blocks
 - `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE examples, ClickHouse INSERT columns
 - Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
@@ -363,7 +363,7 @@ Internal-only backend changes (middleware refactors, observability internals, de
 
 1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
 2. Use the new config value in `cmd/wavehouse/main.go` or the relevant internal package.
-3. Document in `docs/src/content/docs/configuration.md`.
+3. Document in `docs/src/content/docs/configuration.mdx`.
 
 ### Adding a new internal package
 
