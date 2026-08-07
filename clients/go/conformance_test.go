@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -75,13 +76,18 @@ func TestConformance_WireFormat(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
+			// capt is written on the server goroutine and read on the test
+			// goroutine; the mutex is what makes that visible under -race.
+			var mu sync.Mutex
 			var capt captured
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
 				capt.method = r.Method
 				capt.path = r.URL.RequestURI()
 				capt.contentType = r.Header.Get("Content-Type")
 				raw, _ := io.ReadAll(r.Body)
 				capt.body = string(raw)
+				mu.Unlock()
 
 				// Return valid JSON so the SDK doesn't error on decode.
 				w.Header().Set("Content-Type", "application/json")
@@ -214,6 +220,8 @@ func TestConformance_WireFormat(t *testing.T) {
 			}
 
 			// Verify method.
+			mu.Lock()
+			defer mu.Unlock()
 			if tc.ExpectedMethod != "" && capt.method != tc.ExpectedMethod {
 				t.Errorf("method: want %s, got %s", tc.ExpectedMethod, capt.method)
 			}
