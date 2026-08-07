@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -206,13 +205,4 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-// errIs checks if err wraps a *Error with the given code.
-func errIs(err error, code string) bool {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Code == code
-	}
-	return false
 }

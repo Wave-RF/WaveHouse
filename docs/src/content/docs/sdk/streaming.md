@@ -158,3 +158,7 @@ interface StreamSubscriber<T> {
 4. Flushes remaining buffered events and switches to live mode.
 
 This "stream-first" approach ensures no events are lost between the fetch and stream start.
+
+:::caution[Dedup needs `received_timestamp` in the projection]
+The dedup boundary comes from the fetched rows' `received_timestamp` values. A `.select(...)` projection that omits that column disables dedup, and events in the fetch/stream overlap window are delivered twice — once in `initial()`, again via `next()`.
+:::

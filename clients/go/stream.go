@@ -22,7 +22,7 @@ type StreamController struct {
 	mu            sync.Mutex
 	status        StreamStatus
 	subscribers   []*StreamSubscriber
-	eventCh       chan StreamEvent // ponytail: single buffered channel for Go-native consumption
+	eventCh       chan StreamEvent // single buffered channel for Go-native consumption
 	chanRequested bool             // set by Events(); until then emitEvent skips the channel
 	dropLogOnce   sync.Once
 	cancel        context.CancelFunc
@@ -103,7 +103,7 @@ func (sc *StreamController) Connected(ctx context.Context) error {
 	sc.mu.Unlock()
 
 	// Poll — simple and correct.
-	// ponytail: condition variable if polling shows up in profiles.
+	// TODO: switch to a condition variable if polling shows up in profiles.
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -338,7 +338,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 		if line == "" {
 			// Empty line = end of event frame.
 			if dataLine != "" {
-				sc.handleSSEData(dataLine, eventID)
+				sc.handleSSEData(dataLine)
 				// Track last event ID for reconnect gap-fill.
 				if eventID != "" {
 					lastID = eventID
@@ -376,12 +376,14 @@ type sseMessage struct {
 	Data              map[string]any `json:"data"`
 }
 
-func (sc *StreamController) handleSSEData(data, eventID string) {
+func (sc *StreamController) handleSSEData(data string) {
 	var msg sseMessage
 	if err := json.Unmarshal([]byte(data), &msg); err != nil {
-		// Deliberately omits the payload: event data can carry tenant/PII
-		// fields and this goes to the process-global logger.
-		log.Printf("[wavehouse] SSE received malformed message (%d bytes): %v", len(data), err)
+		// Delivered via the subscriber Error callback rather than the
+		// process-global logger, so consumers control visibility and a
+		// malformed-frame flood can't spam host-application logs. Payload
+		// deliberately omitted: event data can carry tenant/PII fields.
+		sc.emitError(fmt.Errorf("malformed SSE message (%d bytes): %w", len(data), err))
 		return
 	}
 

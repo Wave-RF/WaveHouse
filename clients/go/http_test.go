@@ -3,6 +3,7 @@ package wavehouse
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,15 @@ import (
 	"testing"
 	"time"
 )
+
+// errIs checks if err wraps a *Error with the given code.
+func errIs(err error, code string) bool {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code == code
+	}
+	return false
+}
 
 func testCtx(t *testing.T, handler http.Handler) httpContext {
 	t.Helper()

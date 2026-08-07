@@ -257,13 +257,21 @@ Decode into your own type inside the callback if you need one.
 1. Subscribes to the stream **immediately** and buffers incoming events.
 2. Runs the `.FetchUntyped(ctx)` query for historical data, calls
    `sub.Initial(rows, err)` with the result.
-3. Deduplicates buffered events by comparing timestamps against the latest
-   historical row's `received_timestamp`.
+3. Deduplicates buffered events against the **newest** `received_timestamp`
+   in the backfill — the maximum across all rows, not the last row's (an
+   `OrderBy(..., "desc")` puts the *oldest* row last).
 4. Flushes remaining buffered events (re-checking for anything that arrived
    mid-flush) and switches to live mode.
 
 This "stream-first" approach ensures no events are lost between the fetch
 and stream start.
+
+:::caution[Dedup needs `received_timestamp` in the projection]
+The dedup bound comes from the backfill rows' `received_timestamp` values.
+`.SelectAll()` (or no projection) includes it; a `.Select(...)` projection
+that omits it disables dedup, and events in the fetch/stream overlap window
+are delivered twice — once in `Initial`, again via `Next`.
+:::
 
 ### `.Close()`
 

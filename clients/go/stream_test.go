@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -204,11 +205,16 @@ func TestStream_HandleMalformedSSEData(t *testing.T) {
 	// chanRequested must be true or emitEvent skips the channel entirely and
 	// the no-emit assertion below would pass vacuously.
 	sc := &StreamController{eventCh: make(chan StreamEvent, 1), chanRequested: true}
-	sc.handleSSEData("not json", "id1") // must not panic or emit
+	var gotErr error
+	sc.subscribers = []*StreamSubscriber{{Error: func(err error) { gotErr = err }}}
+	sc.handleSSEData("not json") // must not panic or emit
 	select {
 	case e := <-sc.eventCh:
 		t.Fatalf("malformed data emitted event: %+v", e)
 	default:
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "malformed SSE message") {
+		t.Fatalf("want malformed-SSE error via subscriber, got %v", gotErr)
 	}
 }
 

@@ -216,7 +216,9 @@ func TestConformance_WireFormat(t *testing.T) {
 				logCallErr(t, c.Pipes.Delete(ctx, tc.PipeName))
 
 			default:
-				t.Skipf("unhandled endpoint: %s", tc.Endpoint)
+				// Hard failure, matching the TS runner: skipped cases break
+				// cross-SDK parity.
+				t.Fatalf("unhandled endpoint %q — wire it up in the dispatch switch", tc.Endpoint)
 			}
 
 			// Verify method.

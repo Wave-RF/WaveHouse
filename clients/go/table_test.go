@@ -6,13 +6,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
 func TestTableRef_InsertSingle(t *testing.T) {
+	// mu guards handler captures throughout this file: the handler runs on the
+	// server goroutine and no happens-before edge exists via the TCP socket.
+	var mu sync.Mutex
 	var gotBody map[string]any
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		gotPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -26,6 +32,8 @@ func TestTableRef_InsertSingle(t *testing.T) {
 	if !result.OK {
 		t.Fatal("want ok=true")
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotPath != "/v1/ingest" {
 		t.Fatalf("want /v1/ingest, got %s", gotPath)
 	}
@@ -35,9 +43,12 @@ func TestTableRef_InsertSingle(t *testing.T) {
 }
 
 func TestTableRef_InsertBatch(t *testing.T) {
+	var mu sync.Mutex
 	var gotCT string
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		gotCT = r.Header.Get("Content-Type")
 		raw, _ := io.ReadAll(r.Body)
 		gotBody = string(raw)
@@ -57,6 +68,8 @@ func TestTableRef_InsertBatch(t *testing.T) {
 	if !result.OK {
 		t.Fatal("want ok=true")
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotCT != "application/x-ndjson" {
 		t.Fatalf("want ndjson content type, got %s", gotCT)
 	}
@@ -75,9 +88,12 @@ func TestTableRef_InsertTypedSlice(t *testing.T) {
 		Page string `json:"page"`
 	}
 
+	var mu sync.Mutex
 	var gotCT string
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		gotCT = r.Header.Get("Content-Type")
 		raw, _ := io.ReadAll(r.Body)
 		gotBody = string(raw)
@@ -94,6 +110,8 @@ func TestTableRef_InsertTypedSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotCT != "application/x-ndjson" {
 		t.Fatalf("want ndjson content type, got %s", gotCT)
 	}
@@ -114,8 +132,11 @@ func TestTableRef_InsertTypedSlice(t *testing.T) {
 // TestTableRef_InsertByteSliceNotBatch ensures []byte keeps going through
 // insertSingle rather than being (mis)treated as a slice of per-byte rows.
 func TestTableRef_InsertByteSliceNotBatch(t *testing.T) {
+	var mu sync.Mutex
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		gotPath = r.URL.Path
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
@@ -128,6 +149,8 @@ func TestTableRef_InsertByteSliceNotBatch(t *testing.T) {
 	if !result.OK {
 		t.Fatal("want ok=true")
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotPath != "/v1/ingest" {
 		t.Fatalf("want /v1/ingest, got %s", gotPath)
 	}
@@ -152,8 +175,11 @@ func TestTableRef_InsertEmptyBatch(t *testing.T) {
 }
 
 func TestTableRef_InsertNDJSON(t *testing.T) {
+	var mu sync.Mutex
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		raw, _ := io.ReadAll(r.Body)
 		gotBody = string(raw)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -170,6 +196,8 @@ func TestTableRef_InsertNDJSON(t *testing.T) {
 	if result.Total == nil || *result.Total != 2 {
 		t.Fatalf("want total=2, got %v", result.Total)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotBody != ndjson {
 		t.Fatalf("want raw NDJSON, got %s", gotBody)
 	}

@@ -22,7 +22,7 @@ type queryState struct {
 	orderBy      []OrderClause
 	limit        *int
 	timeRange    *TimeRange
-	cacheTTL     *int // ponytail: client-side only, not sent to server (#280)
+	cacheTTL     *int // client-side only, not sent to server (#280)
 }
 
 // QueryBuilder builds structured queries. Immutable — every chain method
@@ -179,7 +179,7 @@ func FetchTyped[Row any](ctx context.Context, q *QueryBuilder) (*Page[Row], erro
 	// SDK's QueryBuilder.fetch()/_fetchNext(), which has the same limitation).
 	if hasMore && len(q.state.orderBy) > 0 {
 		page.Next = func(ctx context.Context) (*Page[Row], error) {
-			return fetchNextTyped[Row](ctx, q, rows)
+			return fetchNextTyped(ctx, q, rows)
 		}
 	}
 
@@ -275,7 +275,7 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 	lastRow := any(prevRows[len(prevRows)-1])
 	m, ok := lastRow.(map[string]any)
 	if !ok {
-		// ponytail: marshal/unmarshal round-trip to get a map — optimize with reflect if perf matters.
+		// TODO: marshal/unmarshal round-trip to get a map — optimize with reflect if perf matters.
 		// UseNumber keeps typed int64 cursor values exact past 2^53. The
 		// untyped path (FetchUntyped / TableRef.Fetch) doesn't get this
 		// protection: its rows were already decoded to float64 by
