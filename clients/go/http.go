@@ -138,16 +138,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		// 503/429 with Retry-After: wait the specified duration (capped).
 		if res.StatusCode == http.StatusServiceUnavailable || res.StatusCode == http.StatusTooManyRequests {
 			if ra := res.Header.Get("Retry-After"); ra != "" && attempt < maxAttempts-1 {
-				delay := maxRetryAfter
-				if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 {
-					delay = time.Duration(secs) * time.Second
-				} else if parsed, parseErr := http.ParseTime(ra); parseErr == nil {
-					if d := time.Until(parsed); d > 0 {
-						delay = d
-					}
-				}
-				delay = min(delay, maxRetryAfter)
-				if sleepErr := sleepWithContext(ctx, delay); sleepErr != nil {
+				if sleepErr := sleepWithContext(ctx, retryAfterDelay(ra, attempt)); sleepErr != nil {
 					return errAborted
 				}
 				lastErr = apiErr
@@ -176,6 +167,21 @@ func buildURL(base, path string, params url.Values) string {
 		u += "?" + params.Encode()
 	}
 	return u
+}
+
+// retryAfterDelay resolves a Retry-After header (delta-seconds or HTTP-date)
+// into a wait, clamped to maxRetryAfter. An unparseable header falls back to
+// the ordinary backoff for this attempt, not the maximum.
+func retryAfterDelay(ra string, attempt int) time.Duration {
+	delay := backoff(attempt)
+	if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+		delay = time.Duration(secs) * time.Second
+	} else if parsed, err := http.ParseTime(ra); err == nil {
+		if d := time.Until(parsed); d > 0 {
+			delay = d
+		}
+	}
+	return min(delay, maxRetryAfter)
 }
 
 func backoff(attempt int) time.Duration {

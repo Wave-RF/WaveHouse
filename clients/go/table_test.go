@@ -17,6 +17,7 @@ func TestTableRef_InsertSingle(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), map[string]any{"page": "/home"})
 	if err != nil {
@@ -44,6 +45,7 @@ func TestTableRef_InsertBatch(t *testing.T) {
 			"total": 2, "succeeded": 2, "failed": 0, "duplicates": 0,
 		})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), []map[string]any{
 		{"page": "/a"},
@@ -83,6 +85,7 @@ func TestTableRef_InsertTypedSlice(t *testing.T) {
 			"total": 2, "succeeded": 1, "failed": 1, "duplicates": 0,
 		})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), []ClickRow{
 		{Page: "/a"},
@@ -116,6 +119,7 @@ func TestTableRef_InsertByteSliceNotBatch(t *testing.T) {
 		gotPath = r.URL.Path
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), []byte(`{"page":"/home"}`))
 	if err != nil {
@@ -133,6 +137,7 @@ func TestTableRef_InsertEmptyBatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("should not make a request for empty batch")
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), []map[string]any{})
 	if err != nil {
@@ -155,6 +160,7 @@ func TestTableRef_InsertNDJSON(t *testing.T) {
 			"total": 2, "succeeded": 2, "failed": 0, "duplicates": 0,
 		})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	ndjson := `{"page":"/a"}` + "\n" + `{"page":"/b"}`
 	result, err := c.From("clicks").InsertNDJSON(context.Background(), ndjson)
@@ -181,6 +187,7 @@ func TestTableRef_Schema(t *testing.T) {
 			},
 		})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	schema, err := c.From("clicks").Schema(context.Background())
 	if err != nil {
@@ -198,6 +205,7 @@ func TestTableRef_InsertDuplicate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"duplicate": true})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	result, err := c.From("clicks").Insert(context.Background(), map[string]any{"page": "/dup"})
 	if err != nil {

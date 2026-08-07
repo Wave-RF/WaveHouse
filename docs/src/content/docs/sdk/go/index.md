@@ -173,8 +173,9 @@ See [Reference → Error Handling](/sdk/go/reference#error-handling) for retry b
 ## Differences from the TypeScript SDK
 
 The two SDKs share a wire format and mirror each other's feature set closely
-(a shared `testdata/wire_cases.json` conformance fixture in the repo asserts
-both produce identical HTTP requests for equivalent builder calls), but the
+(a shared `wire_cases.json` conformance fixture is replayed by a test runner
+per SDK — both run in CI — asserting each produces the expected HTTP request
+for equivalent builder calls), but the
 languages pull the API shape in different directions:
 
 - **No `Result<T>` union.** Go returns `(T, error)`; nothing is wrapped in

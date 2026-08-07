@@ -95,8 +95,8 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
  <Card title="Hasura-style access control" icon="seti:lock">
   Per-table, per-role column and row-level policies with JWT claim templating. Stored in NATS KV with file-based bootstrap and cluster sync.
  </Card>
- <Card title="TypeScript SDK" icon="seti:typescript">
-  `@wavehouse/sdk` — zero-dependency client with type-safe query builder, live queries, real-time streaming, and codegen from your schemas.
+ <Card title="TypeScript & Go SDKs" icon="seti:typescript">
+  `@wavehouse/sdk` and `clients/go` — zero-dependency clients with type-safe query builders, live queries, real-time streaming, and codegen from your schemas, speaking one shared wire format.
  </Card>
 </CardGrid>
 
@@ -104,7 +104,7 @@ If you're building user-facing analytics, **WaveHouse is like Supabase for Click
 
 ## Query it like a database. Subscribe to it like a socket.
 
-The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming:
+The zero-dependency [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainable query builder, and live queries that backfill history before streaming. Writing Go? The official [Go SDK](/sdk/go) mirrors the same feature set:
 
 <Tabs>
  <TabItem label="Ingest">
@@ -191,6 +191,11 @@ WaveHouse is fail-closed, so the standalone stack ships a permissive trial polic
   title="TypeScript SDK"
   description="Query builder, live queries, streaming, and schema codegen."
   href="/sdk"
+ />
+ <LinkCard
+  title="Go SDK"
+  description="The same surface for Go — context-first, generics for typed rows, zero deps."
+  href="/sdk/go"
  />
 </CardGrid>
 

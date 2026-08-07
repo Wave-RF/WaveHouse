@@ -188,7 +188,7 @@ They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear
 
 ### Using the SDK against `make dev`
 
-There's no bundled playground — point the published `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`), with the dev policy seeded so requests are authorized:
+There's no bundled playground — point the published `@wavehouse/sdk` client (or the Go SDK, `github.com/Wave-RF/WaveHouse/clients/go`) at your local server (`baseURL: "http://localhost:8080"`), with the dev policy seeded so requests are authorized:
 
 ```bash
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
@@ -196,7 +196,7 @@ WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 
 See the [SDK guide](/sdk) for the client API and examples.
 
-Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
+Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work. Go services do the same with `wavehouse.NewClient(wavehouse.Config{BaseURL: "http://localhost:8080"})` — see the [Go SDK docs](/sdk/go).
 
 ### Validating tokens
 
@@ -337,7 +337,10 @@ Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a tex
 | Category | Location | Docker? | Command |
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
-| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
+| SDK unit tests (TS) | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
+| SDK unit tests (Go) | `clients/go/*_test.go` (nested Go module) | No | `make test-go-sdk` (runs with `-race`) |
+| Wire-format conformance | `clients/go/conformance_test.go` + `tests/conformance/conformance_ts.mjs`, both replaying `clients/go/testdata/wire_cases.json` | No | Go half via `make test-go-sdk`; TS half via `make test-conformance-ts` |
+| SDK E2E (Go, live server) | `clients/go/e2e_test.go` (`//go:build e2e`) | No | `make test-go-sdk-e2e` (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
@@ -429,8 +432,13 @@ WaveHouse/
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
 │   └── testutil/           # Shared test helpers and mocks
+├── clients/                # Official SDKs
+│   ├── ts/                 # TypeScript SDK (@wavehouse/sdk)
+│   └── go/                 # Go SDK — a NESTED Go module (own go.mod, invisible
+│                           #   to root `go list`; hence the *-go-sdk make targets)
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
+│   ├── conformance/        # TS half of the cross-SDK wire-format conformance suite
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
 │       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
@@ -476,7 +484,7 @@ Run `make help` to see all targets. Key ones:
 | **Static checks** | |
 | `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) |
+| `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
 | `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
@@ -486,8 +494,11 @@ Run `make help` to see all targets. Key ones:
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
 | `make build-ts` | Build TypeScript SDK → `clients/ts/dist/` |
 | **Test** | |
-| `make test` | Alias for `test-unit` |
+| `make test` | Alias for `test-unit` + `test-go-sdk` |
 | `make test-unit` | Go unit tests + render coverage + gate suite threshold |
+| `make test-go-sdk` | Go SDK (`clients/go`, nested module) unit tests with `-race` |
+| `make test-go-sdk-e2e` | Go SDK E2E against a live server (`WAVEHOUSE_URL`, `WAVEHOUSE_AUTH`) |
+| `make test-conformance-ts` | TS SDK wire-format conformance against the shared `wire_cases.json` fixture (builds the TS SDK first) |
 | `make test-integration` | Go integration tests (requires Docker) + coverage gate |
 | `make test-ts` | SDK vitest unit tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
 | `make cov` | Merge Go + TS coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." Each side skips silently if its data is missing, but `make cov` fails if *both* are empty (you ran it before any test target). |
@@ -581,7 +592,7 @@ If the title doesn't match, a sticky comment posts on the PR explaining the form
 
 The `main branch protection` ruleset requires one status check to pass before any PR can merge:
 
-- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
+- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts test-go-sdk test-conformance-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
 
 The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
 

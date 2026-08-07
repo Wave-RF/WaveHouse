@@ -356,7 +356,7 @@ fmt-ts: pnpm-install
 	$(call run,Biome (format),$(PNPM) -s -w run format,run make fix to apply formatting)
 
 .PHONY: lint
-lint: lint-go lint-ts lint-md lint-prose ## Lint across Go (golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell). Run `make fix` to apply --fix.
+lint: lint-go lint-go-sdk lint-ts lint-md lint-prose ## Lint across Go (root + clients/go golangci-lint) + TS/JSON (Biome) + Markdown (markdownlint) + docs prose (misspell). Run `make fix` to apply --fix.
 
 .PHONY: lint-go
 lint-go: $(GOLANGCI_LINT) go-mod-download
@@ -451,6 +451,8 @@ fix-go: $(GOLANGCI_LINT)
 	@$(GOFUMPT) -w $(GO_DIRS)
 	@$(GOIMPORTS) -w $(GO_DIRS)
 	@$(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
+	@echo "$(CYAN)==> Applying Go auto-fixes (Go SDK — nested module, outside GO_DIRS)...$(RESET)"
+	@cd clients/go && go mod tidy && $(GOFUMPT) -w . && $(GOIMPORTS) -w . && $(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
 
 .PHONY: fix-ts
 fix-ts: pnpm-install
@@ -681,7 +683,7 @@ test-unit: go-mod-download ## Run Go unit tests + render coverage + gate thresho
 # Hidden alias: `make test` matches `go test ./...` muscle memory; test-unit
 # is the explicit form.
 .PHONY: test
-test: test-unit
+test: test-unit test-go-sdk
 
 .PHONY: test-integration
 test-integration: go-mod-download ## Run Go integration tests + render coverage + gate threshold (requires Docker)
@@ -726,11 +728,20 @@ test-ts: pnpm-install ## Run SDK vitest unit tests + coverage + gate against sui
 
 # test-go-sdk: unit tests for clients/go/ — a nested Go module (its own
 # go.mod), so it's outside test-unit's ./internal/... ./cmd/... scope and
-# test-go-sdk: nested module — needs its own target.
+# needs its own target. -race because the SDK's streaming subsystem is the
+# most concurrent code in the repo.
 .PHONY: test-go-sdk
 test-go-sdk: ## Run Go SDK (clients/go, a nested module) unit tests
 	@printf "$(CYAN)==> Running Go SDK tests...$(RESET)\n"
-	@cd clients/go && go test ./...
+	@cd clients/go && go test -race ./...
+
+# test-conformance-ts: the TS half of the cross-SDK wire-format conformance
+# suite (the Go half is clients/go/conformance_test.go, run by test-go-sdk).
+# Both replay clients/go/testdata/wire_cases.json.
+.PHONY: test-conformance-ts
+test-conformance-ts: build-ts ## Run TS SDK wire-format conformance against the shared fixture
+	@printf "$(CYAN)==> Running TS wire-format conformance...$(RESET)\n"
+	@node tests/conformance/conformance_ts.mjs
 
 # test-go-sdk-e2e: E2E against live server. WAVEHOUSE_URL + WAVEHOUSE_AUTH env vars.
 .PHONY: test-go-sdk-e2e

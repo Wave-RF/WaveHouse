@@ -49,7 +49,7 @@ guarantee.
 | Status | Code | Retryable | Description |
 |--------|------|-----------|--------------|
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
-| 401 | `HTTP_401` | No | Missing or invalid JWT |
+| 401 | `HTTP_401` | No | Present-but-invalid or expired JWT (a *missing* token resolves to `default_role` and is denied with 403) |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `ClientOptions.MaxRetries`) |
@@ -179,13 +179,20 @@ package myapp
 
 // ClicksRow represents a row in the "clicks" table.
 type ClicksRow struct {
-    EventID    string `json:"event_id"`
-    Page       string `json:"page"`
-    UserID     string `json:"user_id"`
-    DurationMS int    `json:"duration_ms"`
-    ReceivedTimestamp string `json:"received_timestamp"`
+    Page              string  `json:"page"`
+    Button            string  `json:"button"`
+    Score             float64 `json:"score"`
+    ReceivedTimestamp string  `json:"received_timestamp,omitempty"`
 }
 ```
+
+(That's the exact output for the `clicks` table from the
+[development quick-start](/development#quick-start) — `received_timestamp`
+gets `,omitempty` because it has a `DEFAULT` clause.)
+
+Note the generator does **not** special-case initialisms: `event_id` becomes
+`EventId`, not the Go-idiomatic `EventID` — each `_`-separated part simply
+gets its first letter upper-cased.
 
 Table and column names are converted to `PascalCase` for Go field/type names
 (a leading digit gets an `X` prefix — e.g. a table named `2fa_events`
@@ -197,17 +204,18 @@ tag.
 
 | ClickHouse Type | Go Type |
 |------------------|---------|
-| `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum8`/`Enum16`, `IPv4`/`IPv6` | `string` |
-| `Bool` | `bool` |
+| `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Time`/`Time64`, `Enum8`/`Enum16`, `IPv4`/`IPv6` | `string` |
+| `Bool` / `Boolean` | `bool` |
 | `UInt8` / `UInt16` / `UInt32` | `uint8` / `uint16` / `uint32` |
 | `Int8` / `Int16` / `Int32` | `int8` / `int16` / `int32` |
-| `Float32` | `float32` |
+| `Float32`, `BFloat16` | `float32` |
 | `Float64` | `float64` |
 | `UInt64`/`Int64`, `Decimal*`, `UInt128`/`UInt256`, `Int128`/`Int256` | `string` (ClickHouse quotes 64-bit-and-wider integers in JSON output — `output_format_json_quote_64bit_integers` — and the server forwards them verbatim) |
 | `Nullable(T)` | `*T` |
 | `LowCardinality(T)` | same as `T` |
 | `Array(T)` | `[]T` |
 | `Map(K, V)` | `map[K]V` (falls back to `map[string]any` if `K`/`V` can't be split) |
+| `SimpleAggregateFunction(fn, T)` | same as `T` (rollup tables from `AggregatingMergeTree`/`SummingMergeTree` generate usable structs) |
 | anything unrecognized | `any` |
 
 This differs from the TypeScript SDK's mapping in one notable way: Go's
@@ -220,11 +228,13 @@ that is what actually arrives on the wire.
 
 The Go SDK ships with unit tests colocated in `clients/go/` (its own Go
 module — `clients/go/go.mod` — separate from the root `WaveHouse` module),
-plus a wire-format **conformance suite**
-(`clients/go/conformance_test.go` + `clients/go/testdata/wire_cases.json`)
-that replays a shared fixture of builder calls and asserts the Go SDK
-produces the exact same HTTP method, path, content type, and body as the
-TypeScript SDK for each one — keeping the two clients honest about the wire
+plus the Go half of the cross-language wire-format **conformance suite**:
+`clients/go/conformance_test.go` replays the shared fixture
+(`clients/go/testdata/wire_cases.json`) and asserts the Go SDK produces the
+expected HTTP method, path, content type, and body for each case. The
+TypeScript half — `tests/conformance/conformance_ts.mjs`, run with
+`make test-conformance-ts` (it builds the TS SDK first) — replays the same
+fixture, and CI runs both, keeping the two clients honest about the wire
 format they both speak.
 
 ```bash

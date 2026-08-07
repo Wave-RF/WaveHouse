@@ -18,13 +18,15 @@ import (
 // StreamController manages a live SSE event stream. Use Subscribe for
 // callback-based consumption or Events for channel-based consumption.
 type StreamController struct {
-	mu          sync.Mutex
-	status      StreamStatus
-	subscribers []*StreamSubscriber
-	eventCh     chan StreamEvent // ponytail: single buffered channel for Go-native consumption
-	cancel      context.CancelFunc
-	done        chan struct{}
-	closed      bool
+	mu            sync.Mutex
+	status        StreamStatus
+	subscribers   []*StreamSubscriber
+	eventCh       chan StreamEvent // ponytail: single buffered channel for Go-native consumption
+	chanRequested bool             // set by Events(); until then emitEvent skips the channel
+	dropLogOnce   sync.Once
+	cancel        context.CancelFunc
+	done          chan struct{}
+	closed        bool
 }
 
 // newStreamController opens an SSE connection for the given table.
@@ -75,8 +77,13 @@ func (sc *StreamController) Subscribe(sub *StreamSubscriber) func() {
 }
 
 // Events returns a read-only channel that receives stream events.
-// The channel is closed when the stream closes.
+// The channel is closed when the stream closes. Events are fed to the
+// channel only from the first Events() call onward — a Subscribe-only
+// consumer never fills (and overflows) a channel it isn't reading.
 func (sc *StreamController) Events() <-chan StreamEvent {
+	sc.mu.Lock()
+	sc.chanRequested = true
+	sc.mu.Unlock()
 	return sc.eventCh
 }
 
@@ -162,11 +169,20 @@ func (sc *StreamController) emitEvent(event StreamEvent) {
 		}
 	}
 
-	// Non-blocking send to the channel.
+	// Non-blocking send to the channel. Guarded by mu so the send and
+	// closeEventCh serialize — a late event can never hit a closed channel —
+	// and skipped entirely until Events() opts in.
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.closed || !sc.chanRequested {
+		return
+	}
 	select {
 	case sc.eventCh <- event:
 	default:
-		log.Printf("[wavehouse] stream event dropped: channel buffer full")
+		sc.dropLogOnce.Do(func() {
+			log.Printf("[wavehouse] stream event dropped: Events() channel buffer full (further drops not logged)")
+		})
 	}
 }
 
@@ -182,11 +198,20 @@ func (sc *StreamController) emitError(err error) {
 	}
 }
 
+// closeEventCh marks the controller closed and closes the events channel.
+// Must serialize with emitEvent's send via mu.
+func (sc *StreamController) closeEventCh() {
+	sc.mu.Lock()
+	sc.closed = true
+	close(sc.eventCh)
+	sc.mu.Unlock()
+}
+
 // run is the SSE connection loop with reconnect/backoff.
 func (sc *StreamController) run(ctx context.Context, hctx httpContext, table string, opts *StreamOptions) {
 	defer func() {
 		sc.setStatus(StatusClosed)
-		close(sc.eventCh)
+		sc.closeEventCh()
 		close(sc.done)
 	}()
 
@@ -344,7 +369,9 @@ type sseMessage struct {
 func (sc *StreamController) handleSSEData(data, eventID string) {
 	var msg sseMessage
 	if err := json.Unmarshal([]byte(data), &msg); err != nil {
-		log.Printf("[wavehouse] SSE received malformed message: %s", data)
+		// Deliberately omits the payload: event data can carry tenant/PII
+		// fields and this goes to the process-global logger.
+		log.Printf("[wavehouse] SSE received malformed message (%d bytes): %v", len(data), err)
 		return
 	}
 
@@ -370,11 +397,14 @@ func newFilteredStreamController(inner *StreamController, filters []QueryFilter,
 	go func() {
 		defer func() {
 			sc.setStatus(StatusClosed)
-			close(sc.eventCh)
+			// closeEventCh serializes with any in-flight emitEvent (which
+			// runs on the inner controller's goroutine), so the channel is
+			// never closed under a pending send.
+			sc.closeEventCh()
 			close(sc.done)
 		}()
 
-		inner.Subscribe(&StreamSubscriber{
+		unsub := inner.Subscribe(&StreamSubscriber{
 			Next: func(event StreamEvent) {
 				if !matchesFilters(event.Data, filters) {
 					return
@@ -394,6 +424,7 @@ func newFilteredStreamController(inner *StreamController, filters []QueryFilter,
 
 		select {
 		case <-ctx.Done():
+			unsub()
 			inner.Close()
 		case <-inner.done:
 		}

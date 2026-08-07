@@ -10,8 +10,10 @@ import (
 	"time"
 )
 
-func testCtx(handler http.Handler) httpContext {
+func testCtx(t *testing.T, handler http.Handler) httpContext {
+	t.Helper()
 	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
 	return httpContext{
 		baseURL:    srv.URL,
 		maxRetries: 0,
@@ -20,7 +22,7 @@ func testCtx(handler http.Handler) httpContext {
 }
 
 func TestDoRequest_SuccessfulGET(t *testing.T) {
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
@@ -41,7 +43,7 @@ func TestDoRequest_SuccessfulGET(t *testing.T) {
 func TestDoRequest_POSTWithBody(t *testing.T) {
 	var gotBody map[string]string
 	var gotCT string
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("Content-Type")
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(200)
@@ -66,7 +68,7 @@ func TestDoRequest_POSTWithBody(t *testing.T) {
 func TestDoRequest_RawBody(t *testing.T) {
 	var gotBody string
 	var gotCT string
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("Content-Type")
 		raw := make([]byte, 1024)
 		n, _ := r.Body.Read(raw)
@@ -93,7 +95,7 @@ func TestDoRequest_RawBody(t *testing.T) {
 
 func TestDoRequest_AuthInjection(t *testing.T) {
 	var gotAuth string
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(200)
 	}))
@@ -113,7 +115,7 @@ func TestDoRequest_AuthInjection(t *testing.T) {
 
 func TestDoRequest_4xxNotRetried(t *testing.T) {
 	var count atomic.Int32
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		count.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(404)
@@ -136,7 +138,7 @@ func TestDoRequest_4xxNotRetried(t *testing.T) {
 
 func TestDoRequest_5xxRetried(t *testing.T) {
 	var count atomic.Int32
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := count.Add(1)
 		if n < 3 {
 			w.Header().Set("Content-Type", "application/json")
@@ -162,7 +164,7 @@ func TestDoRequest_5xxRetried(t *testing.T) {
 }
 
 func TestDoRequest_AbortedOnCancel(t *testing.T) {
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(5 * time.Second)
 	}))
 
@@ -180,7 +182,7 @@ func TestDoRequest_AbortedOnCancel(t *testing.T) {
 }
 
 func TestDoRequest_EmptyResponse(t *testing.T) {
-	hctx := testCtx(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 
@@ -220,5 +222,64 @@ func TestBackoff(t *testing.T) {
 				t.Errorf("backoff(%d) = %v, want within [%v, %v]", tt.attempt, got, lo, hi)
 			}
 		})
+	}
+}
+
+func TestRetryAfterDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		ra   string
+		want time.Duration
+	}{
+		{"DeltaSeconds", "5", 5 * time.Second},
+		{"ClampedToMax", "3600", maxRetryAfter},
+		{"HTTPDateFuture", time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat), 0}, // range-checked below
+		{"Garbage", "not-a-delay", 0},                                                         // range-checked below
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := retryAfterDelay(tt.ra, 0)
+			switch tt.name {
+			case "HTTPDateFuture":
+				if got <= 0 || got > 10*time.Second {
+					t.Fatalf("want ~10s, got %v", got)
+				}
+			case "Garbage":
+				// Falls back to backoff(0): 1s ±20% jitter.
+				if got < 800*time.Millisecond || got > 1200*time.Millisecond {
+					t.Fatalf("want backoff(0) fallback, got %v", got)
+				}
+			default:
+				if got != tt.want {
+					t.Fatalf("want %v, got %v", tt.want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestDoRequest_429RetriesWithRetryAfter(t *testing.T) {
+	var calls atomic.Int64
+	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	hctx.maxRetries = 1
+
+	start := time.Now()
+	var result map[string]string
+	err := doRequest(context.Background(), hctx, requestOptions{method: "GET", path: "/x"}, &result)
+	if err != nil {
+		t.Fatalf("want success after 429 retry, got %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("want 2 attempts, got %d", got)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Fatalf("Retry-After: 1 not honored — retried after only %v", elapsed)
 	}
 }

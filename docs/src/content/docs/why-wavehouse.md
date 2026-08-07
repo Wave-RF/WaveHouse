@@ -154,7 +154,7 @@ flowchart TB
 | Schema validation | Custom code in ingest API | Built in (discovers `system.columns`) |
 | Row/column access control | Custom middleware or a dedicated service | Built in (Hasura-style, JWT-driven) |
 | Dead letter queue | Custom retry + dead topic on Kafka | Built in (`WAVEHOUSE_DLQ`) |
-| Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript, zero-dep, codegen) |
+| Client SDK | Each team writes one | `@wavehouse/sdk` (TypeScript) + `clients/go` (Go) — zero-dep, codegen |
 
 The DIY path works — big teams run it — but the ops cost is not small. You're paying for a Kafka cluster (or Confluent bill), a second service you wrote from scratch, and all the debugging hours when the batching consumer stalls at 3 a.m.
 
@@ -194,7 +194,7 @@ Tinybird wins on "zero ops to start." WaveHouse wins on "own your data plane and
 | Thundering-herd coalescing | ✗ | Custom | ✓ | ✓ Ristretto + singleflight |
 | Row/column policies with JWT claims | ✗ | Custom | Tokens only | ✓ Hasura-style |
 | Named parameterized pipes | ✗ | Custom | ✓ | ✓ stored in NATS KV |
-| Type-safe client SDK with codegen | ✗ | Per team | Partial | ✓ `@wavehouse/sdk` |
+| Type-safe client SDK with codegen | ✗ | Per team | Partial | ✓ TypeScript + Go SDKs |
 | Cost model | Infra only | Infra + eng time | Per-vCPU SaaS | Infra only |
 
 ## Part IV — End-to-end data journey
