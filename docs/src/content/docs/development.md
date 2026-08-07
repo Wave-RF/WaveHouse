@@ -288,9 +288,9 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed.
+The coverage-instrumented suite targets (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary, and accept `ARGS`/`V=1`. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
 
-All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
+Go tests run with the **race detector** (`-race`) enabled by default (including `test-go-sdk` — the SDK's streaming subsystem is highly concurrent; `test-go-sdk-e2e` skips it since it drives a live server). WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
 ### Quick Reference
 
@@ -300,7 +300,8 @@ All tests run with Go's **race detector** (`-race`) enabled by default. WaveHous
 # Unit tests + Go SDK tests (compact output) — alias for `test-unit` + `test-go-sdk`
 make test
 
-# Run specific test(s)
+# Run specific root-module test(s) — ARGS reaches test-unit only; the
+# test-go-sdk half of `make test` runs its full suite regardless
 make test ARGS="-run TestValidate"
 
 # Go integration tests (requires Docker)
@@ -518,7 +519,7 @@ Run `make help` to see all targets. Key ones:
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
 
-All test targets accept `ARGS="..."` for pass-through `go test` flags. Build targets accept `TAGS="..."` for Go build tags. `V=1` switches to verbose `gotestsum` output.
+The gotestsum-driven targets (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) accept `ARGS="..."` for pass-through `go test` flags and `V=1` for verbose output; `test-go-sdk`, `test-go-sdk-e2e`, and `test-conformance-ts` ignore both. Build targets accept `TAGS="..."` for Go build tags.
 
 ## Dependency Management
 

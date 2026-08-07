@@ -372,6 +372,12 @@ func buildMarkerRow(t *testing.T, ts TableSchema, mk string) (map[string]any, st
 		}
 		ct := strings.ToLower(col.Type)
 		switch {
+		case strings.Contains(ct, "array(") || strings.Contains(ct, "map(") ||
+			strings.Contains(ct, "tuple(") || strings.Contains(ct, "nested("):
+			// Container types must be gated BEFORE the substring cases below —
+			// "array(string)" contains "string" and would otherwise get a
+			// scalar marker injected into an array column.
+			t.Skipf("e2e: table %q requires container column %q of type %q", ts.Name, col.Name, col.Type)
 		case !markerSet && strings.Contains(ct, "string"):
 			row[col.Name] = mk
 			markerCol = col.Name
@@ -387,9 +393,9 @@ func buildMarkerRow(t *testing.T, ts TableSchema, mk string) (map[string]any, st
 		case strings.Contains(ct, "bool"):
 			row[col.Name] = false
 		default:
-			// No safe synthetic value for this type (Array, Map, Tuple, UUID,
-			// ...) — an empty string would make the insert fail with a type
-			// error that looks like an SDK defect.
+			// No safe synthetic value for this type (UUID, IPv6, ...) — an
+			// empty string would make the insert fail with a type error that
+			// looks like an SDK defect.
 			t.Skipf("e2e: table %q requires column %q of unsupported type %q", ts.Name, col.Name, col.Type)
 		}
 	}

@@ -381,8 +381,11 @@ the token must resolve to the policy admin role (`admin_role`, `"admin"` by
 default) — a JWT request with no token, or an invalid/expired one, falls
 back to the `default_role` and is rejected. Alternatively, a configured
 operator key (`Authorization: Operator <key>` or `X-Operator-Key`)
-authorizes `/v1/admin/*` without a JWT. Package-level generic function — use
-`map[string]any` for a dynamic/unknown schema.
+authorizes `/v1/admin/*` without a JWT — but note `Config.Auth` always
+sends its token as `Bearer <token>`, so to use an operator key from this
+SDK supply a `Config.HTTPClient` whose `Transport` sets the
+`X-Operator-Key` header on each request. Package-level generic function —
+use `map[string]any` for a dynamic/unknown schema.
 
 ```go
 rows, err := wavehouse.SQL[map[string]any](ctx, wh,

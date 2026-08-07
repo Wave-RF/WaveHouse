@@ -20,7 +20,7 @@ either page mostly carries over.
 go get github.com/Wave-RF/WaveHouse/clients/go
 ```
 
-Requires Go 1.26.5 or later (the minimum pinned in the module's `go.mod`).
+Requires Go 1.24 or later (the module's `go.mod` floor — deliberately a supported-releases floor rather than the server's patch-pinned toolchain).
 
 ## Import
 

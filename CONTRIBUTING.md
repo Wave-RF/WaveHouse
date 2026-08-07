@@ -39,7 +39,7 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
    The pre-push hook (installed by `make tools`) blocks a push until the tree has been validated locally: a code change needs `make ci`, a docs/prose-only change needs only `make verify` (the same split CI makes). `make lint` / `make test` / `make build` are fast inner-loop subsets.
 
-2. Write tests for new functionality. Unit tests go alongside the code in `internal/`. Integration tests go in `tests/` with the `//go:build integration` tag.
+2. Write tests for new functionality. Unit tests go alongside the code in `internal/`; SDK tests live in `clients/ts/src/` and `clients/go/`. Integration tests go in `tests/` with the `//go:build integration` tag.
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`
@@ -90,7 +90,7 @@ test(cache): add tiered cache stampede test
 
 ## Code Style
 
-- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks it (CI runs the same target); `make fix` applies it.
+- **Formatting**: Code must be formatted with `gofumpt` (a strict superset of `gofmt`). `make fmt` checks the root module; the nested `clients/go` module is checked by `make verify` (its `verify-go-sdk` leaf, which the pre-commit hook and CI run). `make fix` applies gofumpt to both.
 - **Linting**: All lint checks in `.golangci.yml` must pass (see `make lint`).
 - **Naming**: Follow [Go naming conventions](https://go.dev/doc/effective_go#names).
 - **Interfaces**: Define interfaces where they are consumed, not where they are implemented.

@@ -201,7 +201,9 @@ func TestStream_FilteredCloseUnderLoad(t *testing.T) {
 }
 
 func TestStream_HandleMalformedSSEData(t *testing.T) {
-	sc := &StreamController{eventCh: make(chan StreamEvent, 1)}
+	// chanRequested must be true or emitEvent skips the channel entirely and
+	// the no-emit assertion below would pass vacuously.
+	sc := &StreamController{eventCh: make(chan StreamEvent, 1), chanRequested: true}
 	sc.handleSSEData("not json", "id1") // must not panic or emit
 	select {
 	case e := <-sc.eventCh:
