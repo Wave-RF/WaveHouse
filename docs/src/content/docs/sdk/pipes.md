@@ -1,5 +1,5 @@
 ---
-title: "SDK Pipes"
+title: "TypeScript SDK Pipes"
 description: "Execute and manage named query pipes with @wavehouse/sdk."
 ---
 

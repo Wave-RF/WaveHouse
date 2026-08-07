@@ -1,5 +1,5 @@
 ---
-title: "SDK Admin & System"
+title: "TypeScript SDK Admin & System"
 description: "Schema introspection, access-control policy, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 

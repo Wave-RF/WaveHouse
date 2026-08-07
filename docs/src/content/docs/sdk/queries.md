@@ -1,5 +1,5 @@
 ---
-title: "SDK Queries"
+title: "TypeScript SDK Queries"
 description: "Tables, the chainable query builder, pagination, and raw SQL in @wavehouse/sdk."
 ---
 
@@ -162,8 +162,15 @@ clicks.select('page')
   .min('score', 'min_score')     // MIN(score)
   .max('score', 'max_score')     // MAX(score)
   .countDistinct('page', 'unique_pages')
-  .aggregate('uniqExact', 'user_id', 'unique_users') // custom fn
+  .aggregate('uniqExact', 'user_id', 'unique_users') // allowlisted fn
 ```
+
+Custom function names pass through `.aggregate(fn, column, alias)` but are
+validated server-side against a fixed allowlist (matched case-insensitively):
+`count`, `sum`, `avg`, `min`, `max`, `countDistinct`, `uniq`, `uniqExact`,
+`any`, `anyLast`, `argMin`, `argMax`, `groupArray`, `median`, `quantile`,
+`stddevPop`, `stddevSamp`, `varPop`, `varSamp`. Anything else is rejected
+with `400 unsupported aggregation function`.
 
 Each aggregation method signature: `(column: string, alias?: string)`.  
 `count()` defaults to `column='*'`, `alias='count'`.

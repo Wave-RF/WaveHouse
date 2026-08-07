@@ -227,8 +227,15 @@ clicks.Select("page").
     Min("score", "min_score").            // MIN(score)
     Max("score", "max_score").            // MAX(score)
     CountDistinct("page", "unique_pages").
-    Aggregate("uniqExact", "user_id", "unique_users") // custom fn
+    Aggregate("uniqExact", "user_id", "unique_users") // allowlisted fn
 ```
+
+Custom function names pass through `.Aggregate(fn, column, alias)` but are
+validated server-side against a fixed allowlist (matched case-insensitively):
+`count`, `sum`, `avg`, `min`, `max`, `countDistinct`, `uniq`, `uniqExact`,
+`any`, `anyLast`, `argMin`, `argMax`, `groupArray`, `median`, `quantile`,
+`stddevPop`, `stddevSamp`, `varPop`, `varSamp`. Anything else is rejected
+with `400 unsupported aggregation function`.
 
 `Count`/`Sum`/`Avg`/`Min`/`Max`/`CountDistinct` take `(column, alias
 string)`; `Aggregate` takes `(fn, column, alias string)`. Empty-alias

@@ -1,5 +1,5 @@
 ---
-title: "SDK Reference & CLI"
+title: "TypeScript SDK Reference & CLI"
 description: "Error codes, AbortController, the full API tree, the codegen CLI, and E2E testing with @wavehouse/sdk."
 ---
 
@@ -38,6 +38,7 @@ The SDK **never throws**. All errors are returned in `Result.error`.
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
 | 0 | `SSE_ERROR` | Yes | Stream connection failure, delivered to the stream's error callback; the stream reconnects automatically |
+| 0 | `SSE_CONNECT_ERROR` | Yes | Stream could not be opened (auth provider threw, invalid `baseURL`) |
 
 ---
 

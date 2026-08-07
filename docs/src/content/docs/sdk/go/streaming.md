@@ -143,6 +143,14 @@ type StreamEvent struct {
 }
 ```
 
+:::note[`Events()` carries events only]
+`Error` and `Status` are delivered exclusively through `.Subscribe(...)` —
+the channel is typed `chan StreamEvent` and simply ends (closes) when the
+stream closes, including on a terminal 401/403/404. Pair `Events()` with a
+`Subscribe(&StreamSubscriber{Error: ..., Status: ...})` if you need to know
+*why* a stream ended.
+:::
+
 :::note[`Events()` starts feeding on first call]
 The channel only receives events emitted **after** the first `Events()`
 call — a stream you set up but don't consume yet buffers nothing for the

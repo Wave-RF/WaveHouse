@@ -281,8 +281,8 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 		// protection: its rows were already decoded to float64 by
 		// encoding/json, so precision above 2^53 is gone before we get here —
 		// the same ceiling the TS SDK has with JS numbers. Use FetchTyped (or
-		// codegen structs, whose 64-bit int columns are strings) when paging
-		// on >2^53 integer cursors.
+		// codegen structs — their 64-bit int columns are int64/uint64, and
+		// 128/256-bit are json.Number) when paging on >2^53 integer cursors.
 		raw, _ := json.Marshal(lastRow)
 		m = make(map[string]any)
 		dec := json.NewDecoder(bytes.NewReader(raw))

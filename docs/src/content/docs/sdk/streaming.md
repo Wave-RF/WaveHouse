@@ -1,5 +1,5 @@
 ---
-title: "SDK Streaming & Live Queries"
+title: "TypeScript SDK Streaming & Live Queries"
 description: "Real-time SSE streams, client-side filtering, and backfill-then-live queries in @wavehouse/sdk."
 ---
 
