@@ -302,7 +302,9 @@ for (const f of failures) {
   }
 }
 
-if (failed > 0) {
+if (failed > 0 || skipped > 0 || passed === 0) {
+  if (passed === 0) console.log("  ✗ nothing ran — every case skipped or the fixture is empty\n");
+  if (skipped > 0) console.log("  ✗ skipped cases break cross-SDK parity — wire up the endpoint above\n");
   process.exit(1);
 } else {
   console.log("  ✓ All cases passed\n");

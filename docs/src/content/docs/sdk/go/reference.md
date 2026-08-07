@@ -39,12 +39,15 @@ background goroutine, torn down explicitly via `.Close()`. See
 ## Error Handling
 
 The SDK never panics on API or network failures — every request-response
-operation (queries, ingest, pipes, admin) returns `(T, error)`, and errors
-are always `*wavehouse.Error` (unwrap with `errors.As`). Streaming lifecycle
-methods (`Stream`, `Subscribe`, `Close`) don't return `(T, error)`; stream
-errors are delivered via the subscriber's `Error` callback. This is the
-direct Go equivalent of the TypeScript SDK's "the SDK never throws"
-guarantee.
+operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors
+originating from the HTTP exchange are `*wavehouse.Error` (unwrap with
+`errors.As`); client-side failures before a request goes out (an `Auth`
+provider error, a request-body marshal failure) are plain wrapped errors,
+so handle the `errors.As == false` case too. Streaming lifecycle methods
+(`Stream`, `Subscribe`, `Close`) don't return `(T, error)` — stream errors
+are delivered via the subscriber's `Error` callback — and `Connected(ctx)`
+returns plain errors. This is the direct Go equivalent of the TypeScript
+SDK's "the SDK never throws" guarantee.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|--------------|
@@ -63,6 +66,8 @@ if err != nil {
     var whErr *wavehouse.Error
     if errors.As(err, &whErr) {
         fmt.Println(whErr.Status, whErr.Code, whErr.Message, whErr.Retryable)
+    } else {
+        fmt.Println("client-side failure:", err) // auth provider, marshal, ...
     }
     return err
 }
@@ -182,13 +187,13 @@ type ClicksRow struct {
     Page              string  `json:"page"`
     Button            string  `json:"button"`
     Score             float64 `json:"score"`
-    ReceivedTimestamp string  `json:"received_timestamp,omitempty"`
+    ReceivedTimestamp *string `json:"received_timestamp,omitempty"`
 }
 ```
 
 (That's the exact output for the `clicks` table from the
 [development quick-start](/development#quick-start) — `received_timestamp`
-gets `,omitempty` because it has a `DEFAULT` clause.)
+becomes `*string` + `,omitempty` because it has a `DEFAULT` clause.)
 
 Note the generator does **not** special-case initialisms: `event_id` becomes
 `EventId`, not the Go-idiomatic `EventID` — each `_`-separated part simply
@@ -197,8 +202,11 @@ gets its first letter upper-cased.
 Table and column names are converted to `PascalCase` for Go field/type names
 (a leading digit gets an `X` prefix — e.g. a table named `2fa_events`
 becomes `X2faEventsRow` — to stay a valid Go identifier). A column with
-`has_default: true` in the schema gets `,omitempty` appended to its JSON
-tag.
+`has_default: true` in the schema becomes a **pointer field** with
+`,omitempty` — the Go spelling of the TS codegen's `field?: T`: leave it
+`nil` to omit the field (the server default applies), or point it at a
+value to send it — including an explicit `0`/`false`/`""`, which a plain
+value field with `omitempty` would silently drop.
 
 **ClickHouse → Go type mapping:**
 

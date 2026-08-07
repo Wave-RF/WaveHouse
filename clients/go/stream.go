@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -242,6 +243,15 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 		}
 
 		if err != nil {
+			// A non-retryable API error (401/403/404, ...) is terminal:
+			// reconnecting can't fix a bad token or a missing table, and the
+			// TS SDK's EventSource likewise ends up closed on a non-200.
+			// Emit it and exit — the deferred cleanup sets StatusClosed.
+			var apiErr *Error
+			if errors.As(err, &apiErr) && !apiErr.Retryable {
+				sc.emitError(apiErr)
+				return
+			}
 			sc.emitError(&Error{
 				Status:    0,
 				Code:      "SSE_ERROR",
@@ -307,7 +317,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("SSE connect failed: HTTP %d", resp.StatusCode)
+		return "", false, parseErrorResponse(resp)
 	}
 
 	sc.setStatus(StatusLive)

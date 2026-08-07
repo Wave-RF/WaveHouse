@@ -1,8 +1,10 @@
 package wavehouse
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -267,5 +269,162 @@ func TestQueryBuilder_ComplexQuery(t *testing.T) {
 	}
 	if body["group_by"].([]any)[0] != "page" {
 		t.Fatal("wrong group_by")
+	}
+}
+
+// pagingServer returns limit-sized pages of rows and captures each request
+// body, so tests can walk page.Next and inspect the cursor filters sent.
+func pagingServer(t *testing.T, pages [][]map[string]any) (*Client, func() []map[string]any) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies []map[string]any
+	call := 0
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber() // keep int64 cursor values exact on the capture side too
+		_ = dec.Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		idx := call
+		call++
+		mu.Unlock()
+		page := []map[string]any{}
+		if idx < len(pages) {
+			page = pages[idx]
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	return c, func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]map[string]any(nil), bodies...)
+	}
+}
+
+func filtersOf(t *testing.T, body map[string]any) []map[string]any {
+	t.Helper()
+	raw, ok := body["filters"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, len(raw))
+	for i, f := range raw {
+		out[i] = f.(map[string]any)
+	}
+	return out
+}
+
+func TestQueryBuilder_Pagination_NextWalksPages(t *testing.T) {
+	c, getBodies := pagingServer(t, [][]map[string]any{
+		{{"id": "a"}, {"id": "b"}},
+		{{"id": "c"}, {"id": "d"}},
+		{{"id": "e"}},
+	})
+
+	page, err := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page2, err := page.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page2.Data[0]["id"] != "c" || !page2.HasMore || page2.Next == nil {
+		t.Fatalf("unexpected page 2: %+v", page2)
+	}
+	page3, err := page2.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page3.Data) != 1 || page3.HasMore {
+		t.Fatalf("unexpected page 3: %+v", page3)
+	}
+
+	bodies := getBodies()
+	if len(bodies) != 3 {
+		t.Fatalf("want 3 requests, got %d", len(bodies))
+	}
+	if f := filtersOf(t, bodies[0]); len(f) != 0 {
+		t.Fatalf("page 1 must have no cursor filter, got %v", f)
+	}
+	// Page 2 and 3: exactly ONE cursor filter (replaced, not stacked), with
+	// the ascending op and the previous page's last cursor value.
+	for i, want := range []string{"b", "d"} {
+		f := filtersOf(t, bodies[i+1])
+		if len(f) != 1 {
+			t.Fatalf("page %d: want exactly 1 cursor filter, got %v", i+2, f)
+		}
+		if f[0]["column"] != "id" || f[0]["op"] != "gt" || f[0]["value"] != want {
+			t.Fatalf("page %d: unexpected cursor filter %v", i+2, f[0])
+		}
+	}
+}
+
+func TestQueryBuilder_Pagination_DescUsesLt(t *testing.T) {
+	c, getBodies := pagingServer(t, [][]map[string]any{
+		{{"id": "z"}, {"id": "y"}},
+		{{"id": "x"}},
+	})
+
+	page, err := c.From("clicks").Select("id").OrderBy("id", "desc").Limit(2).FetchUntyped(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := page.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	f := filtersOf(t, getBodies()[1])
+	if len(f) != 1 || f[0]["op"] != "lt" || f[0]["value"] != "y" {
+		t.Fatalf("desc cursor filter wrong: %v", f)
+	}
+}
+
+func TestQueryBuilder_Pagination_CursorColumnMissingEndsQuietly(t *testing.T) {
+	c, _ := pagingServer(t, [][]map[string]any{
+		{{"other": "1"}, {"other": "2"}}, // projection omits the order column
+	})
+
+	page, err := c.From("clicks").Select("other").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := page.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Data) != 0 || next.HasMore || next.Next != nil {
+		t.Fatalf("want quiet empty page, got %+v", next)
+	}
+}
+
+func TestQueryBuilder_Pagination_TypedInt64CursorKeepsPrecision(t *testing.T) {
+	type idRow struct {
+		ID int64 `json:"id"`
+	}
+	const bigID = int64(9007199254740993) // 2^53 + 1: float64 round-trip corrupts it
+	c, getBodies := pagingServer(t, [][]map[string]any{
+		{{"id": 1}, {"id": bigID}},
+		{},
+	})
+
+	q := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2)
+	page, err := FetchTyped[idRow](context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := page.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	f := filtersOf(t, getBodies()[1])
+	if len(f) != 1 {
+		t.Fatalf("want 1 cursor filter, got %v", f)
+	}
+	// json.Number survives the round-trip; float64 would have sent ...992.
+	if got := fmt.Sprint(f[0]["value"]); got != "9007199254740993" {
+		t.Fatalf("cursor value lost precision: %s", got)
 	}
 }

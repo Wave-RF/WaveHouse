@@ -307,7 +307,14 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 			seenFields[fieldName] = col.Name
 			jsonTag := col.Name
 			if col.HasDefault {
+				// Pointer + omitempty is the Go spelling of the TS codegen's
+				// `field?: T`: nil omits the field (server default applies),
+				// while a pointer to the zero value still sends an explicit
+				// 0/false/"" instead of silently dropping it.
 				jsonTag += ",omitempty"
+				if !strings.HasPrefix(goType, "*") {
+					goType = "*" + goType
+				}
 			}
 			fmt.Fprintf(&sb, "\t%s %s `json:%q`\n", fieldName, goType, jsonTag)
 		}

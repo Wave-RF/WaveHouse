@@ -786,7 +786,7 @@ cov: ## Consolidated coverage report (Go + TS) + gate against thresholds (auto-r
 # marker that standalone `make verify` writes is instead written by ci's own
 # `ci-marker.sh write` below — it touches both the ci and verify markers.
 .PHONY: ci-parallel
-ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts test-go-sdk
+ci-parallel: verify-parallel build build-cover build-ts build-docs test test-ts test-go-sdk test-conformance-ts
 
 .PHONY: ci
 ci: ## Full pipeline — parallel checks, then sequential heavy suites + coverage

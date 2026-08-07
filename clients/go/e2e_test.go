@@ -142,8 +142,7 @@ func TestE2E_InsertAndQuery(t *testing.T) {
 	table, ts := firstTable(t, c)
 	mk := marker(t)
 
-	row := buildMarkerRow(t, ts, mk)
-	markerCol := markerColumn(t, ts)
+	row, markerCol := buildMarkerRow(t, ts, mk)
 
 	res, err := c.From(table).Insert(ctx, row)
 	if err != nil {
@@ -169,12 +168,12 @@ func TestE2E_BatchInsert(t *testing.T) {
 	table, ts := firstTable(t, c)
 
 	mk := marker(t)
-	markerCol := markerColumn(t, ts)
 
 	// Build 3 rows, each with the same marker so we can count them.
 	rows := make([]map[string]any, 3)
+	markerCol := ""
 	for i := range rows {
-		rows[i] = buildMarkerRow(t, ts, mk)
+		rows[i], markerCol = buildMarkerRow(t, ts, mk)
 	}
 
 	res, err := c.From(table).Insert(ctx, rows)
@@ -358,26 +357,14 @@ func TestE2E_PipesCRUD(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// markerColumn finds the first String/LowCardinality(String) column in the
-// schema that we can use to inject a test marker value.
-func markerColumn(t *testing.T, ts TableSchema) string {
-	t.Helper()
-	for _, col := range ts.Columns {
-		ct := strings.ToLower(col.Type)
-		if ct == "string" || strings.Contains(ct, "string") {
-			return col.Name
-		}
-	}
-	t.Skipf("e2e: table %q has no string column for marker injection", ts.Name)
-	return ""
-}
-
 // buildMarkerRow constructs a minimal valid row for the table, injecting the
-// marker into the first string column and using sensible defaults for other
-// required columns.
-func buildMarkerRow(t *testing.T, ts TableSchema, mk string) map[string]any {
+// marker into the first non-default string column and using sensible values
+// for other required columns. It returns the row and the marker column, so
+// callers query back the exact column the marker went into.
+func buildMarkerRow(t *testing.T, ts TableSchema, mk string) (map[string]any, string) {
 	t.Helper()
 	row := make(map[string]any)
+	markerCol := ""
 	markerSet := false
 	for _, col := range ts.Columns {
 		if col.HasDefault {
@@ -387,6 +374,7 @@ func buildMarkerRow(t *testing.T, ts TableSchema, mk string) map[string]any {
 		switch {
 		case !markerSet && strings.Contains(ct, "string"):
 			row[col.Name] = mk
+			markerCol = col.Name
 			markerSet = true
 		case strings.Contains(ct, "string"):
 			row[col.Name] = "e2e"
@@ -408,7 +396,7 @@ func buildMarkerRow(t *testing.T, ts TableSchema, mk string) map[string]any {
 	if !markerSet {
 		t.Skipf("e2e: table %q has no non-default string column for marker", ts.Name)
 	}
-	return row
+	return row, markerCol
 }
 
 // skipIfUnauthorized skips the test when err indicates a 401 or 403,

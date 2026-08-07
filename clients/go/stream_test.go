@@ -2,6 +2,7 @@ package wavehouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -297,5 +298,45 @@ func TestProjectColumns(t *testing.T) {
 	got := projectColumns(row, []string{"a", "c", "missing"})
 	if len(got) != 2 || got["a"] != 1 || got["c"] != 3 {
 		t.Fatalf("unexpected projection: %+v", got)
+	}
+}
+
+// TestStream_NonRetryableConnectErrorIsTerminal: a 403 must close the stream
+// (no infinite reconnect) and surface the API error to Error subscribers.
+func TestStream_NonRetryableConnectErrorIsTerminal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	stream := streamClient(t, srv).From("clicks").Stream(nil)
+	defer stream.Close()
+
+	errCh := make(chan error, 4)
+	stream.Subscribe(&StreamSubscriber{Error: func(err error) { errCh <- err }})
+
+	select {
+	case err := <-errCh:
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden || apiErr.Retryable {
+			t.Fatalf("want non-retryable HTTP_403, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("error never surfaced")
+	}
+
+	select {
+	case <-stream.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream never closed after non-retryable connect error")
+	}
+	if s := stream.Status(); s != StatusClosed {
+		t.Fatalf("want closed, got %s", s)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := stream.Connected(ctx); err == nil {
+		t.Fatal("Connected must fail on a terminally-closed stream")
 	}
 }

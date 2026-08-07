@@ -313,7 +313,7 @@ make test-ts
 # E2E SDK suite against bin/wavehouse-cov
 make test-e2e
 
-# All four suites sequentially + merged coverage
+# All suites sequentially + merged coverage
 make test-all
 
 # Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts,
@@ -324,7 +324,7 @@ make ci
 make cov
 ```
 
-Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total.
+Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run without coverage instrumentation or a per-suite gate.
 
 **Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag).
 
@@ -503,7 +503,7 @@ Run `make help` to see all targets. Key ones:
 | `make test-ts` | SDK vitest unit tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
 | `make cov` | Merge Go + TS coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." Each side skips silently if its data is missing, but `make cov` fails if *both* are empty (you ran it before any test target). |
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
-| `make test-all` | All four suites sequentially + merged coverage gate |
+| `make test-all` | All suites sequentially + merged coverage gate |
 | `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
 | **Analysis** (informational, not in CI) | |
 | `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
@@ -550,9 +550,11 @@ PRs are grouped per config to reduce noise. The npm config is pointed at the wor
 
 **No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
 
-## Releasing the SDK
+## Releasing the SDKs
 
-The TypeScript SDK (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
+**Go SDK** (`github.com/Wave-RF/WaveHouse/clients/go`): no tagged releases yet — `go get` resolves a pseudo-version from `main`. A tagged release requires a `clients/go/vX.Y.Z` tag (Go's nested-module tag form); the server's `v*` and npm's `sdk-v*` tag globs deliberately don't cover it, and no release workflow exists for it yet.
+
+**TypeScript SDK** (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
 
 - **Dev snapshots.** Every push to `main` publishes `0.0.0-dev.<hash>` under the `dev` dist-tag — but only when the built `dist/` actually changed (the version is a hash of the build output, so an unchanged build resolves to an already-published version and is skipped). Install the bleeding edge with `npm install @wavehouse/sdk@dev`.
 - **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. A stable version goes to the `latest` dist-tag; a prerelease (`sdk-v0.2.0-rc.1`) is published under `alpha`/`beta`/`rc`/`next` — derived from the suffix — and marked as a GitHub pre-release. The tag **must** match `clients/ts/package.json`'s `version`, or the job fails fast.

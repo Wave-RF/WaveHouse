@@ -225,10 +225,12 @@ clicks.Select("page").
     Aggregate("uniqExact", "user_id", "unique_users") // custom fn
 ```
 
-Each aggregation method signature: `(column, alias string) *QueryBuilder`.
-`Count` defaults to `column="*"` when `column` is `""`, and `alias="count"`
-when `alias` is `""`; the other aggregations default `alias` to
-`"<fn>_<column>"` when left empty.
+`Count`/`Sum`/`Avg`/`Min`/`Max`/`CountDistinct` take `(column, alias
+string)`; `Aggregate` takes `(fn, column, alias string)`. Empty-alias
+defaults: `Count` → `count` (and `column=""` becomes `*`); `Sum`/`Avg`/
+`Min`/`Max` → `sum_<column>`/`avg_<column>`/`min_<column>`/`max_<column>`;
+`CountDistinct` → `count_distinct_<column>`. `Aggregate` has **no** alias
+default — pass one explicitly or the query is sent with `"alias": ""`.
 
 #### `.GroupBy(...columns)`
 
@@ -303,10 +305,10 @@ Execute the query and decode rows into `[]map[string]any`. The ordinary
 (non-generic) method form of `FetchTyped`.
 
 ```go
-page, err := clicks.Select("page").Limit(50).FetchUntyped(ctx)
+page, err := clicks.Select("page").OrderBy("page", "asc").Limit(50).FetchUntyped(ctx)
 
 if page.HasMore && page.Next != nil {
-    page2, err := page.Next(ctx) // cursor-based pagination
+    page2, err := page.Next(ctx) // cursor-based pagination — needs OrderBy
 }
 ```
 

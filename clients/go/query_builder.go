@@ -1,6 +1,7 @@
 package wavehouse
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/url"
@@ -275,9 +276,13 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 	m, ok := lastRow.(map[string]any)
 	if !ok {
 		// ponytail: marshal/unmarshal round-trip to get a map — optimize with reflect if perf matters.
+		// UseNumber keeps int64 cursor values exact; plain float64 decoding
+		// corrupts IDs past 2^53 and pagination would repeat or skip a row.
 		raw, _ := json.Marshal(lastRow)
 		m = make(map[string]any)
-		_ = json.Unmarshal(raw, &m)
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		_ = dec.Decode(&m)
 	}
 	lastValue, exists := m[cursor.Column]
 	if !exists {

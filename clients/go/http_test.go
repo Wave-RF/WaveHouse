@@ -3,6 +3,7 @@ package wavehouse
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -70,9 +71,8 @@ func TestDoRequest_RawBody(t *testing.T) {
 	var gotCT string
 	hctx := testCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("Content-Type")
-		raw := make([]byte, 1024)
-		n, _ := r.Body.Read(raw)
-		gotBody = string(raw[:n])
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
 		_ = json.NewEncoder(w).Encode(map[string]int{"total": 1})
 	}))
 

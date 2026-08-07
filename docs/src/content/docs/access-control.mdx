@@ -399,7 +399,7 @@ curl -X PUT http://localhost:8080/v1/admin/policy \
   -d @policy.json
 ```
 
-The full request and response shapes for these endpoints live in the [API Reference](/api); the [TypeScript SDK](/sdk) wraps them as `client.policy.get()`, `client.policy.set(policy)`, and `client.policy.validate(policy)`.
+The full request and response shapes for these endpoints live in the [API Reference](/api); the [TypeScript SDK](/sdk) wraps them as `client.policy.get()`, `client.policy.set(policy)`, and `client.policy.validate(policy)`, and the [Go SDK](/sdk/go/admin) as `wh.Policy.Get(ctx)`, `wh.Policy.Set(ctx, policy)`, and `wh.Policy.Validate(ctx, policy)`.
 
 ## Bootstrapping and the policy lifecycle
 

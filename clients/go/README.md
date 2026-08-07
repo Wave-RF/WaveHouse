@@ -193,9 +193,9 @@ rows, _ := wavehouse.SQL[map[string]any](ctx, client, "SELECT count() FROM click
 Generate Go structs from a running WaveHouse instance:
 
 ```bash
+export WAVEHOUSE_AUTH=<admin-jwt>   # avoids leaking the token via argv
 go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen \
     --url http://localhost:8080 \
-    --auth <admin-jwt> \
     --out ./db_types.go \
     --package myapp
 ```
@@ -204,7 +204,7 @@ See the [full type mapping in the docs](https://wavehouse.dev/sdk/go/reference/#
 
 ## Error Handling
 
-Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors are `*wavehouse.Error` (use `errors.As`). Streaming lifecycle methods (`Stream`, `Subscribe`, `Close`) deliver errors through callbacks instead:
+Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors originating from the HTTP exchange are `*wavehouse.Error` — unwrap with `errors.As`. Client-side failures before a request goes out (an `Auth` provider error, a request-body marshal failure) are plain wrapped errors, so handle the `errors.As == false` case too. Streaming lifecycle methods (`Stream`, `Subscribe`, `Close`, and `Connected`) deliver errors through callbacks or plain errors instead:
 
 ```go
 page, err := client.From("clicks").Fetch(ctx)
