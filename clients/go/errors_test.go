@@ -76,24 +76,28 @@ func TestParseErrorResponse(t *testing.T) {
 
 func TestParseErrorResponse_5xxRetryable(t *testing.T) {
 	tests := []struct {
+		name      string
 		status    int
 		retryable bool
 	}{
-		{400, false},
-		{403, false},
-		{500, true},
-		{503, true},
+		{"BadRequest", 400, false},
+		{"Forbidden", 403, false},
+		{"TooManyRequests", 429, true},
+		{"InternalServerError", 500, true},
+		{"ServiceUnavailable", 503, true},
 	}
 	for _, tt := range tests {
-		res := &http.Response{
-			StatusCode: tt.status,
-			Body:       io.NopCloser(strings.NewReader(`{"error":"test"}`)),
-			Header:     http.Header{},
-		}
-		e := parseErrorResponse(res)
-		if e.Retryable != tt.retryable {
-			t.Errorf("status %d: want retryable=%v, got %v", tt.status, tt.retryable, e.Retryable)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			res := &http.Response{
+				StatusCode: tt.status,
+				Body:       io.NopCloser(strings.NewReader(`{"error":"test"}`)),
+				Header:     http.Header{},
+			}
+			e := parseErrorResponse(res)
+			if e.Retryable != tt.retryable {
+				t.Errorf("status %d: want retryable=%v, got %v", tt.status, tt.retryable, e.Retryable)
+			}
+		})
 	}
 }
 

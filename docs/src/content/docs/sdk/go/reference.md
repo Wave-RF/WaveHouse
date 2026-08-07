@@ -4,7 +4,7 @@ description: "Error codes, context cancellation, the full API tree, and the code
 ---
 
 Cross-cutting reference for `github.com/Wave-RF/WaveHouse/clients/go`:
-cancellation, the error model behind every SDK call's `(T, error)` return,
+cancellation, the error model behind every request-response call's `(T, error)` return,
 the complete API tree at a glance, and the `wavehouse-codegen` tool that
 ships with the module. Compare with the TypeScript SDK's
 [Reference & CLI](/sdk/reference) page.
@@ -38,10 +38,13 @@ background goroutine, torn down explicitly via `.Close()`. See
 
 ## Error Handling
 
-The SDK never panics on API or network failures — every operation returns
-`(T, error)`, and errors are always `*wavehouse.Error` (unwrap with
-`errors.As`). This is the direct Go equivalent of the TypeScript SDK's "the
-SDK never throws" guarantee.
+The SDK never panics on API or network failures — every request-response
+operation (queries, ingest, pipes, admin) returns `(T, error)`, and errors
+are always `*wavehouse.Error` (unwrap with `errors.As`). Streaming lifecycle
+methods (`Stream`, `Subscribe`, `Close`) don't return `(T, error)`; stream
+errors are delivered via the subscriber's `Error` callback. This is the
+direct Go equivalent of the TypeScript SDK's "the SDK never throws"
+guarantee.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|--------------|
@@ -135,9 +138,9 @@ Generate Go structs from a running WaveHouse instance. The module ships a
 `wavehouse-codegen` command under `cmd/`:
 
 ```bash
+export WAVEHOUSE_AUTH=<admin-jwt>   # avoids leaking the token via argv
 go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen \
     --url http://localhost:8080 \
-    --auth <admin-jwt> \
     --out ./db_types.go \
     --package myapp
 ```
@@ -149,8 +152,9 @@ go run ./cmd/wavehouse-codegen --url http://localhost:8080 --out ./db_types.go
 ```
 
 Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev
-server, pass an admin-role token with `--auth <jwt>` or the request is
-denied with `403`.
+server, provide an admin-role token or the request is denied with `403`.
+Prefer the `WAVEHOUSE_AUTH` environment variable — a token passed with
+`--auth <jwt>` ends up in shell history and process listings.
 
 **Options:**
 
@@ -158,7 +162,7 @@ denied with `403`.
 |------|-------------|---------|
 | `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
 | `--out`, `-o` | Output `.go` file path | `./wavehouse_types.go` |
-| `--auth`, `-a` | Bearer token (if auth required) | — |
+| `--auth`, `-a` | Bearer token (if auth required); prefer `WAVEHOUSE_AUTH` env var | `$WAVEHOUSE_AUTH` |
 | `--package`, `-p` | Go package name for the generated file | `main` |
 | `--help`, `-h` | Show usage and exit | — |
 
@@ -195,11 +199,11 @@ tag.
 |------------------|---------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum8`/`Enum16`, `IPv4`/`IPv6` | `string` |
 | `Bool` | `bool` |
-| `UInt8` / `UInt16` / `UInt32` / `UInt64` | `uint8` / `uint16` / `uint32` / `uint64` |
-| `Int8` / `Int16` / `Int32` / `Int64` | `int8` / `int16` / `int32` / `int64` |
+| `UInt8` / `UInt16` / `UInt32` | `uint8` / `uint16` / `uint32` |
+| `Int8` / `Int16` / `Int32` | `int8` / `int16` / `int32` |
 | `Float32` | `float32` |
 | `Float64` | `float64` |
-| `Decimal*`, `UInt128`/`UInt256`, `Int128`/`Int256` | `string` (big numbers are strings in JSON) |
+| `UInt64`/`Int64`, `Decimal*`, `UInt128`/`UInt256`, `Int128`/`Int256` | `string` (ClickHouse quotes 64-bit-and-wider integers in JSON output — `output_format_json_quote_64bit_integers` — and the server forwards them verbatim) |
 | `Nullable(T)` | `*T` |
 | `LowCardinality(T)` | same as `T` |
 | `Array(T)` | `[]T` |
@@ -207,9 +211,10 @@ tag.
 | anything unrecognized | `any` |
 
 This differs from the TypeScript SDK's mapping in one notable way: Go's
-codegen preserves ClickHouse's integer **widths** (`UInt32` → `uint32`, not
-a generic `number`), since Go — unlike TypeScript — has native fixed-width
-integer types.
+codegen preserves ClickHouse's integer **widths** up to 32 bits (`UInt32` →
+`uint32`, not a generic `number`), since Go — unlike TypeScript — has
+native fixed-width integer types. 64-bit integers stay `string` because
+that is what actually arrives on the wire.
 
 ## Testing
 
@@ -226,6 +231,17 @@ format they both speak.
 cd clients/go
 go test ./...
 ```
+
+E2E tests (build tag `e2e`) run against a live WaveHouse instance and have
+their own Make target, separate from the repo's `make test-e2e`:
+
+```bash
+WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_AUTH=<jwt> make test-go-sdk-e2e
+```
+
+`WAVEHOUSE_URL` defaults to `http://localhost:8080`; `WAVEHOUSE_AUTH` is
+optional (admin-only cases skip without it). When the server is unreachable
+the suite skips instead of failing.
 
 Unlike the TypeScript SDK, the Go SDK isn't (yet) wired into the repo's
 `make test-e2e` harness — see the TypeScript SDK's

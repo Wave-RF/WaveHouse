@@ -361,10 +361,12 @@ for page.HasMore && page.Next != nil {
 
 ## Raw SQL — `wavehouse.SQL[Row](ctx, client, query)`
 
-Execute a raw SQL query. `/v1/admin/query` is admin-only: the caller's JWT
-must resolve to the policy admin role (`admin_role`, `"admin"` by default).
-A request with no token, or an invalid/expired one, falls back to the
-`default_role` and is rejected. Package-level generic function — use
+Execute a raw SQL query. `/v1/admin/query` is admin-only: for JWT callers,
+the token must resolve to the policy admin role (`admin_role`, `"admin"` by
+default) — a JWT request with no token, or an invalid/expired one, falls
+back to the `default_role` and is rejected. Alternatively, a configured
+operator key (`Authorization: Operator <key>` or `X-Operator-Key`)
+authorizes `/v1/admin/*` without a JWT. Package-level generic function — use
 `map[string]any` for a dynamic/unknown schema.
 
 ```go

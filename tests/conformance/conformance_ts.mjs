@@ -18,7 +18,14 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Import the built SDK.
-const { createClient } = await import(join(__dirname, "../../clients/ts/dist/index.js"));
+let createClient;
+try {
+  ({ createClient } = await import(join(__dirname, "../../clients/ts/dist/index.js")));
+} catch (err) {
+  console.error("Cannot load the TypeScript SDK build. Run the SDK build first (e.g. `pnpm --dir clients/ts build`).");
+  console.error(err.message);
+  process.exit(1);
+}
 
 const cases = JSON.parse(readFileSync(join(__dirname, "../../clients/go/testdata/wire_cases.json"), "utf-8"));
 
@@ -43,7 +50,7 @@ const server = createServer((req, res) => {
     if (req.url?.startsWith("/v1/dlq")) {
       res.end(JSON.stringify({ tables: {}, total: 0 }));
     } else if (req.url?.startsWith("/v1/schema") && req.method === "GET") {
-      res.end(JSON.stringify({}));
+      res.end(JSON.stringify([]));
     } else if (req.url === "/v1/admin/policy/validate" && req.method === "POST") {
       res.end(JSON.stringify({ valid: true }));
     } else if (req.url?.startsWith("/v1/admin/policy") && req.method === "GET") {
@@ -53,13 +60,15 @@ const server = createServer((req, res) => {
     } else if (req.url === "/v1/admin/pipes" && req.method === "GET") {
       res.end(JSON.stringify([]));
     } else if (req.url?.startsWith("/v1/ingest")) {
+      // Same shapes the real server returns (internal/api/ingest.go).
       if (lastCapture.contentType === "application/x-ndjson") {
         res.end(JSON.stringify({ total: 0, succeeded: 0, failed: 0, duplicates: 0 }));
       } else {
         res.end(JSON.stringify({ ok: true }));
       }
     } else if (req.url === "/v1/health") {
-      res.end("");
+      // Real server shape (internal/api/health.go).
+      res.end(JSON.stringify({ status: "ok" }));
     } else {
       res.end(JSON.stringify([]));
     }
@@ -124,8 +133,17 @@ function applyQueryOps(wh, table, operations) {
   return q;
 }
 
+// Compare request URIs by meaning: same path, same decoded query values,
+// regardless of + vs %20 spelling or parameter order (mirrors the Go harness).
 function normalizePath(p) {
-  return p.replace(/\+/g, "%20");
+  let u;
+  try {
+    u = new URL(p, "http://conformance.invalid");
+  } catch {
+    return p;
+  }
+  u.searchParams.sort();
+  return `${u.pathname}?${u.searchParams.toString()}`;
 }
 
 function deepEqual(a, b) {
@@ -147,6 +165,8 @@ function sortKeys(v) {
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
+const skippedNames = [];
 const failures = [];
 
 for (const tc of cases) {
@@ -213,7 +233,10 @@ for (const tc of cases) {
         await wh.pipes.delete(tc.pipe_name);
         break;
       default:
-        passed++;
+        // Not a pass — the Go harness skips these too. Fixture cases with a
+        // new endpoint value must be wired up here before they count.
+        skipped++;
+        skippedNames.push(`${tc.name} (endpoint: ${tc.endpoint})`);
         continue;
     }
 
@@ -261,9 +284,16 @@ for (const tc of cases) {
   }
 }
 
+server.closeAllConnections?.();
 server.close();
 
-console.log(`\nWire-format conformance (TS SDK): ${passed} passed, ${failed} failed, ${cases.length} total\n`);
+console.log(
+  `\nWire-format conformance (TS SDK): ${passed} passed, ${failed} failed, ${skipped} skipped, ${cases.length} total\n`,
+);
+
+for (const name of skippedNames) {
+  console.log(`  - skipped: ${name}`);
+}
 
 for (const f of failures) {
   console.log(`  ✗ ${f.name}`);
@@ -276,4 +306,5 @@ if (failed > 0) {
   process.exit(1);
 } else {
   console.log("  ✓ All cases passed\n");
+  process.exit(0);
 }

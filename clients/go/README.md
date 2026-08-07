@@ -204,7 +204,7 @@ See the [full type mapping in the docs](https://wavehouse.dev/sdk/go/reference/#
 
 ## Error Handling
 
-All SDK operations return `(T, error)`. Errors are `*wavehouse.Error` (use `errors.As`):
+Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors are `*wavehouse.Error` (use `errors.As`). Streaming lifecycle methods (`Stream`, `Subscribe`, `Close`) deliver errors through callbacks instead:
 
 ```go
 page, err := client.From("clicks").Fetch(ctx)

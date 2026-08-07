@@ -84,7 +84,7 @@ func (t *TableRef) Schema(ctx context.Context) (*TableSchema, error) {
 		path:   "/v1/schema",
 		params: url.Values{"table": {t.table}},
 	}, &schema); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get schema for table %q: %w", t.table, err)
 	}
 	return &schema, nil
 }
@@ -105,7 +105,7 @@ func (t *TableRef) insertSingle(ctx context.Context, data any) (*InsertResult, e
 		params: url.Values{"table": {t.table}},
 		body:   data,
 	}, &res); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("insert into %q: %w", t.table, err)
 	}
 	ok := true
 	if res.OK != nil {
@@ -181,7 +181,7 @@ func (t *TableRef) sendNDJSON(ctx context.Context, ndjson string) (*InsertResult
 		rawBody:     ndjson,
 		contentType: "application/x-ndjson",
 	}, &res); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ingest into %q: %w", t.table, err)
 	}
 	result := &InsertResult{
 		OK:         res.Failed == 0,

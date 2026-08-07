@@ -83,7 +83,7 @@ wh := wavehouse.NewClient(wavehouse.Config{
 | `BaseURL` | `string` | — | WaveHouse server URL (required) |
 | `Auth` | `func(context.Context) (string, error)` | `nil` | Token provider, called before each request. `nil` means unauthenticated access |
 | `Options` | `*ClientOptions` | `nil` | Transport tuning (see below) |
-| `HTTPClient` | `*http.Client` | `http.DefaultClient` | Override for custom TLS, proxies, or test transports |
+| `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports |
 
 ### `ClientOptions`
 
@@ -118,6 +118,13 @@ parameter fallback to worry about (that's a TypeScript-SDK-in-the-browser
 concern only; see its [equivalent note](/sdk#creating-a-client)).
 :::
 
+:::caution[Use HTTPS for authenticated non-local servers]
+The SDK doesn't forbid `http://` base URLs — local development and
+private-network deployments rely on them — but a bearer token sent over
+plaintext HTTP is readable by anything on the path. Point authenticated
+clients at `https://` endpoints outside a trusted network.
+:::
+
 ## Typed Rows (Generics)
 
 Pass a row type as a type parameter to get results decoded straight into
@@ -148,7 +155,7 @@ parameter.
 
 ## Error Handling
 
-All SDK operations return `(T, error)`. Errors are `*wavehouse.Error`; unwrap with `errors.As`:
+Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors are `*wavehouse.Error`; unwrap with `errors.As`. (Streaming lifecycle methods — `Stream`, `Subscribe`, `Close` — deliver errors through callbacks instead; see [Streaming](/sdk/go/streaming).)
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)
@@ -161,7 +168,7 @@ if err != nil {
 }
 ```
 
-See [Reference → Error Handling](/sdk/go/reference/#error-handling) for retry behavior and error codes.
+See [Reference → Error Handling](/sdk/go/reference#error-handling) for retry behavior and error codes.
 
 ## Differences from the TypeScript SDK
 

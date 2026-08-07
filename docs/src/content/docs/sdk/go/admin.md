@@ -43,7 +43,7 @@ policy, err := wh.Policy.Get(ctx)
 
 // Update policy.
 tenantFilter := "{{ jwt.app_metadata.tenant_id }}"
-err = wh.Policy.Set(ctx, &wavehouse.Policy{
+policyDraft := &wavehouse.Policy{
     DefaultRole: "viewer",
     Tables: map[string]wavehouse.TablePolicy{
         "clicks": {
@@ -58,7 +58,8 @@ err = wh.Policy.Set(ctx, &wavehouse.Policy{
             },
         },
     },
-})
+}
+err = wh.Policy.Set(ctx, policyDraft)
 
 // Validate without applying (dry run).
 result, err := wh.Policy.Validate(ctx, policyDraft)

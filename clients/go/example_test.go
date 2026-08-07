@@ -17,8 +17,9 @@ func ExampleNewClient() {
 	})
 
 	// Health check — returns nil when the server is reachable.
-	err := client.Sys.Health(context.Background())
-	_ = err
+	if err := client.Sys.Health(context.Background()); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func ExampleNewClient_withAuth() {
@@ -40,12 +41,15 @@ func ExampleClient_From() {
 	})
 
 	// Query with the builder.
-	page, _ := client.From("clicks").
+	page, err := client.From("clicks").
 		Select("page", "button").
 		Where("page", wavehouse.OpEq, "/home").
 		OrderBy("page", "asc").
 		Limit(10).
 		FetchUntyped(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	for _, row := range page.Data {
 		fmt.Println(row["page"])

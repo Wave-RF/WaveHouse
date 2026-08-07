@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
-func nsClient(handler http.Handler) *Client {
+func nsClient(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
 	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
 	return NewClient(Config{
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),
@@ -18,7 +21,7 @@ func nsClient(handler http.Handler) *Client {
 }
 
 func TestSysNamespace_Health(t *testing.T) {
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/health" {
 			t.Errorf("want /v1/health, got %s", r.URL.Path)
 		}
@@ -31,7 +34,7 @@ func TestSysNamespace_Health(t *testing.T) {
 }
 
 func TestSchemaNamespace_List(t *testing.T) {
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/schema" {
 			t.Errorf("want /v1/schema, got %s", r.URL.Path)
 		}
@@ -49,22 +52,27 @@ func TestSchemaNamespace_List(t *testing.T) {
 }
 
 func TestSchemaNamespace_Refresh(t *testing.T) {
+	var mu sync.Mutex
 	var gotMethod string
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotMethod = r.Method
+		mu.Unlock()
 		w.WriteHeader(200)
 	}))
 	err := c.Schema.Refresh(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotMethod != "POST" {
 		t.Fatalf("want POST, got %s", gotMethod)
 	}
 }
 
 func TestPolicyNamespace_GetSetValidate(t *testing.T) {
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			_ = json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
@@ -99,7 +107,7 @@ func TestPolicyNamespace_GetSetValidate(t *testing.T) {
 
 func TestDLQNamespace(t *testing.T) {
 	t.Run("List", func(t *testing.T) {
-		c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
 		}))
 		stats, err := c.DLQ.List(context.Background())
@@ -112,15 +120,20 @@ func TestDLQNamespace(t *testing.T) {
 	})
 
 	t.Run("Table", func(t *testing.T) {
+		var mu sync.Mutex
 		var gotParam string
-		c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
 			gotParam = r.URL.Query().Get("table")
+			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 2}, Total: 2})
 		}))
 		_, err := c.DLQ.Table(context.Background(), "clicks")
 		if err != nil {
 			t.Fatal(err)
 		}
+		mu.Lock()
+		defer mu.Unlock()
 		if gotParam != "clicks" {
 			t.Fatalf("want table=clicks, got %s", gotParam)
 		}
@@ -128,7 +141,7 @@ func TestDLQNamespace(t *testing.T) {
 }
 
 func TestPipesNamespace_CRUD(t *testing.T) {
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			if r.URL.Path == "/v1/admin/pipes" {
@@ -171,12 +184,15 @@ func TestPipesNamespace_CRUD(t *testing.T) {
 }
 
 func TestPipeRef_Fetch(t *testing.T) {
+	var mu sync.Mutex
 	var gotPath, gotMethod string
 	var gotBody map[string]any
-	c := nsClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotPath = r.URL.Path
 		gotMethod = r.Method
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"count": 42}})
 	}))
 	rows, err := Fetch[map[string]any](context.Background(), c.Pipe("top_pages", map[string]any{"limit": 10}))
@@ -186,6 +202,8 @@ func TestPipeRef_Fetch(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("want 1 row, got %d", len(rows))
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotPath != "/v1/pipes/top_pages" {
 		t.Fatalf("want /v1/pipes/top_pages, got %s", gotPath)
 	}

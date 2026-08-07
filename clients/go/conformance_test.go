@@ -7,10 +7,21 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// logCallErr surfaces SDK-call errors that the conformance harness otherwise
+// ignores — the assertions only inspect the captured request, but when a call
+// fails before sending, the failure message should name the real cause.
+func logCallErr(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Logf("SDK call returned error (request may still be valid): %v", err)
+	}
+}
 
 // wireCasesJSON embeds the shared wire-format conformance fixture so the
 // test binary is self-contained: it works from a module archive or a
@@ -103,18 +114,25 @@ func TestConformance_WireFormat(t *testing.T) {
 			// Execute the case.
 			switch tc.Endpoint {
 			case "query":
-				q := c.From(tc.Table).Select()
-				q = applyOps(t, q, tc.Table, c, tc.Operations)
-				_, _ = q.FetchUntyped(ctx)
+				q := applyOps(t, tc.Table, c, tc.Operations)
+				_, err := q.FetchUntyped(ctx)
+				logCallErr(t, err)
 
 			case "ingest":
 				if len(tc.Operations) > 0 && tc.Operations[0].Method == "insert" {
+					if len(tc.Operations[0].Args) == 0 {
+						t.Fatal("insert needs 1 arg, got 0")
+					}
 					data := tc.Operations[0].Args[0]
-					_, _ = c.From(tc.Table).Insert(ctx, data)
+					_, err := c.From(tc.Table).Insert(ctx, data)
+					logCallErr(t, err)
 				}
 
 			case "ingest_batch":
 				if len(tc.Operations) > 0 && tc.Operations[0].Method == "insert" {
+					if len(tc.Operations[0].Args) == 0 {
+						t.Fatal("insert needs 1 arg, got 0")
+					}
 					rawArr, ok := tc.Operations[0].Args[0].([]any)
 					if !ok {
 						t.Fatalf("batch insert args[0] is not an array")
@@ -123,63 +141,73 @@ func TestConformance_WireFormat(t *testing.T) {
 					for i, r := range rawArr {
 						rows[i] = toStringMap(r)
 					}
-					_, _ = c.From(tc.Table).Insert(ctx, rows)
+					_, err := c.From(tc.Table).Insert(ctx, rows)
+					logCallErr(t, err)
 				}
 
 			case "pipe":
 				p := c.Pipe(tc.PipeName, tc.PipeParams)
-				_, _ = p.FetchUntyped(ctx)
+				_, err := p.FetchUntyped(ctx)
+				logCallErr(t, err)
 
 			case "sql":
-				_, _ = SQL[map[string]any](ctx, c, tc.SQL)
+				_, err := SQL[map[string]any](ctx, c, tc.SQL)
+				logCallErr(t, err)
 
 			case "health":
-				_ = c.Sys.Health(ctx)
+				logCallErr(t, c.Sys.Health(ctx))
 
 			case "schema_list":
-				_, _ = c.Schema.List(ctx)
+				_, err := c.Schema.List(ctx)
+				logCallErr(t, err)
 
 			case "schema_refresh":
-				_ = c.Schema.Refresh(ctx)
+				logCallErr(t, c.Schema.Refresh(ctx))
 
 			case "policy_get":
-				_, _ = c.Policy.Get(ctx)
+				_, err := c.Policy.Get(ctx)
+				logCallErr(t, err)
 
 			case "policy_set":
 				var pol Policy
 				if err := json.Unmarshal(tc.PolicyBody, &pol); err != nil {
 					t.Fatalf("parse policy_body: %v", err)
 				}
-				_ = c.Policy.Set(ctx, &pol)
+				logCallErr(t, c.Policy.Set(ctx, &pol))
 
 			case "policy_validate":
 				var pol Policy
 				if err := json.Unmarshal(tc.PolicyBody, &pol); err != nil {
 					t.Fatalf("parse policy_body: %v", err)
 				}
-				_, _ = c.Policy.Validate(ctx, &pol)
+				_, err := c.Policy.Validate(ctx, &pol)
+				logCallErr(t, err)
 
 			case "dlq_list":
-				_, _ = c.DLQ.List(ctx)
+				_, err := c.DLQ.List(ctx)
+				logCallErr(t, err)
 
 			case "dlq_table":
-				_, _ = c.DLQ.Table(ctx, tc.Table)
+				_, err := c.DLQ.Table(ctx, tc.Table)
+				logCallErr(t, err)
 
 			case "pipes_list":
-				_, _ = c.Pipes.List(ctx)
+				_, err := c.Pipes.List(ctx)
+				logCallErr(t, err)
 
 			case "pipes_get":
-				_, _ = c.Pipes.Get(ctx, tc.PipeName)
+				_, err := c.Pipes.Get(ctx, tc.PipeName)
+				logCallErr(t, err)
 
 			case "pipes_set":
 				var def PipeDef
 				if err := json.Unmarshal(tc.PipeDefBody, &def); err != nil {
 					t.Fatalf("parse pipe_def: %v", err)
 				}
-				_ = c.Pipes.Set(ctx, tc.PipeName, def)
+				logCallErr(t, c.Pipes.Set(ctx, tc.PipeName, def))
 
 			case "pipes_delete":
-				_ = c.Pipes.Delete(ctx, tc.PipeName)
+				logCallErr(t, c.Pipes.Delete(ctx, tc.PipeName))
 
 			default:
 				t.Skipf("unhandled endpoint: %s", tc.Endpoint)
@@ -235,7 +263,7 @@ func TestConformance_WireFormat(t *testing.T) {
 // applyOps replays the operation chain from the fixture onto a QueryBuilder.
 // Fixtures always put select first (mirroring real usage), so rebuilding on
 // select is safe and keeps this simple.
-func applyOps(t *testing.T, _ *QueryBuilder, table string, c *Client, ops []wireOp) *QueryBuilder {
+func applyOps(t *testing.T, table string, c *Client, ops []wireOp) *QueryBuilder {
 	t.Helper()
 	q := c.From(table).Select()
 
@@ -249,8 +277,15 @@ func applyOps(t *testing.T, _ *QueryBuilder, table string, c *Client, ops []wire
 			if len(op.Args) != 3 {
 				t.Fatalf("where needs 3 args, got %d", len(op.Args))
 			}
-			col := op.Args[0].(string)
-			opStr := FilterOp(op.Args[1].(string))
+			col, ok := op.Args[0].(string)
+			if !ok {
+				t.Fatalf("where: column arg is %T, want string", op.Args[0])
+			}
+			rawOp, ok := op.Args[1].(string)
+			if !ok {
+				t.Fatalf("where: operator arg is %T, want string", op.Args[1])
+			}
+			opStr := FilterOp(rawOp)
 			val := op.Args[2]
 			q = q.Where(col, opStr, val)
 		case "count":
@@ -371,7 +406,14 @@ func normalizeJSON(v any) any {
 	}
 }
 
+// normalizePath compares request URIs by meaning: same path, same decoded
+// query values regardless of + vs %20 spelling or parameter order. A raw
+// string replace would also rewrite literal + characters and stop asserting
+// the encoding at all.
 func normalizePath(p string) string {
-	// Normalize URL encoding differences (+ vs %20 for spaces).
-	return strings.ReplaceAll(p, "+", "%20")
+	u, err := url.ParseRequestURI(p)
+	if err != nil {
+		return p
+	}
+	return u.Path + "?" + u.Query().Encode()
 }

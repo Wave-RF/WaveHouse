@@ -13,7 +13,9 @@ WaveHouse also ships an official Go SDK
 `context.Context`-first, generics for typed rows. See the
 [Go SDK docs](/sdk/go). The two clients speak the same wire format, so
 everything below about tables, the query builder, streaming, and admin
-endpoints carries over conceptually — only the language idioms differ.
+endpoints carries over conceptually, but API and lifecycle details differ —
+Go uses context-first calls and package-level generics, and streams must be
+closed explicitly.
 :::
 
 ## Installation

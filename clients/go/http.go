@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,6 +16,10 @@ import (
 )
 
 var errAborted = &Error{Status: 0, Code: "ABORTED", Message: "Request aborted", Retryable: false}
+
+// maxRetryAfter caps server-supplied Retry-After delays so a hostile or
+// misconfigured server can't park the calling goroutine for hours.
+const maxRetryAfter = 30 * time.Second
 
 // httpContext carries per-client state needed by every request.
 type httpContext struct {
@@ -130,10 +135,10 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 		apiErr := parseErrorResponse(res)
 		_ = res.Body.Close()
 
-		// 503 with Retry-After: wait the specified duration.
-		if res.StatusCode == http.StatusServiceUnavailable {
+		// 503/429 with Retry-After: wait the specified duration (capped).
+		if res.StatusCode == http.StatusServiceUnavailable || res.StatusCode == http.StatusTooManyRequests {
 			if ra := res.Header.Get("Retry-After"); ra != "" && attempt < maxAttempts-1 {
-				delay := 30 * time.Second
+				delay := maxRetryAfter
 				if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 {
 					delay = time.Duration(secs) * time.Second
 				} else if parsed, parseErr := http.ParseTime(ra); parseErr == nil {
@@ -141,6 +146,7 @@ func doRequest(ctx context.Context, hctx httpContext, opts requestOptions, dst a
 						delay = d
 					}
 				}
+				delay = min(delay, maxRetryAfter)
 				if sleepErr := sleepWithContext(ctx, delay); sleepErr != nil {
 					return errAborted
 				}
@@ -177,6 +183,8 @@ func backoff(attempt int) time.Duration {
 	if ms > 30000 {
 		ms = 30000
 	}
+	// ±20% jitter so clients failing at the same moment don't retry in lockstep.
+	ms *= 0.8 + 0.4*rand.Float64() //nolint:gosec // retry jitter, not cryptographic
 	return time.Duration(ms) * time.Millisecond
 }
 

@@ -52,6 +52,7 @@ func TestClient_From(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	_, _ = c.From("events").Fetch(context.Background())
 }
@@ -68,6 +69,7 @@ func TestClient_SQL(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"x": 1}})
 	}))
+	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
 	rows, err := SQL[map[string]any](context.Background(), c, "SELECT 1")
 	if err != nil {
@@ -86,5 +88,18 @@ func TestStaticToken(t *testing.T) {
 	}
 	if token != "abc" {
 		t.Fatalf("want abc, got %s", token)
+	}
+}
+
+func TestPolicyFilter_MarshalOperators(t *testing.T) {
+	empty := ""
+	raw, err := json.Marshal(PolicyFilter{Eq: &empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Intentional empty-string comparison survives; unset operators are
+	// omitted entirely, never sent as null.
+	if string(raw) != `{"_eq":""}` {
+		t.Fatalf(`want {"_eq":""}, got %s`, raw)
 	}
 }

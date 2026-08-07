@@ -3,6 +3,7 @@ package wavehouse
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // LiveQueryHandle controls a live query that combines historical backfill
@@ -10,7 +11,13 @@ import (
 type LiveQueryHandle struct {
 	stream    *StreamController
 	cancel    context.CancelFunc
+	unsub     func()
 	closeOnce sync.Once
+
+	mu        sync.Mutex
+	buffer    []StreamEvent
+	buffering bool
+	closed    bool
 }
 
 // newLiveQuery starts a live query: opens the stream immediately, fetches
@@ -19,43 +26,50 @@ func newLiveQuery(
 	stream *StreamController,
 	fetchFn func(ctx context.Context) ([]map[string]any, error),
 	sub *StreamSubscriber,
-	filters []QueryFilter,
 ) *LiveQueryHandle {
 	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is called in Close()
 	lq := &LiveQueryHandle{
-		stream: stream,
-		cancel: cancel,
+		stream:    stream,
+		cancel:    cancel,
+		buffering: true,
 	}
 
-	var (
-		mu        sync.Mutex
-		buffer    []StreamEvent
-		buffering = true
-		closed    = false
-	)
-
-	// Step 1: Subscribe to live events and buffer them.
-	stream.Subscribe(&StreamSubscriber{
+	// Step 1: Subscribe to live events and buffer them. User callbacks are
+	// invoked outside lq.mu so a subscriber may call Close() without
+	// deadlocking.
+	lq.unsub = stream.Subscribe(&StreamSubscriber{
 		Next: func(event StreamEvent) {
-			mu.Lock()
-			defer mu.Unlock()
-			if closed {
+			lq.mu.Lock()
+			if lq.closed {
+				lq.mu.Unlock()
 				return
 			}
-			if buffering {
-				buffer = append(buffer, event)
-			} else if sub.Next != nil {
+			if lq.buffering {
+				lq.buffer = append(lq.buffer, event)
+				lq.mu.Unlock()
+				return
+			}
+			lq.mu.Unlock()
+			if sub.Next != nil {
 				sub.Next(event)
 			}
 		},
-		Status: sub.Status,
-		Error:  sub.Error,
+		Status: func(s StreamStatus) {
+			if !lq.isClosed() && sub.Status != nil {
+				sub.Status(s)
+			}
+		},
+		Error: func(err error) {
+			if !lq.isClosed() && sub.Error != nil {
+				sub.Error(err)
+			}
+		},
 	})
 
 	// Step 2–5: Fetch historical and flush.
 	go func() {
 		rows, err := fetchFn(ctx)
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || lq.isClosed() {
 			return
 		}
 
@@ -65,19 +79,23 @@ func newLiveQuery(
 		}
 
 		if err != nil {
-			mu.Lock()
-			buffering = false
-			buffer = nil
-			mu.Unlock()
+			lq.mu.Lock()
+			lq.buffering = false
+			lq.buffer = nil
+			lq.mu.Unlock()
 			return
 		}
 
-		// Step 4: Deduplicate buffered events.
-		var lastTimestamp string
-		if len(rows) > 0 {
-			lastRow := rows[len(rows)-1]
-			if ts, ok := lastRow["received_timestamp"].(string); ok {
-				lastTimestamp = ts
+		// Step 4: Dedup bound — the maximum backfilled timestamp, compared as
+		// parsed times. OrderBy(..., "desc") makes the *last* row the oldest,
+		// and RFC3339 strings with varying fractional digits don't sort
+		// lexically, so neither "last row" nor raw string compare is safe.
+		var lastTS time.Time
+		for _, row := range rows {
+			if s, ok := row["received_timestamp"].(string); ok {
+				if ts, perr := time.Parse(time.RFC3339Nano, s); perr == nil && ts.After(lastTS) {
+					lastTS = ts
+				}
 			}
 		}
 
@@ -85,31 +103,31 @@ func newLiveQuery(
 		// buffer is provably empty under the lock — prevents concurrent
 		// sub.Next calls and preserves delivery order.
 		for {
-			mu.Lock()
-			if closed {
-				mu.Unlock()
+			lq.mu.Lock()
+			if lq.closed {
+				lq.mu.Unlock()
 				return
 			}
-			pending := buffer
-			buffer = nil
+			pending := lq.buffer
+			lq.buffer = nil
 			if len(pending) == 0 {
-				buffering = false
-				mu.Unlock()
+				lq.buffering = false
+				lq.mu.Unlock()
 				break
 			}
-			mu.Unlock()
+			lq.mu.Unlock()
 
 			for _, event := range pending {
-				mu.Lock()
-				c := closed
-				mu.Unlock()
-				if c {
+				if lq.isClosed() {
 					return
 				}
-				// <= dedupes events already delivered in the backfill.
-				// Sub-millisecond received_timestamp precision makes collisions rare.
-				if lastTimestamp != "" && event.Timestamp <= lastTimestamp {
-					continue
+				// Skip events already delivered in the backfill.
+				// Sub-millisecond received_timestamp precision makes
+				// boundary collisions rare.
+				if !lastTS.IsZero() {
+					if ts, perr := time.Parse(time.RFC3339Nano, event.Timestamp); perr == nil && !ts.After(lastTS) {
+						continue
+					}
 				}
 				if sub.Next != nil {
 					sub.Next(event)
@@ -118,21 +136,25 @@ func newLiveQuery(
 		}
 	}()
 
-	// Cleanup on context cancel.
-	go func() {
-		<-ctx.Done()
-		mu.Lock()
-		closed = true
-		buffer = nil
-		mu.Unlock()
-	}()
-
 	return lq
 }
 
-// Close shuts down the live query and the underlying stream.
+func (lq *LiveQueryHandle) isClosed() bool {
+	lq.mu.Lock()
+	defer lq.mu.Unlock()
+	return lq.closed
+}
+
+// Close shuts down the live query and the underlying stream. The close state
+// is applied synchronously: no new subscriber callbacks start after Close
+// returns (a callback already in flight may still complete).
 func (lq *LiveQueryHandle) Close() {
 	lq.closeOnce.Do(func() {
+		lq.mu.Lock()
+		lq.closed = true
+		lq.buffer = nil
+		lq.mu.Unlock()
+		lq.unsub()
 		lq.cancel()
 		lq.stream.Close()
 	})

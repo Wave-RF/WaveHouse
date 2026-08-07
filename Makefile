@@ -364,7 +364,7 @@ lint-go: $(GOLANGCI_LINT) go-mod-download
 
 .PHONY: lint-go-sdk
 lint-go-sdk: $(GOLANGCI_LINT)
-	$(call run,golangci-lint (Go SDK),cd clients/go && $(GOLANGCI_LINT) run ./...,)
+	$(call run,golangci-lint (Go SDK),cd clients/go && $(GOLANGCI_LINT) run ./... --allow-parallel-runners,)
 
 .PHONY: lint-ts
 lint-ts: pnpm-install
@@ -477,7 +477,7 @@ fix-prose: $(MISSPELL)
 # slowest tool, not the slowest *group* (e.g. golangci no longer drags Biome +
 # markdownlint along behind it).
 #
-# Leaves (10): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck,
+# Leaves (see verify-parallel prerequisites): tidy, fmt-go (gofumpt), lint-go (golangci), vulncheck,
 # verify-go-sdk (go vet + gofumpt on the nested clients/go module) on the Go
 # side; lint-ts (biome check) + lint-md (markdownlint) + lint-prose (misspell,
 # docs spelling) for JS/TS + Markdown + prose;
@@ -744,6 +744,7 @@ test-go-sdk-e2e: ## Run Go SDK E2E tests against a live WaveHouse instance (WAVE
 .PHONY: test-all
 test-all: ## Run all suites sequentially + one consolidated Go + TS coverage report + gates
 	@$(MAKE) test-unit COV_DEFER=1
+	@$(MAKE) test-go-sdk
 	@$(MAKE) test-ts COV_DEFER=1
 	@$(MAKE) test-integration COV_DEFER=1
 	@$(MAKE) test-e2e COV_DEFER=1

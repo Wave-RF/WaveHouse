@@ -201,13 +201,19 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 			return
 		}
 
-		lastID, err := sc.connect(ctx, hctx, table, since)
+		lastID, live, err := sc.connect(ctx, hctx, table, since)
 		// Persist the last event ID so the next reconnect resumes from it.
 		if lastID != "" {
 			since = lastID
 		}
 		if ctx.Err() != nil {
 			return
+		}
+
+		// A connection that reached "live" resets the backoff so a long-lived
+		// stream doesn't inherit a maxed-out delay on its first drop.
+		if live {
+			attempt = 0
 		}
 
 		if err != nil {
@@ -232,11 +238,12 @@ func (sc *StreamController) run(ctx context.Context, hctx httpContext, table str
 }
 
 // connect opens a single SSE connection and reads events until it closes.
-// Returns the last seen event ID (empty if none) and any error.
-func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table, since string) (string, error) {
+// Returns the last seen event ID (empty if none), whether the connection
+// reached the live state, and any error.
+func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table, since string) (string, bool, error) {
 	u, err := url.Parse(hctx.baseURL + "/v1/stream")
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	q := u.Query()
 	q.Set("table", table)
@@ -249,7 +256,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 	if hctx.auth != nil {
 		token, err := hctx.auth(ctx)
 		if err != nil {
-			return "", fmt.Errorf("auth: %w", err)
+			return "", false, fmt.Errorf("auth: %w", err)
 		}
 		if token != "" {
 			authHeader = "Bearer " + token
@@ -260,7 +267,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
@@ -270,12 +277,12 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 
 	resp, err := hctx.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("SSE connect failed: HTTP %d", resp.StatusCode)
+		return "", false, fmt.Errorf("SSE connect failed: HTTP %d", resp.StatusCode)
 	}
 
 	sc.setStatus(StatusLive)
@@ -288,7 +295,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 
 	for scanner.Scan() {
 		if ctx.Err() != nil {
-			return lastID, nil
+			return lastID, true, nil
 		}
 
 		line := scanner.Text()
@@ -324,7 +331,7 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 		}
 	}
 
-	return lastID, scanner.Err()
+	return lastID, true, scanner.Err()
 }
 
 // sseMessage matches the server's SSE event JSON shape.

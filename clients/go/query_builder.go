@@ -212,7 +212,7 @@ func (q *QueryBuilder) LiveQuery(sub *StreamSubscriber, opts *StreamOptions) *Li
 		}
 		return page.Data, nil
 	}
-	return newLiveQuery(stream, fetchFn, sub, q.state.filters)
+	return newLiveQuery(stream, fetchFn, sub)
 }
 
 func (q *QueryBuilder) aggDefault(fn, prefix, column, alias string) *QueryBuilder {
@@ -293,6 +293,14 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 	}
 
 	next := q.clone(func(s *queryState) {
+		// Replace an existing cursor filter instead of appending — otherwise
+		// page N carries N stacked filters on the cursor column.
+		for i := range s.filters {
+			if s.filters[i].Column == cursor.Column && s.filters[i].Op == cursorOp {
+				s.filters[i].Value = lastValue
+				return
+			}
+		}
 		s.filters = append(s.filters, QueryFilter{
 			Column: cursor.Column,
 			Op:     cursorOp,

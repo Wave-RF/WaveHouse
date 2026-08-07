@@ -3,32 +3,44 @@ package wavehouse
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
-func queryTestCtx(handler http.Handler) (*Client, *httptest.Server) {
+func queryTestCtx(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
 	srv := httptest.NewServer(handler)
-	c := NewClient(Config{
+	t.Cleanup(srv.Close)
+	return NewClient(Config{
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),
 		Options:    &ClientOptions{MaxRetries: 0},
 	})
-	return c, srv
 }
 
 func captureQueryBody(t *testing.T, handler http.Handler) (*Client, func() map[string]any) {
 	t.Helper()
+	// body is written on the server goroutine and read on the test goroutine;
+	// the mutex is what makes that visible under -race.
+	var mu sync.Mutex
 	var body []byte
 	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := make([]byte, 32*1024)
-		n, _ := r.Body.Read(raw)
-		body = raw[:n]
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		mu.Lock()
+		body = raw
+		mu.Unlock()
 		handler.ServeHTTP(w, r)
 	})
-	c, _ := queryTestCtx(wrapper)
+	c := queryTestCtx(t, wrapper)
 	return c, func() map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
 		var m map[string]any
 		_ = json.Unmarshal(body, &m)
 		return m
@@ -41,7 +53,7 @@ var emptyRows = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 })
 
 func TestQueryBuilder_Immutability(t *testing.T) {
-	c, _ := queryTestCtx(emptyRows)
+	c := queryTestCtx(t, emptyRows)
 	b1 := c.From("clicks").Select("page")
 	b2 := b1.Where("score", OpGt, 10)
 	if b1 == b2 {
@@ -121,14 +133,16 @@ func TestQueryBuilder_AllOperators(t *testing.T) {
 		{OpNotLike, "not_like"},
 	}
 	for _, tt := range ops {
-		c, getBody := captureQueryBody(t, emptyRows)
-		_, _ = c.From("clicks").Select("x").Where("col", tt.sdk, "v").FetchUntyped(context.Background())
-		body := getBody()
-		filters := body["filters"].([]any)
-		f := filters[0].(map[string]any)
-		if f["op"] != tt.wire {
-			t.Errorf("%s: want wire op %s, got %s", tt.sdk, tt.wire, f["op"])
-		}
+		t.Run(tt.wire, func(t *testing.T) {
+			c, getBody := captureQueryBody(t, emptyRows)
+			_, _ = c.From("clicks").Select("x").Where("col", tt.sdk, "v").FetchUntyped(context.Background())
+			body := getBody()
+			filters := body["filters"].([]any)
+			f := filters[0].(map[string]any)
+			if f["op"] != tt.wire {
+				t.Errorf("want wire op %s, got %s", tt.wire, f["op"])
+			}
+		})
 	}
 }
 
@@ -198,10 +212,9 @@ func TestQueryBuilder_TimeRange(t *testing.T) {
 }
 
 func TestQueryBuilder_Pagination_HasMore(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
 	}))
-	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client(), Options: &ClientOptions{MaxRetries: 0}})
 
 	page, err := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
 	if err != nil {
@@ -216,10 +229,9 @@ func TestQueryBuilder_Pagination_HasMore(t *testing.T) {
 }
 
 func TestQueryBuilder_Pagination_NoOrderNoNext(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a"}, {"id": "b"}})
 	}))
-	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client(), Options: &ClientOptions{MaxRetries: 0}})
 
 	page, err := c.From("clicks").Select("id").Limit(2).FetchUntyped(context.Background())
 	if err != nil {

@@ -8,11 +8,12 @@
 //	client := wavehouse.NewClient(wavehouse.Config{
 //	    BaseURL: "http://localhost:8080",
 //	})
-//	rows, err := client.From("clicks").SelectAll().Fetch(ctx)
+//	rows, err := client.From("clicks").SelectAll().FetchUntyped(ctx)
 package wavehouse
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -73,7 +74,9 @@ func NewClient(cfg Config) *Client {
 
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = http.DefaultClient
+		// Not http.DefaultClient: it's mutable global state another package
+		// could reconfigure (timeout, transport, redirects) after we're built.
+		hc = &http.Client{}
 	}
 
 	c := &Client{
@@ -125,7 +128,7 @@ func SQL[Row any](ctx context.Context, c *Client, query string) ([]Row, error) {
 		body:   map[string]string{"sql": query},
 	}, &rows)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sql query: %w", err)
 	}
 	return rows, nil
 }

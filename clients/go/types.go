@@ -179,15 +179,16 @@ type RolePermissions struct {
 	MaxMemoryUsage      any                     `json:"max_memory_usage,omitempty"`
 }
 
-// PolicyFilter describes a policy filter predicate. Fields are pointers so an
-// intentional empty-string comparison (e.g. Eq pointing at "") round-trips
-// distinctly from an absent operator, matching the server's semantics.
+// PolicyFilter describes a policy filter predicate. Fields are pointers with
+// omitempty so an intentional empty-string comparison (e.g. Eq pointing at "")
+// is sent as "", while an unset operator is omitted entirely — never null —
+// matching the server's absent-operator semantics.
 type PolicyFilter struct {
-	Eq  *string `json:"_eq"`
-	Neq *string `json:"_neq"`
-	Gt  *string `json:"_gt"`
-	Lt  *string `json:"_lt"`
-	In  *string `json:"_in"`
+	Eq  *string `json:"_eq,omitempty"`
+	Neq *string `json:"_neq,omitempty"`
+	Gt  *string `json:"_gt,omitempty"`
+	Lt  *string `json:"_lt,omitempty"`
+	In  *string `json:"_in,omitempty"`
 }
 
 // ValidationResult is the response from policy validation.

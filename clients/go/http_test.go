@@ -200,19 +200,25 @@ func TestDoRequest_EmptyResponse(t *testing.T) {
 
 func TestBackoff(t *testing.T) {
 	tests := []struct {
+		name    string
 		attempt int
-		want    time.Duration
+		base    time.Duration
 	}{
-		{0, 1 * time.Second},
-		{1, 2 * time.Second},
-		{2, 4 * time.Second},
-		{3, 8 * time.Second},
-		{10, 30 * time.Second}, // capped at 30s
+		{"Attempt0", 0, 1 * time.Second},
+		{"Attempt1", 1, 2 * time.Second},
+		{"Attempt2", 2, 4 * time.Second},
+		{"Attempt3", 3, 8 * time.Second},
+		{"CappedAt30s", 10, 30 * time.Second},
 	}
 	for _, tt := range tests {
-		got := backoff(tt.attempt)
-		if got != tt.want {
-			t.Errorf("backoff(%d) = %v, want %v", tt.attempt, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			// backoff applies ±20% jitter around the exponential base.
+			lo := time.Duration(float64(tt.base) * 0.8)
+			hi := time.Duration(float64(tt.base) * 1.2)
+			got := backoff(tt.attempt)
+			if got < lo || got > hi {
+				t.Errorf("backoff(%d) = %v, want within [%v, %v]", tt.attempt, got, lo, hi)
+			}
+		})
 	}
 }

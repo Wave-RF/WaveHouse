@@ -4,9 +4,11 @@ package wavehouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,14 +35,15 @@ func e2eClient(t *testing.T) *Client {
 		cfg.Auth = StaticToken(tok)
 	}
 
-	// Probe the server before committing to the test.
-	probe, err := http.NewRequestWithContext(
-		context.Background(), "GET", base+"/v1/health", nil,
-	)
+	// Probe the server before committing to the test. Bounded so a host that
+	// accepts the connection but never responds still yields the graceful skip.
+	probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	probe, err := http.NewRequestWithContext(probeCtx, "GET", base+"/v1/health", nil)
 	if err != nil {
 		t.Skipf("e2e: bad WAVEHOUSE_URL %q: %v", base, err)
 	}
-	resp, err := http.DefaultClient.Do(probe)
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(probe)
 	if err != nil {
 		t.Skipf("e2e: server unreachable at %s: %v", base, err)
 	}
@@ -58,20 +61,47 @@ func marker(t *testing.T) string {
 	return fmt.Sprintf("%s_%d", safe, time.Now().UnixNano())
 }
 
-// firstTable discovers a usable table from the schema list. Many E2E tests
-// need a real table to insert/query — this avoids hardcoding a name.
-func firstTable(t *testing.T, c *Client) string {
+// firstTable discovers a usable table from the schema list and returns its
+// schema alongside the name. Many E2E tests need a real table to insert/query
+// — this avoids hardcoding a name, and returning the schema avoids a second
+// Schema.List whose result set might no longer contain the chosen table.
+// Sorted so every run picks the same table (map iteration order is random).
+func firstTable(t *testing.T, c *Client) (string, TableSchema) {
 	t.Helper()
-	ctx := context.Background()
-	schemas, err := c.Schema.List(ctx)
+	schemas, err := c.Schema.List(context.Background())
 	if err != nil {
 		t.Skipf("e2e: cannot list schemas (auth?): %v", err)
 	}
+	names := make([]string, 0, len(schemas))
 	for name := range schemas {
-		return name
+		names = append(names, name)
 	}
-	t.Skip("e2e: no tables found — server has an empty schema")
-	return ""
+	if len(names) == 0 {
+		t.Skip("e2e: no tables found — server has an empty schema")
+	}
+	slices.Sort(names)
+	return names[0], schemas[names[0]]
+}
+
+// waitForRows polls the marker query until at least want rows are visible or
+// the deadline expires. Ingestion is asynchronous — a fixed sleep fails on a
+// loaded runner without any real defect.
+func waitForRows(t *testing.T, c *Client, table, markerCol, mk string, want int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		page, err := c.From(table).Select(markerCol).
+			Where(markerCol, OpEq, mk).
+			Limit(max(want, 1)).
+			FetchUntyped(context.Background())
+		if err != nil {
+			t.Fatalf("query for marker %q: %v", mk, err)
+		}
+		if len(page.Data) >= want || time.Now().After(deadline) {
+			return page.Data
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -109,20 +139,8 @@ func TestE2E_SchemaList(t *testing.T) {
 func TestE2E_InsertAndQuery(t *testing.T) {
 	c := e2eClient(t)
 	ctx := context.Background()
-	table := firstTable(t, c)
+	table, ts := firstTable(t, c)
 	mk := marker(t)
-
-	// Discover columns so we can build a valid row. We need at least one
-	// string-ish column to inject our marker. Fall back to skipping if the
-	// table's schema doesn't have one we can use.
-	schemas, err := c.Schema.List(ctx)
-	if err != nil {
-		t.Fatalf("Schema.List: %v", err)
-	}
-	ts, ok := schemas[table]
-	if !ok {
-		t.Skipf("table %q vanished between discovery and use", table)
-	}
 
 	row := buildMarkerRow(t, ts, mk)
 	markerCol := markerColumn(t, ts)
@@ -135,21 +153,11 @@ func TestE2E_InsertAndQuery(t *testing.T) {
 		t.Fatalf("Insert into %s: OK=false", table)
 	}
 
-	// Allow a moment for async ingestion to settle.
-	time.Sleep(500 * time.Millisecond)
-
-	// Query it back.
-	page, err := c.From(table).Select(markerCol).
-		Where(markerCol, OpEq, mk).
-		Limit(1).
-		FetchUntyped(ctx)
-	if err != nil {
-		t.Fatalf("Query failed: %v", err)
-	}
-	if len(page.Data) == 0 {
+	rows := waitForRows(t, c, table, markerCol, mk, 1)
+	if len(rows) == 0 {
 		t.Fatal("Query returned zero rows — expected the inserted marker row")
 	}
-	got, _ := page.Data[0][markerCol].(string)
+	got, _ := rows[0][markerCol].(string)
 	if got != mk {
 		t.Errorf("marker mismatch: want %q, got %q", mk, got)
 	}
@@ -158,13 +166,7 @@ func TestE2E_InsertAndQuery(t *testing.T) {
 func TestE2E_BatchInsert(t *testing.T) {
 	c := e2eClient(t)
 	ctx := context.Background()
-	table := firstTable(t, c)
-
-	schemas, err := c.Schema.List(ctx)
-	if err != nil {
-		t.Fatalf("Schema.List: %v", err)
-	}
-	ts := schemas[table]
+	table, ts := firstTable(t, c)
 
 	mk := marker(t)
 	markerCol := markerColumn(t, ts)
@@ -183,30 +185,16 @@ func TestE2E_BatchInsert(t *testing.T) {
 		t.Fatalf("Batch insert: OK=false")
 	}
 
-	time.Sleep(500 * time.Millisecond)
-
-	page, err := c.From(table).Select(markerCol).
-		Where(markerCol, OpEq, mk).
-		Limit(10).
-		FetchUntyped(ctx)
-	if err != nil {
-		t.Fatalf("Query after batch insert failed: %v", err)
-	}
-	if len(page.Data) < 3 {
-		t.Fatalf("expected >= 3 rows for marker %q, got %d", mk, len(page.Data))
+	got := waitForRows(t, c, table, markerCol, mk, 3)
+	if len(got) < 3 {
+		t.Fatalf("expected >= 3 rows for marker %q, got %d", mk, len(got))
 	}
 }
 
 func TestE2E_QueryBuilder(t *testing.T) {
 	c := e2eClient(t)
 	ctx := context.Background()
-	table := firstTable(t, c)
-
-	schemas, err := c.Schema.List(ctx)
-	if err != nil {
-		t.Fatalf("Schema.List: %v", err)
-	}
-	ts := schemas[table]
+	table, ts := firstTable(t, c)
 
 	// Pick two columns for a minimal projection.
 	var cols []string
@@ -215,6 +203,9 @@ func TestE2E_QueryBuilder(t *testing.T) {
 		if len(cols) >= 2 {
 			break
 		}
+	}
+	if len(cols) == 0 {
+		t.Skipf("e2e: table %q has no columns", table)
 	}
 
 	page, err := c.From(table).
@@ -235,7 +226,7 @@ func TestE2E_QueryBuilder(t *testing.T) {
 func TestE2E_TypedFetch(t *testing.T) {
 	c := e2eClient(t)
 	ctx := context.Background()
-	table := firstTable(t, c)
+	table, _ := firstTable(t, c)
 
 	q := c.From(table).SelectAll().Limit(3)
 	page, err := FetchTyped[map[string]any](ctx, q)
@@ -408,7 +399,10 @@ func buildMarkerRow(t *testing.T, ts TableSchema, mk string) map[string]any {
 		case strings.Contains(ct, "bool"):
 			row[col.Name] = false
 		default:
-			row[col.Name] = ""
+			// No safe synthetic value for this type (Array, Map, Tuple, UUID,
+			// ...) — an empty string would make the insert fail with a type
+			// error that looks like an SDK defect.
+			t.Skipf("e2e: table %q requires column %q of unsupported type %q", ts.Name, col.Name, col.Type)
 		}
 	}
 	if !markerSet {
@@ -426,12 +420,10 @@ func skipIfUnauthorized(t *testing.T, err error, op string) {
 	}
 }
 
-// isHTTPStatus checks whether err is a wavehouse.Error with the given status.
+// isHTTPStatus checks whether err wraps a wavehouse.Error with the given status.
 func isHTTPStatus(err error, status int) bool {
-	if err == nil {
-		return false
-	}
-	if e, ok := err.(*Error); ok {
+	var e *Error
+	if errors.As(err, &e) {
 		return e.Status == status
 	}
 	return false

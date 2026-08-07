@@ -53,7 +53,7 @@ func parseErrorResponse(res *http.Response) *Error {
 		msg = http.StatusText(res.StatusCode)
 	}
 
-	retryable := res.StatusCode == http.StatusServiceUnavailable || res.StatusCode >= 500
+	retryable := res.StatusCode >= 500 || res.StatusCode == http.StatusTooManyRequests
 	return &Error{
 		Status:    res.StatusCode,
 		Code:      fmt.Sprintf("HTTP_%d", res.StatusCode),

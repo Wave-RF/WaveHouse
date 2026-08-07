@@ -2,6 +2,7 @@ package wavehouse
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 )
 
@@ -17,7 +18,7 @@ func (p *PipesNamespace) List(ctx context.Context) ([]Pipe, error) {
 		method: "GET",
 		path:   "/v1/admin/pipes",
 	}, &pipes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list pipes: %w", err)
 	}
 	return pipes, nil
 }
@@ -29,26 +30,32 @@ func (p *PipesNamespace) Get(ctx context.Context, name string) (*Pipe, error) {
 		method: "GET",
 		path:   "/v1/admin/pipes/" + url.PathEscape(name),
 	}, &pipe); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get pipe %q: %w", name, err)
 	}
 	return &pipe, nil
 }
 
 // Set creates or updates a pipe. Admin-only.
 func (p *PipesNamespace) Set(ctx context.Context, name string, def PipeDef) error {
-	return doRequest(ctx, p.ctx, requestOptions{
+	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "PUT",
 		path:   "/v1/admin/pipes/" + url.PathEscape(name),
 		body:   def,
-	}, nil)
+	}, nil); err != nil {
+		return fmt.Errorf("set pipe %q: %w", name, err)
+	}
+	return nil
 }
 
 // Delete removes a pipe by name. Admin-only.
 func (p *PipesNamespace) Delete(ctx context.Context, name string) error {
-	return doRequest(ctx, p.ctx, requestOptions{
+	if err := doRequest(ctx, p.ctx, requestOptions{
 		method: "DELETE",
 		path:   "/v1/admin/pipes/" + url.PathEscape(name),
-	}, nil)
+	}, nil); err != nil {
+		return fmt.Errorf("delete pipe %q: %w", name, err)
+	}
+	return nil
 }
 
 // PipeDef is the definition body for creating/updating a pipe (Pipe minus name).
@@ -79,7 +86,7 @@ func Fetch[Row any](ctx context.Context, p *PipeRef) ([]Row, error) {
 		path:   "/v1/pipes/" + url.PathEscape(p.name),
 		body:   body,
 	}, &rows); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("execute pipe %q: %w", p.name, err)
 	}
 	return rows, nil
 }

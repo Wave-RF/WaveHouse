@@ -543,5 +543,20 @@
     "pipe_name": "my_pipe",
     "expected_path": "/v1/admin/pipes/my_pipe",
     "expected_method": "DELETE"
+  },
+  {
+    "name": "cacheTTL is client-side only and not sent on the wire",
+    "endpoint": "query",
+    "table": "clicks",
+    "operations": [
+      { "method": "cacheTTL", "args": [60] },
+      { "method": "limit", "args": [5] }
+    ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
+    "expected_body": {
+      "select_all": true,
+      "limit": 5
+    }
   }
 ]
