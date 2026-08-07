@@ -1,6 +1,9 @@
 package wavehouse
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // SchemaNamespace provides admin-only schema introspection.
 type SchemaNamespace struct {
@@ -15,7 +18,7 @@ func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
 		method: "GET",
 		path:   "/v1/schema",
 	}, &raw); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list schemas: %w", err)
 	}
 	schemas := make(Schemas, len(raw))
 	for _, t := range raw {
@@ -26,8 +29,11 @@ func (s *SchemaNamespace) List(ctx context.Context) (Schemas, error) {
 
 // Refresh forces a schema re-discovery from ClickHouse. Admin-only.
 func (s *SchemaNamespace) Refresh(ctx context.Context) error {
-	return doRequest(ctx, s.ctx, requestOptions{
+	if err := doRequest(ctx, s.ctx, requestOptions{
 		method: "POST",
 		path:   "/v1/schema/refresh",
-	}, nil)
+	}, nil); err != nil {
+		return fmt.Errorf("refresh schema: %w", err)
+	}
+	return nil
 }

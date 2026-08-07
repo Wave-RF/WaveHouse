@@ -2,6 +2,7 @@ package wavehouse
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 )
 
@@ -28,7 +29,7 @@ func (d *DLQNamespace) stats(ctx context.Context, params url.Values) (*DLQStats,
 		path:   "/v1/dlq/stats",
 		params: params,
 	}, &stats); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get dlq stats: %w", err)
 	}
 	return &stats, nil
 }

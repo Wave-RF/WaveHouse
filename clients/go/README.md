@@ -4,7 +4,7 @@ Official Go client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — a s
 
 **Zero third-party runtime dependencies** — stdlib only.
 
-**[Full SDK documentation on wavehouse.dev](https://wavehouse.dev/sdk/go/)**
+**[Full SDK documentation on wavehouse.dev](https://wavehouse.dev/sdk/go)**
 
 ## Install
 
@@ -200,7 +200,7 @@ go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
     --package myapp
 ```
 
-See the [full type mapping in the docs](https://wavehouse.dev/sdk/go/reference/#codegen-cli).
+See the [full type mapping in the docs](https://wavehouse.dev/sdk/go/reference#codegen-cli).
 
 ## Error Handling
 

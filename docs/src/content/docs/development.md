@@ -488,7 +488,7 @@ Run `make help` to see all targets. Key ones:
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go incl. `clients/go` (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: root Go (tidy + fmt + vulncheck + lint), `clients/go` (fmt + vet + lint — no tidy/vulncheck: it's a nested module, invisible to the root-scoped `tidy`/`vulncheck` targets) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |

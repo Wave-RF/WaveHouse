@@ -215,7 +215,7 @@ clicks.Select("page").
 | `wavehouse.OpLte` | `lte` | Less than or equal |
 | `wavehouse.OpIn` | `in` | Value in array — accepts a Go slice of any element type (`[]string`, `[]int`, `[]any`, ...) |
 | `wavehouse.OpLike` | `like` | SQL LIKE pattern |
-| `wavehouse.OpNotLike` | — | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
+| `wavehouse.OpNotLike` | `not_like` | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects the token |
 
 #### Aggregations
 

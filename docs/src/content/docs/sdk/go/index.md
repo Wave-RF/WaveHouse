@@ -88,7 +88,16 @@ wh := wavehouse.NewClient(wavehouse.Config{
 | `BaseURL` | `string` | — | WaveHouse server URL (required) |
 | `Auth` | `func(context.Context) (string, error)` | `nil` | Token provider, called before each request. `nil` means unauthenticated access |
 | `Options` | `*ClientOptions` | `nil` | Transport tuning (see below) |
-| `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports |
+| `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports (see caution below) |
+
+:::caution[Timeouts: use contexts, not `http.Client.Timeout`]
+The default client sets no `Timeout` — a `context.Context` deadline is the
+only bound on a request, so pass one for anything that mustn't hang on a
+stalled server. If you supply your own `HTTPClient`, leave `Timeout` unset:
+it covers body reads too, so it would kill every long-lived SSE stream at
+the timeout and force a reconnect loop. Use `Transport`-level dial /
+TLS / response-header timeouts instead.
+:::
 
 ### `ClientOptions`
 

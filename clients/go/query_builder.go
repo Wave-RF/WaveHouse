@@ -179,7 +179,7 @@ func FetchTyped[Row any](ctx context.Context, q *QueryBuilder) (*Page[Row], erro
 	// SDK's QueryBuilder.fetch()/_fetchNext(), which has the same limitation).
 	if hasMore && len(q.state.orderBy) > 0 {
 		page.Next = func(ctx context.Context) (*Page[Row], error) {
-			return fetchNextTyped[Row](ctx, q, rows, limit)
+			return fetchNextTyped[Row](ctx, q, rows)
 		}
 	}
 
@@ -265,7 +265,7 @@ func (q *QueryBuilder) buildAST(effectiveLimit int) *StructuredQuery {
 	return ast
 }
 
-func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Row, limit int) (*Page[Row], error) {
+func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Row) (*Page[Row], error) {
 	if len(q.state.orderBy) == 0 {
 		return &Page[Row]{}, nil
 	}
