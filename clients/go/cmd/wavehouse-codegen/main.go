@@ -209,8 +209,14 @@ func chTypeToGo(chType string) string {
 	}
 	// Array.
 	if strings.HasPrefix(chType, "Array(") && strings.HasSuffix(chType, ")") {
-		inner := chType[6 : len(chType)-1]
-		return "[]" + chTypeToGo(inner)
+		inner := chTypeToGo(chType[6 : len(chType)-1])
+		// []uint8 is []byte, which encoding/json base64-encodes as a string —
+		// the server requires a real JSON array for Array(...) columns, so
+		// widen the element type instead.
+		if inner == "uint8" {
+			inner = "uint16"
+		}
+		return "[]" + inner
 	}
 	// Map.
 	if strings.HasPrefix(chType, "Map(") && strings.HasSuffix(chType, ")") {

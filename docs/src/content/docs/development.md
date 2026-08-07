@@ -297,7 +297,7 @@ All tests run with Go's **race detector** (`-race`) enabled by default. WaveHous
 ```bash
 # Prefix any test target with V=1 for verbose output, e.g. `V=1 make test`
 
-# Unit tests (compact output) — alias for `test-unit`
+# Unit tests + Go SDK tests (compact output) — alias for `test-unit` + `test-go-sdk`
 make test
 
 # Run specific test(s)
@@ -316,8 +316,8 @@ make test-e2e
 # All suites sequentially + merged coverage
 make test-all
 
-# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts,
-# then test-integration + test-e2e + cov
+# Full CI: parallel verify + builds (Go + SDK + docs) + test + test-ts +
+# test-conformance-ts, then test-integration + test-e2e + cov
 make ci
 
 # Merge available covdata + gate against total threshold
@@ -431,6 +431,7 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
+│   ├── stream/             # SSE fan-out (event Hub, subscriber queues, keepalive)
 │   └── testutil/           # Shared test helpers and mocks
 ├── clients/                # Official SDKs
 │   ├── ts/                 # TypeScript SDK (@wavehouse/sdk)
@@ -482,11 +483,11 @@ Run `make help` to see all targets. Key ones:
 | `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
 | `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
 | **Static checks** | |
-| `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
+| `make fmt` | Check formatting across root-module Go (`gofumpt`) + TS (Biome); the nested `clients/go` module's gofumpt check runs under `make verify` (`verify-go-sdk`). Run `make fix` to apply everywhere. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
 | `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
+| `make verify` | Repo-wide static checks: Go incl. `clients/go` (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
 | `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |

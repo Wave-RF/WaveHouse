@@ -276,8 +276,13 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 	m, ok := lastRow.(map[string]any)
 	if !ok {
 		// ponytail: marshal/unmarshal round-trip to get a map — optimize with reflect if perf matters.
-		// UseNumber keeps int64 cursor values exact; plain float64 decoding
-		// corrupts IDs past 2^53 and pagination would repeat or skip a row.
+		// UseNumber keeps typed int64 cursor values exact past 2^53. The
+		// untyped path (FetchUntyped / TableRef.Fetch) doesn't get this
+		// protection: its rows were already decoded to float64 by
+		// encoding/json, so precision above 2^53 is gone before we get here —
+		// the same ceiling the TS SDK has with JS numbers. Use FetchTyped (or
+		// codegen structs, whose 64-bit int columns are strings) when paging
+		// on >2^53 integer cursors.
 		raw, _ := json.Marshal(lastRow)
 		m = make(map[string]any)
 		dec := json.NewDecoder(bytes.NewReader(raw))

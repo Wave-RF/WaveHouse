@@ -59,6 +59,7 @@ SDK's "the SDK never throws" guarantee.
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `context.Context` |
+| 0 | `SSE_ERROR` | Yes | Stream connection failure, delivered to the subscriber's `Error` callback; the stream reconnects automatically |
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)

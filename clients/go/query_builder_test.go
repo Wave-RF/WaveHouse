@@ -428,3 +428,31 @@ func TestQueryBuilder_Pagination_TypedInt64CursorKeepsPrecision(t *testing.T) {
 		t.Fatalf("cursor value lost precision: %s", got)
 	}
 }
+
+// TestQueryBuilder_Pagination_UntypedCursorFloat64Ceiling documents the known
+// ceiling on the untyped path: rows decode to float64, so an integer cursor
+// past 2^53 loses precision before pagination sees it (same as the TS SDK's
+// JS-number ceiling). Use FetchTyped or codegen structs past 2^53.
+func TestQueryBuilder_Pagination_UntypedCursorFloat64Ceiling(t *testing.T) {
+	c, getBodies := pagingServer(t, [][]map[string]any{
+		{{"id": 1}, {"id": int64(9007199254740993)}},
+		{},
+	})
+
+	page, err := c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2).FetchUntyped(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := page.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	f := filtersOf(t, getBodies()[1])
+	if len(f) != 1 {
+		t.Fatalf("want 1 cursor filter, got %v", f)
+	}
+	// float64 rounds 2^53+1 down to 2^53 — the documented untyped ceiling.
+	if got := fmt.Sprint(f[0]["value"]); got != "9007199254740992" {
+		t.Fatalf("untyped ceiling changed (update docs if intentional): %s", got)
+	}
+}

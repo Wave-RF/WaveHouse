@@ -198,9 +198,10 @@ languages pull the API shape in different directions:
 - **No implicit "await."** A `QueryBuilder` isn't `PromiseLike` — call
   `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)`
   explicitly; there's no bare `await builder` shortcut.
-- **`Insert` accepts typed row slices, not just maps.** Passing
-  `[]ClickRow{...}` (any slice type, detected via reflection) batches as
-  NDJSON exactly like `[]map[string]any` — see
+- **Any slice batches, not just `[]map[string]any`.** Go detects slice-ness
+  via reflection, so `[]ClickRow{...}` takes the same NDJSON batch path as
+  `[]map[string]any` (the TS SDK's `insert` likewise accepts arrays of typed
+  rows — this bullet is about the Go mechanics, not a TS gap) — see
   [Queries → Insert](/sdk/go/queries#insertctx-data).
 
 ## Explore the Go SDK

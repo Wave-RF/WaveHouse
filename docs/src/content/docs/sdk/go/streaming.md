@@ -149,6 +149,12 @@ type StreamEvent struct {
 | --------- | --------- | -------- |
 | SSE | Automatic, with exponential backoff (capped at 30s) and gap-fill replay via the last-seen event ID | HTTP/2 recommended |
 
+Reconnect covers transport failures and retryable (5xx) responses. A
+non-retryable response (401/403/404) is terminal: the error is delivered to
+the subscriber's `Error` callback, status goes to `StatusClosed`, and the
+stream does not reconnect — fix the cause (refresh the token, correct the
+table) and open a new stream.
+
 Auth is sent as an `Authorization: Bearer` header on every stream
 (re)connection — see
 [the note in the Getting Started guide](/sdk/go#creating-a-client). The

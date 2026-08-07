@@ -43,9 +43,10 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`
-   - Configuration options → update `docs/src/content/docs/configuration.md`
+   - Configuration options → update `docs/src/content/docs/configuration.mdx`
    - Deployment → update `docs/src/content/docs/deployment.md`
    - Architecture → update `docs/src/content/docs/architecture.md`
+   - Client SDK surface → update **both** SDKs (`clients/ts/src/`, `clients/go/`), their doc trees (`docs/src/content/docs/sdk/` and `.../sdk/go/`), and the shared wire fixture `clients/go/testdata/wire_cases.json`; see AGENTS.md §SDK Sync
 
 4. Follow the commit message format (see below).
 

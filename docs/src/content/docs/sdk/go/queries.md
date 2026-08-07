@@ -340,6 +340,13 @@ add an `.OrderBy()` to paginate. If the order column was left out of an
 explicit `.Select(...)` projection, `Next` quietly returns an empty page
 instead of erroring (there is no cursor value to read).
 
+One precision caveat on the untyped path (`FetchUntyped` / `TableRef.Fetch`):
+rows decode into `map[string]any`, where JSON numbers become `float64`, so an
+integer cursor column loses exactness past 2^53 and pagination can repeat or
+skip a row at that scale — the same ceiling the TypeScript SDK has with JS
+numbers. `FetchTyped` with an `int64` field keeps the cursor exact, and
+codegen structs are unaffected (their 64-bit integer columns are `string`).
+
 ```go
 page, err := clicks.Select().
     OrderBy("received_timestamp", "desc").
@@ -380,7 +387,7 @@ type PageTotal struct {
     Page  string `json:"page"`
     Total int    `json:"total"`
 }
-rows, err := wavehouse.SQL[PageTotal](ctx, wh,
+typed, err := wavehouse.SQL[PageTotal](ctx, wh,
     "SELECT page, count() AS total FROM clicks GROUP BY page LIMIT 10")
 ```
 
