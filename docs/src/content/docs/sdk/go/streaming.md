@@ -85,8 +85,9 @@ exit path) regardless of which consumption style you use.
 
 The channel is buffered (256 events); a slow consumer that never drains it
 causes the SDK to **drop** new events for that channel rather than block the
-stream's read loop (`.Subscribe` callbacks still fire per event
-regardless of channel backpressure).
+stream's read loop — the first drop logs one line via the standard `log`
+package, further drops are silent (`.Subscribe` callbacks still fire per
+event regardless of channel backpressure).
 
 ### `.Close()`
 
@@ -168,7 +169,11 @@ Reconnect covers transport failures and retryable (5xx) responses. A
 non-retryable response (401/403/404) is terminal: the error is delivered to
 the subscriber's `Error` callback, status goes to `StatusClosed`, and the
 stream does not reconnect — fix the cause (refresh the token, correct the
-table) and open a new stream.
+table) and open a new stream. An `Auth` provider error during a (re)connect
+is treated as retryable (`SSE_ERROR`) and the stream keeps reconnecting —
+`ClientOptions.MaxRetries` bounds request retries only, not stream
+reconnects — so call `.Close()` if your token provider is failing
+permanently.
 
 Auth is sent as an `Authorization: Bearer` header on every stream
 (re)connection — see

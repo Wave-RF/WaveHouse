@@ -233,8 +233,9 @@ for (const tc of cases) {
         await wh.pipes.delete(tc.pipe_name);
         break;
       default:
-        // Not a pass — the Go harness skips these too. Fixture cases with a
-        // new endpoint value must be wired up here before they count.
+        // Not a pass — the Go harness hard-fails on these; we count and exit
+        // non-zero below. Fixture cases with a new endpoint value must be
+        // wired up here before they count.
         skipped++;
         skippedNames.push(`${tc.name} (endpoint: ${tc.endpoint})`);
         continue;

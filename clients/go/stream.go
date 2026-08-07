@@ -144,7 +144,10 @@ func (sc *StreamController) Close() {
 
 func (sc *StreamController) setStatus(s StreamStatus) {
 	sc.mu.Lock()
-	if s == sc.status {
+	// StatusClosed is terminal: a filtered wrapper's inner controller can
+	// have copied its subscriber slice before unsub, so a stale Status
+	// callback may land after Close — it must not resurrect the status.
+	if s == sc.status || sc.status == StatusClosed {
 		sc.mu.Unlock()
 		return
 	}
