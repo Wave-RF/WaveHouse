@@ -215,11 +215,13 @@ func chTypeToGo(chType string) string {
 	// Array.
 	if strings.HasPrefix(chType, "Array(") && strings.HasSuffix(chType, ")") {
 		inner := chTypeToGo(chType[6 : len(chType)-1])
-		// []uint8 is []byte, which encoding/json base64-encodes as a string —
-		// the server requires a real JSON array for Array(...) columns, so
-		// widen the element type instead.
+		// Array(UInt8) is asymmetric on the wire: ingest requires a real JSON
+		// array, but /v1/query responses currently base64-encode it (the
+		// server scans into []byte and encoding/json base64s that — #436).
+		// json.RawMessage is the
+		// only shape that round-trips both directions without a decode error.
 		if inner == "uint8" {
-			inner = "uint16"
+			return "json.RawMessage"
 		}
 		return "[]" + inner
 	}
@@ -298,7 +300,7 @@ func generate(schemas map[string]tableSchema, pkg string) (string, error) {
 	needsJSON := false
 	for _, name := range names {
 		for _, col := range schemas[name].Columns {
-			if strings.Contains(chTypeToGo(col.Type), "json.Number") {
+			if strings.Contains(chTypeToGo(col.Type), "json.") {
 				needsJSON = true
 			}
 		}

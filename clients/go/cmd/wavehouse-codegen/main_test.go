@@ -44,8 +44,9 @@ func TestChTypeToGo(t *testing.T) {
 		{"SimpleAggregateFunction(any)", "any"},
 		{"Array(String)", "[]string"},
 		{"Array(Nullable(Int32))", "[]*int32"},
-		// []uint8 is []byte → base64 on marshal; must widen.
-		{"Array(UInt8)", "[]uint16"},
+		// []uint8 is []byte → base64 on marshal; RawMessage round-trips both
+		// the ingest array form and the (currently base64) query response.
+		{"Array(UInt8)", "json.RawMessage"},
 		{"Map(String, UInt32)", "map[string]uint32"},
 		{"Map(String, Map(UInt32, String))", "map[string]map[uint32]string"},
 		{"Tuple(String, UInt8)", "any"},

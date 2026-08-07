@@ -756,6 +756,7 @@ test-go-sdk-e2e: ## Run Go SDK E2E tests against a live WaveHouse instance (WAVE
 test-all: ## Run all suites sequentially + one consolidated Go + TS coverage report + gates
 	@$(MAKE) test-unit COV_DEFER=1
 	@$(MAKE) test-go-sdk
+	@$(MAKE) test-conformance-ts
 	@$(MAKE) test-ts COV_DEFER=1
 	@$(MAKE) test-integration COV_DEFER=1
 	@$(MAKE) test-e2e COV_DEFER=1

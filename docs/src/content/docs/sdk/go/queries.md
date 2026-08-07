@@ -51,8 +51,11 @@ see [Pagination](#pagination).
 
 Insert one row or many. What you pass determines the wire format:
 
-- A single **map or struct** (anything that isn't a slice, and isn't
-  `[]byte`) is sent as JSON: `POST /v1/ingest?table={table}`.
+- A single **map or struct** (anything that isn't a slice — plus `[]byte`,
+  which is treated as one opaque value rather than a batch of numbers, and
+  would reach the server as a base64 string it rejects; pass raw NDJSON
+  through `.InsertNDJSON(ctx, string(raw))` instead) is sent as JSON:
+  `POST /v1/ingest?table={table}`.
 - **Any slice** — `[]map[string]any`, a generated/user-defined row type like
   `[]ClickRow`, etc. — is serialized to NDJSON (one record per line, via
   reflection for non-`[]map[string]any` slices) and sent as a single
@@ -385,10 +388,13 @@ authorizes `/v1/admin/*` without a JWT. Package-level generic function — use
 rows, err := wavehouse.SQL[map[string]any](ctx, wh,
     "SELECT page, count() AS total FROM clicks GROUP BY page LIMIT 10")
 
-// Or decode into a struct that matches the projected columns/aliases:
+// Or decode into a struct that matches the projected columns/aliases.
+// NOTE: this path forwards ClickHouse's own JSON, which QUOTES 64-bit
+// integers (count() is UInt64) — decode them with the `,string` tag, or
+// use map[string]any. See Reference → Codegen CLI for the full story.
 type PageTotal struct {
     Page  string `json:"page"`
-    Total int    `json:"total"`
+    Total uint64 `json:"total,string"`
 }
 typed, err := wavehouse.SQL[PageTotal](ctx, wh,
     "SELECT page, count() AS total FROM clicks GROUP BY page LIMIT 10")

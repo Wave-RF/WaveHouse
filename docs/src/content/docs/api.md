@@ -150,7 +150,7 @@ Status code: `503 Service Unavailable`
 
 Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
 
-This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
+This is what the SDKs' liveness ping calls (`wh.sys.health()` / `wh.Sys.Health(ctx)`), and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
 
 ---
 
@@ -416,7 +416,7 @@ curl -X POST http://localhost:8080/v1/admin/query \
 Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
 
 :::note[The column allowlist is a hard cap on every clause]
-Every column the query references — in `columns`, an aggregation argument, `filters`, `group_by`, `order_by`, or `time_range` — must be permitted by the role's `allow_columns`/`deny_columns`, or the request is rejected with `403 column "x" not allowed`. A full-row read is requested with `"select_all": true` (expanded to the columns the role may read — never a raw `SELECT *`); **omitting `columns` returns nothing**, so a hidden column never leaks by being left out, grouped on, or filtered on. See [Access control → Column permissions](/access-control#column-permissions).
+Every column the query references — in `columns`, an aggregation argument, `filters`, `group_by`, `order_by`, or `time_range` — must be permitted by the role's `allow_columns`/`deny_columns`, or the request is rejected with `403 column "x" not allowed`. A full-row read is requested with `"select_all": true` (for a column-restricted role, expanded to exactly the columns the role may read rather than a bare `SELECT *`; unrestricted/admin roles do get `SELECT *`); **omitting `columns` returns nothing**, so a hidden column never leaks by being left out, grouped on, or filtered on. See [Access control → Column permissions](/access-control#column-permissions).
 :::
 
 **Request:**
@@ -444,7 +444,7 @@ Every column the query references — in `columns`, an aggregation argument, `fi
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
 | `columns` | string \| string[] | No | Columns to SELECT — an array, or a single string for one column. A literal `"*"` is the column *named* `*`, **not** a wildcard. Omit (or send `[]` / `""`) to select nothing; use `select_all` for a full-row read. Mutually exclusive with `select_all`. |
-| `select_all` | bool | No | Select every column the role may read (the all-columns wildcard, expanded server-side to the allow/deny set). Mutually exclusive with a non-empty `columns`, and with `aggregations`. |
+| `select_all` | bool | No | Select every column the role may read (the all-columns wildcard; a column-restricted role's projection is expanded server-side to its allow/deny set, an unrestricted/admin role gets `SELECT *`). Mutually exclusive with a non-empty `columns`, and with `aggregations`. |
 | `aggregations` | object[] | No | Aggregation functions (`fn`, `column`, `alias`). |
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |

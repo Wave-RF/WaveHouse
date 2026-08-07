@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -339,5 +340,62 @@ func TestStream_NonRetryableConnectErrorIsTerminal(t *testing.T) {
 	defer cancel()
 	if err := stream.Connected(ctx); err == nil {
 		t.Fatal("Connected must fail on a terminally-closed stream")
+	}
+}
+
+// TestStream_ReconnectResumesFromLastEventID: the gap-fill contract. The
+// initial request carries StreamOptions.Since; after the connection drops,
+// the reconnect carries ?since=<last seen event id>.
+func TestStream_ReconnectResumesFromLastEventID(t *testing.T) {
+	var mu sync.Mutex
+	var sinceParams []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sinceParams = append(sinceParams, r.URL.Query().Get("since"))
+		n := len(sinceParams)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		w.WriteHeader(200)
+		fl.Flush()
+		if n == 1 {
+			_, _ = io.WriteString(w, sseFrame("2026-01-01T00:00:01Z", "/home"))
+			fl.Flush()
+			return // server closes → client must reconnect with since=<id>
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	stream := streamClient(t, srv).From("clicks").Stream(&StreamOptions{Since: "seed-id"})
+	defer stream.Close()
+
+	got := make(chan StreamEvent, 4)
+	stream.Subscribe(&StreamSubscriber{Next: func(e StreamEvent) { got <- e }})
+	recvEvent(t, got)
+
+	// Reconnect happens after ~backoff(0) (≈1s with jitter).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := len(sinceParams)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stream never reconnected")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if sinceParams[0] != "seed-id" {
+		t.Fatalf("initial request: want since=seed-id, got %q", sinceParams[0])
+	}
+	if sinceParams[1] != "2026-01-01T00:00:01Z" {
+		t.Fatalf("reconnect: want since=<last event id>, got %q", sinceParams[1])
 	}
 }

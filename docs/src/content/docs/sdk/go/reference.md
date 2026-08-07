@@ -223,7 +223,7 @@ value field with `omitempty` would silently drop.
 | `Decimal*` | `string` (marshaled as a quoted string on the structured-query path) |
 | `Nullable(T)` | `*T` |
 | `LowCardinality(T)` | same as `T` |
-| `Array(T)` | `[]T` (`Array(UInt8)` → `[]uint16`: `[]byte` would JSON-encode as base64, not an array) |
+| `Array(T)` | `[]T` — except `Array(UInt8)` → `json.RawMessage`: the wire is asymmetric (ingest takes a JSON array, but query responses currently base64-encode the column), and `RawMessage` is the one shape that decodes both; server-side normalization tracked in [#436](https://github.com/Wave-RF/WaveHouse/issues/436) |
 | `Map(K, V)` | `map[K]V` (falls back to `map[string]any` if `K`/`V` can't be split) |
 | `SimpleAggregateFunction(fn, T)` | same as `T` (rollup tables from `AggregatingMergeTree`/`SummingMergeTree` generate usable structs) |
 | anything unrecognized | `any` |
