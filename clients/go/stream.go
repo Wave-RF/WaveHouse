@@ -19,15 +19,14 @@ import (
 // StreamController manages a live SSE event stream. Use Subscribe for
 // callback-based consumption or Events for channel-based consumption.
 type StreamController struct {
-	mu            sync.Mutex
-	status        StreamStatus
-	subscribers   []*StreamSubscriber
-	eventCh       chan StreamEvent // single buffered channel for Go-native consumption
-	chanRequested bool             // set by Events(); until then emitEvent skips the channel
-	dropLogOnce   sync.Once
-	cancel        context.CancelFunc
-	done          chan struct{}
-	closed        bool
+	mu          sync.Mutex
+	status      StreamStatus
+	subscribers []*StreamSubscriber
+	eventCh     chan StreamEvent // single buffered channel for Go-native consumption
+	dropLogOnce sync.Once
+	cancel      context.CancelFunc
+	done        chan struct{}
+	closed      bool
 }
 
 // newStreamController opens an SSE connection for the given table.
@@ -78,13 +77,12 @@ func (sc *StreamController) Subscribe(sub *StreamSubscriber) func() {
 }
 
 // Events returns a read-only channel that receives stream events.
-// The channel is closed when the stream closes. Events are fed to the
-// channel only from the first Events() call onward — a Subscribe-only
-// consumer never fills (and overflows) a channel it isn't reading.
+// The channel is closed when the stream closes. Events buffer into it from
+// stream construction (matching the TS SDK), so events that arrive before
+// the first Events() call are not lost. A Subscribe-only consumer that never
+// calls Events() at most fills the 256-slot buffer and trips the one-time
+// drop log.
 func (sc *StreamController) Events() <-chan StreamEvent {
-	sc.mu.Lock()
-	sc.chanRequested = true
-	sc.mu.Unlock()
 	return sc.eventCh
 }
 
@@ -173,12 +171,13 @@ func (sc *StreamController) emitEvent(event StreamEvent) {
 		}
 	}
 
-	// Non-blocking send to the channel. Guarded by mu so the send and
-	// closeEventCh serialize — a late event can never hit a closed channel —
-	// and skipped entirely until Events() opts in.
+	// Non-blocking send to the channel, which buffers from construction (TS
+	// parity) so events emitted before the first Events() call survive.
+	// Guarded by mu so the send and closeEventCh serialize — a late event can
+	// never hit a closed channel.
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	if sc.closed || !sc.chanRequested {
+	if sc.closed {
 		return
 	}
 	select {
@@ -327,7 +326,10 @@ func (sc *StreamController) connect(ctx context.Context, hctx httpContext, table
 
 	// Parse SSE frames.
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // 16 MiB max, matching server ingest cap
+	// 16 MiB max line: generous headroom over the ~1 MiB NATS MaxPayload
+	// ceiling on a single event envelope (oversized records are rejected at
+	// ingest publish and never reach the stream).
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	var eventID, dataLine string
 	lastID := since
 
@@ -600,7 +602,23 @@ func toFloat64(v any) (float64, bool) {
 		return float64(n), true
 	case int:
 		return float64(n), true
+	case int8:
+		return float64(n), true
+	case int16:
+		return float64(n), true
+	case int32:
+		return float64(n), true
 	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint8:
+		return float64(n), true
+	case uint16:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
 		return float64(n), true
 	case json.Number:
 		f, err := n.Float64()

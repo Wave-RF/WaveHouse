@@ -2,6 +2,7 @@ package wavehouse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -202,9 +203,7 @@ func TestStream_FilteredCloseUnderLoad(t *testing.T) {
 }
 
 func TestStream_HandleMalformedSSEData(t *testing.T) {
-	// chanRequested must be true or emitEvent skips the channel entirely and
-	// the no-emit assertion below would pass vacuously.
-	sc := &StreamController{eventCh: make(chan StreamEvent, 1), chanRequested: true}
+	sc := &StreamController{eventCh: make(chan StreamEvent, 1)}
 	var gotErr error
 	sc.subscribers = []*StreamSubscriber{{Error: func(err error) { gotErr = err }}}
 	sc.handleSSEData("not json") // must not panic or emit
@@ -215,6 +214,23 @@ func TestStream_HandleMalformedSSEData(t *testing.T) {
 	}
 	if gotErr == nil || !strings.Contains(gotErr.Error(), "malformed SSE message") {
 		t.Fatalf("want malformed-SSE error via subscriber, got %v", gotErr)
+	}
+}
+
+// TestStream_EventsBufferBeforeFirstEventsCall pins TS parity: the channel
+// buffers from construction, so events emitted before the first Events() call
+// are still delivered once the consumer starts reading.
+func TestStream_EventsBufferBeforeFirstEventsCall(t *testing.T) {
+	sc := &StreamController{eventCh: make(chan StreamEvent, 256)}
+	sc.emitEvent(StreamEvent{Table: "clicks", Data: map[string]any{"page": "/"}})
+
+	select {
+	case e := <-sc.Events():
+		if e.Table != "clicks" {
+			t.Fatalf("want event for clicks, got %+v", e)
+		}
+	default:
+		t.Fatal("event emitted before Events() was not buffered")
 	}
 }
 
@@ -240,6 +256,8 @@ func TestEvaluateFilter(t *testing.T) {
 		{"Lt", float64(9), "lt", 10, true},
 		{"LteString", "a", "lte", "b", true},
 		{"GtIncomparable", "a", "gt", 10, false},
+		// Narrow/unsigned codegen-struct fields must compare, not silently drop.
+		{"GtUnsignedOperand", float64(10), "gt", uint32(5), true},
 		{"InAnySlice", "b", "in", []any{"a", "b"}, true},
 		{"InTypedSlice", float64(2), "in", []int{1, 2}, true},
 		{"InMiss", "c", "in", []any{"a", "b"}, false},
@@ -293,7 +311,12 @@ func TestCompareOrdered(t *testing.T) {
 }
 
 func TestToFloat64(t *testing.T) {
-	for _, v := range []any{float64(1), float32(1), int(1), int64(1)} {
+	for _, v := range []any{
+		float64(1), float32(1),
+		int(1), int8(1), int16(1), int32(1), int64(1),
+		uint(1), uint8(1), uint16(1), uint32(1), uint64(1),
+		json.Number("1"),
+	} {
 		if f, ok := toFloat64(v); !ok || f != 1 {
 			t.Fatalf("toFloat64(%T) = (%v, %v)", v, f, ok)
 		}

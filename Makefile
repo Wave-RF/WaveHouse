@@ -452,7 +452,7 @@ fix-go: $(GOLANGCI_LINT)
 	@$(GOIMPORTS) -w $(GO_DIRS)
 	@$(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
 	@echo "$(CYAN)==> Applying Go auto-fixes (Go SDK — nested module, outside GO_DIRS)...$(RESET)"
-	@cd clients/go && go mod tidy && $(GOFUMPT) -w . && $(GOIMPORTS) -w . && $(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
+	@$(GOFUMPT) -w clients/go && $(GOIMPORTS) -w clients/go && cd clients/go && go mod tidy && $(GOLANGCI_LINT) run --fix ./... --allow-parallel-runners
 
 .PHONY: fix-ts
 fix-ts: pnpm-install

@@ -152,11 +152,13 @@ stream closes, including on a terminal 401/403/404. Pair `Events()` with a
 *why* a stream ended.
 :::
 
-:::note[`Events()` starts feeding on first call]
-The channel only receives events emitted **after** the first `Events()`
-call — a stream you set up but don't consume yet buffers nothing for the
-channel. Call `Events()` immediately after `.Stream()` (or use
-`.Subscribe`) if you can't start ranging right away.
+:::note[The channel buffers from stream construction]
+Events buffer into the channel (up to 256) from the moment `.Stream()`
+constructs the stream, matching the TypeScript SDK — events arriving before
+your first `Events()` call are **not** lost, so you don't have to call
+`Events()` immediately. A consumer that never drains the channel still
+drops everything past the 256th buffered event (with the one-time log line
+described above).
 :::
 
 ### Transport Behavior

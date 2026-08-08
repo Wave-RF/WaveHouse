@@ -175,7 +175,7 @@ type RolePermissions struct {
 	DeniedAggregations  []string                `json:"denied_aggregations,omitempty"`
 	MaxRows             *int                    `json:"max_rows,omitempty"`
 	MaxExecutionTime    any                     `json:"max_execution_time,omitempty"`
-	MaxRowsToRead       *int                    `json:"max_rows_to_read,omitempty"`
+	MaxRowsToRead       *int64                  `json:"max_rows_to_read,omitempty"`
 	MaxMemoryUsage      any                     `json:"max_memory_usage,omitempty"`
 }
 
