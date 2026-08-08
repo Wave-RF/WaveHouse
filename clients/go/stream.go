@@ -160,12 +160,17 @@ func (sc *StreamController) setStatus(s StreamStatus) {
 	}
 }
 
-func (sc *StreamController) emitEvent(event StreamEvent) {
+// snapshotSubs copies the subscriber list under mu so callbacks run unlocked.
+// setStatus keeps its own inline copy: there the snapshot must share the
+// critical section with the status write to keep callback order consistent.
+func (sc *StreamController) snapshotSubs() []*StreamSubscriber {
 	sc.mu.Lock()
-	subs := append([]*StreamSubscriber(nil), sc.subscribers...)
-	sc.mu.Unlock()
+	defer sc.mu.Unlock()
+	return append([]*StreamSubscriber(nil), sc.subscribers...)
+}
 
-	for _, sub := range subs {
+func (sc *StreamController) emitEvent(event StreamEvent) {
+	for _, sub := range sc.snapshotSubs() {
 		if sub.Next != nil {
 			sub.Next(event)
 		}
@@ -190,11 +195,7 @@ func (sc *StreamController) emitEvent(event StreamEvent) {
 }
 
 func (sc *StreamController) emitError(err error) {
-	sc.mu.Lock()
-	subs := append([]*StreamSubscriber(nil), sc.subscribers...)
-	sc.mu.Unlock()
-
-	for _, sub := range subs {
+	for _, sub := range sc.snapshotSubs() {
 		if sub.Error != nil {
 			sub.Error(err)
 		}
@@ -445,6 +446,9 @@ func newFilteredStreamController(inner *StreamController, filters []QueryFilter,
 			unsub()
 			inner.Close()
 		case <-inner.done:
+			// Inner closed on its own — still unsubscribe so the closed
+			// controller doesn't retain a reference to this wrapper.
+			unsub()
 		}
 	}()
 
@@ -542,23 +546,15 @@ func equalValues(a, b any) bool {
 }
 
 // evaluateIn checks whether actual is contained in the expected slice.
-// Handles both []any and typed slices (e.g., []string, []int).
+// Reflection handles []any and typed slices (e.g., []string, []int) alike.
 func evaluateIn(actual, expected any) bool {
-	if arr, ok := expected.([]any); ok {
-		for _, v := range arr {
-			if equalValues(actual, v) {
-				return true
-			}
-		}
+	rv := reflect.ValueOf(expected)
+	if rv.Kind() != reflect.Slice {
 		return false
 	}
-	// Handle typed slices via reflection.
-	rv := reflect.ValueOf(expected)
-	if rv.Kind() == reflect.Slice {
-		for i := range rv.Len() {
-			if equalValues(actual, rv.Index(i).Interface()) {
-				return true
-			}
+	for i := range rv.Len() {
+		if equalValues(actual, rv.Index(i).Interface()) {
+			return true
 		}
 	}
 	return false
@@ -600,32 +596,19 @@ func toFloat64(v any) (float64, bool) {
 		return n, true
 	case float32:
 		return float64(n), true
-	case int:
-		return float64(n), true
-	case int8:
-		return float64(n), true
-	case int16:
-		return float64(n), true
-	case int32:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	case uint:
-		return float64(n), true
-	case uint8:
-		return float64(n), true
-	case uint16:
-		return float64(n), true
-	case uint32:
-		return float64(n), true
-	case uint64:
-		return float64(n), true
 	case json.Number:
 		f, err := n.Float64()
 		return f, err == nil
-	default:
-		return 0, false
 	}
+	// All int/uint widths in two cases (codegen structs use the narrow ones).
+	rv := reflect.ValueOf(v)
+	switch {
+	case rv.CanInt():
+		return float64(rv.Int()), true
+	case rv.CanUint():
+		return float64(rv.Uint()), true
+	}
+	return 0, false
 }
 
 func projectColumns(row map[string]any, columns []string) map[string]any {

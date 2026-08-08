@@ -125,31 +125,33 @@ func TestConformance_WireFormat(t *testing.T) {
 				logCallErr(t, err)
 
 			case "ingest":
-				if len(tc.Operations) > 0 && tc.Operations[0].Method == "insert" {
-					if len(tc.Operations[0].Args) == 0 {
-						t.Fatal("insert needs 1 arg, got 0")
-					}
-					data := tc.Operations[0].Args[0]
-					_, err := c.From(tc.Table).Insert(ctx, data)
-					logCallErr(t, err)
+				if len(tc.Operations) == 0 || tc.Operations[0].Method != "insert" {
+					t.Fatalf("ingest case %q has no insert operation", tc.Name)
 				}
+				if len(tc.Operations[0].Args) == 0 {
+					t.Fatal("insert needs 1 arg, got 0")
+				}
+				data := tc.Operations[0].Args[0]
+				_, err := c.From(tc.Table).Insert(ctx, data)
+				logCallErr(t, err)
 
 			case "ingest_batch":
-				if len(tc.Operations) > 0 && tc.Operations[0].Method == "insert" {
-					if len(tc.Operations[0].Args) == 0 {
-						t.Fatal("insert needs 1 arg, got 0")
-					}
-					rawArr, ok := tc.Operations[0].Args[0].([]any)
-					if !ok {
-						t.Fatalf("batch insert args[0] is not an array")
-					}
-					rows := make([]map[string]any, len(rawArr))
-					for i, r := range rawArr {
-						rows[i] = toStringMap(r)
-					}
-					_, err := c.From(tc.Table).Insert(ctx, rows)
-					logCallErr(t, err)
+				if len(tc.Operations) == 0 || tc.Operations[0].Method != "insert" {
+					t.Fatalf("ingest_batch case %q has no insert operation", tc.Name)
 				}
+				if len(tc.Operations[0].Args) == 0 {
+					t.Fatal("insert needs 1 arg, got 0")
+				}
+				rawArr, ok := tc.Operations[0].Args[0].([]any)
+				if !ok {
+					t.Fatalf("batch insert args[0] is not an array")
+				}
+				rows := make([]map[string]any, len(rawArr))
+				for i, r := range rawArr {
+					rows[i] = toStringMap(t, r)
+				}
+				_, batchErr := c.From(tc.Table).Insert(ctx, rows)
+				logCallErr(t, batchErr)
 
 			case "pipe":
 				p := c.Pipe(tc.PipeName, tc.PipeParams)
@@ -377,12 +379,13 @@ func toStringSlice(args []any) []string {
 	return out
 }
 
-func toStringMap(v any) map[string]any {
+func toStringMap(t *testing.T, v any) map[string]any {
+	t.Helper()
 	m, ok := v.(map[string]any)
-	if ok {
-		return m
+	if !ok {
+		t.Fatalf("fixture row is not an object: %T", v)
 	}
-	return nil
+	return m
 }
 
 // deepEqualJSON compares two JSON-decoded values, treating float64 ints as equal

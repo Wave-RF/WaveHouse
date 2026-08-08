@@ -185,12 +185,10 @@ func retryAfterDelay(ra string, attempt int) time.Duration {
 
 func backoff(attempt int) time.Duration {
 	ms := 1000 * math.Pow(2, float64(attempt))
-	if ms > 30000 {
-		ms = 30000
-	}
-	// ±20% jitter so clients failing at the same moment don't retry in lockstep.
+	// ±20% jitter so clients failing at the same moment don't retry in
+	// lockstep; capped after jitter so the documented 30s max holds.
 	ms *= 0.8 + 0.4*rand.Float64() //nolint:gosec // retry jitter, not cryptographic
-	return time.Duration(ms) * time.Millisecond
+	return time.Duration(min(ms, 30000)) * time.Millisecond
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {

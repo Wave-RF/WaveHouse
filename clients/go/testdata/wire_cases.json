@@ -47,6 +47,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["page", "=", "/home"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "page", "op": "eq", "value": "/home" }],
@@ -61,6 +63,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["page", "!=", "/home"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "page", "op": "neq", "value": "/home" }],
@@ -75,6 +79,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["score", ">", 10] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "score", "op": "gt", "value": 10 }],
@@ -89,6 +95,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["score", ">=", 10] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "score", "op": "gte", "value": 10 }],
@@ -103,6 +111,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["score", "<", 5] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "score", "op": "lt", "value": 5 }],
@@ -117,6 +127,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["score", "<=", 5] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "score", "op": "lte", "value": 5 }],
@@ -131,6 +143,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["page", "in", ["/home", "/about"]] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "page", "op": "in", "value": ["/home", "/about"] }],
@@ -145,6 +159,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "where", "args": ["page", "like", "/home%"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "page", "op": "like", "value": "/home%" }],
@@ -158,6 +174,8 @@
     "operations": [
       { "method": "count", "args": ["*", "total"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "count", "column": "*", "alias": "total" }],
       "limit": 1000
@@ -170,6 +188,8 @@
     "operations": [
       { "method": "sum", "args": ["score", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "sum", "column": "score", "alias": "sum_score" }],
       "limit": 1000
@@ -182,6 +202,8 @@
     "operations": [
       { "method": "avg", "args": ["score", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "avg", "column": "score", "alias": "avg_score" }],
       "limit": 1000
@@ -194,6 +216,8 @@
     "operations": [
       { "method": "min", "args": ["score", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "min", "column": "score", "alias": "min_score" }],
       "limit": 1000
@@ -206,6 +230,8 @@
     "operations": [
       { "method": "max", "args": ["score", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "max", "column": "score", "alias": "max_score" }],
       "limit": 1000
@@ -218,6 +244,8 @@
     "operations": [
       { "method": "countDistinct", "args": ["page", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "countDistinct", "column": "page", "alias": "count_distinct_page" }],
       "limit": 1000
@@ -230,6 +258,8 @@
     "operations": [
       { "method": "aggregate", "args": ["uniqExact", "user_id", "unique_users"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "aggregations": [{ "fn": "uniqExact", "column": "user_id", "alias": "unique_users" }],
       "limit": 1000
@@ -243,6 +273,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "groupBy", "args": ["page"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "group_by": ["page"],
@@ -257,6 +289,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "orderBy", "args": ["page", "asc"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "order_by": [{ "column": "page", "dir": "asc" }],
@@ -271,6 +305,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "orderBy", "args": ["score", "desc"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "order_by": [{ "column": "score", "dir": "desc" }],
@@ -285,6 +321,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "limit", "args": [50] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "limit": 50
@@ -298,6 +336,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "timeRange", "args": ["received_timestamp", "1h", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "time_range": { "column": "received_timestamp", "since": "1h" },
@@ -312,6 +352,8 @@
       { "method": "select", "args": ["page"] },
       { "method": "timeRange", "args": ["ts", "2026-01-01", "2026-02-01"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "time_range": { "column": "ts", "since": "2026-01-01", "until": "2026-02-01" },
@@ -327,6 +369,8 @@
       { "method": "where", "args": ["score", ">", 10] },
       { "method": "where", "args": ["page", "=", "/home"] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [
@@ -349,6 +393,8 @@
       { "method": "limit", "args": [50] },
       { "method": "timeRange", "args": ["received_timestamp", "1h", ""] }
     ],
+    "expected_path": "/v1/query?table=clicks",
+    "expected_method": "POST",
     "expected_body": {
       "columns": ["page"],
       "filters": [{ "column": "score", "op": "gt", "value": 10 }],

@@ -81,7 +81,7 @@ func NewClient(cfg Config) *Client {
 
 	c := &Client{
 		ctx: httpContext{
-			baseURL:    trimTrailingSlashes(cfg.BaseURL),
+			baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
 			auth:       cfg.Auth,
 			maxRetries: maxRetries,
 			httpClient: hc,
@@ -136,8 +136,4 @@ func SQL[Row any](ctx context.Context, c *Client, query string) ([]Row, error) {
 // createStream opens an SSE stream for the given table.
 func (c *Client) createStream(table string, opts *StreamOptions) *StreamController {
 	return newStreamController(c.ctx, table, opts)
-}
-
-func trimTrailingSlashes(s string) string {
-	return strings.TrimRight(s, "/")
 }

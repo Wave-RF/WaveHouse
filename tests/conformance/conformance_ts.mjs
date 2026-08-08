@@ -181,14 +181,12 @@ for (const tc of cases) {
         break;
       }
       case "ingest":
-        if (tc.operations?.[0]?.method === "insert") {
-          await wh.from(tc.table).insert(tc.operations[0].args[0]);
-        }
-        break;
       case "ingest_batch":
-        if (tc.operations?.[0]?.method === "insert") {
-          await wh.from(tc.table).insert(tc.operations[0].args[0]);
+        if (tc.operations?.[0]?.method !== "insert") {
+          // Hard failure, matching the Go harness.
+          throw new Error(`${tc.name}: ingest case has no insert operation`);
         }
+        await wh.from(tc.table).insert(tc.operations[0].args[0]);
         break;
       case "pipe":
         await wh.pipe(tc.pipe_name, tc.pipe_params ?? undefined).fetch();

@@ -26,30 +26,30 @@ type cliArgs struct {
 	pkg  string
 }
 
+// flagValue consumes and returns the value following os.Args[*i], erroring
+// out instead of silently falling back to the default when it's missing.
+func flagValue(i *int) string {
+	flag := os.Args[*i]
+	*i++
+	if *i >= len(os.Args) {
+		fmt.Fprintf(os.Stderr, "Error: missing value for %s (use --help)\n", flag)
+		os.Exit(2)
+	}
+	return os.Args[*i]
+}
+
 func parseArgs() cliArgs {
 	args := cliArgs{url: "http://localhost:8080", out: "./wavehouse_types.go", pkg: "main"}
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--url", "-u":
-			i++
-			if i < len(os.Args) {
-				args.url = os.Args[i]
-			}
+			args.url = flagValue(&i)
 		case "--out", "-o":
-			i++
-			if i < len(os.Args) {
-				args.out = os.Args[i]
-			}
+			args.out = flagValue(&i)
 		case "--auth", "-a":
-			i++
-			if i < len(os.Args) {
-				args.auth = os.Args[i]
-			}
+			args.auth = flagValue(&i)
 		case "--package", "-p":
-			i++
-			if i < len(os.Args) {
-				args.pkg = os.Args[i]
-			}
+			args.pkg = flagValue(&i)
 		case "--help", "-h":
 			fmt.Println(`wavehouse-codegen — Generate Go types from WaveHouse schema
 
@@ -76,7 +76,6 @@ Options:
 type column struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
-	IsNullable bool   `json:"is_nullable"`
 	HasDefault bool   `json:"has_default"`
 }
 
@@ -276,7 +275,7 @@ func pascalCase(s string) string {
 	// Go identifiers can't start with a digit (e.g. a table named
 	// "2fa_events" would otherwise produce the invalid identifier
 	// "2faEvents"). Prefix with "X" to keep it a valid, exported name.
-	if unicode.IsDigit([]rune(result)[0]) {
+	if unicode.IsDigit(rune(result[0])) { // digits are ASCII; no rune-slice needed
 		result = "X" + result
 	}
 	return result

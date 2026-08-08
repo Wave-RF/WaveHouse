@@ -4,24 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 )
 
-func nsClient(t *testing.T, handler http.Handler) *Client {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return NewClient(Config{
-		BaseURL:    srv.URL,
-		HTTPClient: srv.Client(),
-		Options:    &ClientOptions{MaxRetries: 0},
-	})
-}
-
 func TestSysNamespace_Health(t *testing.T) {
-	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/health" {
 			t.Errorf("want /v1/health, got %s", r.URL.Path)
 		}
@@ -34,7 +22,7 @@ func TestSysNamespace_Health(t *testing.T) {
 }
 
 func TestSchemaNamespace_List(t *testing.T) {
-	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/schema" {
 			t.Errorf("want /v1/schema, got %s", r.URL.Path)
 		}
@@ -54,7 +42,7 @@ func TestSchemaNamespace_List(t *testing.T) {
 func TestSchemaNamespace_Refresh(t *testing.T) {
 	var mu sync.Mutex
 	var gotMethod string
-	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		gotMethod = r.Method
 		mu.Unlock()
@@ -72,7 +60,7 @@ func TestSchemaNamespace_Refresh(t *testing.T) {
 }
 
 func TestPolicyNamespace_GetSetValidate(t *testing.T) {
-	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			_ = json.NewEncoder(w).Encode(Policy{Tables: map[string]TablePolicy{}})
@@ -107,7 +95,7 @@ func TestPolicyNamespace_GetSetValidate(t *testing.T) {
 
 func TestDLQNamespace(t *testing.T) {
 	t.Run("List", func(t *testing.T) {
-		c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(DLQStats{Tables: map[string]int{"clicks": 3}, Total: 3})
 		}))
 		stats, err := c.DLQ.List(context.Background())
@@ -122,7 +110,7 @@ func TestDLQNamespace(t *testing.T) {
 	t.Run("Table", func(t *testing.T) {
 		var mu sync.Mutex
 		var gotParam string
-		c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			gotParam = r.URL.Query().Get("table")
 			mu.Unlock()
@@ -141,7 +129,7 @@ func TestDLQNamespace(t *testing.T) {
 }
 
 func TestPipesNamespace_CRUD(t *testing.T) {
-	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			if r.URL.Path == "/v1/admin/pipes" {
@@ -187,7 +175,7 @@ func TestPipeRef_Fetch(t *testing.T) {
 	var mu sync.Mutex
 	var gotPath, gotMethod string
 	var gotBody map[string]any
-	c := nsClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		gotPath = r.URL.Path
 		gotMethod = r.Method
