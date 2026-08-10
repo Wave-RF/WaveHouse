@@ -193,11 +193,14 @@ Queue settings live in the `main branch protection` ruleset's
 
 Deliberately **not** cached: `actions/setup-go`'s bundled cache in
 `publish-dev.yml`, `release.yml` and `goreleaser-validate.yml` (`cache: false`
-on each). It stores its own go.sum-keyed copy of `~/go/pkg/mod` +
-`~/.cache/go-build` — a ~1 GB entry holding the module tree `gomod-v1`
-already keeps once, plus this job's own 8-target cross-compile objects —
-for release builds dominated by cross-compiling and multi-arch docker rather
-than by `go mod download`.
+on each) — for two different reasons. In `publish-dev.yml` / `release.yml` it
+stores its own go.sum-keyed copy of `~/go/pkg/mod` + `~/.cache/go-build`: a
+~1 GB entry holding the module tree `gomod-v1` already keeps once, plus that
+job's own 8-target cross-compile objects, for builds dominated by
+cross-compiling and multi-arch docker rather than by `go mod download`.
+`goreleaser-validate.yml` opts out on its own grounds — its
+`--single-target` snapshot is fast enough that the post-step save costs more
+than a cold `go mod download`.
 
 Key-versioning policy: bump the `v<N>` prefix whenever the cache's
 expected *contents* change shape — saves only fire on an exact-key miss,
@@ -297,8 +300,13 @@ suite's wall-clock becomes a problem again, start here:
 2. Gate on the change set via `needs: changes` + `if:` on its outputs —
    never with workflow-level `paths` filters (they'd orphan the required
    check, invariant 1).
-3. Use `setup-env` with a fresh `go-cache-suffix` if it compiles Go with
-   new flags; never add cache save steps (invariant 6).
+3. Use `setup-env`, and **always** pass a `go-cache-suffix` if the job
+   compiles Go — a fresh one for new flags, an existing flavor's if it
+   compiles identically. Never leave it empty: the resulting
+   `gobuild-v3-<os>-go-` restore-key prefix-matches every flavor's entry
+   (the cross-flavor restore the split exists to avoid) and mints a sixth
+   build entry against the sizing policy above. Never add cache save
+   steps (invariant 6).
 4. Need a build product / data from another job? Upload it as an artifact
    there, then either `needs` the producer + `download-artifact` (simple,
    but serializes this job's setup behind the producer), or — when this

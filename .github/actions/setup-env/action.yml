@@ -80,17 +80,16 @@ runs:
   using: composite
   steps:
     # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure
-    # function of go.mod + go.sum — byte-identical for every compile flavor
-    # — so folding it into the suffixed build cache stored that tree five
-    # times over (once per -lint/-unit/-integration/-e2e-cov/-cov job) —
+    # function of go.mod + go.sum — byte-identical for every compile
+    # flavor — so folding it into the suffixed build cache stored that tree
+    # five times over, once per -lint/-unit/-integration/-e2e-cov/-cov job:
     # five entries of ~0.9-1.2 GB stored each, ~5.2 GB per generation.
-    # Against
-    # a 10 GB repo cap that means two live generations overflowed it, and
-    # GitHub started LRU-evicting warm entries mid-run. Splitting it out
-    # stores it once: a measured post-split generation is 1.05 GB
-    # (0.48 module + 0.57 across the five build entries) (#443).
-    # Sizes here are stored-archive bytes / 2^30, the same unit the
-    # README's usage check prints.
+    # Against a 10 GB repo cap that means two live generations overflowed
+    # it, and GitHub started LRU-evicting warm entries mid-run. Split out,
+    # it is stored once and a measured generation is 1.05 GB — 0.48 module
+    # plus 0.57 across the five build entries (#443). Sizes here are
+    # stored-archive bytes / 2^30, the unit the README's usage check
+    # prints.
     #
     # All Go jobs miss this key together on a dependency bump and all try to
     # save; the backend keeps the first and the rest log a benign "already
