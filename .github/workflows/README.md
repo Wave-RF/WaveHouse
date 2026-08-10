@@ -183,8 +183,8 @@ Queue settings live in the `main branch protection` ruleset's
 
 | Cache | Key | Saved by | Notes |
 |---|---|---|---|
-| Go modules | `gomod-v1-<os>-<go.sum hash>` | every Go job (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.sum`, so one entry serves every job (~1.6 GB on disk, ~1 GB stored). The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go). |
-| Go build objects | `gobuild-v3-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | `~/.cache/go-build` only. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. |
+| Go modules | `gomod-v1-<os>-<go.mod+go.sum hash>` | every Go job (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.mod` + `go.sum`, so one entry serves every job (~1.6 GB on disk, ~1 GB stored). The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go), which is why `go.mod` is in the key — a `go` directive bump changes the required toolchain without touching `go.sum`. |
+| Go build objects | `gobuild-v3-<os>-go<suffix>-<go.mod+go.sum hash>` | every Go job (own suffix) | `~/.cache/go-build` only. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. |
 | golangci binary + analysis | `golangci-<os>-<Makefile,.golangci.yml hash>` | lint | Analysis cache: ~10s warm vs ~90s. `.bin` also carries shellcheck + actionlint. |
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |

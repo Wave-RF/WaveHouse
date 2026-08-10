@@ -14,16 +14,16 @@
 #
 # The cache inventory (full architecture: .github/workflows/README.md):
 #
-#   1. Go modules, `gomod-v1-` key family, keyed on every go.sum and NOT
-#      partitioned per job — ~/go/pkg/mod is a pure function of go.sum, so
-#      one entry serves every Go job, stored once rather than per flavor
-#      (~1.6 GB on disk, ~1 GB as a stored archive).
-#   2. Go build objects, `gobuild-v3-` key family, keyed on every go.sum
-#      and partitioned by `go-cache-suffix`: the unit, integration and e2e
-#      jobs compile with different flags (-race/-cover/-coverpkg/-tags), so
-#      a shared entry would only ever be warm for whichever job saved it.
-#      `restore-keys` keeps it warm across go.sum bumps — avoids setup-go's
-#      exact-key-only cache (actions/setup-go#357).
+#   1. Go modules, `gomod-v1-` key family, keyed on every go.mod + go.sum
+#      and NOT partitioned per job — ~/go/pkg/mod is a pure function of
+#      those files, so one entry serves every Go job, stored once rather
+#      than per flavor (~1.6 GB on disk, ~1 GB as a stored archive).
+#   2. Go build objects, `gobuild-v3-` key family, same key inputs,
+#      partitioned by `go-cache-suffix`: the unit, integration and e2e jobs
+#      compile with different flags (-race/-cover/-coverpkg/-tags), so a
+#      shared entry would only ever be warm for whichever job saved it.
+#      `restore-keys` keeps it warm across dependency bumps — avoids
+#      setup-go's exact-key-only cache (actions/setup-go#357).
 #   3. golangci-lint binary + analysis cache keyed on Makefile +
 #      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
 #      Only the lint job needs it.
@@ -78,15 +78,15 @@ runs:
   using: composite
   steps:
     # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure
-    # function of go.sum — byte-identical for every compile flavor — so
-    # folding it into the suffixed build cache stored that tree five times
-    # over (once per -lint/-unit/-integration/-e2e-cov/-cov job) — five
-    # entries of ~1.1 GB stored each, ~5.5 GB per go.sum generation. Against
+    # function of go.mod + go.sum — byte-identical for every compile flavor
+    # — so folding it into the suffixed build cache stored that tree five
+    # times over (once per -lint/-unit/-integration/-e2e-cov/-cov job) —
+    # five entries of ~1.1 GB stored each, ~5.5 GB per generation. Against
     # a 10 GB repo cap that means two live generations overflowed it, and
     # GitHub started LRU-evicting warm entries mid-run. Splitting it out
     # stores it once (#443).
     #
-    # All Go jobs miss this key together on a go.sum bump and all try to
+    # All Go jobs miss this key together on a dependency bump and all try to
     # save; the backend keeps the first and the rest log a benign "already
     # exists" (same trade-off as the rest of the inventory, see header).
     - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -94,12 +94,17 @@ runs:
       id: gomod-cache
       with:
         path: ~/go/pkg/mod
-        # v1: the GOTOOLCHAIN=auto toolchain rides in here too (no
-        # setup-go) — that content was what forced the old v2 bump.
-        key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
-        # A stale generation is still worth restoring: go.sum bumps move a
-        # handful of modules, so most of the tree is reusable and `go mod
-        # download` fetches only the delta.
+        # go.mod is in the key, not just go.sum, because the GOTOOLCHAIN=auto
+        # toolchain rides in ~/go/pkg/mod/golang.org/toolchain (no setup-go)
+        # and go.sum records no entry for it. Raising go.mod's `go` directive
+        # therefore changes which toolchain belongs in this cache while
+        # leaving go.sum untouched — a go.sum-only key would exact-hit, and
+        # because saves fire only on an exact-key MISS the freshly fetched
+        # toolchain would never be saved, re-downloading on every run.
+        key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
+        # A stale generation is still worth restoring: a bump moves a handful
+        # of modules, so most of the tree is reusable and `go mod download`
+        # fetches only the delta.
         restore-keys: |
           gomod-v1-${{ runner.os }}-
 
@@ -117,7 +122,7 @@ runs:
       id: gobuild-cache
       with:
         path: ~/.cache/go-build
-        key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.sum') }}
+        key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
         # Same-suffix only. The bare-prefix fallback the v2 key carried
         # existed to pick up the shared module cache from another job's
         # entry; that job is now gomod-v1's, and another flavor's build

@@ -52,12 +52,12 @@ jobs:
           go-version-file: "go.mod"
           # setup-go's bundled cache stores ~/go/pkg/mod + ~/.cache/go-build
           # under its own go.sum-keyed entry — a private ~1 GB copy of the
-          # module tree that ci.yml already caches once as `gomod-v1`, and
-          # that this workflow mints afresh on every push to main. Two live
-          # generations is ~2 GB of the repo's hard 10 GB cache budget, for a
-          # release build that runs once per push and is dominated by
-          # cross-compiling + multi-arch docker, not by `go mod download`.
-          # Same call as goreleaser-validate.yml. See #443.
+          # module tree that ci.yml already caches once as `gomod-v1`. It
+          # saves a fresh archive on each cache miss (i.e. every dependency
+          # bump), so two live generations is ~2 GB of the repo's hard 10 GB
+          # budget — for a release build dominated by cross-compiling and
+          # multi-arch docker, not by `go mod download`. Same call as
+          # goreleaser-validate.yml. See #443.
           cache: false
 
       # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
