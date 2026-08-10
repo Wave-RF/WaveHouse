@@ -212,6 +212,19 @@ over an already-restored tree). Drop the old prefix and purge the stale
 entries instead — they hold budget the new keys need. `gobuild-v3` is the
 worked example: it kept only its own same-suffix prefix.
 
+Purge **after** the rotation is on `main`, not before — until then `main`
+still restores the old keys, so an early delete just forces a cold
+repopulate of caches you are about to abandon:
+
+```bash
+gh api repos/Wave-RF/WaveHouse/actions/caches --paginate \
+  -q '.actions_caches[]|select(.key|startswith("<old-prefix>"))|.id' \
+  | xargs -I{} gh api -X DELETE repos/Wave-RF/WaveHouse/actions/caches/{}
+```
+
+Include every family the rotation orphans, not just the renamed one — e.g.
+turning on `cache: false` strands that job's `setup-go-*` entry too.
+
 **Sizing policy — the repo cache budget is 10 GB, hard.** Past it GitHub
 LRU-evicts, so warm entries disappear mid-run and builds silently get
 slower. Budget for **two live generations**: a `go.mod`/`go.sum` or
