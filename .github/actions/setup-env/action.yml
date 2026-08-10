@@ -122,6 +122,13 @@ runs:
       id: gobuild-cache
       with:
         path: ~/.cache/go-build
+        # go.mod belongs in this key for its own reason, not just symmetry
+        # with gomod-v1: the compiler's build ID feeds every action hash, so
+        # a toolchain bump invalidates every object in here. Keyed on go.sum
+        # alone that bump exact-hits, nothing restored is reusable, and the
+        # freshly built objects are never saved (saves fire only on a miss)
+        # — so every run recompiles cold *and* drags in ~1 GB of dead
+        # objects, until some unrelated go.sum change rotates the key.
         key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
         # Same-suffix only. The bare-prefix fallback the v2 key carried
         # existed to pick up the shared module cache from another job's
