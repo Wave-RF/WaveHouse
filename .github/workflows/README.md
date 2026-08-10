@@ -189,12 +189,28 @@ Queue settings live in the `main branch protection` ruleset's
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
 | Astro content collections | `astro-<os>-<lockfile,astro.config.mjs hash>` | lint / docs-build | Warm `astro check`/`build` skip unchanged content. |
+| CodeQL DB + deps | `codeql-dependencies-*`, `codeql-overlay-base-database-*` | GHAS default setup | **Not ours** — minted by GitHub's default CodeQL setup, not by any workflow in this repo, and not configurable here. ~0.4 GB. Listed so the budget arithmetic below is honest. |
+
+Deliberately **not** cached: `actions/setup-go`'s bundled cache in
+`publish-dev.yml`, `release.yml` and `goreleaser-validate.yml` (`cache: false`
+on each). It stores its own go.sum-keyed copy of `~/go/pkg/mod` +
+`~/.cache/go-build` — ~1 GB, i.e. a seventh copy of what `gomod-v1` already
+holds once — for release builds dominated by cross-compiling and multi-arch
+docker rather than by `go mod download`.
 
 Key-versioning policy: bump the `v<N>` prefix whenever the cache's
 expected *contents* change shape — saves only fire on an exact-key miss,
 so without a bump the old entry exact-hits forever and the new content
 is never captured. Keep the old prefixes as transitional restore-keys,
 then delete them once main has saved the new version.
+
+**Exception — a rotation that *narrows* `path:` carries no transitional
+restore-key.** The old archive still contains the paths you just removed,
+so restoring it would re-materialize exactly the content the rotation was
+meant to stop storing (and, for `~/go/pkg/mod`, extract 0444 module files
+over an already-restored tree). Drop the old prefix and purge the stale
+entries instead — they hold budget the new keys need. `gobuild-v3` is the
+worked example: it kept only its own same-suffix prefix.
 
 **Sizing policy — the repo cache budget is 10 GB, hard.** Past it GitHub
 LRU-evicts, so warm entries disappear mid-run and builds silently get
