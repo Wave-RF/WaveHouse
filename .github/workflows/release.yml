@@ -24,10 +24,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
-          # Tag-triggered, so a warm cache is almost never there to hit
-          # anyway; opting out keeps a ~1 GB go.sum-keyed archive — the module
-          # tree plus this job's cross-compile objects — out of the 10 GB
-          # repo budget. Same call as publish-dev.yml and
+          # Opting out keeps a ~1 GB go.sum-keyed archive — the module tree
+          # plus this job's cross-compile objects — out of the 10 GB repo
+          # budget. A tag run could hit it (cache reads fall back to the
+          # default branch's scope, and publish-dev keeps an equivalent key
+          # hot), but a tagged release is rare and not latency-sensitive,
+          # so it isn't worth the budget. Same call as publish-dev.yml and
           # goreleaser-validate.yml. See #443.
           cache: false
 

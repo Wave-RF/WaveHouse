@@ -52,15 +52,17 @@ jobs:
           go-version-file: "go.mod"
           # Opt out of setup-go's bundled cache and cache the half that
           # earns its keep, below. The bundled one stores ~/go/pkg/mod AND
-          # ~/.cache/go-build under one go.sum-keyed entry (~1 GB live), so
+          # ~/.cache/go-build under one go.sum-keyed entry (~1 GB stored), so
           # roughly half of it re-stores the module tree ci.yml already
           # keeps once as `gomod-v1` — the duplication #443 is about.
           cache: false
 
       # The other half is the reason this job is fast, so cache it on its
       # own. GoReleaser cross-compiles 8 targets here (4 goos × 2 goarch),
-      # and the timings split cleanly on whether this cache hit: warm runs
-      # finish GoReleaser in 36-246s, cold ones in 401-446s. Dropping it
+      # and the last 20 runs split cleanly on whether these objects were
+      # warm: GoReleaser finished in 36-246s with them, 401-446s without.
+      # (Measured on setup-go's bundled entry, which carried this same
+      # ~/.cache/go-build tree — this key is new here.) Dropping them
       # outright would cost 3-6.5 minutes on every push to main.
       #
       # Release-scoped suffix: these objects are cross-compiled for 8
