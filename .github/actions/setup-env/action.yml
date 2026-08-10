@@ -14,29 +14,30 @@
 #
 # The cache inventory (full architecture: .github/workflows/README.md):
 #
-#   1. Go module + build cache keyed on every go.sum, `gobuild-v2-` key
-#      family. `restore-keys` keeps the build cache warm across go.sum
-#      bumps — avoids setup-go's exact-key-only cache (actions/setup-go#357).
-#      `go-cache-suffix` partitions the cache per job: the unit,
-#      integration, and e2e jobs compile with different flags
-#      (-race/-cover/-coverpkg/-tags), so a shared entry would only ever
-#      be warm for whichever job saved it. Cross-suffix restore-keys
-#      still share the (identical) module cache on a cold start.
-#   2. golangci-lint binary + analysis cache keyed on Makefile +
+#   1. Go modules, `gomod-v1-` key family, keyed on every go.sum and NOT
+#      partitioned per job — ~/go/pkg/mod is a pure function of go.sum, so
+#      one entry serves every Go job (~1.6 GB stored once, not per flavor).
+#   2. Go build objects, `gobuild-v3-` key family, keyed on every go.sum
+#      and partitioned by `go-cache-suffix`: the unit, integration and e2e
+#      jobs compile with different flags (-race/-cover/-coverpkg/-tags), so
+#      a shared entry would only ever be warm for whichever job saved it.
+#      `restore-keys` keeps it warm across go.sum bumps — avoids setup-go's
+#      exact-key-only cache (actions/setup-go#357).
+#   3. golangci-lint binary + analysis cache keyed on Makefile +
 #      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
 #      Only the lint job needs it.
-#   3. pnpm store (path resolved at runtime) keyed on the root
+#   4. pnpm store (path resolved at runtime) keyed on the root
 #      lockfile — the pnpm workspace projects share one lockfile +
 #      store. Path is dynamic because pnpm's documented default
 #      ~/.local/share/pnpm/store only applies when $HOME and the project
 #      tree share a mount; on some runners it falls back to a
 #      workspace-relative path. Hard-coding the default silently fails
 #      the save with a Path Validation Error.
-#   4. Playwright browser cache (~/.cache/ms-playwright) keyed on the
+#   5. Playwright browser cache (~/.cache/ms-playwright) keyed on the
 #      root lockfile. ~130 MB Chromium download otherwise re-fetched
 #      every docs build (rehype-mermaid renders via headless Chrome).
 #      Only the docs-build job needs it. See #132.
-#   5. Astro content-collection cache (docs/.astro/) keyed on the root
+#   6. Astro content-collection cache (docs/.astro/) keyed on the root
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
@@ -75,26 +76,52 @@ outputs:
 runs:
   using: composite
   steps:
-    # Key version (v2): bumped when the cache's expected CONTENTS change
-    # shape — v2 added the go toolchain itself (~/go/pkg/mod/golang.org/
-    # toolchain, see the GOTOOLCHAIN note below). Saves only happen on an
-    # exact-key miss, so without a bump the pre-change entry would
-    # exact-hit forever and the new content would never be saved.
+    # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure
+    # function of go.sum — byte-identical for every compile flavor — so
+    # folding it into the suffixed build cache stored the same ~1.6 GB
+    # five times (once per -lint/-unit/-integration/-e2e-cov/-cov job).
+    # That is ~5 GB per go.sum generation against a 10 GB repo cap, so two
+    # live generations overflowed it and GitHub started LRU-evicting warm
+    # entries mid-run. Splitting it out stores it once (#443).
+    #
+    # All Go jobs miss this key together on a go.sum bump and all try to
+    # save; the backend keeps the first and the rest log a benign "already
+    # exists" (same trade-off as the rest of the inventory, see header).
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      if: ${{ inputs.go == 'true' }}
+      id: gomod-cache
+      with:
+        path: ~/go/pkg/mod
+        # v1: the GOTOOLCHAIN=auto toolchain rides in here too (no
+        # setup-go) — that content was what forced the old v2 bump.
+        key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+        # A stale generation is still worth restoring: go.sum bumps move a
+        # handful of modules, so most of the tree is reusable and `go mod
+        # download` fetches only the delta.
+        restore-keys: |
+          gomod-v1-${{ runner.os }}-
+
+    # Build objects only. These genuinely differ per job — unit,
+    # integration and e2e compile with different flags
+    # (-race/-cover/-coverpkg/-tags) — so a shared entry would only ever be
+    # warm for whichever job saved it last.
+    #
+    # Key version (v3): bumped because the cache's CONTENTS changed shape
+    # (~/go/pkg/mod moved out, above). Saves only happen on an exact-key
+    # miss, so without a bump the old v2 entry would exact-hit forever and
+    # the new, smaller content would never be saved.
     - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.go == 'true' }}
       id: gobuild-cache
       with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.sum') }}
-        # Same-suffix prefix first (this job's flavor across go.sum bumps),
-        # then the bare prefix as a cold-start fallback — it matches any
-        # other job's suffixed entry, which still carries the shared module
-        # cache even if its build objects don't apply.
+        path: ~/.cache/go-build
+        key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.sum') }}
+        # Same-suffix only. The bare-prefix fallback the v2 key carried
+        # existed to pick up the shared module cache from another job's
+        # entry; that job is now gomod-v1's, and another flavor's build
+        # objects are not reusable here.
         restore-keys: |
-          gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
-          gobuild-v2-${{ runner.os }}-go-
+          gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
 
     - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.golangci == 'true' }}

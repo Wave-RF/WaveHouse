@@ -183,7 +183,8 @@ Queue settings live in the `main branch protection` ruleset's
 
 | Cache | Key | Saved by | Notes |
 |---|---|---|---|
-| Go modules + build | `gobuild-v2-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`). v2 = the GOTOOLCHAIN=auto toolchain rides in `~/go/pkg/mod` (no setup-go). |
+| Go modules | `gomod-v1-<os>-<go.sum hash>` | every Go job (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.sum`, so one ~1.6 GB entry serves every job. The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go). |
+| Go build objects | `gobuild-v3-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | `~/.cache/go-build` only. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. |
 | golangci binary + analysis | `golangci-<os>-<Makefile,.golangci.yml hash>` | lint | Analysis cache: ~10s warm vs ~90s. `.bin` also carries shellcheck + actionlint. |
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
@@ -194,6 +195,29 @@ expected *contents* change shape — saves only fire on an exact-key miss,
 so without a bump the old entry exact-hits forever and the new content
 is never captured. Keep the old prefixes as transitional restore-keys,
 then delete them once main has saved the new version.
+
+**Sizing policy — the repo cache budget is 10 GB, hard.** Past it GitHub
+LRU-evicts, so warm entries disappear mid-run and builds silently get
+slower. Budget for **two live generations**: a `go.sum` or lockfile bump
+mints a whole new set while the previous one is still warm, so the steady
+state is ~2× a single generation. That is why `~/go/pkg/mod` is cached
+**once** (`gomod-v1`) rather than folded into each suffixed build cache —
+doing the latter stored the same ~1.6 GB five times, ~5 GB per
+generation, and #438's 24-module bump pushed the repo to 10.53 GB
+([#443](https://github.com/Wave-RF/WaveHouse/issues/443)).
+
+Before adding a cache or widening an existing `path:`, check the current
+footprint and confirm two generations still fit:
+
+```bash
+gh api repos/Wave-RF/WaveHouse/actions/cache/usage \
+  -q '"\(.active_caches_size_in_bytes/1073741824*100|round/100)GB / 10GB"'
+gh api repos/Wave-RF/WaveHouse/actions/caches --paginate \
+  -q '.actions_caches[]|"\(.size_in_bytes)\t\(.key)"' | sort -rn | head
+```
+
+Never add a per-job copy of content that is a pure function of a lockfile
+— key it once, unsuffixed, and let every job share it.
 
 ## Timing (steady state, full pipeline)
 
