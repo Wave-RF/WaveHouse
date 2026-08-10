@@ -219,9 +219,8 @@ mints a whole new set while the previous one is still warm, so the steady
 state is ~2× a single generation. That is why `~/go/pkg/mod` is cached
 **once** (`gomod-v1`) rather than folded into each suffixed build cache —
 doing the latter stored the module tree five times over — five entries of
-~1.1 GB each, ~5.5 GB per generation — and #438's 24-module bump pushed
-the repo to 10.53 GB
-([#443](https://github.com/Wave-RF/WaveHouse/issues/443)).
+~1.1 GB each, ~5.5 GB per generation — and #438's 24-module bump pushed the
+repo to 10.53 GB ([#443](https://github.com/Wave-RF/WaveHouse/issues/443)).
 
 Before adding a cache or widening an existing `path:`, check the current
 footprint and confirm two generations still fit:

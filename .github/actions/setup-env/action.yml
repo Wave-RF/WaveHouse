@@ -81,10 +81,10 @@ runs:
     # function of go.sum — byte-identical for every compile flavor — so
     # folding it into the suffixed build cache stored that tree five times
     # over (once per -lint/-unit/-integration/-e2e-cov/-cov job) — five
-    # entries of ~1.1 GB stored each, ~5.5 GB per go.sum generation.
-    # Against a 10 GB repo cap that means two
-    # live generations overflowed it and GitHub started LRU-evicting warm
-    # entries mid-run. Splitting it out stores it once (#443).
+    # entries of ~1.1 GB stored each, ~5.5 GB per go.sum generation. Against
+    # a 10 GB repo cap that means two live generations overflowed it, and
+    # GitHub started LRU-evicting warm entries mid-run. Splitting it out
+    # stores it once (#443).
     #
     # All Go jobs miss this key together on a go.sum bump and all try to
     # save; the backend keeps the first and the rest log a benign "already
