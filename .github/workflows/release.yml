@@ -25,9 +25,10 @@ jobs:
         with:
           go-version-file: "go.mod"
           # Tag-triggered, so a warm cache is almost never there to hit
-          # anyway; opting out keeps a ~1 GB go.sum-keyed copy of the module
-          # tree out of the 10 GB repo budget. Same call as publish-dev.yml
-          # and goreleaser-validate.yml. See #443.
+          # anyway; opting out keeps a ~1 GB go.sum-keyed archive — the module
+          # tree plus this job's cross-compile objects — out of the 10 GB
+          # repo budget. Same call as publish-dev.yml and
+          # goreleaser-validate.yml. See #443.
           cache: false
 
       # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;

@@ -17,7 +17,7 @@
 #   1. Go modules, `gomod-v1-` key family, keyed on every go.mod + go.sum
 #      and NOT partitioned per job — ~/go/pkg/mod is a pure function of
 #      those files, so one entry serves every Go job, stored once rather
-#      than per flavor (~1.6 GB on disk; 0.49 GB as a stored archive on a
+#      than per flavor (~1.6 GB on disk; 0.48 GB as a stored archive on a
 #      cold save, drifting up as superseded module versions accumulate
 #      through the restore -> save chain).
 #   2. Go build objects, `gobuild-v3-` key family, same key inputs,
@@ -83,11 +83,14 @@ runs:
     # function of go.mod + go.sum — byte-identical for every compile flavor
     # — so folding it into the suffixed build cache stored that tree five
     # times over (once per -lint/-unit/-integration/-e2e-cov/-cov job) —
-    # five entries of ~1.1 GB stored each, ~5.5 GB per generation. Against
+    # five entries of ~0.9-1.2 GB stored each, ~5.2 GB per generation.
+    # Against
     # a 10 GB repo cap that means two live generations overflowed it, and
     # GitHub started LRU-evicting warm entries mid-run. Splitting it out
-    # stores it once: a measured post-split generation is ~1.05 GB
-    # (0.49 module + 0.59 across the five build entries) (#443).
+    # stores it once: a measured post-split generation is 1.05 GB
+    # (0.48 module + 0.57 across the five build entries) (#443).
+    # Sizes here are stored-archive bytes / 2^30, the same unit the
+    # README's usage check prints.
     #
     # All Go jobs miss this key together on a dependency bump and all try to
     # save; the backend keeps the first and the rest log a benign "already
