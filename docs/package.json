@@ -22,7 +22,7 @@
     "@wave-rf/cloudflare-md-router": "^0.2.1",
     "@wave-rf/starlight-llm-tools": "^0.3.1",
     "@wavehouse/sdk": "workspace:*",
-    "astro": "^6.1.5",
+    "astro": "^7.1.1",
     "astro-vtbot": "^3.0.1",
     "katex": "^0.18.1",
     "rehype-katex": "^7.0.1",
