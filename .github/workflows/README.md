@@ -208,14 +208,18 @@ half that pays for itself on its own key (`gobuild-v3-<os>-go-release-`,
 dropping the build objects outright would cost 3–6.5 minutes on every push
 to main.
 
-`release.yml` keeps the plain opt-out. Not because a warm entry is missing
-— a tag run can restore from the default branch's scope, and `publish-dev`
-keeps that key hot on every push to `main` — but because a tagged release
-is rare and not latency-sensitive, so it isn't worth the budget. If release
-wall-clock ever does matter, it can restore `publish-dev`'s key at zero
-budget cost: an exact hit never saves. `goreleaser-validate.yml` opts out on its own
-grounds: its `--single-target` snapshot is fast enough that the post-step
-save costs more than a cold `go mod download`.
+`release.yml` keeps the plain opt-out — no re-cache. After this change
+nothing mints a `setup-go-*` key at all, so turning its bundled cache back
+on would be a cold miss *and* a fresh ~1 GB save rather than a hit. What is
+warm is `publish-dev`'s `gobuild-v3-<os>-go-release-` entry, which a tag run
+could restore from the default branch's scope — but a tagged release is rare
+and not latency-sensitive, so it isn't worth a hand-rolled restore step.
+That is the lever if release wall-clock ever does matter, and it costs no
+budget: an exact hit never saves.
+
+`goreleaser-validate.yml` opts out on its own grounds: its `--single-target`
+snapshot is fast enough that the post-step save costs more than a cold
+`go mod download`.
 
 Key-versioning policy: bump the `v<N>` prefix whenever the cache's
 expected *contents* change shape — saves only fire on an exact-key miss,

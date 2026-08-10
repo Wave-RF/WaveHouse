@@ -26,11 +26,18 @@ jobs:
           go-version-file: "go.mod"
           # Opting out keeps a ~1 GB go.sum-keyed archive — the module tree
           # plus this job's cross-compile objects — out of the 10 GB repo
-          # budget. A tag run could hit it (cache reads fall back to the
-          # default branch's scope, and publish-dev keeps an equivalent key
-          # hot), but a tagged release is rare and not latency-sensitive,
-          # so it isn't worth the budget. Same call as publish-dev.yml and
-          # goreleaser-validate.yml. See #443.
+          # budget. After this change nothing mints that key at all
+          # (publish-dev.yml and goreleaser-validate.yml opt out too, and
+          # ci.yml runs no setup-go), so turning it back on here would be a
+          # cold miss AND a fresh ~1 GB save, not a hit.
+          #
+          # What IS warm is publish-dev's gobuild-v3-<os>-go-release- entry,
+          # restorable from the default branch's scope. A tagged release is
+          # rare and not latency-sensitive, so it isn't worth a hand-rolled
+          # restore step here — but that's the lever if it ever is.
+          #
+          # Same cache: false as publish-dev.yml and goreleaser-validate.yml;
+          # different follow-up (publish-dev re-caches the useful half). #443.
           cache: false
 
       # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
