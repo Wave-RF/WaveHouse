@@ -63,6 +63,10 @@ export interface ClientConfig<_DB extends Database = Database> {
    * a path prefix ("https://app.example.com/api/warehouse") for a WaveHouse
    * behind a BFF, app-server route, or path-routed ingress; request paths are
    * appended to it. The proxy in front must strip the prefix before forwarding.
+   *
+   * Must be **absolute** — scheme and host included. A relative value such as
+   * "/api/warehouse" throws `TypeError: Invalid URL` on the first request
+   * rather than returning a `Result`; use `` `${location.origin}/api/warehouse` ``.
    */
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */
