@@ -183,7 +183,7 @@ Queue settings live in the `main branch protection` ruleset's
 
 | Cache | Key | Saved by | Notes |
 |---|---|---|---|
-| Go modules | `gomod-v1-<os>-<go.sum hash>` | every Go job (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.sum`, so one ~1.6 GB entry serves every job. The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go). |
+| Go modules | `gomod-v1-<os>-<go.sum hash>` | every Go job (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.sum`, so one entry serves every job (~1.6 GB on disk, ~1 GB stored). The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go). |
 | Go build objects | `gobuild-v3-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | `~/.cache/go-build` only. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. |
 | golangci binary + analysis | `golangci-<os>-<Makefile,.golangci.yml hash>` | lint | Analysis cache: ~10s warm vs ~90s. `.bin` also carries shellcheck + actionlint. |
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
@@ -194,9 +194,9 @@ Queue settings live in the `main branch protection` ruleset's
 Deliberately **not** cached: `actions/setup-go`'s bundled cache in
 `publish-dev.yml`, `release.yml` and `goreleaser-validate.yml` (`cache: false`
 on each). It stores its own go.sum-keyed copy of `~/go/pkg/mod` +
-`~/.cache/go-build` — ~1 GB, i.e. a seventh copy of what `gomod-v1` already
-holds once — for release builds dominated by cross-compiling and multi-arch
-docker rather than by `go mod download`.
+`~/.cache/go-build` — ~1 GB duplicating what `gomod-v1` already holds once —
+for release builds dominated by cross-compiling and multi-arch docker rather
+than by `go mod download`.
 
 Key-versioning policy: bump the `v<N>` prefix whenever the cache's
 expected *contents* change shape — saves only fire on an exact-key miss,
@@ -218,8 +218,9 @@ slower. Budget for **two live generations**: a `go.sum` or lockfile bump
 mints a whole new set while the previous one is still warm, so the steady
 state is ~2× a single generation. That is why `~/go/pkg/mod` is cached
 **once** (`gomod-v1`) rather than folded into each suffixed build cache —
-doing the latter stored the same ~1.6 GB five times, ~5 GB per
-generation, and #438's 24-module bump pushed the repo to 10.53 GB
+doing the latter stored the module tree five times over — five entries of
+~1.1 GB each, ~5.5 GB per generation — and #438's 24-module bump pushed
+the repo to 10.53 GB
 ([#443](https://github.com/Wave-RF/WaveHouse/issues/443)).
 
 Before adding a cache or widening an existing `path:`, check the current

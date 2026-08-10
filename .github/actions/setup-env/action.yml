@@ -16,7 +16,8 @@
 #
 #   1. Go modules, `gomod-v1-` key family, keyed on every go.sum and NOT
 #      partitioned per job — ~/go/pkg/mod is a pure function of go.sum, so
-#      one entry serves every Go job (~1.6 GB stored once, not per flavor).
+#      one entry serves every Go job, stored once rather than per flavor
+#      (~1.6 GB on disk, ~1 GB as a stored archive).
 #   2. Go build objects, `gobuild-v3-` key family, keyed on every go.sum
 #      and partitioned by `go-cache-suffix`: the unit, integration and e2e
 #      jobs compile with different flags (-race/-cover/-coverpkg/-tags), so
@@ -78,9 +79,10 @@ runs:
   steps:
     # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure
     # function of go.sum — byte-identical for every compile flavor — so
-    # folding it into the suffixed build cache stored the same ~1.6 GB
-    # five times (once per -lint/-unit/-integration/-e2e-cov/-cov job).
-    # That is ~5 GB per go.sum generation against a 10 GB repo cap, so two
+    # folding it into the suffixed build cache stored that tree five times
+    # over (once per -lint/-unit/-integration/-e2e-cov/-cov job) — five
+    # entries of ~1.1 GB stored each, ~5.5 GB per go.sum generation.
+    # Against a 10 GB repo cap that means two
     # live generations overflowed it and GitHub started LRU-evicting warm
     # entries mid-run. Splitting it out stores it once (#443).
     #
