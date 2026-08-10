@@ -323,13 +323,27 @@ const wh = createClient<Database>({
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `baseURL` | `string` | — | WaveHouse server URL (required) |
+| `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
 :::note[How the token is transmitted]
 The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server reads the header in preference to the query parameter, and strips the `?token=` value from the URL after extraction so it can't leak into logs.
 :::
+
+#### Serving under a path prefix
+
+`baseURL` may carry a path prefix, for a WaveHouse reachable somewhere other than the root of an origin — behind a BFF, an app-server route, or a path-routed ingress. Every request path is appended to it, on both transports:
+
+```ts
+const wh = createClient({ baseURL: 'https://app.example.com/api/warehouse' });
+// queries  → https://app.example.com/api/warehouse/v1/query
+// streams  → https://app.example.com/api/warehouse/v1/stream
+```
+
+Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/warehouse` throws `TypeError: Invalid URL` at the first request instead of returning a `Result`, so build an absolute one: `` `${location.origin}/api/warehouse` ``.
+
+The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
 
 ### Type-Safe Tables
 

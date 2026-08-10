@@ -58,7 +58,12 @@ export interface StreamSubscriber<T = Record<string, unknown>> {
 // --- Client config ---
 
 export interface ClientConfig<_DB extends Database = Database> {
-  /** Base URL of the WaveHouse server (e.g. "http://localhost:8080"). */
+  /**
+   * Base URL of the WaveHouse server (e.g. "http://localhost:8080"). May include
+   * a path prefix ("https://app.example.com/api/warehouse") for a WaveHouse
+   * behind a BFF, app-server route, or path-routed ingress; request paths are
+   * appended to it. The proxy in front must strip the prefix before forwarding.
+   */
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */
   auth?: () => Promise<string> | string;
