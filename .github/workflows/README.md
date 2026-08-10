@@ -189,18 +189,25 @@ Queue settings live in the `main branch protection` ruleset's
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
 | Astro content collections | `astro-<os>-<lockfile,astro.config.mjs hash>` | lint / docs-build | Warm `astro check`/`build` skip unchanged content. |
+| Go build objects (release) | `gobuild-v3-<os>-go-release-<go.mod+go.sum hash>` | publish-dev | `~/.cache/go-build` from GoReleaser's 8-target cross-compile (~0.5 GB). Same family and key inputs as the CI flavors, `-release` suffix because cross-compiled objects share nothing with the native-only ones. Worth 3–6.5 min on every push to main. |
 | CodeQL DB + deps | `codeql-dependencies-*`, `codeql-overlay-base-database-*` | GHAS default setup | **Not ours** — minted by GitHub's default CodeQL setup, not by any workflow in this repo, and not configurable here. ~0.4 GB. Listed so the budget arithmetic below is honest. |
 
-Deliberately **not** cached: `actions/setup-go`'s bundled cache in
-`publish-dev.yml`, `release.yml` and `goreleaser-validate.yml` (`cache: false`
-on each) — for two different reasons. In `publish-dev.yml` / `release.yml` it
-stores its own go.sum-keyed copy of `~/go/pkg/mod` + `~/.cache/go-build`: a
-~1 GB entry holding the module tree `gomod-v1` already keeps once, plus that
-job's own 8-target cross-compile objects, for builds dominated by
-cross-compiling and multi-arch docker rather than by `go mod download`.
-`goreleaser-validate.yml` opts out on its own grounds — its
-`--single-target` snapshot is fast enough that the post-step save costs more
-than a cold `go mod download`.
+Deliberately **not** cached: `actions/setup-go`'s bundled cache
+(`cache: false` in `publish-dev.yml`, `release.yml` and
+`goreleaser-validate.yml`) — for different reasons per job.
+
+It stores `~/go/pkg/mod` **and** `~/.cache/go-build` under one go.sum-keyed
+entry (~1 GB live), so roughly half re-stores the module tree `gomod-v1`
+already keeps once. `publish-dev.yml` opts out of that entry and caches the
+half that pays for itself on its own key (`gobuild-v3-<os>-go-release-`,
+~0.5 GB): its GoReleaser step takes 36–246 s warm versus 401–446 s cold, so
+dropping the build objects outright would cost 3–6.5 minutes on every push
+to main.
+
+`release.yml` keeps the plain opt-out — it is tag-triggered, so a warm entry
+is rarely there to hit. `goreleaser-validate.yml` opts out on its own
+grounds: its `--single-target` snapshot is fast enough that the post-step
+save costs more than a cold `go mod download`.
 
 Key-versioning policy: bump the `v<N>` prefix whenever the cache's
 expected *contents* change shape — saves only fire on an exact-key miss,
@@ -240,8 +247,11 @@ five entries of ~0.9-1.2 GB each, ~5.2 GB per generation, and #438's 24-module
 bump pushed the repo to 10.53 GB
 ([#443](https://github.com/Wave-RF/WaveHouse/issues/443)).
 
-Before adding a cache or widening an existing `path:`, check the current
-footprint and confirm two generations still fit:
+Steady state after the split is roughly 5 GB of the 10 — two generations
+of `gomod-v1` + the five `gobuild-v3` flavors + the release build cache,
+plus the node-side caches and CodeQL. Before adding a cache or widening an
+existing `path:`, check the current footprint and confirm two generations
+still fit:
 
 ```bash
 gh api repos/Wave-RF/WaveHouse/actions/cache/usage \

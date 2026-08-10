@@ -50,16 +50,31 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
-          # setup-go's bundled cache stores ~/go/pkg/mod + ~/.cache/go-build
-          # under its own go.sum-keyed entry — a private ~1 GB archive: the
-          # module tree ci.yml already caches once as `gomod-v1`, plus this
-          # job's own 8-target cross-compile objects. It
-          # saves a fresh archive on each cache miss (i.e. every dependency
-          # bump), so two live generations is ~2 GB of the repo's hard 10 GB
-          # budget — for a release build dominated by cross-compiling and
-          # multi-arch docker, not by `go mod download`. Same call as
-          # goreleaser-validate.yml. See #443.
+          # Opt out of setup-go's bundled cache and cache the half that
+          # earns its keep, below. The bundled one stores ~/go/pkg/mod AND
+          # ~/.cache/go-build under one go.sum-keyed entry (~1 GB live), so
+          # roughly half of it re-stores the module tree ci.yml already
+          # keeps once as `gomod-v1` — the duplication #443 is about.
           cache: false
+
+      # The other half is the reason this job is fast, so cache it on its
+      # own. GoReleaser cross-compiles 8 targets here (4 goos × 2 goarch),
+      # and the timings split cleanly on whether this cache hit: warm runs
+      # finish GoReleaser in 36-246s, cold ones in 401-446s. Dropping it
+      # outright would cost 3-6.5 minutes on every push to main.
+      #
+      # Release-scoped suffix: these objects are cross-compiled for 8
+      # GOOS/GOARCH pairs and share nothing with ci.yml's native-only
+      # flavors, so `-release` keeps both sides from restoring bytes the
+      # other can't use. Same `gobuild-v3` family and key inputs as
+      # setup-env's (see .github/workflows/README.md); ~0.5 GB rather than
+      # the ~1 GB the bundled cache held.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-v3-${{ runner.os }}-go-release-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: |
+            gobuild-v3-${{ runner.os }}-go-release-
 
       # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
       # the GitHub-hosted runner's default docker driver can't build
