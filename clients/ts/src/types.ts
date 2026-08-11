@@ -66,8 +66,8 @@ export interface ClientConfig<_DB extends Database = Database> {
    * the prefix before forwarding.
    *
    * Must be **absolute** — scheme and host included. A relative value such as
-   * "/api/warehouse" throws `TypeError: Invalid URL` on the first request
-   * rather than returning a `Result`; use `` `${location.origin}/api/warehouse` ``.
+   * "/api/warehouse" throws a `TypeError` on the first request rather than
+   * returning a `Result`; use `` `${location.origin}/api/warehouse` ``.
    */
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */

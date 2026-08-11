@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. The one exception is a malformed `baseURL`: REST calls reject with a `TypeError`, and streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback (see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)).
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), and `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)).
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -37,6 +37,10 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
+| 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. a non-absolute `baseURL`) |
+| 0 | `SSE_ERROR` | Yes | Stream connection error |
+
+The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them.
 
 ---
 

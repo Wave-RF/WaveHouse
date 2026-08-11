@@ -125,7 +125,7 @@ const { data } = await wh.from('clicks').select('page').limit(10);
 
 ## Error Handling
 
-All operations return `{ data, error }` tuples — the SDK never throws for anything the server returns. The one exception is a malformed `baseURL` (it must be absolute): REST calls reject with a `TypeError`, while streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback.
+All operations return `{ data, error }` tuples — the SDK never throws for anything the server returns. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback), and `.stream()` / `.liveQuery()` in a runtime with no `EventSource`.
 
 ```ts
 const { data, error } = await wh.from('clicks').fetch();

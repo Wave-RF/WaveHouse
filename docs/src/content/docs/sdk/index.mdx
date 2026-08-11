@@ -343,7 +343,7 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/warehouse' });
 // streams  → https://app.example.com/api/warehouse/v1/stream
 ```
 
-Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/warehouse` makes every REST call reject with `TypeError: Invalid URL` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``.
+Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``.
 
 The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
 
@@ -368,7 +368,7 @@ Generate the `Database` interface from a running server with the
 
 ## Result Type
 
-Every async SDK operation returns `Result<T>` — a discriminated union that never throws for anything the server returns (a malformed `baseURL` is the one exception, and fails fast):
+Every async SDK operation returns `Result<T>` — a discriminated union that never throws for anything the server returns (caller and environment errors do throw — see [Error Handling](/sdk/reference#error-handling)):
 
 ```ts
 type Result<T> =
