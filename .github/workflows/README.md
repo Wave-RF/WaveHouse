@@ -119,13 +119,20 @@ Break one of these knowingly or not at all.
    runs the PR tree with no secrets beyond a read-mostly `GITHUB_TOKEN`.
    Fork PRs: secrets are absent and `docs-preview` skips itself.
 
-6. **Caches are owned end-to-end by `setup-env`**
+6. **`ci.yml`'s caches are owned end-to-end by `setup-env`**
    ([.github/actions/setup-env](../actions/setup-env/action.yml)): each
    cache is a nested `actions/cache` step that restores inline and saves
    automatically at job end on an exact-key miss. No save steps in
    `ci.yml`. Trade-offs accepted: failed jobs don't save (restore-keys
    cushion the next run), and concurrent same-key misses produce benign
-   "already exists" warnings.
+   "already exists" warnings. **Two cache steps live outside it**, both in
+   `publish-dev.yml`, because that workflow doesn't use `setup-env` at all
+   (it runs GoReleaser, not the test suites): a bare `actions/cache` owning
+   the release build cache, and an `actions/cache/restore` that *reads*
+   `gomod-v1` and owns nothing. Those two are the only `actions/cache*`
+   steps outside the composite — keep it that way. A workflow that needs
+   the shared module tree reads it restore-only; writing it belongs to the
+   `ci.yml` jobs that run a full `go mod download`.
 
 ## Coverage publishing
 
@@ -183,17 +190,108 @@ Queue settings live in the `main branch protection` ruleset's
 
 | Cache | Key | Saved by | Notes |
 |---|---|---|---|
-| Go modules + build | `gobuild-v2-<os>-go<suffix>-<go.sum hash>` | every Go job (own suffix) | Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`). v2 = the GOTOOLCHAIN=auto toolchain rides in `~/go/pkg/mod` (no setup-go). |
+| Go modules | `gomod-v1-<os>-<go.mod+go.sum hash>` | every `ci.yml` Go job via `setup-env` (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.mod` + `go.sum`, so one entry serves every job (~1.6 GB on disk; 0.48 GB stored on a cold save, drifting up as superseded versions accumulate). The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go), which is why `go.mod` is in the key — a `go` directive bump changes the required toolchain without touching `go.sum`. |
+| Go build objects | `gobuild-v3-<os>-go<suffix>-<go.mod+go.sum hash>` | every `ci.yml` Go job via `setup-env` (own suffix) | `~/.cache/go-build` only — 25–152 MB stored per flavor. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. `go.mod` is in the key for its own reason — the compiler's build ID keys every object, so a toolchain bump invalidates all of them. |
 | golangci binary + analysis | `golangci-<os>-<Makefile,.golangci.yml hash>` | lint | Analysis cache: ~10s warm vs ~90s. `.bin` also carries shellcheck + actionlint. |
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
 | Astro content collections | `astro-<os>-<lockfile,astro.config.mjs hash>` | lint / docs-build | Warm `astro check`/`build` skip unchanged content. |
+| Go build objects (release) | `gobuild-v3-<os>-go-release-<go.mod+go.sum hash>` | publish-dev (hand-rolled, not `setup-env`) | `~/.cache/go-build` from GoReleaser's 8-target cross-compile (~0.5 GB). Same family and key inputs as the CI flavors, `-release` suffix because cross-compiled objects share nothing with the native-only ones. Worth ≈2.5–7 min on every push to main (mean delta ≈4.8 min). |
+| Go modules (release read) | `gomod-v1-<os>-<go.mod+go.sum hash>` | nobody — **restore-only** | `publish-dev` reads `ci.yml`'s shared entry from `main`'s scope via `actions/cache/restore`, so its cross-compile isn't slowed by a cold module tree. No post-step save, so 0 GB of budget and no risk of a partial write to the shared key. |
+| CodeQL DB + deps | `codeql-dependencies-*`, `codeql-overlay-base-database-*` | GHAS default setup | **Not ours** — minted by GitHub's default CodeQL setup, not by any workflow in this repo, and not configurable here. ~0.4 GB. Listed so the budget arithmetic below is honest. |
+
+Deliberately **not** cached: `actions/setup-go`'s bundled cache
+(`cache: false` in `publish-dev.yml`, `release.yml` and
+`goreleaser-validate.yml`) — for different reasons per job.
+
+It stores `~/go/pkg/mod` **and** `~/.cache/go-build` under one entry
+(~1 GB stored), keyed on the root `go.mod` — setup-go hashed `go.sum`
+through v6.2.0 and `go.mod` from v6.3.0, see
+[actions/setup-go#705](https://github.com/actions/setup-go/pull/705) — so
+roughly half of it re-stores the module tree `gomod-v1` already keeps once.
+`publish-dev.yml` opts out of that entry and caches the half that pays for
+itself on its own key (`gobuild-v3-<os>-go-release-`,
+~0.5 GB): its GoReleaser step takes 36–246 s warm versus 401–446 s cold, so
+dropping the build objects outright would cost roughly 2.5–7 minutes on
+every push to main (mean delta ≈4.8 min across those runs). Those timings were measured with setup-go's bundled entry, which
+also held `~/go/pkg/mod` — so `publish-dev` additionally *restores* (never
+saves) `gomod-v1` from `main`'s scope, keeping the module tree warm too.
+Without that restore the job would re-download ~112 MB per push and land
+above the warm range this table quotes.
+
+`release.yml` keeps the plain opt-out — no re-cache. After this change
+nothing mints a `setup-go-*` key at all, so turning its bundled cache back
+on would be a cold miss *and* a fresh ~1 GB save rather than a hit. What is
+warm is `publish-dev`'s `gobuild-v3-<os>-go-release-` entry, which a tag run
+could restore from the default branch's scope — but a tagged release is rare
+and not latency-sensitive, so it isn't worth a hand-rolled restore step.
+
+Re-enabling the bundled cache there would be strictly negative, not merely
+unhelpful: cache writes are scoped to the ref that made them, so a save
+from `refs/tags/v1.0.0` can never be read by `refs/tags/v1.0.1`, by `main`,
+or by a PR — only by a re-run of that same tag. It would be a ~1 GB entry
+per release that nothing but a retry can ever read. If release wall-clock
+ever does matter, the lever is `actions/cache/restore` on
+`publish-dev`'s key: restore-only, so it reads `main`'s warm entry and never
+writes a tag-scoped one.
+
+`goreleaser-validate.yml` opts out on its own grounds: its `--single-target`
+snapshot is fast enough that the post-step save costs more than a cold
+`go mod download`.
 
 Key-versioning policy: bump the `v<N>` prefix whenever the cache's
 expected *contents* change shape — saves only fire on an exact-key miss,
 so without a bump the old entry exact-hits forever and the new content
 is never captured. Keep the old prefixes as transitional restore-keys,
 then delete them once main has saved the new version.
+
+**Exception — a rotation that *narrows* `path:` carries no transitional
+restore-key.** The old archive still contains the paths you just removed,
+so restoring it would re-materialize exactly the content the rotation was
+meant to stop storing (and, for `~/go/pkg/mod`, extract 0444 module files
+over an already-restored tree). Drop the old prefix and purge the stale
+entries instead — they hold budget the new keys need. `gobuild-v3` is the
+worked example: it kept only its own same-suffix prefix.
+
+Purge **after** the rotation is on `main`, not before — until then `main`
+still restores the old keys, so an early delete just forces a cold
+repopulate of caches you are about to abandon:
+
+```bash
+gh api repos/Wave-RF/WaveHouse/actions/caches --paginate \
+  -q '.actions_caches[]|select(.key|startswith("<old-prefix>"))|.id' \
+  | xargs -I{} gh api -X DELETE repos/Wave-RF/WaveHouse/actions/caches/{}
+```
+
+Include every family the rotation orphans, not just the renamed one — e.g.
+turning on `cache: false` strands that job's `setup-go-*` entry too.
+
+**Sizing policy — the repo cache budget is 10 GB, hard.** Past it GitHub
+LRU-evicts, so warm entries disappear mid-run and builds silently get
+slower. Budget for **two live generations**: a `go.mod`/`go.sum` or
+lockfile bump mints a whole new set while the previous one is still warm,
+so the steady state is ~2× a single generation. That is why `~/go/pkg/mod`
+is cached **once** (`gomod-v1`) rather than folded into each suffixed
+build cache — doing the latter stored the module tree five times over,
+five entries of ~0.9-1.2 GB each, ~5.2 GB per generation, and #438's 24-module
+bump pushed the repo to 10.53 GB
+([#443](https://github.com/Wave-RF/WaveHouse/issues/443)).
+
+Steady state after the split is roughly 5 GB of the 10 — two generations
+of `gomod-v1` + the five `gobuild-v3` flavors + the release build cache,
+plus the node-side caches and CodeQL. Before adding a cache or widening an
+existing `path:`, check the current footprint and confirm two generations
+still fit:
+
+```bash
+gh api repos/Wave-RF/WaveHouse/actions/cache/usage \
+  -q '"\(.active_caches_size_in_bytes/1073741824*100|round/100)GB / 10GB"'
+gh api repos/Wave-RF/WaveHouse/actions/caches --paginate \
+  -q '.actions_caches[]|"\(.size_in_bytes)\t\(.key)"' | sort -rn | head
+```
+
+Never add a per-job copy of content that is a pure function of a lockfile
+— key it once, unsuffixed, and let every job share it.
 
 ## Timing (steady state, full pipeline)
 
@@ -242,8 +340,24 @@ suite's wall-clock becomes a problem again, start here:
 2. Gate on the change set via `needs: changes` + `if:` on its outputs —
    never with workflow-level `paths` filters (they'd orphan the required
    check, invariant 1).
-3. Use `setup-env` with a fresh `go-cache-suffix` if it compiles Go with
-   new flags; never add cache save steps (invariant 6).
+3. Use `setup-env`. Three rules come with it:
+   - **Pass a `go-cache-suffix` if the job compiles Go** — a fresh one for
+     new flags, an existing flavor's if it compiles identically. Never
+     empty: the resulting `gobuild-v3-<os>-go-` restore-key prefix-matches
+     every flavor's entry (the cross-flavor restore the split exists to
+     avoid) and mints an extra build entry against the sizing policy above.
+     `setup-env` fails the job outright whenever `go` is true — which is
+     the **default** — and no suffix is passed, so a new job can't inherit
+     the empty default silently. A job that doesn't build Go passes
+     `go: "false"` instead, as the docs jobs do.
+   - **Make sure the job's make target reaches `go-mod-download`.** Every
+     `ci.yml` Go job races to save the shared unsuffixed `gomod-v1`, so a
+     job that only fetches the modules it happens to import can store a
+     partial tree that then exact-hits for everyone until the next
+     rotation. This is why `cov` carries the prerequisite.
+   - **Never add cache save steps to `ci.yml`** (invariant 6). A workflow
+     outside it that needs a cache hand-rolls one, as `publish-dev.yml`
+     does.
 4. Need a build product / data from another job? Upload it as an artifact
    there, then either `needs` the producer + `download-artifact` (simple,
    but serializes this job's setup behind the producer), or — when this
