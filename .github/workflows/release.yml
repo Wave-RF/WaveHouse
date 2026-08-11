@@ -24,6 +24,29 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
+          # Opting out keeps a ~1 GB archive — the module tree plus this
+          # job's cross-compile objects — out of the 10 GB repo budget.
+          # (That entry is keyed on the root go.mod, not go.sum: setup-go
+          # hashed go.sum through v6.2.0 and go.mod from v6.3.0 —
+          # actions/setup-go#705.)
+          #
+          # Turning it back on here would be strictly negative. Nothing
+          # mints that key any more — publish-dev.yml and
+          # goreleaser-validate.yml opt out too, and ci.yml runs no
+          # setup-go — so the restore is a guaranteed miss. Worse, cache
+          # writes are scoped to the ref that made them: a save from
+          # refs/tags/v1.0.0 can never be read by refs/tags/v1.0.1, by main,
+          # or by a PR — only by a re-run of that same tag. It would be a
+          # ~1 GB entry per release that nothing but a retry can ever read.
+          #
+          # What IS warm is publish-dev's gobuild-v3-<os>-go-release- entry,
+          # restorable from the default branch's scope. A tagged release is
+          # rare and not latency-sensitive, so it isn't worth a hand-rolled
+          # restore step here — but that's the lever if it ever is.
+          #
+          # Same cache: false as publish-dev.yml and goreleaser-validate.yml;
+          # different follow-up (publish-dev re-caches the useful half). #443.
+          cache: false
 
       # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
       # the GitHub-hosted runner's default docker driver can't build

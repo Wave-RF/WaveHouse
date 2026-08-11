@@ -50,6 +50,53 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
+          # Opt out of setup-go's bundled cache and cache the half that
+          # earns its keep, below. The bundled one stores ~/go/pkg/mod AND
+          # ~/.cache/go-build under one entry (~1 GB stored), keyed on the
+          # root go.mod — setup-go hashed go.sum through v6.2.0 and go.mod
+          # from v6.3.0 (actions/setup-go#705). So roughly half of it
+          # re-stores the module tree ci.yml already keeps once as
+          # `gomod-v1` — the duplication #443 is about.
+          cache: false
+
+      # The other half is the reason this job is fast, so cache it on its
+      # own. GoReleaser cross-compiles 8 targets here (4 goos × 2 goarch),
+      # and the last 20 runs split cleanly on whether these objects were
+      # warm: GoReleaser finished in 36-246s with them, 401-446s without.
+      # (Measured on setup-go's bundled entry, which carried this same
+      # ~/.cache/go-build tree — this key is new here.) Dropping them
+      # outright would cost roughly 2.5-7 min per push to main (the envelope
+      # between those two clusters; mean delta ~4.8 min).
+      #
+      # Release-scoped suffix: these objects are cross-compiled for 8
+      # GOOS/GOARCH pairs and share nothing with ci.yml's native-only
+      # flavors, so `-release` keeps both sides from restoring bytes the
+      # other can't use. Same `gobuild-v3` family and key inputs as
+      # setup-env's (see .github/workflows/README.md); ~0.5 GB rather than
+      # the ~1 GB the bundled cache held.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-v3-${{ runner.os }}-go-release-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: |
+            gobuild-v3-${{ runner.os }}-go-release-
+
+      # And read — never write — ci.yml's shared module tree, so dropping
+      # setup-go's bundled cache doesn't leave this job re-downloading ~112 MB
+      # of modules on every push. This workflow runs on main, the same scope
+      # ci.yml saves `gomod-v1` into, so the entry is there to hit.
+      #
+      # restore, not cache: a full actions/cache would add a post-step save,
+      # and this job has no business writing the entry every ci.yml Go job
+      # shares — it never runs `go mod download` for the full graph (see the
+      # cov note in the Makefile for why a partial save there is corrosive).
+      # Restore-only writes nothing, so it costs 0 GB of the budget.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/go/pkg/mod
+          key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: |
+            gomod-v1-${{ runner.os }}-
 
       # dockers_v2 builds the linux/amd64+arm64 manifest via `docker buildx`;
       # the GitHub-hosted runner's default docker driver can't build
