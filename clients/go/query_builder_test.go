@@ -456,3 +456,26 @@ func TestQueryBuilder_Pagination_UntypedCursorFloat64Ceiling(t *testing.T) {
 		t.Fatalf("untyped ceiling changed (update docs if intentional): %s", got)
 	}
 }
+
+// The cursor round-trip re-marshals the last row to read its cursor value. A
+// Row that unmarshals cleanly but can't be marshaled back (an exported func
+// field, absent from the response) must surface an error rather than an empty
+// page, which is indistinguishable from real exhaustion.
+func TestQueryBuilder_Pagination_UnmarshalableRowErrors(t *testing.T) {
+	type row struct {
+		ID string `json:"id"`
+		Cb func() `json:"cb"`
+	}
+	c, _ := pagingServer(t, [][]map[string]any{{{"id": "a"}, {"id": "b"}}})
+	page, err := FetchTyped[row](context.Background(),
+		c.From("clicks").Select("id").OrderBy("id", "asc").Limit(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Next == nil {
+		t.Fatal("want a Next cursor")
+	}
+	if _, err := page.Next(context.Background()); err == nil {
+		t.Fatal("want a marshal error, got a silently empty page")
+	}
+}
