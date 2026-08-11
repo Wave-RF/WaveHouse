@@ -81,11 +81,11 @@ runs:
   steps:
     # Fail loudly on the one way to misuse the split. An empty suffix on a Go
     # job yields restore-key `gobuild-v3-<os>-go-`, which prefix-matches every
-    # flavor's entry AND publish-dev's `-release` one — restoring cross-compiled
-    # or wrong-flag objects nothing can hit, then saving an extra entry
-    # against the sizing policy. Documented in the input description and the README's
-    # "Adding a job" checklist; enforced here so a new job can't inherit the
-    # empty default silently.
+    # flavor's entry AND publish-dev's `-release` one — restoring
+    # cross-compiled or wrong-flag objects nothing can hit, then saving an
+    # extra entry against the sizing policy. Documented in the input
+    # description and the README's "Adding a job" checklist; enforced here
+    # so a new job can't inherit the empty default silently.
     - name: Require a go-cache-suffix on Go jobs
       if: ${{ inputs.go == 'true' && inputs.go-cache-suffix == '' }}
       shell: bash

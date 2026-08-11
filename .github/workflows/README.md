@@ -125,11 +125,14 @@ Break one of these knowingly or not at all.
    automatically at job end on an exact-key miss. No save steps in
    `ci.yml`. Trade-offs accepted: failed jobs don't save (restore-keys
    cushion the next run), and concurrent same-key misses produce benign
-   "already exists" warnings. **One cache lives outside it**:
-   `publish-dev.yml`'s release build cache is a bare `actions/cache`,
-   because that workflow doesn't use `setup-env` at all (it runs
-   GoReleaser, not the test suites). It is the only `actions/cache@` in
-   the repo outside the composite — keep it that way.
+   "already exists" warnings. **Two cache steps live outside it**, both in
+   `publish-dev.yml`, because that workflow doesn't use `setup-env` at all
+   (it runs GoReleaser, not the test suites): a bare `actions/cache` owning
+   the release build cache, and an `actions/cache/restore` that *reads*
+   `gomod-v1` and owns nothing. Those two are the only `actions/cache*`
+   steps outside the composite — keep it that way. A workflow that needs
+   the shared module tree reads it restore-only; writing it belongs to the
+   `ci.yml` jobs that run a full `go mod download`.
 
 ## Coverage publishing
 
