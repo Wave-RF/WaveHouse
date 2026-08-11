@@ -79,6 +79,23 @@ outputs:
 runs:
   using: composite
   steps:
+    # Fail loudly on the one way to misuse the split. An empty suffix on a Go
+    # job yields restore-key `gobuild-v3-<os>-go-`, which prefix-matches every
+    # flavor's entry AND publish-dev's `-release` one — restoring cross-compiled
+    # or wrong-flag objects nothing can hit, then saving a sixth entry against
+    # the sizing policy. Documented in the input description and the README's
+    # "Adding a job" checklist; enforced here so a future Go job can't acquire
+    # it silently.
+    - name: Require a go-cache-suffix on Go jobs
+      if: ${{ inputs.go == 'true' && inputs.go-cache-suffix == '' }}
+      shell: bash
+      run: |
+        echo "::error title=setup-env::go-cache-suffix is required when go: true." \
+             "An empty suffix cross-matches every other flavor's build cache." \
+             "Pass a fresh suffix for new compile flags, or an existing flavor's" \
+             "if this job compiles identically (see .github/workflows/README.md)."
+        exit 1
+
     # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure
     # function of go.mod + go.sum — byte-identical for every compile
     # flavor — so folding it into the suffixed build cache stored that tree

@@ -187,8 +187,8 @@ Queue settings live in the `main branch protection` ruleset's
 
 | Cache | Key | Saved by | Notes |
 |---|---|---|---|
-| Go modules | `gomod-v1-<os>-<go.mod+go.sum hash>` | every Go job (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.mod` + `go.sum`, so one entry serves every job (~1.6 GB on disk; 0.48 GB stored on a cold save, drifting up as superseded versions accumulate). The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go), which is why `go.mod` is in the key — a `go` directive bump changes the required toolchain without touching `go.sum`. |
-| Go build objects | `gobuild-v3-<os>-go<suffix>-<go.mod+go.sum hash>` | every Go job (own suffix) | `~/.cache/go-build` only — 25–152 MB stored per flavor. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. `go.mod` is in the key for its own reason — the compiler's build ID keys every object, so a toolchain bump invalidates all of them. |
+| Go modules | `gomod-v1-<os>-<go.mod+go.sum hash>` | every `ci.yml` Go job via `setup-env` (shared) | `~/go/pkg/mod`, **unsuffixed** — a pure function of `go.mod` + `go.sum`, so one entry serves every job (~1.6 GB on disk; 0.48 GB stored on a cold save, drifting up as superseded versions accumulate). The GOTOOLCHAIN=auto toolchain rides in here too (no setup-go), which is why `go.mod` is in the key — a `go` directive bump changes the required toolchain without touching `go.sum`. |
+| Go build objects | `gobuild-v3-<os>-go<suffix>-<go.mod+go.sum hash>` | every `ci.yml` Go job via `setup-env` (own suffix) | `~/.cache/go-build` only — 25–152 MB stored per flavor. Suffix partitions by compile flavor (`-lint`, `-unit`, `-integration`, `-e2e-cov`, `-cov`), which compile with different flags. `go.mod` is in the key for its own reason — the compiler's build ID keys every object, so a toolchain bump invalidates all of them. |
 | golangci binary + analysis | `golangci-<os>-<Makefile,.golangci.yml hash>` | lint | Analysis cache: ~10s warm vs ~90s. `.bin` also carries shellcheck + actionlint. |
 | pnpm store | `pnpm-<os>-<lockfile hash>` | any node job on miss | Store path resolved from pnpm at runtime. docs-build prunes before its save on a key rotation. |
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
@@ -337,9 +337,15 @@ suite's wall-clock becomes a problem again, start here:
    compiles identically. Never leave it empty: the resulting
    `gobuild-v3-<os>-go-` restore-key prefix-matches every flavor's entry
    (the cross-flavor restore the split exists to avoid) and mints an extra
-   build entry against the sizing policy above. Never add cache save steps to
+   build entry against the sizing policy above. `setup-env` now fails the
+   job outright if `go: true` is passed without a suffix, so this can't be
+   acquired silently. Never add cache save steps to
    `ci.yml` (invariant 6); a workflow outside it that needs a cache
-   hand-rolls one, as `publish-dev.yml` does.
+   hand-rolls one, as `publish-dev.yml` does. And make sure the job's make
+   target reaches `go-mod-download`: every Go job races to save the shared
+   unsuffixed `gomod-v1`, so a job that only fetches the modules it happens
+   to import can store a partial tree that then exact-hits for everyone
+   until the next rotation.
 4. Need a build product / data from another job? Upload it as an artifact
    there, then either `needs` the producer + `download-artifact` (simple,
    but serializes this job's setup behind the producer), or — when this
