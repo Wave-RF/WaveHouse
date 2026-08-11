@@ -39,7 +39,9 @@ background goroutine, torn down explicitly via `.Close()`. See
 ## Error Handling
 
 The SDK never panics on API or network failures — every request-response
-operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors
+operation (queries, ingest, pipes, admin) returns `(T, error)` — or a bare
+`error` for operations with no result body (`Pipes.Set`/`Delete`,
+`Policy.Set`, `Schema.Refresh`, `Sys.Health`). Errors
 originating from the HTTP exchange are `*wavehouse.Error` (unwrap with
 `errors.As`); client-side failures before a request goes out (an `Auth`
 provider error, a request-body marshal failure) are plain wrapped errors,

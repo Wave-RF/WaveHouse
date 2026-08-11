@@ -288,7 +288,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-The coverage-instrumented suite targets (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary, and accept `ARGS`/`V=1`. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
+The Go suite targets (`test-unit`, `test-integration`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed. `test-e2e` runs the orchestrator + vitest and `test-ts` runs vitest directly, so neither uses gotestsum. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
 
 Go tests run with the **race detector** (`-race`) enabled by default (including `test-go-sdk` — the SDK's streaming subsystem is highly concurrent; `test-go-sdk-e2e` skips it since it drives a live server). WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 
@@ -327,9 +327,9 @@ make cov
 
 Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run without coverage instrumentation or a per-suite gate.
 
-**Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag).
+**Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output on `test-unit` / `test-integration`, and to stream live output on `test-e2e`. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag). `test-ts` and the Go SDK / conformance targets ignore it.
 
-**Extra flags**: All test targets accept `ARGS="..."` for additional `go test` flags (e.g., `-run`, `-count`, `-timeout`).
+**Extra flags**: `test-unit`, `test-integration`, and `test-ts` accept `ARGS="..."` for pass-through flags (e.g., `-run`, `-count`, `-timeout` for the Go targets; vitest flags for `test-ts`). `test-e2e` and the Go SDK / conformance targets ignore it.
 
 **Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
 
@@ -355,6 +355,8 @@ Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()`
 - **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
 - **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
 - **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
+- **Go SDK unit test** → add to `clients/go/*_test.go` (nested module — outside `test-unit`'s scope). Run with `make test-go-sdk`.
+- **Wire-format parity case** → when you add or change an endpoint, add an entry to `clients/go/testdata/wire_cases.json` plus its dispatch in both runners (`clients/go/conformance_test.go` and `tests/conformance/conformance_ts.mjs`). Required by the SDK sync rule in `AGENTS.md` / `CONTRIBUTING.md`.
 - **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
 ### E2E Tests via SDK
@@ -519,7 +521,7 @@ Run `make help` to see all targets. Key ones:
 | `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
 | `make clean-all` | Full reset: above + `data/` + Docker volumes |
 
-The gotestsum-driven targets (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) accept `ARGS="..."` for pass-through `go test` flags and `V=1` for verbose output; `test-go-sdk`, `test-go-sdk-e2e`, and `test-conformance-ts` ignore both. Build targets accept `TAGS="..."` for Go build tags.
+`test-unit`, `test-integration`, and `test-ts` accept `ARGS="..."` for pass-through flags; `test-unit`, `test-integration`, and `test-e2e` accept `V=1` for verbose output. `test-go-sdk`, `test-go-sdk-e2e`, and `test-conformance-ts` ignore both. Build targets accept `TAGS="..."` for Go build tags.
 
 ## Dependency Management
 

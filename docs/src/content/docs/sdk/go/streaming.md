@@ -197,8 +197,10 @@ stream := wh.From("clicks").
 // Only events where page == "/home" are emitted, with only page + button fields
 ```
 
-Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`,
-`not_like` — the same `FilterOp` set `.Where()` takes everywhere. `like` /
+Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`,
+`OpIn`, `OpLike`, `OpNotLike` — the same `FilterOp` set `.Where()` takes
+everywhere (the SDK maps them to wire tokens such as `eq`/`neq`
+internally). `like` /
 `not_like` match SQL LIKE semantics (`%` → any run of characters, `_` → any
 single character), case-insensitively. `in` accepts any Go slice type on
 the right-hand side (`[]string`, `[]int`, `[]any`, ...), not just `[]any`.

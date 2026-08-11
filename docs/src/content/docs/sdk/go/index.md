@@ -174,7 +174,7 @@ parameter.
 
 ## Error Handling
 
-Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)`. Errors originating from the HTTP exchange are `*wavehouse.Error`; unwrap with `errors.As`. Client-side failures before a request goes out (an `Auth` provider error, a request-body marshal failure) are plain wrapped errors, so handle the `errors.As == false` case too. (Streaming lifecycle methods — `Stream`, `Subscribe`, `Close`, `Connected` — deliver errors through callbacks or plain errors instead; see [Streaming](/sdk/go/streaming).)
+Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)` — or a bare `error` for operations with no result body (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). Errors originating from the HTTP exchange are `*wavehouse.Error`; unwrap with `errors.As`. Client-side failures before a request goes out (an `Auth` provider error, a request-body marshal failure) are plain wrapped errors, so handle the `errors.As == false` case too. (Streaming lifecycle methods — `Stream`, `Subscribe`, `Close`, `Connected` — deliver errors through callbacks or plain errors instead; see [Streaming](/sdk/go/streaming).)
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)
