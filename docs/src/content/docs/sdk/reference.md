@@ -40,7 +40,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. a non-absolute `baseURL`) |
 | 0 | `SSE_ERROR` | Yes | Stream connection error |
 
-The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them.
+The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Their `retryable: true` is advisory: unlike the REST codes above, the SDK never re-dials a stream itself. Once the connection is open the native `EventSource` reconnects on its own (`SSE_ERROR`), but a failure *before* it is constructed — a non-absolute `baseURL`, a rejecting `auth` callback — is terminal (`SSE_CONNECT_ERROR`), so fix the cause and start a new stream.
 
 ---
 
