@@ -179,7 +179,7 @@ func TestMiddleware_QueryParamToken_StrippedFromURL(t *testing.T) {
 	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
 	c := run(t, cfg(), func(r *http.Request) { r.URL.RawQuery = "token=" + tok })
 	assert.Equal(t, "viewer", c.role)
-	assert.Empty(t, c.tokenInURL, "the ?token param must be stripped so it can't leak into logs")
+	assert.Empty(t, c.tokenInURL, "the ?token param must be stripped so it stays out of our own logs")
 }
 
 func TestMiddleware_HeaderTakesPrecedenceOverQuery(t *testing.T) {
