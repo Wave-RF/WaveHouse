@@ -211,10 +211,10 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 **Schema Validation:**
 
 - Unknown fields (not in the ClickHouse schema) are rejected.
-- Type mismatches are rejected (e.g., sending a string for a `Float64` column).
+- Type mismatches are rejected (e.g., sending a JSON object for a `Float64` column).
 - Missing required columns (non-nullable without a default) are rejected.
 - Null values for non-nullable columns are rejected.
-- Type compatibility: `String`/`DateTime`/`UUID`/`Enum`/`IPv*` accept JSON strings; `Int*`/`Float*`/`Decimal` accept JSON numbers; `Bool` accepts JSON booleans or numbers; `Array` accepts JSON arrays; `Map`/`Tuple` accept JSON objects.
+- Type compatibility: `Int*`/`Float*`/`Decimal*` accept JSON numbers **or numeric strings** — the string form exists so 64-bit IDs survive JavaScript's `Number` precision loss; `String`/`FixedString`/`UUID` accept strings, numbers, or booleans (coerced); `Date*`/`DateTime*`, `Enum8/16`, and `IPv4`/`IPv6` accept strings or numbers; `Bool` accepts booleans, numbers (`0`/`1`), or strings (`"true"`/`"false"`); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts arrays or objects. A ClickHouse type outside this matrix accepts any value and defers validation to ClickHouse.
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
 
 **Response (accepted):**
@@ -539,7 +539,7 @@ data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","da
 
 Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.
 
-**Note:** When access control policies are active, streamed events are filtered per the caller's role — tables without select permission are skipped, denied columns are removed from each event, and the role's row-level `filter` is evaluated per subscriber against the caller's JWT claims, so each connection receives only the rows it could also read over `POST /v1/query`. The claims come from the connection's token (the `Authorization` header, or the `?token=` fallback above), and replayed gap-fill events are filtered the same way. See [Access control — row-level security](/access-control#row-level-security) and the enforcement caution there for the stream's fail-closed comparison boundary.
+**Note:** When access control policies are active, streamed events are filtered per the caller's role — tables without select permission are skipped, denied columns are removed from each event, and the role's row-level `filter` is evaluated per subscriber against the caller's JWT claims — so a connection is never delivered a row the query path would hide for that role, with one documented exception (a numeric filter over a column type that rounds the payload on insert). The claims come from the connection's token (the `Authorization` header, or the `?token=` fallback above), and replayed gap-fill events are filtered the same way. See [Access control — row-level security](/access-control#row-level-security) and the enforcement caution there for the stream's fail-closed comparison boundary.
 
 **CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
 

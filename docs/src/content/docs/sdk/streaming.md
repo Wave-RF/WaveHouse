@@ -67,6 +67,17 @@ stream.close();
 
 Current connection status: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
 
+### `.connected(timeoutMs?)`
+
+Returns a promise that resolves once `.status` reaches `'live'` — the "safe to ingest now" barrier, so tests and scripts don't need sleep loops between opening a stream and inserting the rows they expect to see. Rejects if the stream is already `'closed'`, or after `timeoutMs` milliseconds (default `5_000`) if it never connects. Safe to call before `.subscribe()`.
+
+```ts
+const stream = wh.from('clicks').stream();
+const unsub = stream.subscribe({ next: (e) => console.log(e) });
+await stream.connected(); // transport is live
+await wh.from('clicks').insert({ page: '/home', button: 'signup' }); // this row will arrive on the stream
+```
+
 ### `StreamOptions`
 
 | Field | Type | Description |
@@ -96,9 +107,13 @@ interface StreamEvent<T> {
 The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
 :::
 
+### Server-Side Policy Filtering
+
+Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims. A stream on a row-policied table therefore delivers only the rows the policy admits for that connection — and, where the server's in-memory comparison can't prove a match, fewer; see [Access control — where each rule is enforced](/access-control#where-each-rule-is-enforced).
+
 ### Client-Side Stream Filtering
 
-When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:
+On top of that, when a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:
 
 ```ts
 const stream = wh.from('clicks')

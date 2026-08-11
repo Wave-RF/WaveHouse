@@ -87,6 +87,7 @@ createClient<DB>(config) → WaveHouseClient
 
 StreamController (NOT thenable)
 ├── .subscribe({ next, status?, error? }) → unsubscribe()
+├── .connected(timeoutMs?) → Promise<void>
 ├── .close()
 ├── .status → StreamStatus
 └── [Symbol.asyncIterator]() → AsyncIterableIterator<StreamEvent>
@@ -109,7 +110,7 @@ Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, p
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
+| `--url`, `-u` | WaveHouse base URL (may include a path prefix) | `http://localhost:8080` |
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 

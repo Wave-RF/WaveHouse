@@ -165,14 +165,32 @@ describe("Streaming", () => {
         await inserter.from(T.clicks).insert({ ...base, event_id: usId, country: "US" });
         await inserter.from(T.clicks).insert({ ...base, event_id: caId, country: "CA" });
 
-        // Each subscriber receives its own country's row. Waiting for BOTH positives
-        // proves both rows were broadcast, so the cross-absence checks below are real
-        // (a row filtered out at the source can never arrive later).
+        // Each subscriber receives its own country's row.
         await waitForCondition(() => usEvents.some((e) => e.data?.event_id === usId), 10_000);
         await waitForCondition(() => caEvents.some((e) => e.data?.event_id === caId), 10_000);
 
+        // Barrier rows make the cross-absence checks deterministic: SSE frames on one
+        // connection are strictly ordered behind the same subject, so a leaked
+        // cross-country row published *before* a barrier must be parsed before the
+        // barrier row is — once each stream has seen its barrier, absence is proven,
+        // not just "not yet arrived".
+        const usBarrierId = testId();
+        const caBarrierId = testId();
+        await inserter.from(T.clicks).insert({ ...base, event_id: usBarrierId, country: "US" });
+        await inserter.from(T.clicks).insert({ ...base, event_id: caBarrierId, country: "CA" });
+        await waitForCondition(
+          () => usEvents.some((e) => e.data?.event_id === usBarrierId),
+          10_000,
+        );
+        await waitForCondition(
+          () => caEvents.some((e) => e.data?.event_id === caBarrierId),
+          10_000,
+        );
+
         expect(usEvents.some((e) => e.data?.event_id === caId)).toBe(false);
         expect(caEvents.some((e) => e.data?.event_id === usId)).toBe(false);
+        expect(usEvents.some((e) => e.data?.event_id === caBarrierId)).toBe(false);
+        expect(caEvents.some((e) => e.data?.event_id === usBarrierId)).toBe(false);
       } finally {
         if (unsubUs) unsubUs();
         if (unsubCa) unsubCa();
