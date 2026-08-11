@@ -52,7 +52,8 @@ jobs:
           go-version-file: "go.mod"
           # Opt out of setup-go's bundled cache and cache the half that
           # earns its keep, below. The bundled one stores ~/go/pkg/mod AND
-          # ~/.cache/go-build under one go.sum-keyed entry (~1 GB stored), so
+          # ~/.cache/go-build under one entry (~1 GB stored), keyed on the root
+          # go.mod at setup-go >= v7 (go.sum through v6, actions/setup-go#705), so
           # roughly half of it re-stores the module tree ci.yml already
           # keeps once as `gomod-v1` — the duplication #443 is about.
           cache: false

@@ -200,9 +200,10 @@ Deliberately **not** cached: `actions/setup-go`'s bundled cache
 (`cache: false` in `publish-dev.yml`, `release.yml` and
 `goreleaser-validate.yml`) — for different reasons per job.
 
-It stores `~/go/pkg/mod` **and** `~/.cache/go-build` under one go.sum-keyed
-entry (~1 GB stored), so roughly half re-stores the module tree `gomod-v1`
-already keeps once. `publish-dev.yml` opts out of that entry and caches the
+It stores `~/go/pkg/mod` **and** `~/.cache/go-build` under one entry
+(~1 GB stored, keyed on the root `go.mod` — setup-go hashed `go.sum`
+through v6, `go.mod` from v7, [actions/setup-go#705]), so roughly half
+re-stores the module tree `gomod-v1` already keeps once. `publish-dev.yml` opts out of that entry and caches the
 half that pays for itself on its own key (`gobuild-v3-<os>-go-release-`,
 ~0.5 GB): its GoReleaser step takes 36–246 s warm versus 401–446 s cold, so
 dropping the build objects outright would cost 3–6.5 minutes on every push
@@ -214,8 +215,14 @@ on would be a cold miss *and* a fresh ~1 GB save rather than a hit. What is
 warm is `publish-dev`'s `gobuild-v3-<os>-go-release-` entry, which a tag run
 could restore from the default branch's scope — but a tagged release is rare
 and not latency-sensitive, so it isn't worth a hand-rolled restore step.
-That is the lever if release wall-clock ever does matter, and it costs no
-budget: an exact hit never saves.
+
+Re-enabling the bundled cache there would be strictly negative, not merely
+unhelpful: cache writes are scoped to the ref that made them, so a save from
+`refs/tags/v1.0.0` can never be read by `refs/tags/v1.0.1` or anything else
+— a ~1 GB write-only entry per release, permanently unreadable. If release
+wall-clock ever does matter, the lever is `actions/cache/restore` on
+`publish-dev`'s key: restore-only, so it reads `main`'s warm entry and never
+writes a tag-scoped one.
 
 `goreleaser-validate.yml` opts out on its own grounds: its `--single-target`
 snapshot is fast enough that the post-step save costs more than a cold
