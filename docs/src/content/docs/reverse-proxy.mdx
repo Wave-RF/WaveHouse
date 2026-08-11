@@ -93,7 +93,7 @@ wavehouse.NewClient(wavehouse.Config{BaseURL: "https://app.example.com/api/wareh
 ```
 
 :::caution[Check the prefix actually survives to the wire]
-A prefix that the proxy forwards *unstripped* produces a clean `404` from WaveHouse — annoying, but loud. The quiet failure is the other side: a **TypeScript** SDK older than the prefix support silently dropped it and sent every request to the origin root. If requests are landing at `/v1/…` instead of `/api/warehouse/v1/…`, upgrade `@wavehouse/sdk` — the fix is unreleased, so it ships on the `@dev` tag until the next release ([#428](https://github.com/Wave-RF/WaveHouse/issues/428)). The Go SDK preserves the prefix on every released version.
+A prefix that the proxy forwards *unstripped* produces a clean `404` from WaveHouse — annoying, but loud. The quiet failure is the other side: a **TypeScript** SDK older than the prefix support silently dropped it and sent every request to the origin root. If requests are landing at `/v1/…` instead of `/api/warehouse/v1/…`, upgrade `@wavehouse/sdk` — the fix is unreleased, so it ships on the `@dev` tag until the next release ([#428](https://github.com/Wave-RF/WaveHouse/issues/428)). The Go SDK has supported prefixed base URLs since its first release.
 :::
 
 ## Request-body size limits

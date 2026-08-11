@@ -483,10 +483,10 @@ Run `make help` to see all targets. Key ones:
 | **Static checks** | |
 | `make fmt` | Check formatting across root-module Go (`gofumpt`) + TS (Biome); the nested `clients/go` module's gofumpt check runs under `make verify` (`verify-go-sdk`). Run `make fix` to apply everywhere. |
 | `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) |
+| `make lint` | Run linters across Go (`golangci-lint`, root + `clients/go`) + TS (Biome) + Markdown (markdownlint) + docs prose (misspell) |
 | `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: root Go (tidy + fmt + vulncheck + lint), `clients/go` (fmt + vet + lint — no tidy/vulncheck: it's a nested module, invisible to the root-scoped `tidy`/`vulncheck` targets) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
+| `make verify` | Repo-wide static checks: root Go (tidy + fmt + vulncheck + lint), `clients/go` (fmt + vet + lint — no tidy/vulncheck: it's a nested module, invisible to the root-scoped `tidy`/`vulncheck` targets) + TS (Biome + `tsc` typecheck) + Markdown/prose, shell (shellcheck), workflows (actionlint), and `astro check` (parallel-safe: `make -j verify`) |
+| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`), TS (Biome `--write`), Markdown (markdownlint) + docs prose (misspell) |
 | **Build** | |
 | `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
 | `make build-release` | Stripped release-style build → `bin/wavehouse-release` |

@@ -152,7 +152,7 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
 | `'<='` | `lte` | Less than or equal |
 | `'in'` | `in` | Value in array |
 | `'like'` | `like` | SQL LIKE pattern |
-| `'not_like'` | — | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
+| `'not_like'` | `not_like` | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects the token |
 
 #### Aggregations
 
@@ -254,6 +254,10 @@ while (result.hasMore && result.next) {
   if (result.data) allRows.push(...result.data);
 }
 ```
+
+The cursor filter is strict (`gt`/`lt` against the last row's value) and uses only that one order column, with no tie-breaker — so rows sharing the boundary value with the last row of a page are skipped. Paginate on a column that is unique per row (or made unique by a monotonic timestamp), or accept that ties at a page edge can be dropped. The Go SDK's `Next` has the same limitation ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
+
+Rows decode with JSON numbers as JS `number`s, so an integer cursor column past `Number.MAX_SAFE_INTEGER` (2^53) loses exactness and pagination can repeat or skip a row at that scale. The Go SDK's `FetchTyped` with an `int64` field avoids this; there is no JS equivalent short of a string or `bigint` column.
 
 ---
 
