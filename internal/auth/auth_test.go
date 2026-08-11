@@ -425,23 +425,6 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 	}
 }
 
-// infoBufLogger returns a logger writing JSON records at Info+ to buf, so a test
-// can assert both that the failed-operator-attempt WARN fires and that ordinary
-// traffic does not emit it. Mirrors warnBufLogger in internal/api/errors_test.go.
-func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})), &buf
-}
-
-// A presented-but-wrong operator credential is recorded at WARN (so operators
-// can alert on probing of the most privileged credential) while the request
-// still falls through unauthenticated — no operator bit, roleless — because the
-// middleware never rejects. A request carrying no operator credential must NOT
-// emit that WARN, so ordinary traffic never drowns the signal. The counter
-// (wavehouse_auth_operator_key_failures_total) rides the same branch; like its
-// sibling wavehouse_ingest_dedupe_missing_id_total it isn't asserted here, but
-// the failed-attempt cases in TestMiddleware_OperatorKey already exercise the
-// Add call (proving it's safe under the default no-op meter).
 // The operator key is the most privileged credential and returns before the
 // Bearer path, so it is the easiest place for the ?token strip to be skipped —
 // which it was until the bearerToken call was hoisted above the operator branch.
@@ -459,6 +442,23 @@ func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
 	assert.Equal(t, "clicks", c.otherQueryParam)
 }
 
+// infoBufLogger returns a logger writing JSON records at Info+ to buf, so a test
+// can assert both that the failed-operator-attempt WARN fires and that ordinary
+// traffic does not emit it. Mirrors warnBufLogger in internal/api/errors_test.go.
+func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})), &buf
+}
+
+// A presented-but-wrong operator credential is recorded at WARN (so operators
+// can alert on probing of the most privileged credential) while the request
+// still falls through unauthenticated — no operator bit, roleless — because the
+// middleware never rejects. A request carrying no operator credential must NOT
+// emit that WARN, so ordinary traffic never drowns the signal. The counter
+// (wavehouse_auth_operator_key_failures_total) rides the same branch; like its
+// sibling wavehouse_ingest_dedupe_missing_id_total it isn't asserted here, but
+// the failed-attempt cases in TestMiddleware_OperatorKey already exercise the
+// Add call (proving it's safe under the default no-op meter).
 func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	t.Parallel()
 	cfg := Config{OperatorKey: testOperatorKey}
