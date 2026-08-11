@@ -216,7 +216,7 @@ if err != nil {
 }
 ```
 
-The HTTP layer retries 5xx and network errors with exponential backoff (default 2 retries). 503 with `Retry-After` is honored. Context cancellation returns immediately with code `ABORTED`.
+The HTTP layer retries 5xx, 429, and network errors with exponential backoff (default 2 retries). `Retry-After` on a 503 or 429 is honored, capped at 30s. Context cancellation returns immediately with code `ABORTED`.
 
 ## License
 

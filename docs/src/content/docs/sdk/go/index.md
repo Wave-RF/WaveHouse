@@ -103,7 +103,7 @@ TLS / response-header timeouts instead.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, network failures) |
+| `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures) |
 
 A `*Client` is safe for concurrent use by multiple goroutines — client state
 is immutable after `NewClient`, and every builder chain copies. Supply a

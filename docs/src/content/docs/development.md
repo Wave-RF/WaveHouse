@@ -328,7 +328,7 @@ make cov
 
 Each coverage-instrumented suite target (`test-unit`, `test-integration`, `test-e2e`, `test-ts`) writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run without coverage instrumentation or a per-suite gate.
 
-**Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output on `test-unit` / `test-integration`, and to stream live output on `test-e2e`. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag). `test-ts` and the Go SDK / conformance targets ignore it.
+**Verbose output**: Use `V=1` to switch from the compact `pkgname-and-test-fails` format to `standard-verbose` on `test-unit` / `test-integration`, and to stream live output on `test-e2e`. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag). `test-ts` and the Go SDK / conformance targets ignore it.
 
 **Extra flags**: `test-unit`, `test-integration`, and `test-ts` accept `ARGS="..."` for pass-through flags (e.g., `-run`, `-count`, `-timeout` for the Go targets; vitest flags for `test-ts`). `test-e2e` and the Go SDK / conformance targets ignore it.
 

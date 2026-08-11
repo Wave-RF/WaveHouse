@@ -282,6 +282,15 @@ that omits it disables dedup, and events in the fetch/stream overlap window
 are delivered twice — once in `Initial`, again via `Next`.
 :::
 
+:::caution[`OpLike` matching differs between backfill and live]
+Client-side `OpLike` / `OpNotLike` matching is case-**insensitive**, but the
+backfill runs server-side where the same operator compiles to ClickHouse
+`LIKE`, which is case-**sensitive**. A live query filtering on `OpLike` can
+therefore disagree with itself: the backfill excludes rows the live stream
+includes. Tracked in
+[#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+:::
+
 ### `.Close()`
 
 Shuts down the live query and its underlying stream. Safe to call more than

@@ -162,3 +162,7 @@ This "stream-first" approach ensures no events are lost between the fetch and st
 :::caution[Dedup needs `received_timestamp` in the projection]
 The dedup boundary comes from the fetched rows' `received_timestamp` values. A `.select(...)` projection that omits that column disables dedup, and events in the fetch/stream overlap window are delivered twice — once in `initial()`, again via `next()`.
 :::
+
+:::caution[`like` matching differs between backfill and live]
+Client-side `like` / `not_like` matching is case-**insensitive**, but the backfill runs server-side where the same operator compiles to ClickHouse `LIKE`, which is case-**sensitive**. A live query filtering on `like` can therefore disagree with itself: the backfill excludes rows the live stream includes. Tracked in [#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+:::
