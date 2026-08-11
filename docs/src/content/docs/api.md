@@ -211,29 +211,12 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 **Schema Validation:**
 
 - Unknown fields (not in the ClickHouse schema) are rejected.
-- Type mismatches are rejected (e.g., sending a string for a `Float64` column).
+- Type mismatches are rejected (e.g., sending a boolean for a `Float64` column).
 - Missing required columns (non-nullable without a default) are rejected.
-- Null values for non-nullable columns are rejected.
-- Type compatibility: `String`/`DateTime`/`UUID`/`Enum`/`IPv*` accept JSON strings; `Int*`/`Float*`/`Decimal` accept JSON numbers; `Bool` accepts JSON booleans or numbers; `Array` accepts JSON arrays; `Map`/`Tuple` accept JSON objects.
+- Null values for non-nullable columns without a default are rejected.
+- Type compatibility: `String` accepts JSON strings, numbers, and booleans (ClickHouse coerces the non-strings); `FixedString`/`UUID` accept the same at validation, but ClickHouse rejects a non-string value there, so it surfaces in the DLQ; `DateTime`/`Date`/`Enum` accept JSON strings or numbers; `IPv*` accepts JSON strings (a number passes validation but ClickHouse rejects it → DLQ); `Int*`/`Float*`/`Decimal` accept JSON numbers or strings — a string lets JavaScript callers avoid 64-bit precision loss, and its contents are ClickHouse's to judge (a non-numeric string is accepted here and surfaces in the DLQ, not as a `400`); `Bool` accepts JSON booleans and the numbers `0`/`1` (any other number, and *any* string — including `"true"` — passes validation but is rejected by ClickHouse → DLQ); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts JSON arrays or objects at validation, but ClickHouse takes an array only for an *unnamed* tuple and an object only for a *named* one — the other shape surfaces in the DLQ; any other ClickHouse type (`JSON`, `Variant`, `Dynamic`, geo, …) accepts any JSON value — WaveHouse defers to ClickHouse, so a bad value surfaces in the DLQ rather than as a `400`.
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
-
-**Timestamp canonicalization:** a `DateTime`/`DateTime64` column value sent in any of the forms below is rewritten to **one canonical wire form — RFC 3339 UTC** (`2026-06-21T04:00:00Z`, fraction truncated to the column's precision) before publishing, so the stored instant never changes but every consumer (the ClickHouse insert, [SSE subscribers](#get-v1stream--server-sent-events-stream), the DLQ) sees the same spelling `/v1/query` renders. The accepted input forms:
-
-- RFC 3339, any offset (`.`-fractions only — ClickHouse has no `,` separator).
-- `YYYY-MM-DD[ T]HH:MM:SS[.fff]` or `YYYY-MM-DD`, zone-less — interpreted in the column's time zone, else the ClickHouse server's, exactly as ClickHouse itself would.
-- A Unix-seconds string of exactly 9–10 digits (a `.fff` fraction is honored only for `DateTime64` columns, as ClickHouse does). Other digit lengths are ClickHouse's own forms — calendar shapes like `YYYYMMDD`, or its 13/16/19-digit ms/µs/ns epochs — so they pass through untouched.
-- A **non-negative integer** JSON number, unquoted — read the way ClickHouse reads bare numbers: Unix **seconds** for a `DateTime` column, but the column's raw **tick count** for `DateTime64` (a `DateTime64(3)` stores milliseconds, so `1750478400500` is the millisecond epoch `2025-06-21T04:00:00.5Z` — and `1750478400` is January 1970, not June 2025). A bare number with a fraction or exponent (`1750478400.5`) is passed through un-rewritten, and ClickHouse then fails the row for any timestamp column: it parses bare numbers as integers only — its lenient timestamp parsing, which does accept `"1750478400.5"`, applies solely to quoted strings.
-
-**Fail-open**: a value in none of those forms — or whose instant lies outside the column type's range, where ClickHouse *saturates* spelling-dependently instead of erroring — is published verbatim: ClickHouse's more liberal parser decides insertability, and a value it too rejects surfaces via the DLQ, as before. Pass-through likewise applies when a time zone doesn't resolve at runtime — the binary embeds no tzdata, so named zones resolve from the runtime's zone database (the bundled distroless images ship one; a stripped-down custom runtime, or a server zone newer than the image's snapshot, may not resolve): an unresolvable *column* zone skips canonicalization for that column entirely, an unresolvable *server* default skips only zone-less values of columns without a declared zone — warned at schema refresh either way, and never guessed as UTC, which could move the stored instant. The accepted grammar is differentially tested against a live ClickHouse (raw and canonicalized spellings must insert identically, or both fail). `Date`/`Date32` columns pass through untouched.
-
-**The canonical form, precisely.** This is the one strict timestamp spelling in WaveHouse — the same one `/v1/query` renders and the SSE stream carries, and the form the stream row-filter will require for timestamp comparisons once row-level enforcement lands ([#381](https://github.com/Wave-RF/WaveHouse/issues/381)):
-
-- `YYYY-MM-DDTHH:MM:SSZ`, or `YYYY-MM-DDTHH:MM:SS.FZ` when there is a sub-second part: uppercase `T` separator, uppercase `Z` suffix, always UTC — never a numeric offset — and seconds always present.
-- The fraction is **truncated** (never rounded) to the column's precision: a `DateTime` column (whole seconds) never carries a fraction; a `DateTime64(3)` column carries at most three digits.
-- Trailing fractional zeros are trimmed and an all-zero fraction is dropped (Go's `time.RFC3339Nano` rendering): `.120` becomes `.12Z`, `.000` becomes plain `Z` — byte-for-byte what `/v1/query` returns for the same stored value.
-- A column's declared time zone changes only how zone-less *inputs* are interpreted, never the output: every canonical value ends in `Z`.
-
-Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00.1239"` (zone-less, read in New York) → `"2026-06-21T04:00:00.123Z"`; `"1750478400.5"` (Unix-seconds string) → `"2025-06-21T04:00:00.5Z"`; the integer number `1750478400500` (ticks at the column's millisecond scale) → `"2025-06-21T04:00:00.5Z"`.
+- Top-level `DateTime`/`DateTime64` values are rewritten to a canonical wire form on ingest — see [Timestamp canonicalization](#timestamp-canonicalization).
 
 **Response (accepted):**
 
@@ -252,7 +235,7 @@ Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
-| 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
+| 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
@@ -269,6 +252,41 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -H "Content-Type: application/json" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
+
+#### Timestamp canonicalization
+
+**Send the canonical form — RFC 3339 UTC with the fraction already truncated to the column's precision and trailing zeros trimmed (spelled out below) — and the value is republished byte-for-byte.** A `DateTime`/`DateTime64` column value sent in any other accepted form — including RFC 3339 UTC with extra or trailing-zero fraction digits — is rewritten to that **one canonical wire form — RFC 3339 UTC** (`2026-06-21T04:00:00Z`, fraction truncated to the column's precision) before publishing, so the stored instant never changes but every consumer (the ClickHouse insert, [SSE subscribers](#get-v1stream--server-sent-events-stream), the DLQ) sees the same spelling `/v1/query` renders. The accepted input forms:
+
+- RFC 3339, any offset (`.`-fractions only — ClickHouse has no `,` separator).
+- `YYYY-MM-DD[ T]HH:MM:SS[.fff]` or `YYYY-MM-DD`, zone-less — interpreted in the column's time zone, else the ClickHouse server's, exactly as ClickHouse itself would.
+- A Unix-seconds string of exactly 9–10 digits (a `.fff` fraction is honored only for `DateTime64` columns, as ClickHouse does).
+- A **non-negative integer** JSON number, unquoted — read the way ClickHouse reads bare numbers: Unix **seconds** for a `DateTime` column, but the column's raw **tick count** for `DateTime64` (a `DateTime64(3)` stores milliseconds, so `1750478400500` is the millisecond epoch `2025-06-21T04:00:00.5Z` — and `1750478400` is January 1970, not June 2025).
+
+**Fail-open**: a value in none of those forms is published verbatim — ClickHouse's more liberal parser decides insertability, and a value it too rejects surfaces via the DLQ, as before. `Date`/`Date32` columns pass through untouched.
+
+:::note[Pass-through edge cases]
+
+- Digit-strings of lengths other than 9–10 are ClickHouse's own forms — calendar shapes like `YYYYMMDD`, or its 13/16/19-digit ms/µs/ns epochs — and pass through untouched.
+- A bare number with a fraction or exponent (`1750478400.5`) is passed through un-rewritten, and ClickHouse then fails the row for any timestamp column: it parses bare numbers as integers only — its lenient timestamp parsing, which accepts `"1750478400.5"` for a `DateTime64` column (on a plain `DateTime` the leftover fraction still fails the row), applies solely to quoted strings.
+- An instant outside the column type's range also passes through — ClickHouse *saturates* out-of-range values spelling-dependently (and at `DateTime64` precision ≥ 7 even rejects the insert past the Int64-nanosecond ceiling), so no rewrite there is safe.
+- A time zone that doesn't resolve at runtime also causes pass-through: the binary embeds no tzdata, so named zones resolve from the runtime's zone database (the bundled distroless images ship one; a stripped-down custom runtime, or a server zone newer than the image's snapshot, may not resolve). An unresolvable *column* zone skips canonicalization for that column entirely; an unresolvable *server* default skips only zone-less values of columns without a declared zone — warned at schema refresh either way, and never guessed as UTC, which could move the stored instant. Remedy: install `tzdata` in a custom image, or point Go at a zone database via the `ZONEINFO` environment variable.
+- Timestamps nested inside a composite column (`Array(DateTime)`, `Map(K, DateTime64)`, `Tuple(…, DateTime)`) pass through untouched; only top-level `DateTime`/`DateTime64` columns (including `Nullable`/`LowCardinality` wrappers) are canonicalized.
+- The accepted grammar is differentially tested against a live ClickHouse: raw and canonicalized spellings must insert identically, or both fail.
+
+:::
+
+:::caution[Upgrading WaveHouse against a pre-26.5 ClickHouse]
+WaveHouse pins `date_time_input_format=best_effort` on its inserts — the ClickHouse server default since 26.5. On an older server whose default was `basic`, a plain `DateTime` column read an all-digit timestamp string of *any* length as Unix seconds; under `best_effort`, `"20260711"` stores 2026-07-11, not 1970-08-23, and some lengths (e.g. 12 digits) are rejected outright. (`DateTime64` columns diverge the same way on calendar-shaped runs — `"20260711"` is 1970-08-23 under `basic`, 2026-07-11 under `best_effort` — and additionally whenever an epoch run's unit doesn't match the column scale, e.g. a 16-digit microsecond epoch into a `DateTime64(3)`; only 9–10-digit Unix-seconds runs, with an optional fraction, read identically under both.) The canonical form itself is what the pin rescues: under `basic` an RFC 3339 value's `Z` suffix is rejected outright (the row fails and lands in the DLQ), and the pin is what makes it insertable regardless of server version. Zone-less date-times and 9–10-digit Unix-seconds strings parse identically under both settings.
+:::
+
+**The canonical form, precisely.** This is the one strict timestamp spelling in WaveHouse — the same one `/v1/query` renders and the SSE stream carries, and the form the stream row-filter will require for timestamp comparisons once row-level enforcement lands ([#381](https://github.com/Wave-RF/WaveHouse/issues/381)):
+
+- `YYYY-MM-DDTHH:MM:SSZ`, or `YYYY-MM-DDTHH:MM:SS.FZ` when there is a sub-second part: uppercase `T` separator, uppercase `Z` suffix, always UTC — never a numeric offset — and seconds always present.
+- The fraction is **truncated** (never rounded) to the column's precision: a `DateTime` column (whole seconds) never carries a fraction; a `DateTime64(3)` column carries at most three digits.
+- Trailing fractional zeros are trimmed and an all-zero fraction is dropped (Go's `time.RFC3339Nano` rendering): `.120` becomes `.12Z`, `.000` becomes plain `Z` — byte-for-byte what `/v1/query` returns for the same stored value (one exception: a `Nullable` timestamp column whose effective zone — declared, else the ClickHouse server default — is not UTC; `/v1/query` currently renders it with a numeric offset: same instant, different spelling).
+- A column's declared time zone changes only how zone-less *inputs* are interpreted, never the output: every canonical value ends in `Z`.
+
+Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00.1239"` (zone-less, read in New York) → `"2026-06-21T04:00:00.123Z"`; `"1750478400.5"` (Unix-seconds string) → `"2025-06-21T04:00:00.5Z"`; the integer number `1750478400500` (ticks at the column's millisecond scale) → `"2025-06-21T04:00:00.5Z"`.
 
 #### Batch Ingest
 
@@ -476,7 +494,7 @@ Table, column, and alias names may contain any characters ClickHouse accepts —
 
 **Response:**
 
-JSON array of result rows. The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
+JSON array of result rows. `DateTime`/`DateTime64` values are returned in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream); the one exception is a `Nullable` timestamp column whose effective zone is not UTC, which is currently spelled with a numeric offset (same instant) — see [Timestamp canonicalization](#timestamp-canonicalization). The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
 
 The inbound request body is capped at 1 MiB; a body over the cap is rejected with `413`. A query AST is bounded by nature (far under 1 MiB even with a large `in`-list), and the cap blocks a single-request memory-exhaustion vector on this public endpoint. Set a tighter or higher outer limit at your [reverse proxy](/reverse-proxy#request-body-size-limits) — but it can only narrow the effective limit, not raise it past this cap.
 
@@ -557,7 +575,7 @@ data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","da
 
 Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.
 
-Row `DateTime`/`DateTime64` column values inside `data` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#post-v1ingesttabletable--ingest-data)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The two renderings are byte-identical regardless of the column's declared time zone — a column declared with a non-UTC zone also streams as `Z`, because `/v1/query` likewise normalizes every `DateTime` value to UTC before rendering. Canonicalization is fail-open at ingest, so a value outside the accepted input forms streams in whatever spelling the producer sent; events ingested before this behavior shipped likewise replay in their original spelling.
+Row values of top-level `DateTime`/`DateTime64` columns inside `data` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#timestamp-canonicalization)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The two renderings are byte-identical for non-nullable timestamp columns regardless of the declared time zone — a column declared with a non-UTC zone also streams as `Z`, and `/v1/query` normalizes it to UTC before rendering. The one exception is a `Nullable` timestamp column whose effective zone (declared, else the ClickHouse server default) is not UTC: `/v1/query` currently renders it with a numeric offset (`-04:00`) — the same instant in a different spelling — while SSE carries the canonical `Z` form. Canonicalization is fail-open at ingest, so a value outside the accepted input forms streams in whatever spelling the producer sent; events ingested before this behavior shipped likewise replay in their original spelling.
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
@@ -788,7 +806,7 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
 | `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
-| `data` | object | The flat JSON body, with parseable `DateTime`/`DateTime64` column values rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#post-v1ingesttabletable--ingest-data)); other values as originally sent. |
+| `data` | object | The flat JSON body, with parseable `DateTime`/`DateTime64` column values rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
 
 ### Client-Facing Format (SSE)
 

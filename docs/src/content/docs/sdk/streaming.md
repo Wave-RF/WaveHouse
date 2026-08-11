@@ -84,6 +84,17 @@ interface StreamEvent<T> {
 }
 ```
 
+Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not
+timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339
+UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the
+same row (a `Nullable` timestamp column whose effective zone — declared, else
+the ClickHouse server default — is not UTC is the one exception: `/v1/query`
+currently spells the same instant with a numeric offset) — either way
+`new Date(value)` parses correctly with no zone fix-up.
+Values the server couldn't parse stream in the producer's original spelling —
+a zone-less one of those is exactly what `new Date()` reads as *local* time
+(see [Timestamp canonicalization](/api#timestamp-canonicalization)).
+
 ### Transport Behavior
 
 | Transport | Reconnect | Protocol |

@@ -74,7 +74,7 @@ The API layer uses [Chi](https://github.com/go-chi/chi) for routing with Request
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
 - **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
-- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set (#219).
+- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set ([#219](https://github.com/Wave-RF/WaveHouse/issues/219)).
 - **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
 - **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Each connection registers one `Subscriber` (the `stream/` package) with both the event `Hub` (under its `(topic, role)`) and the shared keepalive wheel, then drains both from a single byte-pump — so idle streams keep emitting `:` keepalive comments (surviving reverse-proxy idle timeouts) while live events arrive already projected and serialized. Per-event projection/serialization happens **once per role** in the `Hub`, not once per subscriber ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)). Gap-fill replay from NATS JetStream (`DeliverByStartTime`) stays per-connection (low-volume, one-time on connect).
 - **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
@@ -114,7 +114,7 @@ The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https:/
 ### `discovery/` — Schema Discovery & Validation
 
 - **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Each refresh also discovers the server's default time zone (`SELECT timezone()`) and bakes every `DateTime`/`DateTime64` column's canonicalization spec (precision + resolved zone) into the cached schema, so the per-record ingest path parses no type strings and loads no zones ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). Supports periodic auto-refresh, on-demand refresh, and `RetryRefresh` (boot-time exponential backoff loop used by `cmd/wavehouse` so a transiently unreachable ClickHouse doesn't crash-loop the binary). Thread-safe via `sync.RWMutex`.
-- **timestamp.go** — `CanonicalizeTimestamps(schema, data)` rewrites every `DateTime`/`DateTime64` value it can parse to the canonical RFC 3339 UTC wire form before the event is published (#372): zone-less values are interpreted in the column's declared zone, else the discovered server default — ClickHouse's own rule, so the spelling changes but never the instant. Fail-open: an unparseable value or unresolvable zone passes through verbatim for ClickHouse's own parser to judge; ingest never rejects a record over its timestamp spelling.
+- **timestamp.go** — `CanonicalizeTimestamps(schema, data)` rewrites every `DateTime`/`DateTime64` value it can parse to the canonical RFC 3339 UTC wire form before the event is published ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)): zone-less values are interpreted in the column's declared zone, else the discovered server default — ClickHouse's own rule, so the spelling changes but never the instant. Fail-open: an unparseable value or unresolvable zone passes through verbatim for ClickHouse's own parser to judge; ingest never rejects a record over its timestamp spelling.
 - **validation.go** — `Validate(schema, data)` checks incoming JSON against the discovered schema: unknown fields, type compatibility, missing required columns, null handling.
 - **discovery_test.go** — Unit tests for validation logic.
 
@@ -183,8 +183,14 @@ Ingest worker pipeline (StartIngestWorker):
   → Batch events per table, bulk INSERT to ClickHouse
     (INSERTs pin date_time_input_format=best_effort — the server default since
     ClickHouse 26.5; on older servers the 'basic' default rejects the canonical
-    RFC 3339 form's zone suffix. A superset of basic, so pre-canonical and
-    fail-open pass-through spellings parse as before)
+    RFC 3339 form's zone suffix. The ordinary spellings — zone-less
+    date-times, 9–10-digit Unix-seconds strings — parse identically under
+    both settings, so pre-canonical messages replay unchanged; bare
+    digit-strings of other lengths can differ — best_effort reads them as
+    calendar/epoch shapes where basic read DateTime digit strings of any
+    length as Unix seconds; DateTime64 reads >10-digit runs as ticks at its
+    own scale under basic while best_effort unit-detects ms/µs/ns epochs —
+    they agree only when the run's unit matches the column scale)
   → On success: DoubleAck messages
   → On failure: route to DLQ output (dlq.{table}), then Ack to prevent infinite retry
 
