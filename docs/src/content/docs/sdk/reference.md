@@ -136,10 +136,11 @@ export interface ClicksRow {
 | ClickHouse Type | TypeScript Type |
 |----------------|-----------------|
 | `String`, `FixedString`, `UUID`, `DateTime*`, `Date*`, `Enum*`, `IPv4/6` | `string` |
-| `UInt*`, `Int*`, `Float*`, `Decimal*` | `number` |
+| `UInt*`, `Int*`, `Float*` | `number` |
+| `Decimal*` | `number` *(generated)* — but `/v1/query` returns Decimals as **quoted strings**, so treat the field as `string` until codegen is fixed ([#453](https://github.com/Wave-RF/WaveHouse/issues/453)) |
 | `Bool` | `boolean` |
 | `Nullable(T)` | `T \| null` |
-| `Array(T)` | `T[]` |
+| `Array(T)` | `T[]` — except `Array(UInt8)`, which `/v1/query` base64-encodes, so the generated `number[]` is a `string` at runtime ([#436](https://github.com/Wave-RF/WaveHouse/issues/436)) |
 | `Map(K, V)` | `Record<K, V>` |
 | `LowCardinality(T)` | same as `T` |
 
