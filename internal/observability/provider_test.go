@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 )
@@ -98,7 +99,7 @@ func TestInitProvider_ShutdownParallelBounded(t *testing.T) {
 	require.NoError(t, err)
 	ctr.Add(context.Background(), 1)
 	var rec otellog.Record
-	rec.SetBody(otellog.StringValue("shutdown-regression"))
+	rec.SetBody(attribute.StringValue("shutdown-regression"))
 	global.GetLoggerProvider().Logger("test").Emit(context.Background(), rec)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

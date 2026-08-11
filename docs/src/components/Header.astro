@@ -1,0 +1,234 @@
+---
+// Custom header overriding Starlight's default. The layout is our own: brand +
+// primary nav pinned left, controls (search, social, theme, language) pinned
+// right. On doc pages the inner row is full-bleed to the bar edges; on the splash
+// homepage (the only page with a hero) it's held in a centered 68rem column —
+// deliberately narrower than the hero's 80rem band, the inset look settled in
+// PR #368 review — so the header widens back out to the edges when you
+// navigate into the docs (see the <style> note below). Search shows
+// Starlight's expanded "Search … ⌘K" box on every page (≥50rem), so the keyboard
+// shortcut stays discoverable. Every control is still Starlight's own built-in,
+// pulled in through its `virtual:starlight/components/*` import, so the
+// SiteTitle/Search/Theme overrides and the Pagefind-search logic keep working
+// untouched. The outer <header class="header"> (PageFrame — fixed position +
+// full-width glass background) is not ours and stays as-is.
+//
+// Because the controls are Starlight built-ins re-rendered here, env.d.ts
+// declares their virtual modules so `astro check` can resolve them. On
+// @astrojs/starlight upgrades, re-check those component module paths.
+//
+// The left nav and the controls are hidden below Starlight's `md` (50rem):
+// under 50rem the sidebar (a hamburger drawer) already carries navigation on
+// doc pages, leaving the full-lockup logo + the (always-visible) search button
+// — the wordmark (not the old bare mark) keeps the mobile bar from reading
+// empty (PR #368 review).
+import config from "virtual:starlight/user-config";
+
+import LanguageSelect from "virtual:starlight/components/LanguageSelect";
+import Search from "virtual:starlight/components/Search";
+import SiteTitle from "virtual:starlight/components/SiteTitle";
+import SocialIcons from "virtual:starlight/components/SocialIcons";
+import ThemeSelect from "virtual:starlight/components/ThemeSelect";
+import { headerNav } from "../config/sidebar.ts";
+
+// Mirror of the package default: only render Search when Pagefind is enabled or
+// the Search component has been overridden.
+const shouldRenderSearch =
+  config.pagefind ||
+  config.components.Search !== "@astrojs/starlight/components/Search.astro";
+
+// Highlight the active destination — exact match, or any nested page beneath it
+// (so a "/guides" link stays current on "/guides/foo"). trailingSlash is
+// "never", so strip stray trailing slashes before comparing, just in case — on
+// BOTH sides, mirroring the client sync script below, so SSR and client can't
+// disagree if a headerNav entry ever carries one.
+const stripSlash = (path: string) => path.replace(/(.)\/$/, "$1");
+const currentPath = stripSlash(Astro.url.pathname);
+---
+
+<div class="header wh-header">
+  <div class="wh-lead">
+    <div class="title-wrapper sl-flex">
+      <SiteTitle />
+    </div>
+    <nav
+      class="wh-header-nav sl-hidden md:sl-flex print:hidden"
+      aria-label="Primary"
+    >
+      {
+        headerNav.map(({ label, href }) => {
+          const target = stripSlash(href);
+          return (
+            <a
+              href={href}
+              class="wh-header-nav__link"
+              aria-current={
+                currentPath === target || currentPath.startsWith(`${target}/`)
+                  ? "page"
+                  : undefined
+              }
+            >
+              {label}
+            </a>
+          );
+        })
+      }
+    </nav>
+  </div>
+
+  <div class="wh-right">
+    {
+      shouldRenderSearch && (
+        <div class="wh-search sl-flex print:hidden">
+          <Search />
+        </div>
+      )
+    }
+    <div class="wh-controls sl-hidden md:sl-flex print:hidden">
+      <div class="sl-flex social-icons">
+        <SocialIcons />
+      </div>
+      <ThemeSelect />
+      <LanguageSelect />
+    </div>
+  </div>
+</div>
+
+<script is:inline>
+  // The header sits outside the frame vtbot swaps on view transitions, so its
+  // server-rendered aria-current freezes at whatever the first full page load
+  // computed. Recompute it on each client navigation — mirroring the currentPath
+  // logic in the frontmatter — so the active nav link tracks SPA navigation and
+  // not just hard reloads.
+  function syncHeaderNavCurrent() {
+    var path = location.pathname.replace(/(.)\/$/, '$1');
+    document.querySelectorAll('.wh-header-nav__link').forEach(function (link) {
+      var href = link.pathname.replace(/(.)\/$/, '$1');
+      var current = path === href || path.startsWith(href + '/');
+      if (current) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+  }
+  document.addEventListener('DOMContentLoaded', syncHeaderNavCurrent);
+  document.addEventListener('astro:page-load', syncHeaderNavCurrent);
+</script>
+
+<style>
+  /* Our own header layout. Unlayered so it authoritatively styles this
+     component's inner .header row (Starlight's own rules are @layer'd and would
+     otherwise win). Doc pages are full-bleed to the bar edges, like
+     Supabase/ClickHouse docs; the splash rule in global.css holds the inner
+     content in a centered 68rem column, deliberately narrower than the hero. The
+     outer PageFrame bar always spans full width; only this inner content is
+     capped + centered. */
+  /* Layout only. The width behaviour — the splash's centred column widening to
+     full-bleed on the docs, and the animated tween between them — lives in
+     global.css as `.wh-header`, NOT here: the rule is keyed on
+     `body:has(.wh-hero)`, and body/hero live outside this component's template,
+     so a component-scoped selector would need :global() to match at all; and
+     since the header element is PRESERVED across view-transitions, one
+     always-applied global rule lets max-width TWEEN on the persisted node
+     instead of snapping (see the global.css note). */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    height: 100%;
+  }
+
+  .wh-lead {
+    display: flex;
+    /* Baseline-align the row so the "Docs" link sits on the logo wordmark's
+       baseline. <Logo/> exposes the wordmark baseline as its own (inline SVG +
+       one documented ratio — see Logo.astro), so this needs no per-pixel nudge
+       and survives font / logo-size changes. Vertical centring in the bar comes
+       from `.header { align-items: center }` centring this row as a whole. */
+    align-items: baseline;
+    gap: 1.75rem;
+    min-width: 0;
+  }
+  .title-wrapper {
+    /* Prevent the title overflowing and covering the search button on narrow
+       viewports (upstream default's guard; moot for the fixed-size logo, kept
+       for future-proofing). The 0.25rem padding gutter exactly hosts the 4px
+       focus ring, so the clip never eats it. */
+    overflow: clip;
+    padding: 0.25rem;
+    margin: -0.25rem;
+    min-width: 0;
+  }
+
+  .wh-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  /* No `display` here on purpose — let the `sl-hidden md:sl-flex` utilities
+     govern visibility so the controls collapse under 50rem (an unlayered
+     `display: flex` would override Starlight's layered `sl-hidden`). This only
+     styles the flex row they become at >=50rem. */
+  .wh-controls {
+    align-items: center;
+    gap: 1rem;
+  }
+  .social-icons {
+    align-items: center;
+    gap: 1rem;
+  }
+  /* Hairline divider before the theme/lang controls, matching the default. */
+  .social-icons::after {
+    content: "";
+    height: 1.5rem;
+    border-inline-end: 1px solid var(--sl-color-gray-5);
+  }
+
+  /* Search. Starlight's expanded "Search … ⌘K" box on every page (≥50rem) so the
+     keyboard shortcut stays discoverable; below 50rem it sizes down to its icon. */
+  .wh-search {
+    align-items: center;
+  }
+  /* Expand to the box only from 50rem up — the same breakpoint that reveals the
+     controls. Below it the label + ⌘K are already hidden (md:-only), so forcing
+     a width would leave a wide, near-empty button overflowing the narrow header
+     beside the logo; letting it size to its icon keeps it compact there.
+     min-width:0 + max-width let it shrink rather than overflow if the desktop
+     row gets tight. */
+  @media (min-width: 50rem) {
+    .wh-search {
+      min-width: 0;
+    }
+    .wh-search :global(button[data-open-modal]) {
+      width: 22rem;
+      max-width: 100%;
+    }
+  }
+
+  /* Primary nav links — present but subordinate to the wordmark, brand accent on
+     hover and when current. */
+  .wh-header-nav {
+    align-items: center;
+    gap: 1.5rem;
+  }
+  .wh-header-nav__link {
+    /* Ink-toned, a step up from muted secondary text but held just under the
+       wordmark's full ink so the brand stays dominant; the brand-accent shift on
+       hover / current page is the interactive cue. */
+    color: color-mix(in oklab, var(--wh-ink) 80%, var(--wh-ink-muted));
+    /* Baseline-aligned to the wordmark by the parent (.wh-lead is align-items:
+       baseline, and <Logo/> exposes the wordmark baseline) — no nudge needed. */
+    font-size: 0.9375rem;
+    font-weight: 500;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: color 0.15s ease;
+  }
+  .wh-header-nav__link:hover {
+    color: var(--wh-accent-hi);
+  }
+  .wh-header-nav__link[aria-current="page"] {
+    color: var(--wh-accent-text);
+    font-weight: 600;
+  }
+</style>

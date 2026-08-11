@@ -14,29 +14,33 @@
 #
 # The cache inventory (full architecture: .github/workflows/README.md):
 #
-#   1. Go module + build cache keyed on every go.sum, `gobuild-v2-` key
-#      family. `restore-keys` keeps the build cache warm across go.sum
-#      bumps — avoids setup-go's exact-key-only cache (actions/setup-go#357).
-#      `go-cache-suffix` partitions the cache per job: the unit,
-#      integration, and e2e jobs compile with different flags
-#      (-race/-cover/-coverpkg/-tags), so a shared entry would only ever
-#      be warm for whichever job saved it. Cross-suffix restore-keys
-#      still share the (identical) module cache on a cold start.
-#   2. golangci-lint binary + analysis cache keyed on Makefile +
+#   1. Go modules, `gomod-v1-` key family, keyed on every go.mod + go.sum
+#      and NOT partitioned per job — ~/go/pkg/mod is a pure function of
+#      those files, so one entry serves every Go job, stored once rather
+#      than per flavor (~1.6 GB on disk; 0.48 GB as a stored archive on a
+#      cold save, drifting up as superseded module versions accumulate
+#      through the restore -> save chain).
+#   2. Go build objects, `gobuild-v3-` key family, same key inputs,
+#      partitioned by `go-cache-suffix`: the unit, integration and e2e jobs
+#      compile with different flags (-race/-cover/-coverpkg/-tags), so a
+#      shared entry would only ever be warm for whichever job saved it.
+#      `restore-keys` keeps it warm across dependency bumps — avoids
+#      setup-go's exact-key-only cache (actions/setup-go#357).
+#   3. golangci-lint binary + analysis cache keyed on Makefile +
 #      .golangci.yml. Analysis cache is the win (~10s warm vs ~90s).
 #      Only the lint job needs it.
-#   3. pnpm store (path resolved at runtime) keyed on the root
+#   4. pnpm store (path resolved at runtime) keyed on the root
 #      lockfile — the pnpm workspace projects share one lockfile +
 #      store. Path is dynamic because pnpm's documented default
 #      ~/.local/share/pnpm/store only applies when $HOME and the project
 #      tree share a mount; on some runners it falls back to a
 #      workspace-relative path. Hard-coding the default silently fails
 #      the save with a Path Validation Error.
-#   4. Playwright browser cache (~/.cache/ms-playwright) keyed on the
+#   5. Playwright browser cache (~/.cache/ms-playwright) keyed on the
 #      root lockfile. ~130 MB Chromium download otherwise re-fetched
 #      every docs build (rehype-mermaid renders via headless Chrome).
 #      Only the docs-build job needs it. See #132.
-#   5. Astro content-collection cache (docs/.astro/) keyed on the root
+#   6. Astro content-collection cache (docs/.astro/) keyed on the root
 #      lockfile + astro.config.mjs. Speeds up warm `astro check` /
 #      `astro build` — unchanged content skips the parse + transform
 #      pipeline. See #132.
@@ -48,7 +52,7 @@ inputs:
     description: "Set up the Go toolchain + the Go module/build cache"
     default: "true"
   go-cache-suffix:
-    description: "Per-job Go build-cache partition, e.g. '-unit' (different jobs compile with different flags). Empty = the shared default key."
+    description: "REQUIRED when `go` is true (the default) — the action fails the job without one. Per-job Go build-cache partition, e.g. '-unit' (different jobs compile with different flags); an empty suffix yields a restore-key that prefix-matches every other flavor's entry, the cross-flavor restore the gomod-v1/gobuild-v3 split exists to avoid. A job that doesn't build Go passes `go: \"false\"` instead. The shared part of the cache is gomod-v1, which needs no suffix. The default stays empty because a composite action's `required:` isn't enforced by the runner — the guard step is."
     default: ""
   golangci:
     description: "Cache the golangci-lint binary + analysis cache (lint job only)"
@@ -75,26 +79,93 @@ outputs:
 runs:
   using: composite
   steps:
-    # Key version (v2): bumped when the cache's expected CONTENTS change
-    # shape — v2 added the go toolchain itself (~/go/pkg/mod/golang.org/
-    # toolchain, see the GOTOOLCHAIN note below). Saves only happen on an
-    # exact-key miss, so without a bump the pre-change entry would
-    # exact-hit forever and the new content would never be saved.
+    # Fail loudly on the one way to misuse the split. An empty suffix on a Go
+    # job yields restore-key `gobuild-v3-<os>-go-`, which prefix-matches every
+    # flavor's entry AND publish-dev's `-release` one — restoring
+    # cross-compiled or wrong-flag objects nothing can hit, then saving an
+    # extra entry against the sizing policy. Documented in the input
+    # description and the README's "Adding a job" checklist; enforced here
+    # so a new job can't inherit the empty default silently.
+    - name: Require a go-cache-suffix on Go jobs
+      if: ${{ inputs.go == 'true' && inputs.go-cache-suffix == '' }}
+      shell: bash
+      run: |
+        echo "::error title=setup-env::go-cache-suffix is required when go is true (the default)." \
+             "An empty suffix cross-matches every other flavor's build cache." \
+             "If this job builds Go: pass a fresh suffix for new compile flags, or an" \
+             "existing flavor's if it compiles identically. If it does not build Go:" \
+             "pass go: \"false\". See .github/workflows/README.md."
+        exit 1
+
+    # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure
+    # function of go.mod + go.sum — byte-identical for every compile
+    # flavor — so folding it into the suffixed build cache stored that tree
+    # five times over, once per -lint/-unit/-integration/-e2e-cov/-cov job:
+    # five entries of ~0.9-1.2 GB stored each, ~5.2 GB per generation.
+    # Against a 10 GB repo cap that means two live generations overflowed
+    # it, and GitHub started LRU-evicting warm entries mid-run. Split out,
+    # it is stored once and a measured generation is 1.05 GB — 0.48 module
+    # plus 0.57 across the five build entries (#443). Sizes here are
+    # stored-archive bytes / 2^30, the unit the README's usage check
+    # prints.
+    #
+    # All Go jobs miss this key together on a dependency bump and all try to
+    # save; the backend keeps the first and the rest log a benign "already
+    # exists" (same trade-off as the rest of the inventory, see header).
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      if: ${{ inputs.go == 'true' }}
+      id: gomod-cache
+      with:
+        path: ~/go/pkg/mod
+        # go.mod is in the key, not just go.sum, because the GOTOOLCHAIN=auto
+        # toolchain rides in ~/go/pkg/mod/golang.org/toolchain (no setup-go)
+        # and go.sum records no entry for it. Raising go.mod's `go` directive
+        # therefore changes which toolchain belongs in this cache while
+        # leaving go.sum untouched — a go.sum-only key would exact-hit, and
+        # because saves fire only on an exact-key MISS the freshly fetched
+        # toolchain would never be saved, re-downloading on every run.
+        key: gomod-v1-${{ runner.os }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
+        # A stale generation is still worth restoring: a bump moves a handful
+        # of modules, so most of the tree is reusable and `go mod download`
+        # fetches only the delta.
+        restore-keys: |
+          gomod-v1-${{ runner.os }}-
+
+    # Build objects only. These genuinely differ per job — unit,
+    # integration and e2e compile with different flags
+    # (-race/-cover/-coverpkg/-tags) — so a shared entry would only ever be
+    # warm for whichever job saved it last.
+    #
+    # Key version (v3): bumped because the cache's CONTENTS changed shape
+    # (~/go/pkg/mod moved out, above). Saves only happen on an exact-key
+    # miss, so without a bump the old v2 entry would exact-hit forever and
+    # the new, smaller content would never be saved.
     - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.go == 'true' }}
       id: gobuild-cache
       with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.sum') }}
-        # Same-suffix prefix first (this job's flavor across go.sum bumps),
-        # then the bare prefix as a cold-start fallback — it matches any
-        # other job's suffixed entry, which still carries the shared module
-        # cache even if its build objects don't apply.
+        path: ~/.cache/go-build
+        # go.mod belongs in this key for its own reason, not just symmetry
+        # with gomod-v1: the compiler's build ID feeds every action hash, so
+        # a toolchain bump invalidates every object in here. Keyed on go.sum
+        # alone that bump exact-hits, nothing restored is reusable, and the
+        # freshly built objects are never saved (saves fire only on a miss)
+        # — so every run recompiles cold *and* restores objects nothing can
+        # hit, until some unrelated go.sum change rotates the key.
+        #
+        # This closes the go-directive half only. GOTOOLCHAIN=auto uses the
+        # LOCAL toolchain whenever it satisfies the directive, so a runner
+        # image bumping its bundled Go swaps the compiler with neither
+        # go.mod nor go.sum moving — same pathology, past both keys. If you
+        # see unexplained cold build caches, that's the cause: rotate the
+        # v<N> prefix to force a save.
+        key: gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-${{ hashFiles('**/go.mod', '**/go.sum') }}
+        # Same-suffix only. The bare-prefix fallback the v2 key carried
+        # existed to pick up the shared module cache from another job's
+        # entry; that job is now gomod-v1's, and another flavor's build
+        # objects are not reusable here.
         restore-keys: |
-          gobuild-v2-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
-          gobuild-v2-${{ runner.os }}-go-
+          gobuild-v3-${{ runner.os }}-go${{ inputs.go-cache-suffix }}-
 
     - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       if: ${{ inputs.golangci == 'true' }}
