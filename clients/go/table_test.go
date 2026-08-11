@@ -126,11 +126,14 @@ func TestTableRef_InsertTypedSlice(t *testing.T) {
 // insertSingle rather than being (mis)treated as a slice of per-byte rows.
 func TestTableRef_InsertByteSliceNotBatch(t *testing.T) {
 	var mu sync.Mutex
-	var gotPath string
+	var gotPath, gotCT, gotBody string
 	c := queryTestCtx(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		gotPath = r.URL.Path
+		gotCT = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	result, err := c.From("clicks").Insert(context.Background(), []byte(`{"page":"/home"}`))
@@ -144,6 +147,18 @@ func TestTableRef_InsertByteSliceNotBatch(t *testing.T) {
 	defer mu.Unlock()
 	if gotPath != "/v1/ingest" {
 		t.Fatalf("want /v1/ingest, got %s", gotPath)
+	}
+	// The batch path posts to the same URL and also yields ok=true, so the
+	// wire format is the only thing that distinguishes them: one opaque JSON
+	// value vs. NDJSON of 16 per-byte rows.
+	if gotCT != "application/json" {
+		t.Fatalf("want application/json (single insert), got %q", gotCT)
+	}
+	// encoding/json base64s a []byte — documented in queries.md as a value the
+	// server rejects (use InsertNDJSON for raw bytes). Pinned here because it
+	// proves the batch path wasn't taken.
+	if gotBody != `"eyJwYWdlIjoiL2hvbWUifQ=="` {
+		t.Fatalf("want single base64 value, got %q", gotBody)
 	}
 }
 

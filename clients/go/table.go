@@ -119,8 +119,10 @@ func (t *TableRef) insertSingle(ctx context.Context, data any) (*InsertResult, e
 }
 
 func emptyInsertResult() *InsertResult {
-	z := 0
-	return &InsertResult{OK: true, Total: &z, Succeeded: &z, Failed: &z, Duplicates: &z}
+	// Separate vars, not one aliased &z: the fields are exported *int, so a
+	// caller writing through one would otherwise mutate all four.
+	total, succeeded, failed, duplicates := 0, 0, 0, 0
+	return &InsertResult{OK: true, Total: &total, Succeeded: &succeeded, Failed: &failed, Duplicates: &duplicates}
 }
 
 func marshalNDJSON(n int, elem func(int) any) (string, error) {

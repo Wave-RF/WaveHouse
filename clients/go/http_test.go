@@ -224,10 +224,19 @@ func TestBackoff(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			got := backoff(tt.attempt)
+			if tt.name == "CappedAt30s" {
+				// The cap is applied *after* jitter, so this is exact — a ±20%
+				// window here would also accept capping before the jitter,
+				// which lets the documented 30s max drift to 36s.
+				if got != 30*time.Second {
+					t.Errorf("backoff(%d) = %v, want exactly 30s", tt.attempt, got)
+				}
+				return
+			}
 			// backoff applies ±20% jitter around the exponential base.
 			lo := time.Duration(float64(tt.base) * 0.8)
 			hi := time.Duration(float64(tt.base) * 1.2)
-			got := backoff(tt.attempt)
 			if got < lo || got > hi {
 				t.Errorf("backoff(%d) = %v, want within [%v, %v]", tt.attempt, got, lo, hi)
 			}
@@ -243,6 +252,10 @@ func TestRetryAfterDelay(t *testing.T) {
 	}{
 		{"DeltaSeconds", "5", 5 * time.Second},
 		{"ClampedToMax", "3600", maxRetryAfter},
+		// time.Duration(secs) * time.Second wraps negative past ~9.2e9s; an
+		// unguarded min() then picks the negative and retries instantly.
+		{"OverflowClamped", "10000000000", maxRetryAfter},
+		{"MaxIntClamped", "9223372036854775807", maxRetryAfter},
 		{"HTTPDateFuture", time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat), 0}, // range-checked below
 		{"Garbage", "not-a-delay", 0},                                                         // range-checked below
 	}
@@ -251,7 +264,9 @@ func TestRetryAfterDelay(t *testing.T) {
 			got := retryAfterDelay(tt.ra, 0)
 			switch tt.name {
 			case "HTTPDateFuture":
-				if got <= 0 || got > 10*time.Second {
+				// Lower bound well clear of the backoff(0) fallback (~1s), so a
+				// broken HTTP-date branch can't pass by falling through to it.
+				if got < 5*time.Second || got > 10*time.Second {
 					t.Fatalf("want ~10s, got %v", got)
 				}
 			case "Garbage":

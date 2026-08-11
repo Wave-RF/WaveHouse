@@ -37,10 +37,23 @@ func TestNewClient_CustomMaxRetries(t *testing.T) {
 
 func TestNewClient_HasNamespaces(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://localhost:8080"})
-	for name, ns := range map[string]any{"Sys": c.Sys, "Schema": c.Schema, "Policy": c.Policy, "Pipes": c.Pipes, "DLQ": c.DLQ} {
-		if ns == nil {
-			t.Fatalf("%s namespace is nil", name)
-		}
+	// Compared as concrete typed pointers, not boxed into map[string]any: a nil
+	// typed pointer in an interface is never == nil, so the map form passed
+	// even if NewClient stopped assigning a namespace entirely.
+	if c.Sys == nil {
+		t.Error("Sys namespace is nil")
+	}
+	if c.Schema == nil {
+		t.Error("Schema namespace is nil")
+	}
+	if c.Policy == nil {
+		t.Error("Policy namespace is nil")
+	}
+	if c.Pipes == nil {
+		t.Error("Pipes namespace is nil")
+	}
+	if c.DLQ == nil {
+		t.Error("DLQ namespace is nil")
 	}
 }
 
@@ -54,7 +67,11 @@ func TestClient_From(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
-	_, _ = c.From("events").Fetch(context.Background())
+	// Checked, not discarded: if Fetch returns before issuing the request, the
+	// handler never runs and the table= assertion above proves nothing.
+	if _, err := c.From("events").Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestClient_SQL(t *testing.T) {

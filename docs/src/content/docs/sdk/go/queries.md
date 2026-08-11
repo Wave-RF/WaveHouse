@@ -319,9 +319,15 @@ Execute the query and decode rows into `[]map[string]any`. The ordinary
 
 ```go
 page, err := clicks.Select("page").OrderBy("page", "asc").Limit(50).FetchUntyped(ctx)
+if err != nil {
+    return err
+}
 
 if page.HasMore && page.Next != nil {
-    page2, err := page.Next(ctx) // cursor-based pagination — needs OrderBy
+    page, err = page.Next(ctx) // cursor-based pagination — needs OrderBy
+    if err != nil {
+        return err
+    }
 }
 ```
 
@@ -352,6 +358,13 @@ honestly, but `Next` is `nil` (there is no deterministic cursor to build) —
 add an `.OrderBy()` to paginate. If the order column was left out of an
 explicit `.Select(...)` projection, `Next` quietly returns an empty page
 instead of erroring (there is no cursor value to read).
+
+The cursor filter is strict (`gt`/`lt` against the last row's value) and uses
+only that first `.OrderBy()` column, with no tie-breaker — so rows sharing the
+boundary value with the last row of a page are skipped. Paginate on a column
+that is unique per row (or made unique by a monotonic timestamp), or accept
+that ties at a page edge can be dropped. The TypeScript SDK's `next()` has the
+same limitation ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
 
 One precision caveat on the untyped path (`FetchUntyped` / `TableRef.Fetch`):
 rows decode into `map[string]any`, where JSON numbers become `float64`, so an
@@ -387,7 +400,8 @@ for page.HasMore && page.Next != nil {
 Execute a raw SQL query. `/v1/admin/query` is admin-only: for JWT callers,
 the token must resolve to the policy admin role (`admin_role`, `"admin"` by
 default) — a JWT request with no token, or an invalid/expired one, falls
-back to the `default_role` and is rejected. Alternatively, a configured
+back to the `default_role`, and is rejected unless the deployment sets
+`default_role` to the admin role (permitted, but dev-only). Alternatively, a configured
 operator key (`Authorization: Operator <key>` or `X-Operator-Key`)
 authorizes `/v1/admin/*` without a JWT — but note `Config.Auth` always
 sends its token as `Bearer <token>`, so to use an operator key from this

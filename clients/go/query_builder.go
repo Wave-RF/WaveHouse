@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 )
 
@@ -283,10 +284,19 @@ func fetchNextTyped[Row any](ctx context.Context, q *QueryBuilder, prevRows []Ro
 		// the same ceiling the TS SDK has with JS numbers. Use FetchTyped (or
 		// codegen structs — their 64-bit int columns are int64/uint64, and
 		// 128/256-bit are json.Number) when paging on >2^53 integer cursors.
-		raw, _ := json.Marshal(lastRow)
+		raw, err := json.Marshal(lastRow)
+		if err != nil {
+			// Row itself is unmarshalable (e.g. a func field absent from the
+			// response). Silently truncating the result set would look like
+			// normal end-of-pagination, so surface it.
+			return nil, fmt.Errorf("wavehouse: marshal cursor row: %w", err)
+		}
 		m = make(map[string]any)
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
+		// Decode error is deliberate: a Row that marshals to a non-object
+		// (FetchTyped[[]any], a scalar row type) leaves m empty and ends
+		// pagination below, same as an absent cursor column. Tracked in #452.
 		_ = dec.Decode(&m)
 	}
 	lastValue, exists := m[cursor.Column]

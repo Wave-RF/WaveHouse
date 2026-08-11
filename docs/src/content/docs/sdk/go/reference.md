@@ -147,7 +147,7 @@ Generate Go structs from a running WaveHouse instance. The module ships a
 `wavehouse-codegen` command under `cmd/`:
 
 ```bash
-export WAVEHOUSE_AUTH=<admin-jwt>   # avoids leaking the token via argv
+export WAVEHOUSE_AUTH='<admin-jwt>'   # avoids leaking the token via argv
 go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
     --url http://localhost:8080 \
     --out ./db_types.go \
@@ -263,7 +263,7 @@ E2E tests (build tag `e2e`) run against a live WaveHouse instance and have
 their own Make target, separate from the repo's `make test-e2e`:
 
 ```bash
-WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_AUTH=<jwt> make test-go-sdk-e2e
+WAVEHOUSE_URL=http://localhost:8080 WAVEHOUSE_AUTH='<jwt>' make test-go-sdk-e2e
 ```
 
 `WAVEHOUSE_URL` defaults to `http://localhost:8080`; `WAVEHOUSE_AUTH` is

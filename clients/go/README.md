@@ -195,7 +195,7 @@ rows, _ := wavehouse.SQL[map[string]any](ctx, client, "SELECT count() FROM click
 Generate Go structs from a running WaveHouse instance:
 
 ```bash
-export WAVEHOUSE_AUTH=<admin-jwt>   # avoids leaking the token via argv
+export WAVEHOUSE_AUTH='<admin-jwt>'   # avoids leaking the token via argv
 go run github.com/Wave-RF/WaveHouse/clients/go/cmd/wavehouse-codegen@latest \
     --url http://localhost:8080 \
     --out ./db_types.go \

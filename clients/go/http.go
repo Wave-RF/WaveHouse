@@ -174,6 +174,12 @@ func buildURL(base, path string, params url.Values) string {
 func retryAfterDelay(ra string, attempt int) time.Duration {
 	delay := backoff(attempt)
 	if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+		// Compare before converting: time.Duration(secs) * time.Second wraps
+		// negative past ~9.2e9 seconds, and min() below would then pick the
+		// negative value, firing the retry timer instantly.
+		if secs > int(maxRetryAfter/time.Second) {
+			return maxRetryAfter
+		}
 		delay = time.Duration(secs) * time.Second
 	} else if parsed, err := http.ParseTime(ra); err == nil {
 		if d := time.Until(parsed); d > 0 {
