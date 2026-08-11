@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +20,11 @@ import (
 )
 
 // rawEvent marshals an EventMessage the way the ingest path publishes it.
-func rawEvent(t *testing.T, table, ts string, data map[string]any) []byte {
-	t.Helper()
+// testing.TB so the fan-out benchmark can build events too.
+func rawEvent(tb testing.TB, table, ts string, data map[string]any) []byte {
+	tb.Helper()
 	raw, err := json.Marshal(ingest.EventMessage{TableName: table, ReceivedTimestamp: ts, Data: data})
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	return raw
 }
 
@@ -68,7 +70,7 @@ func TestHub_ProjectsOncePerRole_FanOutToAllSubscribers(t *testing.T) {
 	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, no filtering
 	const topic = "ingest.clicks"
 
-	a, b := NewSubscriber(), NewSubscriber()
+	a, b := NewSubscriber(nil), NewSubscriber(nil)
 	hub.Add(topic, "public", a)
 	hub.Add(topic, "public", b)
 
@@ -100,8 +102,8 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
 	const topic = "ingest.clicks"
 
-	viewer := NewSubscriber()
-	blocked := NewSubscriber()
+	viewer := NewSubscriber(nil)
+	blocked := NewSubscriber(nil)
 	hub.Add(topic, "viewer", viewer)
 	hub.Add(topic, "blocked", blocked)
 
@@ -136,7 +138,7 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
 	const topic = "ingest.clicks"
 
-	viewer, editor := NewSubscriber(), NewSubscriber()
+	viewer, editor := NewSubscriber(nil), NewSubscriber(nil)
 	hub.Add(topic, "viewer", viewer)
 	hub.Add(topic, "editor", editor)
 
@@ -188,10 +190,8 @@ func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	acme := NewSubscriber()
-	acme.SetClaims(map[string]any{"tenant": "acme"})
-	globex := NewSubscriber()
-	globex.SetClaims(map[string]any{"tenant": "globex"})
+	acme := NewSubscriber(map[string]any{"tenant": "acme"})
+	globex := NewSubscriber(map[string]any{"tenant": "globex"})
 	hub.Add(topic, "viewer", acme)
 	hub.Add(topic, "viewer", globex)
 
@@ -218,8 +218,7 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	acme := NewSubscriber()
-	acme.SetClaims(map[string]any{"tenant": "acme"})
+	acme := NewSubscriber(map[string]any{"tenant": "acme"})
 	hub.Add(topic, "viewer", acme)
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
@@ -236,9 +235,8 @@ func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	a, b := NewSubscriber(), NewSubscriber()
-	a.SetClaims(map[string]any{"tenant": "acme"})
-	b.SetClaims(map[string]any{"tenant": "acme"})
+	a := NewSubscriber(map[string]any{"tenant": "acme"})
+	b := NewSubscriber(map[string]any{"tenant": "acme"})
 	hub.Add(topic, "viewer", a)
 	hub.Add(topic, "viewer", b)
 
@@ -254,7 +252,10 @@ func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 // TestHub_RowFilter_NumericOrdering_SchemaInformed drives the registry-backed path:
 // with a numeric column type in the schema, an `amount > 100` filter compares
 // numerically, so amount=9 is withheld (a lexicographic "9" > "100" comparison would
-// have leaked it) and amount=250 is delivered.
+// have leaked it) and amount=250 is delivered. Without a registry the same ordering
+// filter has no type to trust and withholds every row — fail closed, never the
+// lexicographic leak (the schemaless window is real: boot-time discovery failure
+// retries in the background while the server serves).
 func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	t.Parallel()
 	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
@@ -273,7 +274,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
 	const topic = "ingest.clicks"
 
-	sub := NewSubscriber() // constant filter value ⇒ no claims needed
+	sub := NewSubscriber(nil) // constant filter value ⇒ no claims needed
 	hub.Add(topic, "viewer", sub)
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
@@ -281,12 +282,22 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"amount": float64(250), "page": "/b"}))
 	assert.Equal(t, float64(250), frameData(t, recvFrame(t, sub))["data"].(map[string]any)["amount"])
+
+	// Same policy, no schema registry: an ordering predicate can't be proven either
+	// way, so both rows are withheld — including the one the schema-informed path
+	// delivers above.
+	noSchema := NewHub(policy.NewMemoryStore(p), nil, nil)
+	blind := NewSubscriber(nil)
+	noSchema.Add(topic, "viewer", blind)
+	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
+	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"amount": float64(250), "page": "/b"}))
+	assertNoFrame(t, blind)
 }
 
 func TestHub_TopicIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	clicks, views := NewSubscriber(), NewSubscriber()
+	clicks, views := NewSubscriber(nil), NewSubscriber(nil)
 	hub.Add("ingest.clicks", "public", clicks)
 	hub.Add("ingest.views", "public", views)
 
@@ -330,7 +341,7 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 			t.Parallel()
 			hub := NewHub(tt.store, nil, nil)
 			const topic = "ingest.custom"
-			sub := NewSubscriber()
+			sub := NewSubscriber(nil)
 			hub.Add(topic, "public", sub)
 			hub.Broadcast(topic, []byte(tt.payload))
 
@@ -351,7 +362,7 @@ func TestHub_AddRemoveGCsBucketsAndTopics(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
 	const topic = "ingest.clicks"
-	sub := NewSubscriber()
+	sub := NewSubscriber(nil)
 
 	hub.Add(topic, "public", sub)
 	assert.Equal(t, 1, hub.Len(topic))
@@ -401,7 +412,7 @@ func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
 	assert.Equal(t, int64(1), sumByName(rm, "wavehouse_sse_dropped_frames_total"))
 }
 
-func TestHub_ReplayFrame(t *testing.T) {
+func TestHub_ReplayProjector(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
 		Tables: map[string]policy.TablePolicy{
@@ -422,7 +433,7 @@ func TestHub_ReplayFrame(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f, ok := hub.ReplayFrame(tt.role, nil, raw)
+			f, ok := hub.ReplayProjector(tt.role, nil)(raw)
 			require.Equal(t, tt.want, ok)
 			if !tt.want {
 				return
@@ -435,10 +446,10 @@ func TestHub_ReplayFrame(t *testing.T) {
 	}
 }
 
-// TestHub_ReplayFrame_RowFilter exercises the row-filter branch of ReplayFrame: the
+// TestHub_ReplayProjector_RowFilter exercises the row-filter branch of replay: the
 // #319 fix applies row-level security on the per-connection replay path too, so a
 // gap-fill event is projected only when the connection's claims satisfy the filter.
-func TestHub_ReplayFrame_RowFilter(t *testing.T) {
+func TestHub_ReplayProjector_RowFilter(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	raw := rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
@@ -446,17 +457,24 @@ func TestHub_ReplayFrame_RowFilter(t *testing.T) {
 
 	t.Run("matching claims replay the row, projected to allowed columns", func(t *testing.T) {
 		t.Parallel()
-		f, ok := hub.ReplayFrame("viewer", map[string]any{"tenant": "acme"}, raw)
+		project := hub.ReplayProjector("viewer", map[string]any{"tenant": "acme"})
+		f, ok := project(raw)
 		require.True(t, ok)
 		assert.Equal(t, KindReplay, f.Kind)
 		inner := frameData(t, f)["data"].(map[string]any)
 		assert.Equal(t, "/a", inner["page"])
 		assert.NotContains(t, inner, "secret", "denied column stripped on replay too")
+
+		// The projector is reusable across a replay loop: a second event through the
+		// same closure (cached column kinds) projects identically.
+		f2, ok2 := project(raw)
+		require.True(t, ok2)
+		assert.Equal(t, f.Data, f2.Data)
 	})
 
 	t.Run("non-matching claims withhold the row", func(t *testing.T) {
 		t.Parallel()
-		_, ok := hub.ReplayFrame("viewer", map[string]any{"tenant": "globex"}, raw)
+		_, ok := hub.ReplayProjector("viewer", map[string]any{"tenant": "globex"})(raw)
 		require.False(t, ok, "row must be withheld when claims don't satisfy the filter")
 	})
 }
@@ -473,7 +491,7 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 		go func(role string) {
 			defer wg.Done()
 			for range 50 {
-				sub := NewSubscriber()
+				sub := NewSubscriber(nil)
 				hub.Add(topic, role, sub)
 				hub.Broadcast(topic, raw)
 				hub.Remove(topic, role, sub)
@@ -482,6 +500,150 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, 0, hub.Len(topic), "every subscriber is removed")
+}
+
+// TestHub_ConcurrentRowFilteredBroadcast_Race is the row-filter twin of the
+// passthrough race test above: with a filtered role, the fan-out goroutine reads
+// each subscriber's claims (hub.Broadcast → sub.claims) while other goroutines
+// construct, register and remove claims-bearing subscribers. Claims are immutable
+// after construction, and publication happens-before the fan-out read via the
+// bucket mutex in Add — this test makes the race detector watch exactly that edge,
+// so a future claims setter (or any post-Add mutation) fails -race here instead of
+// racing silently on a security decision.
+func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
+	t.Parallel()
+	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+	const topic = "ingest.clicks"
+	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
+
+	var wg sync.WaitGroup
+	for range 4 { // broadcasters: per-subscriber claims evaluation on every event
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				hub.Broadcast(topic, raw)
+			}
+		}()
+	}
+	for i := range 4 { // churners: subscribers with claims come and go concurrently
+		wg.Add(1)
+		go func(tenant string) {
+			defer wg.Done()
+			for range 50 {
+				sub := NewSubscriber(map[string]any{"tenant": tenant})
+				hub.Add(topic, "viewer", sub)
+				hub.Remove(topic, "viewer", sub)
+			}
+		}([]string{"acme", "globex"}[i%2])
+	}
+	wg.Wait()
+	assert.Equal(t, 0, hub.Len(topic), "every subscriber is removed")
+}
+
+// TestHub_RowFilter_BigIntegerExact: a bare JSON integer past 2^53 must keep its
+// exact digits through the hub's decode (UseNumber), or the row filter compares a
+// lossily-rounded value: tenant 10000000000000001's row would falsely equal a
+// tenant claim of 10000000000000000 — float64 collapses the neighbors — and be
+// delivered cross-tenant on the stream while the query path (ClickHouse stores the
+// exact digits ingest forwarded) excludes it. The raw payload is hand-built —
+// marshaling a Go float64 would already have destroyed the value this test is about.
+func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
+	t.Parallel()
+	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+		{Name: "clicks", Columns: []discovery.Column{
+			{Name: "tenant_id", Type: "UInt64"},
+			{Name: "page", Type: "String"},
+		}},
+	})
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {Select: map[string]policy.RolePermissions{
+				"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}},
+			}},
+		},
+	}
+	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	const topic = "ingest.clicks"
+
+	neighbor := NewSubscriber(map[string]any{"tenant": "10000000000000000"}) // float64-equal neighbor
+	exact := NewSubscriber(map[string]any{"tenant": "10000000000000001"})
+	hub.Add(topic, "viewer", neighbor)
+	hub.Add(topic, "viewer", exact)
+
+	raw := []byte(`{"table_name":"clicks","received_timestamp":"t","data":{"tenant_id":10000000000000001,"page":"/a"}}`)
+	hub.Broadcast(topic, raw)
+
+	assertNoFrame(t, neighbor)
+	frame := recvFrame(t, exact)
+	assert.Contains(t, string(frame.Data), "10000000000000001",
+		"the wire frame carries the exact digits, not a float64 rounding")
+}
+
+// TestHub_RowFilterWithheldIncrementsMetric: a row withheld by row-level security is
+// otherwise invisible to operators (it is not a dropped frame — the queue was never
+// tried). The wavehouse_sse_rows_withheld_total counter must tick for live fan-out
+// and replay withholds alike, so "no matching rows" and "a filter is withholding
+// everything" are distinguishable.
+func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
+	// No t.Parallel(): NewMetrics binds the global meter provider, swapped here.
+	savedMP := otel.GetMeterProvider()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		_ = mp.Shutdown(context.Background())
+		otel.SetMeterProvider(savedMP)
+	})
+
+	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, NewMetrics())
+	const topic = "ingest.clicks"
+	acme := NewSubscriber(map[string]any{"tenant": "acme"})
+	globex := NewSubscriber(map[string]any{"tenant": "globex"})
+	hub.Add(topic, "viewer", acme)
+	hub.Add(topic, "viewer", globex)
+
+	raw := rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"})
+	hub.Broadcast(topic, raw) // delivered to acme, withheld from globex → 1
+
+	_, ok := hub.ReplayProjector("viewer", map[string]any{"tenant": "globex"})(raw)
+	require.False(t, ok) // replay withhold → 2
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	assert.Equal(t, int64(2), sumByName(rm, "wavehouse_sse_rows_withheld_total"))
+	assert.NotEmpty(t, recvFrame(t, acme).Data, "the entitled subscriber still gets the event")
+	assertNoFrame(t, globex)
+}
+
+// BenchmarkBroadcast_RowFilteredFanout measures the per-subscriber cost a
+// row-filtered role pays on the delivery hot path (#294/#353 vs #319): each
+// subscriber's claims run through policy.Evaluate + RowVisible per event, where an
+// unfiltered role shares one projection bucket-wide. Half the subscribers share the
+// event's tenant (row visible), half don't (row withheld); either way each pays the
+// per-subscriber evaluation, which is the cost under measurement. See #435 for the
+// memoization follow-up this benchmark exists to arbitrate.
+func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
+	const topic = "ingest.clicks"
+	raw := rawEvent(b, "clicks", "2026-06-26T00:00:00Z",
+		map[string]any{"tenant_id": "acme", "page": "/a", "secret": "x"})
+
+	for _, n := range []int{100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
+			hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+			for i := range n {
+				tenant := "acme"
+				if i%2 == 1 {
+					tenant = "globex"
+				}
+				hub.Add(topic, "viewer", NewSubscriber(map[string]any{"tenant": tenant}))
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				hub.Broadcast(topic, raw)
+			}
+		})
+	}
 }
 
 func TestWireFrame(t *testing.T) {

@@ -151,10 +151,20 @@ func isTypeCompatible(chType string, val any) bool {
 
 // IsNumericType reports whether chType is a ClickHouse numeric type (integer, float,
 // or decimal), unwrapping Nullable/LowCardinality modifiers first. The stream
-// row-filter evaluator uses it to choose numeric vs lexicographic comparison for a
-// column, so ordering predicates (>, <) on numbers match ClickHouse (9 < 100).
+// row-filter evaluator classifies such columns numeric-comparable, so ordering
+// predicates (>, <) on numbers match ClickHouse (9 < 100).
 func IsNumericType(chType string) bool {
 	return isNumericType(unwrapType(chType))
+}
+
+// IsStringType reports whether chType is a ClickHouse String (unwrapping
+// Nullable/LowCardinality). For String columns, byte comparison IS ClickHouse
+// comparison — equality and lexicographic order alike — so the stream row-filter
+// evaluator can compare them exactly. FixedString is deliberately excluded: its
+// stored values are zero-padded to the declared width, so a byte comparison of an
+// ingested value against a filter constant would not match ClickHouse.
+func IsStringType(chType string) bool {
+	return unwrapType(chType) == "String"
 }
 
 // isNumericType returns true for ClickHouse integer, float, and decimal types.

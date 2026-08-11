@@ -29,7 +29,7 @@ func TestSubscriber_SendDeliversThenDropsWhenFull(t *testing.T) {
 
 func TestSubscriber_EvictedIsOpenUntilClosed(t *testing.T) {
 	t.Parallel()
-	sub := NewSubscriber()
+	sub := NewSubscriber(nil)
 
 	// The eviction seam is inert until the slow-consumer follow-up closes it: the
 	// channel stays open, so a non-blocking read finds nothing.

@@ -81,8 +81,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Register for live events before gap-fill so events arriving during replay
 	// buffer in the subscriber queue instead of being missed (an overlap with
 	// replay yields duplicates, deduped client-side by id: — at-least-once).
-	sub := stream.NewSubscriber()
-	sub.SetClaims(claims)
+	sub := stream.NewSubscriber(claims)
 	h.Hub.Add(topic, role, sub)
 	defer h.Hub.Remove(topic, role, sub)
 
@@ -99,8 +98,9 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// low-volume and one-time, unlike the per-role live fan-out), write, and count
 		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
+		project := h.Hub.ReplayProjector(role, claims)
 		sendReplay := func(data []byte) bool {
-			f, ok := h.Hub.ReplayFrame(role, claims, data)
+			f, ok := project(data)
 			if !ok {
 				return true // filtered for this role — skip
 			}

@@ -26,7 +26,7 @@ type Hub struct {
 	mu       sync.RWMutex
 	topics   map[string]*topicRoutes
 	policy   *policy.Store             // nil ⇒ policy filtering not configured (legacy passthrough)
-	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter ordering compares lexicographically
+	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnKinds)
 	metric   *Metrics                  // nil-safe
 }
 
@@ -37,9 +37,10 @@ type topicRoutes struct {
 
 // NewHub builds an event hub. A nil policy store passes every event through
 // unfiltered (the unwired-tests case); a non-nil store whose Get returns nil is a
-// total lockout (a deleted/absent policy denies everyone). A nil registry disables
-// numeric-aware row-filter comparison (ordering predicates fall back to
-// lexicographic); metric may be nil.
+// total lockout (a deleted/absent policy denies everyone). A nil registry leaves
+// every column's type unknown, so row-filter comparison degrades FAIL-CLOSED:
+// equality/set predicates admit only a byte-identical value and ordering/!= admit
+// nothing (see policy.ColumnKind); metric may be nil.
 func NewHub(policyStore *policy.Store, registry *discovery.SchemaRegistry, metric *Metrics) *Hub {
 	return &Hub{topics: make(map[string]*topicRoutes), policy: policyStore, registry: registry, metric: metric}
 }
@@ -130,14 +131,14 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	}
 
 	var evt ingest.EventMessage
-	decoded := json.Unmarshal(raw, &evt) == nil && evt.TableName != ""
+	decoded := decodeEvent(raw, &evt)
 	p, filter := h.snapshotPolicy()
 
-	// Column types for numeric-aware row-filter comparison — resolved lazily at most
+	// Column kinds for type-aware row-filter comparison — resolved lazily at most
 	// once per event, only when some role actually carries a row-filter, and reused
 	// across every filtered role and subscriber.
-	var numericCols map[string]bool
-	numericResolved := false
+	var colKinds map[string]policy.ColumnKind
+	kindsResolved := false
 
 	for _, rb := range roleBuckets {
 		wire, perms, ok := projectColumns(p, filter, rb.role, &evt, raw, decoded)
@@ -161,13 +162,14 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 		// shared, but whether each subscriber may see THIS row depends on its claims, so
 		// evaluate visibility per subscriber. Predicates read the full event data (a
 		// filter may key on a column the role can't SELECT), not the projected columns.
-		if !numericResolved {
-			numericCols = h.numericCols(evt.TableName)
-			numericResolved = true
+		if !kindsResolved {
+			colKinds = h.columnKinds(evt.TableName)
+			kindsResolved = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
 			subPerms := policy.Evaluate(p, rb.role, evt.TableName, "select", sub.claims)
-			if !subPerms.RowVisible(evt.Data, numericCols) {
+			if !subPerms.RowVisible(evt.Data, colKinds) {
+				h.metric.RowWithheld(evt.TableName, rb.role)
 				continue // this row is filtered out for this subscriber
 			}
 			if !sub.Send(frame) {
@@ -177,12 +179,14 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	}
 }
 
-// numericCols maps each of the table's columns to whether its ClickHouse type is
-// numeric, so the row-filter evaluator compares numeric columns numerically (9 < 100)
-// rather than lexicographically. nil when no schema is available (unknown table, or a
-// Hub built without a registry), in which case ordering predicates fall back to
-// lexicographic comparison.
-func (h *Hub) numericCols(table string) map[string]bool {
+// columnKinds classifies each of the table's columns for the row-filter evaluator:
+// numeric types compare numerically (9 < 100, matching ClickHouse), String compares
+// bytewise (exactly ClickHouse's String collation), and any other type is omitted —
+// policy.ColumnOpaque, the map's zero value — admitting byte-equality only. nil when
+// no schema is available (unknown table, or a Hub built without a registry), which
+// reads as every column Opaque: the fail-closed floor, never a lexicographic
+// fallback that could admit rows the query path excludes ("9" > "100" as text).
+func (h *Hub) columnKinds(table string) map[string]policy.ColumnKind {
 	if h.registry == nil {
 		return nil
 	}
@@ -190,11 +194,34 @@ func (h *Hub) numericCols(table string) map[string]bool {
 	if schema == nil {
 		return nil
 	}
-	m := make(map[string]bool, len(schema.Columns))
+	m := make(map[string]policy.ColumnKind, len(schema.Columns))
 	for _, c := range schema.Columns {
-		m[c.Name] = discovery.IsNumericType(c.Type)
+		switch {
+		case discovery.IsNumericType(c.Type):
+			m[c.Name] = policy.ColumnNumeric
+		case discovery.IsStringType(c.Type):
+			m[c.Name] = policy.ColumnText
+		}
 	}
 	return m
+}
+
+// decodeEvent parses raw as a published EventMessage, reporting whether it is one
+// (a decode error, trailing garbage, or a missing table name all read as "not an
+// EventMessage", which projectColumns then fails closed under a policy). Numbers
+// decode as json.Number — exact digit strings, not float64 — because the row-filter
+// comparison must see the same value ClickHouse stores: ingest decodes with
+// UseNumber and forwards the raw JSON to ClickHouse verbatim, so a bare 64-bit ID
+// past 2^53 keeps its exact digits on the query path, and a lossy float64 decode
+// here would collapse neighboring IDs into one value and deliver another tenant's
+// row (the same reason ingest uses UseNumber). It also keeps the re-serialized wire
+// frame byte-faithful for big integers.
+func decodeEvent(raw []byte, evt *ingest.EventMessage) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	// !More() rejects trailing content after the object, matching the strictness of
+	// the json.Unmarshal this replaces.
+	return dec.Decode(evt) == nil && !dec.More() && evt.TableName != ""
 }
 
 // snapshotPolicy returns the current policy and whether filtering is configured.
@@ -207,29 +234,44 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 	return h.policy.Get(), true
 }
 
-// ReplayFrame projects a single gap-fill event for one role+claims into a
-// ready-to-write replay frame, or ok=false to skip it (denied table, invalid
-// payload, or a row the claims aren't entitled to see). It is a method so replay
-// shares the Hub's policy store and schema registry with the live fan-out — the
-// handler can't accidentally project replay against a different (or nil) policy. The
-// per-connection replay path uses this; the live path uses Broadcast. Replay is
-// already per-connection, so it evaluates row-level security against this
-// connection's claims directly.
-func (h *Hub) ReplayFrame(role string, claims map[string]any, raw []byte) (Frame, bool) {
-	var evt ingest.EventMessage
-	decoded := json.Unmarshal(raw, &evt) == nil && evt.TableName != ""
-	p, filter := h.snapshotPolicy()
-	wire, perms, ok := projectColumns(p, filter, role, &evt, raw, decoded)
-	if !ok {
-		return Frame{}, false
-	}
-	if perms.HasRowFilter() {
-		subPerms := policy.Evaluate(p, role, evt.TableName, "select", claims)
-		if !subPerms.RowVisible(evt.Data, h.numericCols(evt.TableName)) {
-			return Frame{}, false // this row is filtered out for these claims
+// ReplayProjector returns the projection function for one connection's gap-fill:
+// each call projects a single replayed event for the connection's role+claims into
+// a ready-to-write replay frame, or ok=false to skip it (denied table, invalid
+// payload, or a row the claims aren't entitled to see). It is a Hub method so
+// replay shares the Hub's policy store and schema registry with the live fan-out —
+// the handler can't accidentally project replay against a different (or nil)
+// policy. Replay is already per-connection, so row-level security evaluates against
+// this connection's claims directly; the returned closure caches the per-table
+// column-kind lookup across the replay loop (the same hoist Broadcast does per
+// event), so a large Last-Event-ID gap-fill doesn't pay one registry lookup and map
+// build per event. The closure is for a single goroutine — each connection makes
+// its own. The live path uses Broadcast.
+func (h *Hub) ReplayProjector(role string, claims map[string]any) func(raw []byte) (Frame, bool) {
+	var colKinds map[string]policy.ColumnKind
+	kindsFor := "" // table name colKinds was resolved for ("" ⇒ not yet resolved)
+	return func(raw []byte) (Frame, bool) {
+		var evt ingest.EventMessage
+		decoded := decodeEvent(raw, &evt)
+		p, filter := h.snapshotPolicy()
+		wire, perms, ok := projectColumns(p, filter, role, &evt, raw, decoded)
+		if !ok {
+			return Frame{}, false
 		}
+		if perms.HasRowFilter() {
+			// One topic ⇒ one table, so this resolves once per replay in practice; the
+			// guard re-resolves if a stream ever mixes tables rather than going stale.
+			if kindsFor != evt.TableName {
+				colKinds = h.columnKinds(evt.TableName)
+				kindsFor = evt.TableName
+			}
+			subPerms := policy.Evaluate(p, role, evt.TableName, "select", claims)
+			if !subPerms.RowVisible(evt.Data, colKinds) {
+				h.metric.RowWithheld(evt.TableName, role)
+				return Frame{}, false // this row is filtered out for these claims
+			}
+		}
+		return Frame{Kind: KindReplay, Data: wire}, true
 	}
-	return Frame{Kind: KindReplay, Data: wire}, true
 }
 
 // projectColumns applies role/table COLUMN policy to a decoded EventMessage (or

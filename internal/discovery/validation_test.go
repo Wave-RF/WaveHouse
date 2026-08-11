@@ -253,3 +253,34 @@ func TestIsNumericType_Exported(t *testing.T) {
 		})
 	}
 }
+
+// TestIsStringType: only String (under any Nullable/LowCardinality wrapping)
+// qualifies — byte comparison is ClickHouse comparison for it. FixedString is
+// excluded on purpose (zero-padded storage), as is everything whose text form is
+// not canonical (UUID, Enum, DateTime, Bool).
+func TestIsStringType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		chType string
+		want   bool
+	}{
+		{"String", true},
+		{"Nullable(String)", true},
+		{"LowCardinality(String)", true},
+		{"LowCardinality(Nullable(String))", true},
+		{"FixedString(16)", false},
+		{"UUID", false},
+		{"Enum8('a' = 1)", false},
+		{"DateTime", false},
+		{"Bool", false},
+		{"UInt64", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.chType, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsStringType(tt.chType))
+		})
+	}
+}

@@ -8,5 +8,8 @@
 // serialized ONCE per role, then pushed through the same Subscriber queue the
 // keepalive wheel uses, so the handler drains both from a single byte-pump. That
 // collapses the prior per-subscriber unmarshal/project/re-serialize into one pass
-// per distinct (role, table) output shape.
+// per distinct (role, table) output shape. The one per-subscriber decision left is
+// row-level security (#319): a role whose policy carries a row-filter shares the
+// column projection but delivers each event only to the subscribers whose JWT
+// claims admit the row.
 package stream

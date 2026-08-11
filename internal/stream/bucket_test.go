@@ -12,8 +12,8 @@ func TestSubscriberSet_AddRemoveLen(t *testing.T) {
 	s := newSubscriberSet()
 	assert.Equal(t, 0, s.Len())
 
-	s1 := NewSubscriber()
-	s2 := NewSubscriber()
+	s1 := NewSubscriber(nil)
+	s2 := NewSubscriber(nil)
 	s.Add(s1)
 	s.Add(s2)
 	assert.Equal(t, 2, s.Len())
@@ -50,7 +50,7 @@ func TestSubscriberSet_PushIsNonBlockingAndDropsWhenFull(t *testing.T) {
 func TestSubscriberSet_PushAfterRemove_NoPanicNoBlock(t *testing.T) {
 	t.Parallel()
 	s := newSubscriberSet()
-	sub := NewSubscriber()
+	sub := NewSubscriber(nil)
 	s.Add(sub)
 	s.Remove(sub)
 	frame := Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}

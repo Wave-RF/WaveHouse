@@ -25,9 +25,13 @@ type Subscriber struct {
 
 	// claims are this connection's JWT claims, evaluated against a role's row-level
 	// security filter so the Hub can decide, per subscriber, whether each event row is
-	// visible (see Hub.Broadcast). Set once via SetClaims before Add, then read-only —
-	// so the fan-out goroutine reads it without synchronization. nil ⇒ no claims (a
-	// tokenless subscriber), which fails any claim-scoped row-filter closed.
+	// visible (see Hub.Broadcast). Fixed at construction — claims are a property of the
+	// authenticated connection, and there is deliberately no setter, so the fan-out
+	// goroutine's unsynchronized read is race-free structurally (publication happens
+	// under the bucket mutex in Hub.Add). A policy reload needs no claims update: the
+	// Hub re-reads the policy store on every event, and claims only feed Evaluate.
+	// nil ⇒ no claims (a tokenless subscriber), which fails any claim-scoped
+	// row-filter closed.
 	claims map[string]any
 
 	// evict is closed (once) to ask the owning handler to disconnect a wedged slow
@@ -39,20 +43,21 @@ type Subscriber struct {
 }
 
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
-// event Hub.
-func NewSubscriber() *Subscriber { return newSubscriber(defaultSubscriberQueue) }
+// event Hub, carrying the connection's JWT claims (nil for a tokenless caller). The
+// Hub evaluates the claims against a role's row-level-security filter to decide,
+// per subscriber, whether each event row is visible; taking them here — with no
+// setter — is what makes the claims immutable for the connection's lifetime.
+func NewSubscriber(claims map[string]any) *Subscriber {
+	s := newSubscriber(defaultSubscriberQueue)
+	s.claims = claims
+	return s
+}
 
 // newSubscriber builds a Subscriber with an explicit queue size — the seam tests
 // use to exercise the full-queue/drop path without enqueuing 64 frames.
 func newSubscriber(size int) *Subscriber {
 	return &Subscriber{out: make(chan Frame, size), evict: make(chan struct{})}
 }
-
-// SetClaims attaches this connection's JWT claims, which the Hub evaluates against a
-// role's row-level-security filter to decide, per subscriber, whether each event row
-// is visible. Call it before registering the subscriber with the Hub; the claims are
-// then read-only for the subscriber's lifetime, so the fan-out reads them race-free.
-func (s *Subscriber) SetClaims(claims map[string]any) { s.claims = claims }
 
 // Frames is the queue of ready-to-write frames; the handler writes whatever
 // arrives here to the client verbatim.
