@@ -736,12 +736,12 @@ test-all: ## Run all suites sequentially + one consolidated Go + TS coverage rep
 .PHONY: cov
 # go-mod-download is not optional here even though `go run ./scripts/cov`
 # would fetch what it needs on its own. CI's coverage job shares the
-# unsuffixed gomod-v1 cache with every other Go job (.github/actions/
-# setup-env), and all of them race to save it on a key rotation. `go run`
-# populates only the modules that one program imports, so if this job won
-# that race it would store a PARTIAL ~/go/pkg/mod under the shared key —
-# which then exact-hits for every other job, forever, until the next
-# rotation. Downloading the full graph first keeps the shared entry
+# unsuffixed gomod-v1 cache with every other ci.yml Go job (via
+# .github/actions/setup-env), and all of them race to save it on a key
+# rotation. `go run` populates only the modules that one program imports,
+# so if this job won that race it would store a PARTIAL ~/go/pkg/mod under
+# the shared key — which then exact-hits for every other job, forever,
+# until the next rotation. Downloading the full graph first keeps the shared entry
 # complete whoever wins. See #443.
 cov: go-mod-download ## Consolidated coverage report (Go + TS) + gate against thresholds (auto-runs after test-all / ci)
 	@go run ./scripts/cov report

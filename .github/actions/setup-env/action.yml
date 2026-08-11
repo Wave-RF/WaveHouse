@@ -52,7 +52,7 @@ inputs:
     description: "Set up the Go toolchain + the Go module/build cache"
     default: "true"
   go-cache-suffix:
-    description: "Per-job Go build-cache partition, e.g. '-unit' (different jobs compile with different flags). Always pass one for a Go job: an empty suffix yields a restore-key that prefix-matches every other flavor's entry, which is the cross-flavor restore the gomod-v1/gobuild-v3 split exists to avoid. The shared part of the cache is gomod-v1, which needs no suffix."
+    description: "REQUIRED when `go` is true (the default) — the action fails the job without one. Per-job Go build-cache partition, e.g. '-unit' (different jobs compile with different flags); an empty suffix yields a restore-key that prefix-matches every other flavor's entry, the cross-flavor restore the gomod-v1/gobuild-v3 split exists to avoid. A job that doesn't build Go passes `go: \"false\"` instead. The shared part of the cache is gomod-v1, which needs no suffix. The default stays empty because a composite action's `required:` isn't enforced by the runner — the guard step is."
     default: ""
   golangci:
     description: "Cache the golangci-lint binary + analysis cache (lint job only)"
@@ -82,18 +82,19 @@ runs:
     # Fail loudly on the one way to misuse the split. An empty suffix on a Go
     # job yields restore-key `gobuild-v3-<os>-go-`, which prefix-matches every
     # flavor's entry AND publish-dev's `-release` one — restoring cross-compiled
-    # or wrong-flag objects nothing can hit, then saving a sixth entry against
-    # the sizing policy. Documented in the input description and the README's
-    # "Adding a job" checklist; enforced here so a future Go job can't acquire
-    # it silently.
+    # or wrong-flag objects nothing can hit, then saving an extra entry
+    # against the sizing policy. Documented in the input description and the README's
+    # "Adding a job" checklist; enforced here so a new job can't inherit the
+    # empty default silently.
     - name: Require a go-cache-suffix on Go jobs
       if: ${{ inputs.go == 'true' && inputs.go-cache-suffix == '' }}
       shell: bash
       run: |
-        echo "::error title=setup-env::go-cache-suffix is required when go: true." \
+        echo "::error title=setup-env::go-cache-suffix is required when go is true (the default)." \
              "An empty suffix cross-matches every other flavor's build cache." \
-             "Pass a fresh suffix for new compile flags, or an existing flavor's" \
-             "if this job compiles identically (see .github/workflows/README.md)."
+             "If this job builds Go: pass a fresh suffix for new compile flags, or an" \
+             "existing flavor's if it compiles identically. If it does not build Go:" \
+             "pass go: \"false\". See .github/workflows/README.md."
         exit 1
 
     # The module cache is UNSUFFIXED on purpose. ~/go/pkg/mod is a pure

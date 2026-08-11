@@ -194,6 +194,7 @@ Queue settings live in the `main branch protection` ruleset's
 | Playwright Chromium | `playwright-<os>-<lockfile hash>` | docs-build | rehype-mermaid renders via headless Chrome at docs build. |
 | Astro content collections | `astro-<os>-<lockfile,astro.config.mjs hash>` | lint / docs-build | Warm `astro check`/`build` skip unchanged content. |
 | Go build objects (release) | `gobuild-v3-<os>-go-release-<go.mod+go.sum hash>` | publish-dev (hand-rolled, not `setup-env`) | `~/.cache/go-build` from GoReleaser's 8-target cross-compile (~0.5 GB). Same family and key inputs as the CI flavors, `-release` suffix because cross-compiled objects share nothing with the native-only ones. Worth 3–6.5 min on every push to main. |
+| Go modules (release read) | `gomod-v1-<os>-<go.mod+go.sum hash>` | nobody — **restore-only** | `publish-dev` reads `ci.yml`'s shared entry from `main`'s scope via `actions/cache/restore`, so its cross-compile isn't slowed by a cold module tree. No post-step save, so 0 GB of budget and no risk of a partial write to the shared key. |
 | CodeQL DB + deps | `codeql-dependencies-*`, `codeql-overlay-base-database-*` | GHAS default setup | **Not ours** — minted by GitHub's default CodeQL setup, not by any workflow in this repo, and not configurable here. ~0.4 GB. Listed so the budget arithmetic below is honest. |
 
 Deliberately **not** cached: `actions/setup-go`'s bundled cache
@@ -209,7 +210,10 @@ roughly half of it re-stores the module tree `gomod-v1` already keeps once.
 itself on its own key (`gobuild-v3-<os>-go-release-`,
 ~0.5 GB): its GoReleaser step takes 36–246 s warm versus 401–446 s cold, so
 dropping the build objects outright would cost 3–6.5 minutes on every push
-to main.
+to main. Those timings were measured with setup-go's bundled entry, which
+also held `~/go/pkg/mod` — so `publish-dev` additionally *restores* (never
+saves) `gomod-v1` from `main`'s scope, keeping the module tree warm without
+which it would re-download ~112 MB per push and land above that range.
 
 `release.yml` keeps the plain opt-out — no re-cache. After this change
 nothing mints a `setup-go-*` key at all, so turning its bundled cache back
@@ -332,20 +336,24 @@ suite's wall-clock becomes a problem again, start here:
 2. Gate on the change set via `needs: changes` + `if:` on its outputs —
    never with workflow-level `paths` filters (they'd orphan the required
    check, invariant 1).
-3. Use `setup-env`, and **always** pass a `go-cache-suffix` if the job
-   compiles Go — a fresh one for new flags, an existing flavor's if it
-   compiles identically. Never leave it empty: the resulting
-   `gobuild-v3-<os>-go-` restore-key prefix-matches every flavor's entry
-   (the cross-flavor restore the split exists to avoid) and mints an extra
-   build entry against the sizing policy above. `setup-env` now fails the
-   job outright if `go: true` is passed without a suffix, so this can't be
-   acquired silently. Never add cache save steps to
-   `ci.yml` (invariant 6); a workflow outside it that needs a cache
-   hand-rolls one, as `publish-dev.yml` does. And make sure the job's make
-   target reaches `go-mod-download`: every Go job races to save the shared
-   unsuffixed `gomod-v1`, so a job that only fetches the modules it happens
-   to import can store a partial tree that then exact-hits for everyone
-   until the next rotation.
+3. Use `setup-env`. Three rules come with it:
+   - **Pass a `go-cache-suffix` if the job compiles Go** — a fresh one for
+     new flags, an existing flavor's if it compiles identically. Never
+     empty: the resulting `gobuild-v3-<os>-go-` restore-key prefix-matches
+     every flavor's entry (the cross-flavor restore the split exists to
+     avoid) and mints an extra build entry against the sizing policy above.
+     `setup-env` fails the job outright whenever `go` is true — which is
+     the **default** — and no suffix is passed, so a new job can't inherit
+     the empty default silently. A job that doesn't build Go passes
+     `go: "false"` instead, as the docs jobs do.
+   - **Make sure the job's make target reaches `go-mod-download`.** Every
+     `ci.yml` Go job races to save the shared unsuffixed `gomod-v1`, so a
+     job that only fetches the modules it happens to import can store a
+     partial tree that then exact-hits for everyone until the next
+     rotation. This is why `cov` carries the prerequisite.
+   - **Never add cache save steps to `ci.yml`** (invariant 6). A workflow
+     outside it that needs a cache hand-rolls one, as `publish-dev.yml`
+     does.
 4. Need a build product / data from another job? Upload it as an artifact
    there, then either `needs` the producer + `download-artifact` (simple,
    but serializes this job's setup behind the producer), or — when this
