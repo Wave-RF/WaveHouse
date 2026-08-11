@@ -51,7 +51,7 @@ If the branch has an open PR, fetch prior review comments (`gh pr view <num> --j
 
 ### [MUST] Findings
 - `docs/src/content/docs/api.md:42` — "<quoted claim>" contradicts `internal/api/foo.go:NN` (<what the code actually does>). Fix: <corrected text>.
-- `internal/config/config.go:NN` adds the `retention_days` key but no docs update — `docs/src/content/docs/configuration.md` + `config.yaml` must document it (doc-sync).
+- `internal/config/config.go:NN` adds the `retention_days` key but no docs update — `docs/src/content/docs/configuration.mdx` + `config.yaml` must document it (doc-sync).
 
 ### [SHOULD] Findings
 - ...

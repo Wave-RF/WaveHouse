@@ -51,7 +51,7 @@ type Query struct {
 // The OTLP destination — endpoint, TLS, custom CA, mutual TLS, and auth headers
 // — is configured through the standard OTEL_EXPORTER_OTLP_* environment
 // variables read by the OpenTelemetry SDK, not WaveHouse config. See
-// docs/configuration.md.
+// docs/src/content/docs/configuration.mdx.
 type OTel struct {
 	Enabled bool        `yaml:"enabled" env:"WH_OTEL_ENABLED" env-default:"false"`
 	Traces  OTelTraces  `yaml:"traces"`

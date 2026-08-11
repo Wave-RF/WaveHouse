@@ -305,7 +305,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 | Change | Files to update |
 | ------ | --------------- |
 | Add/modify API endpoint | `docs/src/content/docs/api.md`, `README.md` (if user-facing) |
-| Add/modify config option | `docs/src/content/docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
+| Add/modify config option | `docs/src/content/docs/configuration.mdx`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
 | Change architecture / add a package | `docs/src/content/docs/architecture.md`, `AGENTS.md` |
 | Change ingest / event format | `docs/src/content/docs/api.md`, `docs/src/content/docs/deployment.md` (CH schema) |
 | Change deployment / Docker | `docs/src/content/docs/deployment.md`, compose files |
@@ -314,7 +314,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.md`, `config.yaml`, compose env blocks
+- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.mdx`, `config.yaml`, compose env blocks
 - `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE examples, ClickHouse INSERT columns
 - Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
@@ -364,7 +364,7 @@ Internal-only backend changes (middleware refactors, observability internals, de
 
 1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
 2. Use the new config value in `cmd/wavehouse/main.go` or the relevant internal package.
-3. Document in `docs/src/content/docs/configuration.md`.
+3. Document in `docs/src/content/docs/configuration.mdx`.
 
 ### Adding a new internal package
 
