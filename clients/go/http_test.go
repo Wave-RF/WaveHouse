@@ -293,3 +293,30 @@ func TestDoRequest_429RetriesWithRetryAfter(t *testing.T) {
 		t.Fatalf("Retry-After: 1 not honored — retried after only %v", elapsed)
 	}
 }
+
+// A BaseURL carrying a path prefix must survive on both transports — the bug
+// #428 fixed in the TS client, which Go avoids by concatenating rather than
+// resolving. Guards against a future switch to url.JoinPath/ResolveReference.
+func TestBaseURLPathPrefixIsPreserved(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/warehouse/v1/query", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	srv := httptest.NewServer(mux) // anything off-prefix 404s
+	t.Cleanup(srv.Close)
+
+	for _, base := range []string{srv.URL + "/api/warehouse", srv.URL + "/api/warehouse/"} {
+		client := NewClient(Config{BaseURL: base, Options: &ClientOptions{}, HTTPClient: srv.Client()})
+
+		var result map[string]string
+		if err := doRequest(context.Background(), client.ctx, requestOptions{
+			method: "POST",
+			path:   "/v1/query",
+		}, &result); err != nil {
+			t.Fatalf("base %q: %v", base, err)
+		}
+		if result["status"] != "ok" {
+			t.Fatalf("base %q: want ok, got %v", base, result)
+		}
+	}
+}

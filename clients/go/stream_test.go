@@ -430,3 +430,39 @@ func TestStream_ReconnectResumesFromLastEventID(t *testing.T) {
 		t.Fatalf("reconnect: want since=<last event id>, got %q", sinceParams[1])
 	}
 }
+
+// The SSE transport builds its URL separately from buildURL (stream.go), so a
+// BaseURL path prefix needs its own guard. See TestBaseURLPathPrefixIsPreserved.
+func TestStreamBaseURLPathPrefixIsPreserved(t *testing.T) {
+	gotPath := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/warehouse/v1/stream", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case gotPath <- r.URL.Path:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux) // anything off-prefix 404s
+	t.Cleanup(srv.Close)
+
+	client := NewClient(Config{
+		BaseURL:    srv.URL + "/api/warehouse",
+		Options:    &ClientOptions{},
+		HTTPClient: srv.Client(),
+	})
+	sc := client.From("clicks").Stream(nil)
+	t.Cleanup(sc.Close)
+
+	select {
+	case p := <-gotPath:
+		if p != "/api/warehouse/v1/stream" {
+			t.Fatalf("want prefixed stream path, got %q", p)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream never reached the prefixed path")
+	}
+}

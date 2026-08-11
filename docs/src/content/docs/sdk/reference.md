@@ -30,7 +30,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
 | 400 | `HTTP_400` | No | Bad request (validation, missing fields) |
-| 401 | `HTTP_401` | No | Present-but-invalid or expired JWT (a *missing* token resolves to `default_role` and is denied with 403) |
+| 401 | `HTTP_401` | No | Present-but-invalid or expired JWT (a *missing* token is evaluated as `default_role`, so it succeeds or is denied with 403 — never 401) |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
