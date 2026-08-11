@@ -120,6 +120,12 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Resolved before the operator branch purely for its side effect: it
+			// strips ?token from r.URL, and an operator-key match returns without
+			// ever reaching the Bearer path. Leaving it below would exempt the
+			// most privileged credential from the strip — keep this first.
+			tokenStr := bearerToken(r)
+
 			// Operator key: a non-JWT break-glass/operator credential, checked
 			// before any Bearer token. A constant-time match on the presented
 			// credential (Authorization: Operator <key>, or the X-Operator-Key
@@ -185,7 +191,6 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 				}
 			}
 
-			tokenStr := bearerToken(r)
 			if tokenStr == "" {
 				// No token: roleless request (not an error), resolved to
 				// default_role downstream.
@@ -251,21 +256,29 @@ func operatorKey(r *http.Request) string {
 }
 
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
-// clients that can't set headers — the ?token query parameter, which is stripped
-// from the URL so it can't leak into logs. The Authorization header takes
-// precedence when both are present; the Bearer auth-scheme is matched
-// case-insensitively (RFC 7235). Returns "" if absent.
+// clients that can't set headers — the ?token query parameter. The Authorization
+// header takes precedence when both are present; the Bearer auth-scheme is
+// matched case-insensitively (RFC 7235). Returns "" if absent.
+//
+// A ?token is stripped from the URL whichever credential wins, so a credential
+// this request never used can't ride along in r.URL into a later handler's log
+// line. That only protects *our own* logs — it has already crossed every
+// intermediary in the request URI, so proxies must redact query strings
+// themselves.
 func bearerToken(r *http.Request) string {
+	// Strip before either return: a header-authenticated request carrying a
+	// stray ?token would otherwise keep the unused JWT in r.URL.
+	var queryToken string
+	if params := r.URL.Query(); params.Get("token") != "" {
+		queryToken = params.Get("token")
+		params.Del("token")
+		r.URL.RawQuery = params.Encode()
+	}
+
 	if tok, ok := authScheme(r, "Bearer"); ok {
 		return tok
 	}
-	if q := r.URL.Query().Get("token"); q != "" {
-		params := r.URL.Query()
-		params.Del("token")
-		r.URL.RawQuery = params.Encode()
-		return q
-	}
-	return ""
+	return queryToken
 }
 
 // tokenError maps a jwt parse failure to a stable, caller-safe error for the

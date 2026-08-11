@@ -10,7 +10,9 @@ export type Database = Record<string, Record<string, unknown>>;
 // --- Result types ---
 
 /**
- * Discriminated union for all async SDK operations. Never throws.
+ * Discriminated union for all async SDK operations. Never throws for anything
+ * the server returns — caller and environment errors (a non-absolute `baseURL`,
+ * a missing `EventSource`, a rejecting `auth` callback) do throw.
  *
  * Discriminated on `ok`: `if (result.ok)` narrows to the success arm (and tells
  * the compiler `data` is present), while `error` is always available for
@@ -58,7 +60,19 @@ export interface StreamSubscriber<T = Record<string, unknown>> {
 // --- Client config ---
 
 export interface ClientConfig<_DB extends Database = Database> {
-  /** Base URL of the WaveHouse server (e.g. "http://localhost:8080"). */
+  /**
+   * Base URL of the WaveHouse server (e.g. "http://localhost:8080"). May include
+   * a path prefix ("https://app.example.com/api/warehouse") for a WaveHouse
+   * behind a backend-for-frontend (BFF), app-server route, or path-routed
+   * ingress; request paths are appended to it. The proxy in front must strip
+   * the prefix before forwarding.
+   *
+   * Must be **absolute** — scheme and host included. The transports report a
+   * relative value such as "/api/warehouse" differently: a REST call rejects
+   * with a `TypeError` instead of returning a `Result`, while a stream reports
+   * `SSE_CONNECT_ERROR` to the subscriber's `error` callback. Build an absolute
+   * one: `` `${location.origin}/api/warehouse` ``.
+   */
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */
   auth?: () => Promise<string> | string;

@@ -30,6 +30,8 @@ type captured struct {
 	authErr    error
 	isOperator bool
 	tokenInURL string
+	// a non-token query param, to prove the strip is surgical
+	otherQueryParam string
 }
 
 // run drives cfg's middleware over a request decorated by setup, returning what
@@ -56,6 +58,7 @@ func runOp(t *testing.T, cfg Config, store *policy.Store, logger *slog.Logger, s
 		c.authErr = AuthErrorFromContext(r.Context())
 		c.isOperator = IsOperator(r.Context())
 		c.tokenInURL = r.URL.Query().Get("token")
+		c.otherQueryParam = r.URL.Query().Get("table")
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
@@ -179,7 +182,7 @@ func TestMiddleware_QueryParamToken_StrippedFromURL(t *testing.T) {
 	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
 	c := run(t, cfg(), func(r *http.Request) { r.URL.RawQuery = "token=" + tok })
 	assert.Equal(t, "viewer", c.role)
-	assert.Empty(t, c.tokenInURL, "the ?token param must be stripped so it can't leak into logs")
+	assert.Empty(t, c.tokenInURL, "the ?token param must be stripped so it stays out of our own logs")
 }
 
 func TestMiddleware_HeaderTakesPrecedenceOverQuery(t *testing.T) {
@@ -191,6 +194,23 @@ func TestMiddleware_HeaderTakesPrecedenceOverQuery(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+header)
 	})
 	assert.Equal(t, "admin", c.role)
+	// The header won, but the unused query credential must not ride along in
+	// r.URL into a later handler's log line.
+	assert.Empty(t, c.tokenInURL, "the losing ?token param must be stripped too")
+}
+
+// A ?token is stripped even when it authorizes nothing, so an unused credential
+// can't survive in r.URL — here the header is malformed, so neither path uses it.
+func TestMiddleware_QueryTokenStrippedWithUnusableHeader(t *testing.T) {
+	t.Parallel()
+	query := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
+	c := run(t, cfg(), func(r *http.Request) {
+		r.URL.RawQuery = "table=clicks&token=" + query
+		r.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	})
+	assert.Equal(t, "viewer", c.role, "a non-Bearer header falls through to the query token")
+	assert.Empty(t, c.tokenInURL)
+	assert.Equal(t, "clicks", c.otherQueryParam, "unrelated query params must survive the strip")
 }
 
 func TestMiddleware_InvalidQueryParamToken_FallsBackWithError(t *testing.T) {
@@ -403,6 +423,23 @@ func TestMiddleware_OperatorKey(t *testing.T) {
 			assert.NoError(t, c.authErr)
 		})
 	}
+}
+
+// The operator key is the most privileged credential and returns before the
+// Bearer path, so it is the easiest place for the ?token strip to be skipped —
+// which it was until the bearerToken call was hoisted above the operator branch.
+func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
+	t.Parallel()
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	query := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, func(r *http.Request) {
+		r.URL.RawQuery = "table=clicks&token=" + query
+		r.Header.Set("X-Operator-Key", testOperatorKey)
+	})
+	assert.True(t, c.isOperator, "the operator key still wins")
+	assert.Equal(t, "admin", c.role)
+	assert.Empty(t, c.tokenInURL, "the unused ?token must be stripped on the operator path too")
+	assert.Equal(t, "clicks", c.otherQueryParam)
 }
 
 // infoBufLogger returns a logger writing JSON records at Info+ to buf, so a test

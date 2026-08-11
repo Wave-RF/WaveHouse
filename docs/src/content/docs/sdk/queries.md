@@ -6,7 +6,9 @@ description: "Tables, the chainable query builder, pagination, and raw SQL in @w
 Reading and writing data with `@wavehouse/sdk`: table references, the
 chainable query builder, cursor pagination, and the admin-only raw-SQL
 escape hatch. Every call returns the SDK's
-[`Result<T>`](/sdk#result-type) — nothing throws.
+[`Result<T>`](/sdk#result-type) — nothing throws for anything the server
+returns (see [Error Handling](/sdk/reference#error-handling) for the caller and
+environment errors that do).
 Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 

@@ -85,7 +85,7 @@ wh := wavehouse.NewClient(wavehouse.Config{
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `BaseURL` | `string` | — | WaveHouse server URL (required) |
+| `BaseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required). A trailing `/` is trimmed; every request path is appended to it on both transports, so a WaveHouse served under `https://app.example.com/wavehouse` works as-is. |
 | `Auth` | `func(context.Context) (string, error)` | `nil` | Token provider, called before each request. `nil` means unauthenticated access |
 | `Options` | `*ClientOptions` | `nil` | Transport tuning (see below) |
 | `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports (see caution below) |
