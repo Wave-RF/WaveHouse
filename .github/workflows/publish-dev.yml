@@ -65,7 +65,8 @@ jobs:
       # warm: GoReleaser finished in 36-246s with them, 401-446s without.
       # (Measured on setup-go's bundled entry, which carried this same
       # ~/.cache/go-build tree — this key is new here.) Dropping them
-      # outright would cost 3-6.5 minutes on every push to main.
+      # outright would cost roughly 2.5-7 min per push to main (the envelope
+      # between those two clusters; mean delta ~4.8 min).
       #
       # Release-scoped suffix: these objects are cross-compiled for 8
       # GOOS/GOARCH pairs and share nothing with ci.yml's native-only
