@@ -127,7 +127,7 @@ const { data } = await wh.from('clicks').select('page').limit(10);
 
 ## Error Handling
 
-All operations return `{ data, error }` tuples — the SDK never throws for anything the server returns. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback, which the SDK does not re-dial despite its `retryable: true`), `.stream()` / `.liveQuery()` in a runtime with no `EventSource`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call.
+All operations return `{ data, error }` tuples — the SDK never throws for anything the server returns. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback; despite that error's `retryable: true`, the SDK never re-dials the stream itself), `.stream()` / `.liveQuery()` in a runtime with no `EventSource`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call.
 
 ```ts
 const { data, error } = await wh.from('clicks').fetch();
