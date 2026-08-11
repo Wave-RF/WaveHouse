@@ -80,10 +80,20 @@ handle_path /api/warehouse/* {
 The ingress controller forwards the full path unless you ask it to rewrite. Pair a capture-group path (`/api/warehouse(/|$)(.*)` with `pathType: ImplementationSpecific`) with the `nginx.ingress.kubernetes.io/rewrite-target: /$2` annotation, or the prefix arrives at WaveHouse unstripped.
 :::
 
-Point the SDK at the prefixed URL and it does the rest — `createClient({ baseURL: 'https://app.example.com/api/warehouse' })` sends both REST calls and SSE streams under the prefix ([SDK → Serving under a path prefix](/sdk#serving-under-a-path-prefix)).
+Point either SDK at the prefixed URL and it does the rest — both send REST calls and SSE streams under the prefix:
+
+```ts
+// TypeScript — see /sdk#serving-under-a-path-prefix
+createClient({ baseURL: 'https://app.example.com/api/warehouse' });
+```
+
+```go
+// Go — see /sdk/go#config
+wavehouse.NewClient(wavehouse.Config{BaseURL: "https://app.example.com/api/warehouse"})
+```
 
 :::caution[Check the prefix actually survives to the wire]
-A prefix that the proxy forwards *unstripped* produces a clean `404` from WaveHouse — annoying, but loud. The quiet failure is the other side: an SDK older than the prefix support silently dropped it and sent every request to the origin root. If requests are landing at `/v1/…` instead of `/api/warehouse/v1/…`, upgrade `@wavehouse/sdk` — the fix is unreleased, so it ships on the `@dev` tag until the next release ([#428](https://github.com/Wave-RF/WaveHouse/issues/428)).
+A prefix that the proxy forwards *unstripped* produces a clean `404` from WaveHouse — annoying, but loud. The quiet failure is the other side: a **TypeScript** SDK older than the prefix support silently dropped it and sent every request to the origin root. If requests are landing at `/v1/…` instead of `/api/warehouse/v1/…`, upgrade `@wavehouse/sdk` — the fix is unreleased, so it ships on the `@dev` tag until the next release ([#428](https://github.com/Wave-RF/WaveHouse/issues/428)). The Go SDK preserves the prefix on every released version.
 :::
 
 ## Request-body size limits

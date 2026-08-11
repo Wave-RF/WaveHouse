@@ -80,6 +80,8 @@ client = wavehouse.NewClient(wavehouse.Config{
 })
 ```
 
+`BaseURL` may include a path prefix (`https://app.example.com/api/warehouse`) when WaveHouse is served under one. A trailing `/` is trimmed and every request path is appended to it, on both REST and SSE — see [Config](https://wavehouse.dev/sdk/go#config).
+
 ## Typed Queries (Generics)
 
 ```go
