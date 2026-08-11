@@ -187,9 +187,10 @@ Ingest worker pipeline (StartIngestWorker):
     date-times, 9–10-digit Unix-seconds strings — parse identically under
     both settings, so pre-canonical messages replay unchanged; bare
     digit-strings of other lengths can differ — best_effort reads them as
-    calendar/epoch shapes where basic read DateTime digit strings of any
-    length as Unix seconds; DateTime64 reads >10-digit runs as ticks at its
-    own scale under basic while best_effort unit-detects ms/µs/ns epochs —
+    calendar/epoch shapes where basic read DateTime digit strings of five or
+    more digits as Unix seconds (rejecting shorter runs); DateTime64 reads
+    >10-digit runs as ticks at its own scale under basic while best_effort
+    unit-detects ms/µs/ns epochs —
     they agree only when the run's unit matches the column scale)
   → On success: DoubleAck messages
   → On failure: re-insert row by row; each row that fails again → DLQ output (dlq.{table}), then Ack to prevent infinite retry

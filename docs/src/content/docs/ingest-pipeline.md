@@ -75,9 +75,10 @@ The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings)
 parse identically under both settings, so pre-canonical messages still in the
 stream replay unchanged. Bare digit-strings of other lengths are the exception:
 `best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic`
-read a plain `DateTime` column's digit string of any length as Unix seconds:
-under `best_effort` `"20260711"` stores 2026-07-11, where `basic` stored
-1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped
+read a plain `DateTime` column's digit string of five or more digits as Unix
+seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"`
+as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic`
+stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped
 runs, and additionally whenever an epoch run's unit doesn't match the column
 scale (under `basic`, runs longer than 10 digits are ticks at the column's
 own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A
