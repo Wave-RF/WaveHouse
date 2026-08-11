@@ -102,6 +102,7 @@ type fakeConn struct {
 	calls           atomic.Int32
 	tz              string      // SELECT timezone() answer; "" ⇒ "UTC"
 	columns         [][4]string // system.columns rows served on success; nil ⇒ none
+	iterErr         error       // rows.Err() after the served rows; nil ⇒ clean iteration
 }
 
 func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
@@ -109,8 +110,8 @@ func (c *fakeConn) Query(_ context.Context, _ string, _ ...any) (driver.Rows, er
 	if int(n) <= len(c.errsThenSuccess) {
 		return nil, c.errsThenSuccess[n-1]
 	}
-	if c.columns != nil {
-		return &fakeRows{rows: c.columns}, nil
+	if c.columns != nil || c.iterErr != nil {
+		return &fakeRows{rows: c.columns, err: c.iterErr}, nil
 	}
 	return &emptyRows{}, nil
 }
@@ -156,6 +157,7 @@ type fakeRows struct {
 	driver.Rows
 	rows [][4]string
 	next int
+	err  error // returned from Err() once iteration ends
 }
 
 func (r *fakeRows) Next() bool {
@@ -179,7 +181,7 @@ func (r *fakeRows) Scan(dest ...any) error {
 }
 
 func (*fakeRows) Close() error { return nil }
-func (*fakeRows) Err() error   { return nil }
+func (r *fakeRows) Err() error { return r.err }
 
 func newFakeRegistry(t *testing.T, errs []error) (*SchemaRegistry, *fakeConn) {
 	t.Helper()
@@ -195,6 +197,22 @@ func TestRefresh_UnresolvableServerTimezone_NotFatal(t *testing.T) {
 	conn := &fakeConn{tz: "Not/AZone"}
 	sr := NewSchemaRegistry(conn, "test", time.Hour, discardLogger())
 	require.NoError(t, sr.Refresh(context.Background()))
+}
+
+// TestRefresh_RowsIterationError_Fails: rows.Next() returns false on a
+// mid-stream driver error too, so Refresh must consult rows.Err() and fail —
+// keeping the prior cached schema — rather than publish a silently truncated
+// registry.
+func TestRefresh_RowsIterationError_Fails(t *testing.T) {
+	t.Parallel()
+	conn := &fakeConn{
+		columns: [][4]string{{"events", "id", "String", ""}},
+		iterErr: errors.New("network drop mid-stream"),
+	}
+	sr := NewSchemaRegistry(conn, "test", time.Hour, discardLogger())
+	err := sr.Refresh(context.Background())
+	require.ErrorContains(t, err, "network drop mid-stream")
+	require.Nil(t, sr.Get("events"), "truncated scan must not be published")
 }
 
 // TestRetryRefresh_SucceedsOnFirstAttempt is the happy path: Refresh returns

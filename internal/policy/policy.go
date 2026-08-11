@@ -342,7 +342,7 @@ func (rp *ResolvedPermissions) IsColumnAllowed(col string) bool {
 	// allow list, so a column in BOTH is denied. The order of the two loops is
 	// cosmetic — the result is the conjunction "in allow AND not in deny" either
 	// way; what would be unsafe is allow-WINS (returning true before consulting
-	// deny), which we never do. See access-control.md "deny_columns always wins".
+	// deny), which we never do. See access-control.mdx "deny_columns always wins".
 	//
 	// "*" carries no special meaning here: in a query it is a literal column name,
 	// decided by these same rules (and gated by schema membership in the builder,

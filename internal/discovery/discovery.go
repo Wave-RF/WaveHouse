@@ -121,6 +121,12 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		}
 		ts.Columns = append(ts.Columns, col)
 	}
+	// rows.Next() returns false on a mid-stream driver error too — check Err()
+	// so a truncated scan fails the refresh (callers keep the prior cache and
+	// retry) instead of publishing a partial registry.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate system.columns: %w", err)
+	}
 
 	for _, ts := range tables {
 		resolveTimestampSpecs(ts, serverTZ, sr.logger)
