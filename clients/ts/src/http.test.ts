@@ -180,6 +180,31 @@ describe("request", () => {
     expect(url).toContain("table=clicks");
   });
 
+  it("keeps a base path prefix on the request URL", async () => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+
+    await request(makeCtx({ baseURL: "https://app.example.com/api/warehouse" }), {
+      method: "POST",
+      path: "/v1/query?table=clicks",
+    });
+
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://app.example.com/api/warehouse/v1/query?table=clicks");
+  });
+
+  it("keeps a base path prefix when appending params", async () => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+
+    await request(makeCtx({ baseURL: "https://app.example.com/api/warehouse/" }), {
+      method: "GET",
+      path: "/v1/dlq/stats",
+      params: { table: "clicks" },
+    });
+
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://app.example.com/api/warehouse/v1/dlq/stats?table=clicks");
+  });
+
   it("handles empty response body", async () => {
     fetchSpy.mockResolvedValue(new Response("", { status: 200 }));
 

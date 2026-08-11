@@ -35,6 +35,57 @@ WaveHouse speaks plain HTTP and has no certificate management. Terminate TLS at 
 The `clickhouse.http_scheme` / `WH_CH_HTTP_SCHEME` option in the [Configuration reference](/configuration) controls TLS on the **WaveHouse → ClickHouse** hop, not the inbound edge. It has nothing to do with terminating TLS for your clients — that's the proxy's job.
 :::
 
+## Path prefixes
+
+WaveHouse always serves its routes at the root of whatever reaches it — `/v1/query`, `/v1/stream`, `/livez`. There is no configurable base path, and there won't be one: mounting a service under a prefix is the proxy's job, and the server having its own opinion about it is a second place for the two to disagree.
+
+So you can expose WaveHouse under a prefix — `https://app.example.com/api/warehouse/…`, one origin fronting several services, or a backend-for-frontend (BFF) adding auth ahead of the data API — as long as the proxy **strips the prefix** before forwarding:
+
+<Tabs>
+<TabItem label="nginx">
+
+```nginx
+location /api/warehouse/v1/stream {
+    proxy_pass         http://127.0.0.1:8080/v1/stream;
+    proxy_http_version 1.1;
+    proxy_set_header   Connection "";
+    proxy_buffering    off;
+}
+
+# A proxy_pass carrying a URI part — even a bare `/` — replaces the matched
+# location prefix, which is what strips /api/warehouse/ here. Omit the URI
+# and nginx forwards /api/warehouse/v1/query verbatim, which WaveHouse 404s.
+location /api/warehouse/ {
+    proxy_pass       http://127.0.0.1:8080/;
+    proxy_set_header Host $host;
+}
+```
+
+</TabItem>
+<TabItem label="Caddy">
+
+```text
+# handle_path (not handle) strips the matched prefix.
+handle_path /api/warehouse/* {
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1   # SSE: no response buffering
+    }
+}
+```
+
+</TabItem>
+</Tabs>
+
+:::note[Kubernetes `ingress-nginx` does not strip by default]
+The ingress controller forwards the full path unless you ask it to rewrite. Pair a capture-group path (`/api/warehouse(/|$)(.*)` with `pathType: ImplementationSpecific`) with the `nginx.ingress.kubernetes.io/rewrite-target: /$2` annotation, or the prefix arrives at WaveHouse unstripped.
+:::
+
+Point the SDK at the prefixed URL and it does the rest — `createClient({ baseURL: 'https://app.example.com/api/warehouse' })` sends both REST calls and SSE streams under the prefix ([SDK → Serving under a path prefix](/sdk#serving-under-a-path-prefix)).
+
+:::caution[Check the prefix actually survives to the wire]
+A prefix that the proxy forwards *unstripped* produces a clean `404` from WaveHouse — annoying, but loud. The quiet failure is the other side: an SDK older than the prefix support silently dropped it and sent every request to the origin root. If requests are landing at `/v1/…` instead of `/api/warehouse/v1/…`, upgrade `@wavehouse/sdk` — the fix is unreleased, so it ships on the `@dev` tag until the next release ([#428](https://github.com/Wave-RF/WaveHouse/issues/428)).
+:::
+
 ## Request-body size limits
 
 WaveHouse caps the inbound request body it will decode, as a memory-safety backstop:
@@ -83,7 +134,7 @@ Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer re
 
 ### 3. Forward the token, `since`, and `Last-Event-ID`
 
-A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped from the URL after extraction so it can't leak into logs; an `Authorization` header still takes precedence). Make sure your proxy:
+A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped after extraction — whichever credential wins — so it stays out of WaveHouse's own logs, but it has already crossed your proxy in the URI, hence the third bullet below; an `Authorization` header still takes precedence). Make sure your proxy:
 
 - forwards the query string (`token`, `since`) — most do by default;
 - forwards the `Last-Event-ID` request header so reconnects resume from the right point (it's already allow-listed in WaveHouse's CORS preflight);

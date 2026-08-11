@@ -1,5 +1,6 @@
 import { networkError, parseErrorResponse } from "./errors.js";
 import type { HttpContext, WaveHouseError } from "./types.js";
+import { resolveURL } from "./url.js";
 
 interface RequestOptions {
   method: string;
@@ -29,7 +30,7 @@ export interface HttpResult<T> {
  * @internal
  */
 export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promise<HttpResult<T>> {
-  const url = buildURL(ctx.baseURL, opts.path, opts.params);
+  const url = resolveURL(ctx.baseURL, opts.path, opts.params).toString();
   const headers: Record<string, string> = {
     "Content-Type": opts.contentType ?? "application/json",
     Accept: "application/json",
@@ -107,16 +108,6 @@ export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promis
   }
 
   return { data: null, error: lastError!, headers: new Headers() };
-}
-
-function buildURL(base: string, path: string, params?: Record<string, string>): string {
-  const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      url.searchParams.set(k, v);
-    }
-  }
-  return url.toString();
 }
 
 function backoff(attempt: number): number {

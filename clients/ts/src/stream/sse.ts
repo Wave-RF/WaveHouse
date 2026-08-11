@@ -1,4 +1,5 @@
 import type { StreamEvent, StreamStatus, WaveHouseError } from "../types.js";
+import { resolveURL } from "../url.js";
 import type { StreamTransport } from "./controller.js";
 
 export interface SSEOptions {
@@ -53,7 +54,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   }
 
   private async _doConnect(): Promise<void> {
-    const url = new URL("/v1/stream", this._opts.baseURL);
+    const url = resolveURL(this._opts.baseURL, "/v1/stream");
     url.searchParams.set("table", this._opts.table);
     if (this._opts.since) {
       url.searchParams.set("since", this._opts.since);
