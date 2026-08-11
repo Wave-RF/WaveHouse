@@ -120,6 +120,12 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Resolved before the operator branch purely for its side effect: it
+			// strips ?token from r.URL, and an operator-key match returns without
+			// ever reaching the Bearer path. Leaving it below would exempt the
+			// most privileged credential from the strip — keep this first.
+			tokenStr := bearerToken(r)
+
 			// Operator key: a non-JWT break-glass/operator credential, checked
 			// before any Bearer token. A constant-time match on the presented
 			// credential (Authorization: Operator <key>, or the X-Operator-Key
@@ -185,7 +191,6 @@ func Middleware(cfg Config, store *policy.Store, logger *slog.Logger) (func(http
 				}
 			}
 
-			tokenStr := bearerToken(r)
 			if tokenStr == "" {
 				// No token: roleless request (not an error), resolved to
 				// default_role downstream.

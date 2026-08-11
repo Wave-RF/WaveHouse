@@ -442,6 +442,23 @@ func infoBufLogger() (*slog.Logger, *bytes.Buffer) {
 // sibling wavehouse_ingest_dedupe_missing_id_total it isn't asserted here, but
 // the failed-attempt cases in TestMiddleware_OperatorKey already exercise the
 // Add call (proving it's safe under the default no-op meter).
+// The operator key is the most privileged credential and returns before the
+// Bearer path, so it is the easiest place for the ?token strip to be skipped —
+// which it was until the bearerToken call was hoisted above the operator branch.
+func TestMiddleware_OperatorKey_StripsQueryToken(t *testing.T) {
+	t.Parallel()
+	store := policy.NewMemoryStore(&policy.Policy{AdminRole: "admin"})
+	query := testutil.MakeJWT(t, map[string]any{"role": "viewer"})
+	c := runOp(t, Config{OperatorKey: testOperatorKey}, store, nil, func(r *http.Request) {
+		r.URL.RawQuery = "table=clicks&token=" + query
+		r.Header.Set("X-Operator-Key", testOperatorKey)
+	})
+	assert.True(t, c.isOperator, "the operator key still wins")
+	assert.Equal(t, "admin", c.role)
+	assert.Empty(t, c.tokenInURL, "the unused ?token must be stripped on the operator path too")
+	assert.Equal(t, "clicks", c.otherQueryParam)
+}
+
 func TestMiddleware_OperatorKey_FailedAttemptLogged(t *testing.T) {
 	t.Parallel()
 	cfg := Config{OperatorKey: testOperatorKey}

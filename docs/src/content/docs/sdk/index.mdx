@@ -328,9 +328,9 @@ const wh = createClient<Database>({
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
 :::note[How the token is transmitted]
-The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header. Either way it strips `?token=` from the URL after extraction — whichever credential won — so no token stays in `r.URL` for a later handler to log, and it stays out of **WaveHouse's own** logs.
+The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.
 
-Either way, that strip can't reach anything upstream: the token is in the request URI on the wire, so any proxy, CDN, or load balancer in front of WaveHouse records it in access logs unless you redact query strings there.
+That strip can't reach anything upstream, though: the token is in the request URI on the wire, so any proxy, CDN, or load balancer in front of WaveHouse records it in access logs unless you redact query strings there.
 :::
 
 #### Serving under a path prefix
