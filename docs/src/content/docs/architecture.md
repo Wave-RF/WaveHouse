@@ -182,16 +182,7 @@ Ingest worker pipeline (StartIngestWorker):
   → Parse the event envelope (a malformed envelope is the only poison pill: it's acked-and-dropped)
   → Batch events per table, bulk INSERT to ClickHouse
     (INSERTs pin date_time_input_format=best_effort — the server default since
-    ClickHouse 26.5; on older servers the 'basic' default rejects the canonical
-    RFC 3339 form's zone suffix. The ordinary spellings — zone-less
-    date-times, 9–10-digit Unix-seconds strings — parse identically under
-    both settings, so pre-canonical messages replay unchanged; bare
-    digit-strings of other lengths can differ — best_effort reads them as
-    calendar/epoch shapes where basic read DateTime digit strings of five or
-    more digits as Unix seconds (rejecting shorter runs); DateTime64 reads
-    >10-digit runs as ticks at its own scale under basic while best_effort
-    unit-detects ms/µs/ns epochs —
-    they agree only when the run's unit matches the column scale)
+    ClickHouse 26.5; see /ingest-pipeline for the basic-vs-best_effort divergence)
   → On success: DoubleAck messages
   → On failure: re-insert row by row; each row that fails again → DLQ output (dlq.{table}), then Ack to prevent infinite retry
 

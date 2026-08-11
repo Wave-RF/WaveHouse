@@ -136,17 +136,17 @@ func loadLocation(name string) (*time.Location, error) {
 }
 
 // Rewrite bounds. ClickHouse saturates out-of-range instants spelling-dependently
-// (the date clamps in the column zone keeping local time-of-day; DateTime64 at
-// precision ≥7 even fails the insert past the Int64-nanosecond ceiling), so no
-// rewrite out there is safe — the producer's own spelling passes through and
-// saturates as it did before #372. One-day margins keep zone arithmetic from
-// straddling a bound.
+// (the date clamps in the column zone keeping local time-of-day; DateTime64(9)
+// even fails the insert past the Int64-nanosecond ceiling, a bound applied here
+// to precision ≥7 conservatively), so no rewrite out there is safe — the
+// producer's own spelling passes through and saturates as it did before #372.
+// One-day margins keep zone arithmetic from straddling a bound.
 var (
 	dtMin   = time.Unix(0, 0)
 	dtMax   = time.Unix(4294967295-86400, 0) // UInt32 seconds ceiling, one day of margin
 	dt64Min = time.Date(1900, 1, 2, 0, 0, 0, 0, time.UTC)
 	dt64Max = time.Date(2299, 12, 30, 23, 59, 59, 0, time.UTC)
-	ns64Max = time.Date(2262, 4, 10, 23, 59, 59, 0, time.UTC) // Int64 ns ceiling (precision ≥ 7)
+	ns64Max = time.Date(2262, 4, 10, 23, 59, 59, 0, time.UTC) // Int64 ns ceiling (binds at precision 9; applied to ≥ 7)
 )
 
 // rewritable reports whether t is safely inside the column kind's range —
