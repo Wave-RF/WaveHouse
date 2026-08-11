@@ -428,6 +428,7 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
+│   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
