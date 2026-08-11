@@ -55,6 +55,8 @@ const wh = createClient({
 });
 ```
 
+`baseURL` may include a path prefix (`https://app.example.com/api/warehouse`) when WaveHouse is served under one — see [Serving under a path prefix](https://wavehouse.dev/sdk#serving-under-a-path-prefix).
+
 ### Query Data
 
 ```ts
@@ -125,7 +127,7 @@ const { data } = await wh.from('clicks').select('page').limit(10);
 
 ## Error Handling
 
-All operations return `{ data, error }` tuples — the SDK never throws for anything the server returns. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback), and `.stream()` / `.liveQuery()` in a runtime with no `EventSource`.
+All operations return `{ data, error }` tuples — the SDK never throws for anything the server returns. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback), `.stream()` / `.liveQuery()` in a runtime with no `EventSource`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call.
 
 ```ts
 const { data, error } = await wh.from('clicks').fetch();

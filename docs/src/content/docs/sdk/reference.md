@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), and `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)).
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
