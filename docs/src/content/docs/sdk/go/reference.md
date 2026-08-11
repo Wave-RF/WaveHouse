@@ -57,8 +57,9 @@ SDK's "the SDK never throws" guarantee.
 | 401 | `HTTP_401` | No | Present-but-invalid or expired JWT (a *missing* token resolves to `default_role` and is denied with 403) |
 | 403 | `HTTP_403` | No | Insufficient permissions |
 | 404 | `HTTP_404` | No | Table or pipe not found |
+| 429 | `HTTP_429` | Yes | Rate limited (auto-retries, honoring `Retry-After`, capped at 30s) |
 | 500 | `HTTP_500` | Yes | Server error (retried per `ClientOptions.MaxRetries`) |
-| 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`) |
+| 503 | `HTTP_503` | Yes | Service unavailable (auto-retries, honoring `Retry-After`, capped at 30s) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `context.Context` |
 | 0 | `SSE_ERROR` | Yes | Stream connection failure, delivered to the subscriber's `Error` callback; the stream reconnects automatically |

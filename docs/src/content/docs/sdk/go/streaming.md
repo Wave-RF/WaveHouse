@@ -167,7 +167,7 @@ described above).
 | --------- | --------- | -------- |
 | SSE | Automatic, with exponential backoff (capped at 30s) and gap-fill replay via the last-seen event ID | HTTP/2 recommended |
 
-Reconnect covers transport failures and retryable (5xx) responses. A
+Reconnect covers transport failures and retryable (5xx/429) responses. A
 non-retryable response (401/403/404) is terminal: the error is delivered to
 the subscriber's `Error` callback, status goes to `StatusClosed`, and the
 stream does not reconnect — fix the cause (refresh the token, correct the
@@ -199,11 +199,11 @@ stream := wh.From("clicks").
 
 Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`,
 `OpIn`, `OpLike`, `OpNotLike` — the same `FilterOp` set `.Where()` takes
-everywhere (the SDK maps them to wire tokens such as `eq`/`neq`
-internally). `like` /
-`not_like` match SQL LIKE semantics (`%` → any run of characters, `_` → any
-single character), case-insensitively. `in` accepts any Go slice type on
-the right-hand side (`[]string`, `[]int`, `[]any`, ...), not just `[]any`.
+everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
+`OpLike` / `OpNotLike` match SQL LIKE semantics (`%` → any run of
+characters, `_` → any single character), case-insensitively. `OpIn` accepts
+any Go slice type on the right-hand side (`[]string`, `[]int`, `[]any`,
+...), not just `[]any`.
 
 ---
 

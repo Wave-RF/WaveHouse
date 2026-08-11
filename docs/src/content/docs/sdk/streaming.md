@@ -154,7 +154,7 @@ interface StreamSubscriber<T> {
 
 1. Opens the stream **immediately** and buffers incoming events.
 2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result.
-3. Deduplicates buffered events by comparing timestamps against the latest historical timestamp.
+3. Deduplicates buffered events against the **last** fetched row's `received_timestamp` (a string comparison). With the `.orderBy('received_timestamp', 'desc')` used above, the last row is the *oldest* one, so the bound is looser than intended and events in the overlap window can still be re-delivered — tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449). The Go SDK takes the maximum instead.
 4. Flushes remaining buffered events and switches to live mode.
 
 This "stream-first" approach ensures no events are lost between the fetch and stream start.

@@ -295,7 +295,8 @@ Go tests run with the **race detector** (`-race`) enabled by default (including 
 ### Quick Reference
 
 ```bash
-# Prefix any test target with V=1 for verbose output, e.g. `V=1 make test`
+# V=1 gives verbose output on test-unit / test-integration / test-e2e,
+# e.g. `V=1 make test-unit`
 
 # Unit tests + Go SDK tests (compact output) — alias for `test-unit` + `test-go-sdk`
 make test
@@ -366,7 +367,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 **Architecture**:
 
 - `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
-- `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
+- `tests/e2e/sdk/setup.ts` — `globalSetup` that probes the orchestrator-supplied `CLICKHOUSE_URL`/`WAVEHOUSE_URL`, creates the per-suite tables, refreshes the schema, and bootstraps a baseline policy. Lifecycle is owned by the orchestrator: if either URL isn't reachable it fails fast rather than starting anything itself.
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
@@ -378,7 +379,7 @@ make test-e2e
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
 
-**If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
+`make test-e2e` is self-contained — it always starts its own ClickHouse testcontainer and `wavehouse-cov` on a random free port, so it neither needs nor reuses a running `make dev`.
 
 **Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`.
 
@@ -388,13 +389,7 @@ make test-e2e
 make lint
 ```
 
-`golangci-lint` is installed separately (not in `go.mod` — its massive dependency tree causes conflicts). If not found, `make lint` prints install instructions.
-
-Install options:
-
-- **macOS**: `brew install golangci-lint`
-- **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
-- **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
+`golangci-lint` is pinned in the `Makefile` (v2.11.4) and auto-installed to `.bin/<os>_<arch>/` on first `make lint` (or `make tools`) — no manual install needed. It's kept out of `go.mod` because its dependency tree conflicts with the main module. Install it globally and you'll get an unpinned version the build never uses, with findings that diverge from CI.
 
 The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
 
