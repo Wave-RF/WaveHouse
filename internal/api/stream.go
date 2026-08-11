@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/Wave-RF/WaveHouse/internal/auth"
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/mq"
-	"github.com/Wave-RF/WaveHouse/internal/query"
 	"github.com/Wave-RF/WaveHouse/internal/stream"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -49,9 +49,9 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: impl scope
 	scope := ""
-	topic := "ingest." + query.SafeEncodeNATS(table)
+	topic := "ingest." + chsql.SafeEncodeNATS(table)
 	if scope != "" {
-		topic += "." + query.SafeEncodeNATS(scope)
+		topic += "." + chsql.SafeEncodeNATS(scope)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

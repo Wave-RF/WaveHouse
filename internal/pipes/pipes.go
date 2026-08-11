@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -237,9 +238,7 @@ func formatParamValue(v any) (string, error) {
 		if isNumericLiteral(val) {
 			return val, nil
 		}
-		escaped := strings.ReplaceAll(val, `\`, `\\`)
-		escaped = strings.ReplaceAll(escaped, `'`, `''`)
-		return "'" + escaped + "'", nil
+		return chsql.QuoteString(val), nil
 	case float64:
 		// JSON numbers are float64; if it's a whole number, format as integer.
 		if val == float64(int64(val)) {

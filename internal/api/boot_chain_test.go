@@ -112,9 +112,8 @@ func TestBoot_Chain_DegradedThenRecovers(t *testing.T) {
 	handler.Liveness(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"ok"`)
-
-	// Sanity: exactly four Query calls — the initial sync Refresh (1) plus
-	// the retry loop's three attempts (2,3 fail; 4 succeeds). An off-by-one
-	// in the loop's success short-circuit would show up here.
-	assert.Equal(t, int32(4), conn.calls.Load(), "expected 4 Query calls total")
+	// 5 = the three failed attempts (each short-circuits at Refresh's first query,
+	// system.columns) + the successful 4th (system.columns + system.tables). Pins
+	// the retry loop against silent extra attempts or a reshaped discovery pass.
+	assert.Equal(t, int32(5), conn.calls.Load(), "expected 5 Query calls total")
 }

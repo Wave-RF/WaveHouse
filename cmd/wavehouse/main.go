@@ -183,37 +183,25 @@ func run() int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Schema discovery — non-fatal on boot. If the first Refresh fails
-	// (ClickHouse unreachable, database missing, etc.) we mark the binary
-	// degraded via bootState (which /livez surfaces as 503 + diagnostic)
-	// and retry in the background with exponential backoff. The process
-	// still binds :8080 so operators can `curl /livez` instead of grepping
-	// a restart-loop log. Once a Refresh succeeds, bootState flips to nil
-	// and /livez returns 200. The periodic auto-refresh ticker is started
-	// only after the first successful Refresh (sync or retry) so it never
-	// races RetryRefresh on Refresh calls or on bootState writes.
+	// Schema discovery registry. The first Refresh (and the auto-refresh loop) is
+	// deliberately started much further down, only after every handler it can call
+	// back into exists — see the "Schema discovery" block below the handler wiring.
 	bootState := api.NewBootState(nil)
 	refreshInterval := time.Duration(cfg.Schema.RefreshInterval) * time.Second
 	registry := discovery.NewSchemaRegistry(chConn, cfg.ClickHouse.Database, refreshInterval, logger)
-	if err := registry.Refresh(ctx); err != nil {
-		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
-		bootState.Set(fmt.Errorf("schema discovery: %w", err))
-		go func() {
-			retryErr := registry.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(attemptErr error) {
-				logger.Warn("schema discovery retry failed", "error", attemptErr)
-				bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
-			})
-			if retryErr != nil {
-				// ctx cancelled before success — process is shutting down.
-				return
-			}
-			logger.Info("schema discovery succeeded after retry, /livez now 200")
-			bootState.Set(nil)
-			go registry.StartAutoRefresh(ctx)
-		}()
-	} else {
-		go registry.StartAutoRefresh(ctx)
+
+	// TODO: this is where we can switch between ristretto, redis, tiered (both), etc.
+	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
+	if err != nil {
+		logger.Error("cache init", "error", err)
+		return 1
 	}
+	defer func() { _ = l1.Close() }()
+	// Everything downstream takes the Cache INTERFACE, not the concrete L1, so the
+	// eventual L2/tiered swap happens here and nowhere else. (Named resultCache
+	// rather than the historical `cache := l1` because a variable named cache would
+	// shadow the cache package this function still needs.)
+	var resultCache cache.Cache = l1
 
 	// State directories — one configurable root, fixed subdir convention.
 	natsDir := filepath.Join(cfg.DataDir, "nats")
@@ -259,16 +247,6 @@ func run() int {
 		}
 	}
 
-	// L1 cache only in standalone mode.
-	l1, err := cache.NewLocal(cfg.Cache.L1MaxCost)
-	if err != nil {
-		logger.Error("cache init", "error", err)
-		return 1
-	}
-	// TODO: eventually this is where we can switch between ristretto, redis, tiered (both), etc
-	cache := l1
-	defer func() { _ = cache.Close() }()
-
 	// Policy store (NATS KV + optional file bootstrap).
 	policyStore, err := policy.NewStore(ctx, embeddedMQ.JetStream(), cfg.Policy.FilePath, logger)
 	if err != nil {
@@ -301,7 +279,7 @@ func run() int {
 	ingestCleanup, err := ingest.StartIngestWorker(
 		ctx,
 		embeddedMQ.NatsConn(),
-		cache,
+		resultCache,
 		cfg.ClickHouse.Addr,
 		cfg.ClickHouse.HTTPPort, // Uses 8123 by default
 		cfg.ClickHouse.HTTPScheme,
@@ -385,6 +363,52 @@ func run() int {
 		return 1
 	}
 
+	pipesHandler := api.NewPipesHandler(pipesStore, policyStore, chConn, resultCache, registry, cfg.ClickHouse.QueryTimeout, logger)
+
+	structuredQueryHandler := api.NewStructuredQueryHandler(chConn, resultCache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger)
+
+	// Schema discovery — started HERE, after every handler the refresh callback
+	// reaches into exists, so the callback needs no nil checks and no atomics: the
+	// handler writes above happen-before the refresh goroutines are created. It is
+	// non-fatal on boot: if the first Refresh fails (ClickHouse unreachable,
+	// database missing, etc.) we mark the binary degraded via bootState (which
+	// /livez surfaces as 503 + diagnostic) and retry in the background with
+	// exponential backoff; the process still binds :8080 so operators can
+	// `curl /livez` instead of grepping a restart-loop log. The periodic
+	// auto-refresh ticker is started only after the first successful Refresh
+	// (sync or retry) so it never races RetryRefresh on Refresh calls or on
+	// bootState writes.
+	registry.SetOnRefresh(func(snap discovery.DependencySnapshot) {
+		resultCache.SetDependents(snap.Cascade)
+		if len(snap.ChangedViews) > 0 {
+			nss := make([]cache.Namespace, len(snap.ChangedViews))
+			for i, v := range snap.ChangedViews {
+				nss[i] = cache.Namespace{Table: v}
+			}
+			_, _ = resultCache.Invalidate(ctx, nss)
+		}
+		pipesHandler.ClearResolvedDeps()
+	})
+	if err := registry.Refresh(ctx); err != nil {
+		logger.Warn("schema discovery failed on boot, retrying in background", "error", err)
+		bootState.Set(fmt.Errorf("schema discovery: %w", err))
+		go func() {
+			retryErr := registry.RetryRefresh(ctx, 2*time.Second, 60*time.Second, func(attemptErr error) {
+				logger.Warn("schema discovery retry failed", "error", attemptErr)
+				bootState.Set(fmt.Errorf("schema discovery: %w", attemptErr))
+			})
+			if retryErr != nil {
+				// ctx cancelled before success — process is shutting down.
+				return
+			}
+			logger.Info("schema discovery succeeded after retry, /livez now 200")
+			bootState.Set(nil)
+			go registry.StartAutoRefresh(ctx)
+		}()
+	} else {
+		go registry.StartAutoRefresh(ctx)
+	}
+
 	deps := api.Dependencies{
 		Ingest:          ingestHandler,
 		Query:           queryHandler,
@@ -394,8 +418,8 @@ func run() int {
 		Schema:          api.NewSchemaHandler(registry),
 		DLQ:             dlqHandler,
 		Policy:          api.NewPolicyHandler(policyStore),
-		Pipes:           api.NewPipesHandler(pipesStore, policyStore, chConn, cache, cfg.ClickHouse.QueryTimeout, logger),
-		StructuredQuery: api.NewStructuredQueryHandler(chConn, cache, registry, policyStore, cfg.Cache.TimestampBucketSeconds, cfg.ClickHouse.QueryTimeout, cfg.Query.DefaultMaxRows, logger),
+		Pipes:           pipesHandler,
+		StructuredQuery: structuredQueryHandler,
 		AuthMW:          authMW,
 		PolicyStore:     policyStore,
 		Logger:          logger,

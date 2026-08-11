@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ type VersionManager struct {
 
 	tableVersions     map[string]uint64 // <table>                         -> table_version
 	namespaceVersions map[string]uint64 // <table>.<table_version>.<scope> -> namespace_version
+	dependents        map[string][]string
 
 	conn *nats.Conn
 }
@@ -27,13 +29,58 @@ func NewVersionManager(conn *nats.Conn) *VersionManager {
 	return &VersionManager{
 		tableVersions:     make(map[string]uint64),
 		namespaceVersions: make(map[string]uint64),
+		dependents:        make(map[string][]string),
 		conn:              conn,
 	}
+}
+
+// SetDependents installs the base-table -> dependents cascade (NATS-encoded on
+// both sides; the views reading each table plus the MV TO targets it feeds),
+// replacing any prior one. Called on each schema refresh. A nil map clears the
+// cascade. The slice values are retained as-is; the caller must not mutate them
+// afterward (the registry hands over a fresh map each refresh).
+func (vm *VersionManager) SetDependents(dependents map[string][]string) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	if dependents == nil {
+		dependents = make(map[string][]string)
+	}
+	vm.dependents = dependents
+}
+
+// DependentsOf returns the namespaces a write to table must also bump — the views
+// reading it and the MV TO targets it feeds. Nil when table feeds nothing. The
+// result is a copy, so no caller can reach the manager's internal state — a
+// structural guarantee instead of a "don't mutate" contract. It runs per
+// invalidation batch (per flush, not per row), so the allocation is negligible.
+func (vm *VersionManager) DependentsOf(table string) []string {
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
+	return slices.Clone(vm.dependents[table])
 }
 
 type Namespace struct {
 	Table string
 	Scope string
+}
+
+// DatabaseVersionTable is the reserved namespace-table name carrying the
+// DATABASE-wide version: Invalidate bumps it once per (non-empty) batch, so a
+// result that folds only this namespace is evicted by ANY write. It extends the
+// existing subsumption hierarchy one level up — a scoped write also bumps its
+// whole-table view (table subsumes scope), and any write also bumps the database
+// (database subsumes table) — turning the all-base-tables fallback fold from
+// O(tables) per request into O(1) with identical "any write evicts" semantics.
+// "*" cannot collide with a real table: every real name is NATS-encoded
+// (chsql.SafeEncodeNATS) before it reaches the cache, and the encoding emits
+// only [A-Za-z0-9_] and %XX escapes.
+const DatabaseVersionTable = "*"
+
+// DatabaseNamespace returns the namespace a caller folds to depend on the whole
+// database — used by the pipe dependency-resolution fallback, whose only safe
+// claim is "this result may read anything".
+func DatabaseNamespace() Namespace {
+	return Namespace{Table: DatabaseVersionTable}
 }
 
 // namespaceKeyLocked builds the namespace-table key; caller must hold vm.mu.

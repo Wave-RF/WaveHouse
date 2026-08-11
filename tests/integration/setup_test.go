@@ -78,9 +78,15 @@ var tableCounter atomic.Uint64
 func createTable(t *testing.T, columns, tableOpts string) string {
 	t.Helper()
 
-	// Sanitize the test name into a valid CH identifier.
-	safe := strings.NewReplacer("/", "_", " ", "_", "-", "_").Replace(t.Name())
-	name := fmt.Sprintf("it_%s_%d", strings.ToLower(safe), tableCounter.Add(1))
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, t.Name())
+	name := fmt.Sprintf("it_%s_%d", safe, tableCounter.Add(1))
 
 	ctx := context.Background()
 	stmt := fmt.Sprintf(
