@@ -164,5 +164,7 @@ The dedup boundary comes from the fetched rows' `received_timestamp` values. A `
 :::
 
 :::caution[`like` matching differs between backfill and live]
-Client-side `like` / `not_like` matching is case-**insensitive**, but the backfill runs server-side where the same operator compiles to ClickHouse `LIKE`, which is case-**sensitive**. A live query filtering on `like` can therefore disagree with itself: the backfill excludes rows the live stream includes. Tracked in [#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+Client-side `like` matching is case-**insensitive**, but the backfill runs server-side where the operator compiles to ClickHouse `LIKE`, which is case-**sensitive**. A live query filtering on `like` can therefore disagree with itself: the backfill excludes rows the live stream includes. Tracked in [#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+
+`not_like` never reaches the backfill at all — `/v1/query` rejects the operator with a `400`, so a live query filtering on it fails its `initial()` callback. See the operator table in [Queries](/sdk/queries#wherecolumn-op-value).
 :::

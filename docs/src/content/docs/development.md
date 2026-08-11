@@ -288,7 +288,7 @@ go build -o bin/wavehouse ./cmd/wavehouse
 
 ### How It Works
 
-The Go suite targets (`test-unit`, `test-integration`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed. `test-e2e` runs the orchestrator + vitest and `test-ts` runs vitest directly, so neither uses gotestsum. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
+The Go suite targets (`test-unit`, `test-integration`) use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go tool` so no global installation is needed. `test-e2e` runs the orchestrator + vitest and `test-ts` runs vitest directly, so neither uses gotestsum. The Go SDK and conformance targets (`test-go-sdk`, `test-go-sdk-e2e`, `test-conformance-ts`) run plain `go test` / `node` and ignore `ARGS` and `V=1`.
 
 Go tests run with the **race detector** (`-race`) enabled by default (including `test-go-sdk` — the SDK's streaming subsystem is highly concurrent; `test-go-sdk-e2e` skips it since it drives a live server). WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
 

@@ -283,12 +283,16 @@ are delivered twice — once in `Initial`, again via `Next`.
 :::
 
 :::caution[`OpLike` matching differs between backfill and live]
-Client-side `OpLike` / `OpNotLike` matching is case-**insensitive**, but the
-backfill runs server-side where the same operator compiles to ClickHouse
-`LIKE`, which is case-**sensitive**. A live query filtering on `OpLike` can
-therefore disagree with itself: the backfill excludes rows the live stream
-includes. Tracked in
-[#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+Client-side `OpLike` matching is case-**insensitive**, but the backfill runs
+server-side where the operator compiles to ClickHouse `LIKE`, which is
+case-**sensitive**. A live query filtering on `OpLike` can therefore
+disagree with itself: the backfill excludes rows the live stream includes.
+Tracked in [#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+
+`OpNotLike` never reaches the backfill at all — `/v1/query` rejects the
+operator with a `400`, so a live query filtering on it fails its `Initial`
+callback. See the operator table in
+[Queries](/sdk/go/queries#wherecolumn-op-value).
 :::
 
 ### `.Close()`

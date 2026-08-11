@@ -126,7 +126,7 @@ const q = clicks.select('page').select('button'); // SELECT page, button
 
 #### `.selectAll()`
 
-Select every column your role may read (the all-columns wildcard, expanded server-side to your allowed columns). Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.).
+Select every column your role may read. For a column-restricted role the server expands it to exactly that role's allowed columns rather than a bare `SELECT *` (unrestricted/admin roles do get `SELECT *`). Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.).
 
 ```ts
 const q = clicks.selectAll().where('country', '=', 'US');
