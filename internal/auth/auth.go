@@ -252,9 +252,12 @@ func operatorKey(r *http.Request) string {
 
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
 // clients that can't set headers — the ?token query parameter, which is stripped
-// from the URL so it can't leak into logs. The Authorization header takes
-// precedence when both are present; the Bearer auth-scheme is matched
-// case-insensitively (RFC 7235). Returns "" if absent.
+// from the URL so it stays out of *our own* logs (it has already crossed every
+// intermediary in the request URI, so proxies must redact query strings
+// themselves). The Authorization header takes precedence when both are present
+// — and returns before the strip, leaving the query parameter intact; the
+// Bearer auth-scheme is matched case-insensitively (RFC 7235). Returns "" if
+// absent.
 func bearerToken(r *http.Request) string {
 	if tok, ok := authScheme(r, "Bearer"); ok {
 		return tok

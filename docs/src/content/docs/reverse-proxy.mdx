@@ -39,7 +39,7 @@ The `clickhouse.http_scheme` / `WH_CH_HTTP_SCHEME` option in the [Configuration 
 
 WaveHouse always serves its routes at the root of whatever reaches it — `/v1/query`, `/v1/stream`, `/livez`. There is no configurable base path, and there won't be one: mounting a service under a prefix is the proxy's job, and the server having its own opinion about it is a second place for the two to disagree.
 
-So you can expose WaveHouse under a prefix — `https://app.example.com/api/warehouse/…`, one origin fronting several services, or a BFF adding auth ahead of the data API — as long as the proxy **strips the prefix** before forwarding:
+So you can expose WaveHouse under a prefix — `https://app.example.com/api/warehouse/…`, one origin fronting several services, or a backend-for-frontend (BFF) adding auth ahead of the data API — as long as the proxy **strips the prefix** before forwarding:
 
 <Tabs>
 <TabItem label="nginx">
@@ -134,7 +134,7 @@ Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer re
 
 ### 3. Forward the token, `since`, and `Last-Event-ID`
 
-A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped from the URL after extraction so it can't leak into logs; an `Authorization` header still takes precedence). Make sure your proxy:
+A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped after extraction so it stays out of WaveHouse's own logs, but it has already crossed your proxy in the URI — hence the third bullet below; an `Authorization` header still takes precedence, and leaves the query parameter untouched). Make sure your proxy:
 
 - forwards the query string (`token`, `since`) — most do by default;
 - forwards the `Last-Event-ID` request header so reconnects resume from the right point (it's already allow-listed in WaveHouse's CORS preflight);

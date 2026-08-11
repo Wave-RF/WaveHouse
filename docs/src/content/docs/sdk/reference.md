@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws**. All errors are returned in `Result.error`.
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. The one exception is a malformed `baseURL`, which fails fast with a `TypeError` (see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)).
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|

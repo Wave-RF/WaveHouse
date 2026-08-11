@@ -328,14 +328,14 @@ const wh = createClient<Database>({
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
 
 :::note[How the token is transmitted]
-The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and strips the `?token=` value after extraction so it stays out of **WaveHouse's own** logs.
+The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header and leaves the query parameter untouched; when the token arrives *only* as `?token=`, the server strips it from the URL after extraction so it stays out of **WaveHouse's own** logs.
 
-That strip can't reach anything upstream, though: on a streaming connection the token is in the request URI on the wire, so any proxy, CDN, or load balancer in front of WaveHouse will record it in access logs unless you redact query strings there.
+Either way, that strip can't reach anything upstream: the token is in the request URI on the wire, so any proxy, CDN, or load balancer in front of WaveHouse records it in access logs unless you redact query strings there.
 :::
 
 #### Serving under a path prefix
 
-`baseURL` may carry a path prefix, for a WaveHouse reachable somewhere other than the root of an origin — behind a BFF, an app-server route, or a path-routed ingress. Every request path is appended to it, on both transports:
+`baseURL` may carry a path prefix, for a WaveHouse reachable somewhere other than the root of an origin — behind a backend-for-frontend (BFF), an app-server route, or a path-routed ingress. Every request path is appended to it, on both transports:
 
 ```ts
 const wh = createClient({ baseURL: 'https://app.example.com/api/warehouse' });
@@ -368,7 +368,7 @@ Generate the `Database` interface from a running server with the
 
 ## Result Type
 
-Every async SDK operation returns `Result<T>` — a discriminated union that never throws:
+Every async SDK operation returns `Result<T>` — a discriminated union that never throws for anything the server returns (a malformed `baseURL` is the one exception, and fails fast):
 
 ```ts
 type Result<T> =
