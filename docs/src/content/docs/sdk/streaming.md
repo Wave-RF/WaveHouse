@@ -88,8 +88,11 @@ Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not
 timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339
 UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the
 same row — `new Date(value)` parses correctly with no zone fix-up.
-Values the server couldn't parse stream in the producer's original spelling —
-a zone-less one of those is exactly what `new Date()` reads as *local* time
+Values WaveHouse couldn't canonicalize (ingest is fail-open) stream in the
+producer's original spelling, and the `/v1/query` match doesn't hold for them:
+a spelling ClickHouse accepted anyway still queries back in canonical UTC (one
+it rejected never lands in the table at all), and a zone-less one is exactly
+what `new Date()` reads as *local* time
 (see [Timestamp canonicalization](/api#timestamp-canonicalization)).
 
 ### Transport Behavior
