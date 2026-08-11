@@ -65,9 +65,11 @@ export interface ClientConfig<_DB extends Database = Database> {
    * ingress; request paths are appended to it. The proxy in front must strip
    * the prefix before forwarding.
    *
-   * Must be **absolute** — scheme and host included. A relative value such as
-   * "/api/warehouse" throws a `TypeError` on the first request rather than
-   * returning a `Result`; use `` `${location.origin}/api/warehouse` ``.
+   * Must be **absolute** — scheme and host included. The transports report a
+   * relative value such as "/api/warehouse" differently: a REST call rejects
+   * with a `TypeError` instead of returning a `Result`, while a stream reports
+   * `SSE_CONNECT_ERROR` to the subscriber's `error` callback. Build an absolute
+   * one: `` `${location.origin}/api/warehouse` ``.
    */
   baseURL: string;
   /** Auth token provider. Omit for public/unauthenticated access. */

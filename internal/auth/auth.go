@@ -251,24 +251,29 @@ func operatorKey(r *http.Request) string {
 }
 
 // bearerToken extracts a JWT from the Authorization: Bearer header, or — for
-// clients that can't set headers — the ?token query parameter, which is stripped
-// from the URL so it stays out of *our own* logs (it has already crossed every
+// clients that can't set headers — the ?token query parameter. The Authorization
+// header takes precedence when both are present; the Bearer auth-scheme is
+// matched case-insensitively (RFC 7235). Returns "" if absent.
+//
+// A ?token is stripped from the URL whichever credential wins, so a credential
+// this request never used can't ride along in r.URL into a later handler's log
+// line. That only protects *our own* logs — it has already crossed every
 // intermediary in the request URI, so proxies must redact query strings
-// themselves). The Authorization header takes precedence when both are present
-// — and returns before the strip, leaving the query parameter intact; the
-// Bearer auth-scheme is matched case-insensitively (RFC 7235). Returns "" if
-// absent.
+// themselves.
 func bearerToken(r *http.Request) string {
+	// Strip before either return: a header-authenticated request carrying a
+	// stray ?token would otherwise keep the unused JWT in r.URL.
+	var queryToken string
+	if params := r.URL.Query(); params.Get("token") != "" {
+		queryToken = params.Get("token")
+		params.Del("token")
+		r.URL.RawQuery = params.Encode()
+	}
+
 	if tok, ok := authScheme(r, "Bearer"); ok {
 		return tok
 	}
-	if q := r.URL.Query().Get("token"); q != "" {
-		params := r.URL.Query()
-		params.Del("token")
-		r.URL.RawQuery = params.Encode()
-		return q
-	}
-	return ""
+	return queryToken
 }
 
 // tokenError maps a jwt parse failure to a stable, caller-safe error for the
