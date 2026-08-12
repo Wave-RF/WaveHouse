@@ -353,8 +353,9 @@ The proxy in front must **strip** the prefix before forwarding, since WaveHouse 
 
 `options.fetch` replaces the HTTP implementation the SDK uses. Reach for it to
 route through a proxy, attach client certificates, wrap requests in your own
-middleware (logging, tracing, circuit breaking), or to work around transport
-behavior of the runtime you happen to be on:
+middleware (logging, tracing, circuit breaking), stub HTTP in your own tests
+without monkey-patching a global, or to work around transport behavior of the
+runtime you happen to be on:
 
 ```ts
 const wh = createClient({
@@ -435,8 +436,9 @@ so the socket is still there to be reused.
 
 To change the transport process-wide instead of per-client, an installed undici's
 `setGlobalDispatcher(new Agent())` is picked up by Node's built-in global
-`fetch`, no `options.fetch` needed — but that only helps if the *installed*
-undici is 8.10.0+, since it's the bundled implementation doing the stalling.
+`fetch`, no `options.fetch` needed — but only if the *installed* undici is
+8.10.0+: `setGlobalDispatcher` hands connection handling to that copy, so it's
+the one that has to carry the fix.
 
 ### Type-Safe Tables
 
