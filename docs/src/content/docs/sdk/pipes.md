@@ -21,7 +21,13 @@ const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 5
 
 ### `.fetch(opts?)`
 
-Execute and return results.
+Execute and return results. Takes `{ signal }` only — narrower than the
+`.fetch(opts?)` on a [query builder](/sdk/queries), which also accepts `limit`.
+
+There is no per-call row cap here: the endpoint binds your `params` as the
+pipe's parameters, so a limit has to be declared in the pipe's SQL as
+`{{limit}}` (see [Named Pipes](/pipes)) and passed as `wh.pipe(name, { limit })`,
+as in the example above.
 
 ### `.stream(opts?)`
 

@@ -29,8 +29,8 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
    *
    * Takes only `signal` — deliberately narrower than the `RequestOptions` the
    * query builder accepts. The pipes endpoint binds the body as the pipe's
-   * parameters, so there is no row cap to forward; bound a pipe with a
-   * `{{limit}}` parameter in its SQL and pass it via `wh.pipe(name, { limit })`.
+   * parameters, so there is no row cap to forward; give the pipe a `{{limit}}`
+   * parameter in its SQL and pass it via `wh.pipe(name, { limit })`.
    */
   async fetch(opts?: Pick<RequestOptions, "signal">): Promise<Result<Row[]>> {
     const { data, error } = await request<Row[]>(this._ctx, {
