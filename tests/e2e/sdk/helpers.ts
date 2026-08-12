@@ -170,8 +170,11 @@ const CH_QUERY_TIMEOUT_MS = ((): number => {
   const raw = process.env.E2E_CH_QUERY_TIMEOUT_MS;
   if (raw === undefined || raw.trim() === "") return 10_000;
   const parsed = Number(raw);
-  // AbortSignal.timeout's accepted domain: a non-negative integer inside the
-  // 32-bit timer range. It rejects fractions and anything outside it.
+  // The upper bound is load-bearing, and not because the API rejects past it:
+  // AbortSignal.timeout accepts any integer in [0, 4294967295], but anything
+  // above 2^31-1 overflows setTimeout's int32 and Node silently clamps the
+  // delay to 1ms (TimeoutOverflowWarning) — an instant abort on every query.
+  // Reject those here, and 0 with them. Fractions the API does reject.
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 2_147_483_647) {
     throw new Error(
       `E2E_CH_QUERY_TIMEOUT_MS must be a whole number of milliseconds between 1 and ` +
