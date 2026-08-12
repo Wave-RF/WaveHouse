@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
@@ -213,7 +216,11 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		for col, f := range perms.Check {
 			switch {
 			case f.Eq != nil:
-				resolved.CheckClauses[col] = resolveTemplate(*f.Eq, claims)
+				// ok is deliberately ignored: an unrenderable claim (claimString)
+				// leaves its "" hole exactly like an absent claim, and a "" required
+				// value fails every real inserted value closed at the ingest compare.
+				v, _ := resolveTemplate(*f.Eq, claims)
+				resolved.CheckClauses[col] = v
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -229,7 +236,9 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 // resolved to concrete string values — the shared, render-agnostic form the query
 // path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
 // (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
-// for the scalar operators and zero-or-more for "in" (empty ⇒ matches no rows).
+// for the scalar operators and zero-or-more for "in"; an EMPTY Values matches no
+// rows on either surface — an empty/unresolvable "in" set, or a scalar whose
+// constant was unrenderable (see claimString).
 type resolvedPredicate struct {
 	Column string
 	Op     string
@@ -241,18 +250,29 @@ type resolvedPredicate struct {
 // operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
 func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
 	var preds []resolvedPredicate
+	// An unrenderable constant (ok=false from resolveTemplate: a claim whose exact
+	// value was lost upstream) yields a predicate with NO values, which matches no
+	// rows on either surface — never a synthesized stand-in that could match some
+	// other principal's rows.
+	scalar := func(col, op, tmpl string) resolvedPredicate {
+		v, ok := resolveTemplate(tmpl, claims)
+		if !ok {
+			return resolvedPredicate{Column: col, Op: op}
+		}
+		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
+	}
 	for col, f := range filters {
 		if f.Eq != nil {
-			preds = append(preds, resolvedPredicate{col, "=", []string{resolveTemplate(*f.Eq, claims)}})
+			preds = append(preds, scalar(col, "=", *f.Eq))
 		}
 		if f.Neq != nil {
-			preds = append(preds, resolvedPredicate{col, "!=", []string{resolveTemplate(*f.Neq, claims)}})
+			preds = append(preds, scalar(col, "!=", *f.Neq))
 		}
 		if f.Gt != nil {
-			preds = append(preds, resolvedPredicate{col, ">", []string{resolveTemplate(*f.Gt, claims)}})
+			preds = append(preds, scalar(col, ">", *f.Gt))
 		}
 		if f.Lt != nil {
-			preds = append(preds, resolvedPredicate{col, "<", []string{resolveTemplate(*f.Lt, claims)}})
+			preds = append(preds, scalar(col, "<", *f.Lt))
 		}
 		if f.In != nil {
 			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
@@ -285,6 +305,12 @@ func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 				}
 			}
 		default:
+			if len(p.Values) == 0 {
+				// Unrenderable scalar constant (see resolvePredicates): match no
+				// rows, the same fail-closed verdict as the empty-in case above.
+				clauses = append(clauses, "1 = 0")
+				continue
+			}
 			clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, p.Op))
 			params = append(params, p.Values[0])
 		}
@@ -312,10 +338,13 @@ func toStrings(vals []any) []string {
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
-// If a claim path cannot be resolved, the template placeholder is replaced with
-// an empty string to prevent "<nil>" from leaking into SQL filters.
-func resolveTemplate(tmpl string, claims map[string]any) string {
-	return claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
+// An ABSENT claim path is replaced with an empty string (preventing "<nil>" from
+// leaking into SQL filters — the long-standing fallback); ok=false instead marks
+// a claim that was present but unrenderable (see claimString), so the caller can
+// refuse the whole constant rather than compare against a mis-rendered stand-in.
+func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
+	ok := true
+	out := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
 		sub := claimTemplateRe.FindStringSubmatch(match)
 		if len(sub) < 2 {
 			return ""
@@ -325,8 +354,44 @@ func resolveTemplate(tmpl string, claims map[string]any) string {
 		if val == nil {
 			return ""
 		}
-		return fmt.Sprint(val)
+		s, sok := claimString(val)
+		if !sok {
+			ok = false
+			return ""
+		}
+		return s
 	})
+	return out, ok
+}
+
+// claimString renders one claim value as the string constant a filter or check
+// carries. ok=false marks a value whose exact form is unrecoverable: a float64 at
+// or past 2^53 came through a decoder that had already collapsed neighboring JSON
+// integers onto one float (jwt.Parse without WithJSONNumber — which the auth
+// middleware no longer does), so ANY digits rendered for it could be another
+// principal's ID; the caller must fail its predicate closed instead. Smaller
+// floats render positionally — fmt.Sprint's exponent form ("1e+06" for a round
+// million) is a spelling neither ClickHouse integer columns nor producers use.
+// json.Number, what jwt.Parse yields for numbers, passes through with its exact
+// digits.
+func claimString(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return x, true
+	case json.Number:
+		return string(x), true
+	case bool:
+		return strconv.FormatBool(x), true
+	case float64:
+		if math.Abs(x) >= 1<<53 {
+			return "", false
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64), true
+	default:
+		// Non-scalar claim in a scalar position: keep the historical fmt.Sprint
+		// rendering ("map[…]", "[a b]"), which matches no real value.
+		return fmt.Sprint(x), true
+	}
 }
 
 // resolveInValues resolves a templated _in value into the set of bound values
@@ -335,8 +400,10 @@ func resolveTemplate(tmpl string, claims map[string]any) string {
 // the multi-tenant case, where a token's tenant_ids list scopes the predicate.
 // A scalar claim (or any template with surrounding text) yields a single value,
 // matching resolveTemplate. Elements are stringified like the other operators so
-// policy filters stay uniformly string-valued. Returns nil when the claim is
-// absent so the caller can fail the predicate closed.
+// policy filters stay uniformly string-valued. Returns nil — the empty set, which
+// matches no rows — when the claim is absent, or when any value is unrenderable
+// (claimString): one poisoned element could match another principal's rows if
+// rendered, and dropping just it would silently narrow the grant.
 func resolveInValues(tmpl string, claims map[string]any) []any {
 	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
 		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
@@ -345,14 +412,26 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 		case []any:
 			out := make([]any, 0, len(v))
 			for _, e := range v {
-				out = append(out, fmt.Sprint(e))
+				s, ok := claimString(e)
+				if !ok {
+					return nil
+				}
+				out = append(out, s)
 			}
 			return out
 		default:
-			return []any{fmt.Sprint(v)}
+			s, ok := claimString(v)
+			if !ok {
+				return nil
+			}
+			return []any{s}
 		}
 	}
-	return []any{resolveTemplate(tmpl, claims)}
+	v, ok := resolveTemplate(tmpl, claims)
+	if !ok {
+		return nil
+	}
+	return []any{v}
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.

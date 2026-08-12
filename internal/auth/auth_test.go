@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -106,6 +107,25 @@ func TestMiddleware_ValidToken_FlatRole(t *testing.T) {
 	require.True(t, c.hasClaims)
 	assert.Equal(t, "editor", c.claims["role"])
 	assert.NoError(t, c.authErr)
+}
+
+// TestMiddleware_NumericClaims_ExactDigits: numeric claims reach handlers as
+// json.Number — exact digit strings — never float64 (WithJSONNumber on the
+// parser). Claims become the policy row-filter and check constants, and a
+// float64 has collapsed every integer past 2^53 onto its neighbors — enough for
+// a stream row-filter to match another tenant's rows (#381). exp/iat validation
+// must keep working under the same decoding (jwt v5 reads json.Number dates).
+func TestMiddleware_NumericClaims_ExactDigits(t *testing.T) {
+	t.Parallel()
+	c := run(t, cfg(), bearer(testutil.MakeJWT(t, map[string]any{
+		"role":   "editor",
+		"tenant": json.Number("10000000000000001"),
+	})))
+	assert.Equal(t, "editor", c.role)
+	assert.NoError(t, c.authErr)
+	require.True(t, c.hasClaims)
+	assert.Equal(t, json.Number("10000000000000001"), c.claims["tenant"],
+		"bare JSON integer claims keep their exact digits — as float64 this reads 1e+16")
 }
 
 func TestMiddleware_BearerScheme_CaseInsensitive(t *testing.T) {

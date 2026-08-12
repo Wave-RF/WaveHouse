@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -390,28 +391,59 @@ func TestNavigateClaims(t *testing.T) {
 	}
 }
 
+// resolved renders a template, requiring the renderable (ok=true) path — the
+// counterpart tests for unrenderable claims assert ok=false explicitly.
+func resolved(t *testing.T, tmpl string, claims map[string]any) string {
+	t.Helper()
+	s, ok := resolveTemplate(tmpl, claims)
+	require.True(t, ok, "template %q must be renderable", tmpl)
+	return s
+}
+
 func TestResolveTemplate(t *testing.T) {
 	t.Parallel()
 	claims := map[string]any{
 		"org_id": "org-123",
 		"nested": map[string]any{"val": "deep"},
 	}
-	assert.Equal(t, "org-123", resolveTemplate("{{ jwt.org_id }}", claims))
-	assert.Equal(t, "deep", resolveTemplate("{{ jwt.nested.val }}", claims))
-	assert.Equal(t, "", resolveTemplate("{{ jwt.missing }}", claims))
-	assert.Equal(t, "literal", resolveTemplate("literal", claims))
+	assert.Equal(t, "org-123", resolved(t, "{{ jwt.org_id }}", claims))
+	assert.Equal(t, "deep", resolved(t, "{{ jwt.nested.val }}", claims))
+	assert.Equal(t, "", resolved(t, "{{ jwt.missing }}", claims))
+	assert.Equal(t, "literal", resolved(t, "literal", claims))
 }
 
 func TestResolveTemplate_NilClaims(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "", resolveTemplate("{{ jwt.org_id }}", nil))
+	assert.Equal(t, "", resolved(t, "{{ jwt.org_id }}", nil))
 }
 
 func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 	t.Parallel()
 	claims := map[string]any{"a": "1", "b": "2"}
-	result := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
-	assert.Equal(t, "1-2", result)
+	assert.Equal(t, "1-2", resolved(t, "{{ jwt.a }}-{{ jwt.b }}", claims))
+}
+
+// TestResolveTemplate_NumericClaims pins how numeric claims render into filter
+// and check constants: json.Number (what jwt.Parse yields since WithJSONNumber)
+// passes through with its exact digits; a float64 below 2^53 renders positionally
+// (fmt.Sprint's "1e+06" spelling would bind a constant ClickHouse integer columns
+// reject); a float64 at or past 2^53 has already collapsed onto its float
+// neighbors, so it is unrenderable — ok=false — rather than a stand-in that could
+// name another principal.
+func TestResolveTemplate_NumericClaims(t *testing.T) {
+	t.Parallel()
+	claims := map[string]any{
+		"exact": json.Number("10000000000000001"),
+		"round": float64(1_000_000),
+		"frac":  float64(1.5),
+		"big":   float64(10000000000000001), // already 1e16 by the time it's a float64
+	}
+	assert.Equal(t, "10000000000000001", resolved(t, "{{ jwt.exact }}", claims))
+	assert.Equal(t, "1000000", resolved(t, "{{ jwt.round }}", claims))
+	assert.Equal(t, "1.5", resolved(t, "{{ jwt.frac }}", claims))
+
+	_, ok := resolveTemplate("{{ jwt.big }}", claims)
+	assert.False(t, ok, "a float64 at/past 2^53 lost its digits upstream — refuse, never guess")
 }
 
 func TestValidate(t *testing.T) {
@@ -641,6 +673,34 @@ func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	err := Validate(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contains '?'")
+}
+
+// TestResolveFilters_NumericClaimBinding pins the SQL surface of claimString: a
+// json.Number claim binds its exact digits; a round float64 below 2^53 binds
+// positionally ("1000000", never the "1e+06" ClickHouse integer columns reject);
+// an unrenderable claim — float64 at/past 2^53, alone or as one element of an
+// _in set — renders the whole predicate as `1 = 0`, matching no rows, the same
+// verdict RowVisible reaches in memory.
+func TestResolveFilters_NumericClaimBinding(t *testing.T) {
+	t.Parallel()
+	eq := map[string]Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}
+
+	clauses, params := resolveFilters(eq, map[string]any{"tenant": json.Number("10000000000000001")})
+	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
+	assert.Equal(t, []any{"10000000000000001"}, params, "json.Number binds exact digits")
+
+	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(1_000_000)})
+	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
+	assert.Equal(t, []any{"1000000"}, params, "small float binds positionally, not 1e+06")
+
+	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(10000000000000001)})
+	assert.Equal(t, []string{"1 = 0"}, clauses, "lossy float64 claim matches no rows")
+	assert.Empty(t, params)
+
+	in := map[string]Filter{"tenant_id": {In: new("{{ jwt.tenants }}")}}
+	clauses, params = resolveFilters(in, map[string]any{"tenants": []any{"a", float64(1 << 60)}})
+	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
+	assert.Empty(t, params)
 }
 
 // TestResolveFilters_InArrayClaim: the headline #224 fix — an _in filter whose

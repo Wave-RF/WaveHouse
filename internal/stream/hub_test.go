@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Wave-RF/WaveHouse/internal/auth"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
@@ -19,6 +22,28 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
+
+// jwtClaims round-trips claims through a real signed token and the production
+// auth middleware, returning them exactly as a live connection would carry them
+// (numbers as json.Number, never float64 or a hand-typed string). Any test that
+// asserts a claims-derived guarantee must build its subscriber this way: a
+// hand-built claims map once used string tenants here and passed while the
+// production decode path failed open (#381 review).
+func jwtClaims(t *testing.T, claims map[string]any) map[string]any {
+	t.Helper()
+	mw, err := auth.Middleware(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
+	require.NoError(t, err)
+	var got map[string]any
+	h := mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		c, ok := auth.ClaimsFromContext(r.Context())
+		require.True(t, ok, "test token must authenticate")
+		got = map[string]any(c)
+	}))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+testutil.MakeJWT(t, claims))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	return got
+}
 
 // rawEvent marshals an EventMessage the way the ingest path publishes it.
 // testing.TB so the fan-out benchmark can build events too.
@@ -599,8 +624,12 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
 	const topic = "ingest.clicks"
 
-	neighbor := NewSubscriber(map[string]any{"tenant": "10000000000000000"}) // float64-equal neighbor
-	exact := NewSubscriber(map[string]any{"tenant": "10000000000000001"})
+	// Claims come from real signed tokens through the production middleware, so a
+	// bare JSON-number tenant claim reaches the filter exactly as production
+	// decodes it (json.Number since WithJSONNumber; before that fix, float64 —
+	// which collapsed these neighbors and delivered the cross-tenant row).
+	neighbor := NewSubscriber(jwtClaims(t, map[string]any{"tenant": json.Number("10000000000000000")}))
+	exact := NewSubscriber(jwtClaims(t, map[string]any{"tenant": json.Number("10000000000000001")}))
 	hub.Add(topic, "viewer", neighbor)
 	hub.Add(topic, "viewer", exact)
 
@@ -611,6 +640,46 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 	frame := recvFrame(t, exact)
 	assert.Contains(t, string(frame.Data), "10000000000000001",
 		"the wire frame carries the exact digits, not a float64 rounding")
+}
+
+// TestHub_RowFilter_TimestampInstantMatch: since #402, ingest canonicalizes
+// DateTime/DateTime64 payload values to RFC 3339 UTC before publish, while policy
+// authors write the ClickHouse-friendly zone-less spelling the query path wants.
+// The row filter compares the two as instants through the discovery grammar (one
+// parser shared with canonicalization), so the spellings agree; an operand the
+// grammar can't read withholds the row.
+func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
+	t.Parallel()
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{Name: "clicks", Columns: []discovery.Column{
+			{Name: "created_at", Type: "DateTime"},
+			{Name: "page", Type: "String"},
+		}},
+	})
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {Select: map[string]policy.RolePermissions{
+				// Zone-less constant, read in the column's zone (UTC here) on both
+				// surfaces — the one spelling that works for the query path's SQL too.
+				"viewer": {Filter: map[string]policy.Filter{"created_at": {Eq: new("2026-06-21 04:00:00")}}},
+			}},
+		},
+	}
+	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	const topic = "ingest.clicks"
+
+	sub := NewSubscriber(nil)
+	hub.Add(topic, "viewer", sub)
+
+	// The canonical wire spelling ingest publishes: same instant, different bytes.
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"created_at": "2026-06-21T04:00:00Z", "page": "/a"}))
+	assert.NotEmpty(t, recvFrame(t, sub).Data, "canonical payload matches the zone-less constant as an instant")
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"created_at": "2026-06-21T04:00:01Z", "page": "/a"}))
+	assertNoFrame(t, sub)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t3", map[string]any{"created_at": "not a timestamp", "page": "/a"}))
+	assertNoFrame(t, sub)
 }
 
 // TestHub_RowFilterWithheldIncrementsMetric: a row withheld by row-level security is

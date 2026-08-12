@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // HasRowFilter reports whether this role/table entry carries a row-level-security
@@ -27,7 +28,7 @@ type ColumnKind uint8
 const (
 	// ColumnOpaque: no usable type knowledge (no schema, unknown column) or a type
 	// whose text rendering is not canonical — UUID (case), Enum (name vs number),
-	// Bool (true vs 1), Date/DateTime (formats), IPv4/IPv6, … For these only
+	// Bool (true vs 1), Date/Date32 (producer spelling), IPv4/IPv6, … For these only
 	// byte-equality is trustworthy: identical strings parse to identical ClickHouse
 	// values, but differing strings prove nothing. So = and in admit exactly the
 	// event's own rendering, while !=, > and < fail closed (the row is withheld).
@@ -39,22 +40,49 @@ const (
 	// ClickHouse comparison — equality AND lexicographic order — so every operator
 	// is exact. FixedString is NOT ColumnText (zero-padded storage).
 	ColumnText
+	// ColumnTime (DateTime/DateTime64): operands parse as instants through the
+	// caller-supplied ColumnSpec.ParseTime — the same grammar, zone rule, and
+	// range guard ingest canonicalization applies — and compare chronologically,
+	// so every operator is exact across spellings: a zone-less filter constant
+	// matches the canonicalized RFC 3339 payload denoting the same instant. A
+	// side that can't be read as a provable instant fails closed.
+	ColumnTime
 )
+
+// ColumnSpec is one column's comparison contract for the in-memory row filter:
+// the ColumnKind classification plus, for ColumnTime, the parser that maps a
+// value rendering to an instant. The zero value is ColumnOpaque with no parser,
+// so a nil map, an absent column, and an unknown type all land on the most
+// conservative class — never a silent downgrade to a laxer comparison.
+type ColumnSpec struct {
+	Kind ColumnKind
+	// ParseTime converts one rendering of this timestamp column's value — an
+	// ingested payload value (string / json.Number / float64) or a resolved
+	// filter constant (always a string) — to the instant ClickHouse would store,
+	// truncated to the column's precision. ok=false (unparseable, or outside the
+	// column type's range, which insert-time saturation would move) fails the
+	// comparison closed. Set iff Kind is ColumnTime; the stream supplies it from
+	// the schema registry (discovery's Column.TimeParser) so the filter and
+	// ingest canonicalization can never disagree on the grammar.
+	ParseTime func(v any) (t time.Time, ok bool)
+}
 
 // RowVisible reports whether row satisfies every resolved row-filter predicate — the
 // in-memory twin of the query path's WHERE clause, evaluated against a decoded event
 // so the stream applies the same row-level security the query path does. Predicates
 // are ANDed; the query path joins them with AND too.
 //
-// colKinds maps column name → ColumnKind, supplied by the caller from the table
-// schema (see stream.Hub's columnKinds). Numeric columns compare numerically (9 <
+// cols maps column name → ColumnSpec, supplied by the caller from the table
+// schema (see stream.Hub's columnSpecs). Numeric columns compare numerically (9 <
 // 100, as ClickHouse would), String columns compare bytewise (exactly ClickHouse's
-// String collation), and everything else — including every column when no schema is
-// available — admits only byte-equality (= / in) and fails !=, > and < closed: the
-// evaluator cannot mirror ClickHouse's per-type coercion, and text comparison there
-// could admit rows the query path excludes ("9" > "100" as text, an uppercase UUID
-// under !=). Every ambiguous or uncomparable case fails closed — the row is hidden,
-// never leaked — so the boundary costs availability, not confidentiality.
+// String collation), DateTime/DateTime64 columns compare as instants (both operands
+// parsed through the spec's ParseTime, the same grammar ingest canonicalizes with),
+// and everything else — including every column when no schema is available — admits
+// only byte-equality (= / in) and fails !=, > and < closed: the evaluator cannot
+// mirror ClickHouse's per-type coercion, and text comparison there could admit rows
+// the query path excludes ("9" > "100" as text, an uppercase UUID under !=). Every
+// ambiguous or uncomparable case fails closed — the row is hidden, never leaked —
+// so the boundary costs availability, not confidentiality.
 //
 // That guarantee is about the INGESTED PAYLOAD value, which is what the stream
 // evaluates; the query path evaluates the stored row. The one residual asymmetry is
@@ -65,7 +93,7 @@ const (
 // caution.
 //
 // A nil receiver (no policy applies) makes every row visible.
-func (p *ResolvedPermissions) RowVisible(row map[string]any, colKinds map[string]ColumnKind) bool {
+func (p *ResolvedPermissions) RowVisible(row map[string]any, cols map[string]ColumnSpec) bool {
 	if p == nil {
 		return true
 	}
@@ -75,7 +103,7 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, colKinds map[string
 		return false
 	}
 	for _, pred := range p.rowFilter {
-		if !pred.matches(row, colKinds[pred.Column]) {
+		if !pred.matches(row, cols[pred.Column]) {
 			return false
 		}
 	}
@@ -84,27 +112,33 @@ func (p *ResolvedPermissions) RowVisible(row map[string]any, colKinds map[string
 
 // matches evaluates one predicate against the row, failing closed (false) whenever
 // the value is absent or can't be compared as required.
-func (pred resolvedPredicate) matches(row map[string]any, kind ColumnKind) bool {
+func (pred resolvedPredicate) matches(row map[string]any, spec ColumnSpec) bool {
+	// No values ⇒ matches nothing: an empty/unresolvable "in" set, or a scalar
+	// whose constant was unrenderable — the in-memory twin of the `1 = 0`
+	// predicatesToSQL emits for the same cases.
+	if len(pred.Values) == 0 {
+		return false
+	}
 	raw, ok := row[pred.Column]
 	if !ok {
 		return false // column not in the event ⇒ can't prove the row is allowed
 	}
 	switch pred.Op {
 	case "=":
-		c, ok := compareScalar(raw, pred.Values[0], kind)
+		c, ok := compareScalar(raw, pred.Values[0], spec)
 		return ok && c == 0
 	case "!=":
-		c, ok := compareScalar(raw, pred.Values[0], kind)
+		c, ok := compareScalar(raw, pred.Values[0], spec)
 		return ok && c != 0
 	case ">":
-		c, ok := compareScalar(raw, pred.Values[0], kind)
+		c, ok := compareScalar(raw, pred.Values[0], spec)
 		return ok && c > 0
 	case "<":
-		c, ok := compareScalar(raw, pred.Values[0], kind)
+		c, ok := compareScalar(raw, pred.Values[0], spec)
 		return ok && c < 0
 	case "in":
 		for _, v := range pred.Values {
-			if c, ok := compareScalar(raw, v, kind); ok && c == 0 {
+			if c, ok := compareScalar(raw, v, spec); ok && c == 0 {
 				return true
 			}
 		}
@@ -121,13 +155,31 @@ func (pred resolvedPredicate) matches(row map[string]any, kind ColumnKind) bool 
 // ok=false fails the enclosing predicate closed — for != that is what keeps a mere
 // representation difference (an uppercase UUID, 1 for a Bool true) from being
 // mistaken for a real inequality and admitting a row the query path excludes.
-func compareScalar(rowVal any, filterVal string, kind ColumnKind) (int, bool) {
-	s, ok := scalarString(rowVal)
-	if !ok {
-		return 0, false
-	}
-	switch kind {
+func compareScalar(rowVal any, filterVal string, spec ColumnSpec) (int, bool) {
+	switch spec.Kind {
+	case ColumnTime:
+		// The RAW value goes to the parser — a payload timestamp may legitimately
+		// be a number (Unix seconds/ticks), which the spec's parser reads the same
+		// way ingest does; scalarString's rendering would be a detour. Both sides
+		// must parse; either failing (or a spec missing its parser) refuses the
+		// comparison, fail closed.
+		if spec.ParseTime == nil {
+			return 0, false
+		}
+		a, ok := spec.ParseTime(rowVal)
+		if !ok {
+			return 0, false
+		}
+		b, ok := spec.ParseTime(filterVal)
+		if !ok {
+			return 0, false
+		}
+		return a.Compare(b), true
 	case ColumnNumeric:
+		s, ok := scalarString(rowVal)
+		if !ok {
+			return 0, false
+		}
 		a, err1 := strconv.ParseFloat(s, 64)
 		b, err2 := strconv.ParseFloat(filterVal, 64)
 		// NaN must be rejected explicitly: ParseFloat accepts "NaN", and NaN's
@@ -150,12 +202,20 @@ func compareScalar(rowVal any, filterVal string, kind ColumnKind) (int, bool) {
 			return compareExact(s, filterVal)
 		}
 	case ColumnText:
+		s, ok := scalarString(rowVal)
+		if !ok {
+			return 0, false
+		}
 		return strings.Compare(s, filterVal), true
 	case ColumnOpaque:
 		// Byte-equality is the only relation provable without type knowledge
 		// (identical strings always parse to the same ClickHouse value); unequal
 		// bytes prove nothing, so the comparison is refused and the predicate
 		// fails closed.
+		s, ok := scalarString(rowVal)
+		if !ok {
+			return 0, false
+		}
 		if s == filterVal {
 			return 0, true
 		}

@@ -27,7 +27,7 @@ type Hub struct {
 	mu       sync.RWMutex
 	topics   map[string]*topicRoutes
 	policy   *policy.Store             // nil ⇒ policy filtering not configured (legacy passthrough)
-	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnKinds)
+	registry *discovery.SchemaRegistry // nil ⇒ no column types; row-filter comparison degrades fail-closed (see columnSpecs)
 	metric   *Metrics                  // nil-safe
 }
 
@@ -135,11 +135,11 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	decoded := decodeEvent(raw, &evt)
 	p, filter := h.snapshotPolicy()
 
-	// Column kinds for type-aware row-filter comparison — resolved lazily at most
+	// Column specs for type-aware row-filter comparison — resolved lazily at most
 	// once per event, only when some role actually carries a row-filter, and reused
 	// across every filtered role and subscriber.
-	var colKinds map[string]policy.ColumnKind
-	kindsResolved := false
+	var colSpecs map[string]policy.ColumnSpec
+	specsResolved := false
 
 	for _, rb := range roleBuckets {
 		wire, perms, ok := projectColumns(p, filter, rb.role, &evt, raw, decoded)
@@ -163,13 +163,13 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 		// shared, but whether each subscriber may see THIS row depends on its claims, so
 		// evaluate visibility per subscriber. Predicates read the full event data (a
 		// filter may key on a column the role can't SELECT), not the projected columns.
-		if !kindsResolved {
-			colKinds = h.columnKinds(evt.TableName)
-			kindsResolved = true
+		if !specsResolved {
+			colSpecs = h.columnSpecs(evt.TableName)
+			specsResolved = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
 			subPerms := policy.Evaluate(p, rb.role, evt.TableName, "select", sub.claims)
-			if !subPerms.RowVisible(evt.Data, colKinds) {
+			if !subPerms.RowVisible(evt.Data, colSpecs) {
 				h.metric.RowWithheld(evt.TableName, rb.role)
 				continue // this row is filtered out for this subscriber
 			}
@@ -180,14 +180,17 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 	}
 }
 
-// columnKinds classifies each of the table's columns for the row-filter evaluator:
-// numeric types compare numerically (9 < 100, matching ClickHouse), String compares
-// bytewise (exactly ClickHouse's String collation), and any other type is omitted —
+// columnSpecs classifies each of the table's columns for the row-filter evaluator:
+// DateTime/DateTime64 columns compare as instants (through discovery's
+// Column.TimeParser — the same grammar ingest canonicalization applies, so a
+// zone-less filter constant matches the canonical RFC 3339 payload), numeric types
+// compare numerically (9 < 100, matching ClickHouse), String compares bytewise
+// (exactly ClickHouse's String collation), and any other type is omitted —
 // policy.ColumnOpaque, the map's zero value — admitting byte-equality only. nil when
 // no schema is available (unknown table, or a Hub built without a registry), which
 // reads as every column Opaque: the fail-closed floor, never a lexicographic
 // fallback that could admit rows the query path excludes ("9" > "100" as text).
-func (h *Hub) columnKinds(table string) map[string]policy.ColumnKind {
+func (h *Hub) columnSpecs(table string) map[string]policy.ColumnSpec {
 	if h.registry == nil {
 		return nil
 	}
@@ -195,13 +198,17 @@ func (h *Hub) columnKinds(table string) map[string]policy.ColumnKind {
 	if schema == nil {
 		return nil
 	}
-	m := make(map[string]policy.ColumnKind, len(schema.Columns))
+	m := make(map[string]policy.ColumnSpec, len(schema.Columns))
 	for _, c := range schema.Columns {
+		if pt := c.TimeParser(); pt != nil {
+			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnTime, ParseTime: pt}
+			continue
+		}
 		switch {
 		case discovery.IsNumericType(c.Type):
-			m[c.Name] = policy.ColumnNumeric
+			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnNumeric}
 		case discovery.IsStringType(c.Type):
-			m[c.Name] = policy.ColumnText
+			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnText}
 		}
 	}
 	return m
@@ -254,8 +261,8 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 // build per event. The closure is for a single goroutine — each connection makes
 // its own. The live path uses Broadcast.
 func (h *Hub) ReplayProjector(role string, claims map[string]any) func(raw []byte) (Frame, bool) {
-	var colKinds map[string]policy.ColumnKind
-	kindsFor := "" // table name colKinds was resolved for ("" ⇒ not yet resolved)
+	var colSpecs map[string]policy.ColumnSpec
+	specsFor := "" // table name colSpecs was resolved for ("" ⇒ not yet resolved)
 	return func(raw []byte) (Frame, bool) {
 		var evt ingest.EventMessage
 		decoded := decodeEvent(raw, &evt)
@@ -267,12 +274,12 @@ func (h *Hub) ReplayProjector(role string, claims map[string]any) func(raw []byt
 		if perms.HasRowFilter() {
 			// One topic ⇒ one table, so this resolves once per replay in practice; the
 			// guard re-resolves if a stream ever mixes tables rather than going stale.
-			if kindsFor != evt.TableName {
-				colKinds = h.columnKinds(evt.TableName)
-				kindsFor = evt.TableName
+			if specsFor != evt.TableName {
+				colSpecs = h.columnSpecs(evt.TableName)
+				specsFor = evt.TableName
 			}
 			subPerms := policy.Evaluate(p, role, evt.TableName, "select", claims)
-			if !subPerms.RowVisible(evt.Data, colKinds) {
+			if !subPerms.RowVisible(evt.Data, colSpecs) {
 				h.metric.RowWithheld(evt.TableName, role)
 				return Frame{}, false // this row is filtered out for these claims
 			}
