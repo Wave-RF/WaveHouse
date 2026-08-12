@@ -428,11 +428,26 @@ because of the narrow contract above. `undici` is a dependency you add — the S
 itself stays dependency-free.
 
 If you're genuinely pinned to an affected undici, a dispatcher that never reuses
-a keep-alive socket avoids the stall — `new Agent({ pipelining: 0 })`, passed as
-`dispatcher` in the `RequestInit`. It costs you a fresh connection per request,
-so prefer upgrading. Note that tuning `keepAliveTimeout` does **not** help: the
-retirement timer is starved by the same idle event loop that triggers the bug,
-so the socket is still there to be reused.
+a keep-alive socket avoids the stall. Merge it into the `init` the SDK hands
+you, as undici's `dispatcher` option:
+
+```ts
+import { Agent, fetch as undiciFetch } from 'undici';
+
+const dispatcher = new Agent({ pipelining: 0 }); // no keep-alive reuse
+
+const wh = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: {
+    fetch: (url, init) =>
+      undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+  },
+});
+```
+
+That costs a fresh connection per request, so prefer upgrading. Note that tuning
+`keepAliveTimeout` does **not** help: the retirement timer is starved by the same
+idle event loop that triggers the bug, so the socket is still there to be reused.
 
 To change the transport process-wide instead of per-client, an installed undici's
 `setGlobalDispatcher(new Agent())` is picked up by Node's built-in global

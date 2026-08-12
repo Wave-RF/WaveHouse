@@ -147,11 +147,13 @@ describe("WaveHouseClient.sql()", () => {
 
 describe("options.fetch", () => {
   it("routes requests through a supplied fetch instead of the global", async () => {
-    const custom = vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    // Typed as FetchLike rather than cast: a consumer's override needs no cast,
+    // so the test shouldn't need one either.
+    const custom = vi.fn<FetchLike>(async () => new Response(JSON.stringify([]), { status: 200 }));
     const client = createClient({
       baseURL: "http://localhost:8080",
       auth: () => "test-token",
-      options: { fetch: custom as unknown as FetchLike },
+      options: { fetch: custom },
     });
 
     await client.from("clicks").select("*").limit(1);
@@ -162,13 +164,13 @@ describe("options.fetch", () => {
     // proxy/middleware consumers rely on the whole request reaching them.
     const [url, init] = custom.mock.calls[0];
     expect(typeof url).toBe("string");
-    expect(String(url)).toContain("http://localhost:8080");
-    expect(init.method).toBe("POST");
-    expect(init.headers).toMatchObject({
+    expect(url).toContain("http://localhost:8080");
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toMatchObject({
       "Content-Type": "application/json",
       Authorization: "Bearer test-token",
     });
-    expect(typeof init.body).toBe("string");
+    expect(typeof init?.body).toBe("string");
   });
 
   it("falls back to the global fetch when no override is given", async () => {
@@ -192,12 +194,12 @@ describe("options.fetch", () => {
 
   it("applies the override to retries too, not just the first attempt", async () => {
     const custom = vi
-      .fn()
+      .fn<FetchLike>()
       .mockResolvedValueOnce(new Response("boom", { status: 500 }))
       .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
     const client = createClient({
       baseURL: "http://localhost:8080",
-      options: { fetch: custom as unknown as FetchLike, maxRetries: 1 },
+      options: { fetch: custom, maxRetries: 1 },
     });
 
     await client.from("clicks").select("*").limit(1);
