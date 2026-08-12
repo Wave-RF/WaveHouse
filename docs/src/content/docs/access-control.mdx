@@ -534,7 +534,7 @@ Per-role permissions (`tables.<table>.select.<role>` and `.insert.<role>`):
 | ----- | ---- | ---------- | ----------- |
 | `allow_columns` | string[] | select, insert | Allowlist of columns. Empty or `["*"]` = all columns (minus `deny_columns`). |
 | `deny_columns` | string[] | select, insert | Blocklist of columns. Always wins over `allow_columns`. |
-| `filter` | map | select | Row-level predicates (`_eq`/`_neq`/`_gt`/`_lt`/`_in`), ANDed together — injected as a SQL `WHERE` on structured reads and evaluated per subscriber on the live stream (see [enforcement](#where-each-rule-is-enforced)). `_in` takes a single array-valued claim → `col IN (…)`. Values support `{{ jwt.path }}` templating. |
+| `filter` | map | select | Row-level predicates (`_eq`/`_neq`/`_gt`/`_lt`/`_in`), ANDed together — injected as a SQL `WHERE` on structured reads and evaluated per subscriber on the live stream (see [enforcement](#where-each-rule-is-enforced)). `_in` takes a single claim → `col IN (…)`: an array-valued claim contributes each element, a scalar claim acts as a one-element set. Values support `{{ jwt.path }}` templating. |
 | `check` | map | insert | Required insert values (`_eq`, or `_in` for a claim-derived set; `_neq`/`_gt`/`_lt` are rejected). `_eq` is enforced if present and auto-injected if absent; `_in` requires the column be present and in-set. Supports templating. |
 | `allowed_aggregations` | string[] | select | Allowlist of aggregation functions. Empty = all (minus denied). Case-insensitive. |
 | `denied_aggregations` | string[] | select | Blocklist of aggregation functions. Always wins. |

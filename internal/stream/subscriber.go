@@ -45,13 +45,8 @@ type Subscriber struct {
 }
 
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
-// event Hub, carrying the connection's JWT claims (nil for a tokenless caller). The
-// Hub evaluates the claims against a role's row-level-security filter to decide,
-// per subscriber, whether each event row is visible; the claims are deep-copied
-// here — and there is no setter — so the subscriber owns an immutable snapshot: a
-// caller that keeps the source map (e.g. the middleware-owned jwt.MapClaims) can
-// neither change a visibility decision after registration nor race the fan-out's
-// claims read.
+// event Hub, carrying the connection's JWT claims (nil for a tokenless caller),
+// deep-copied — see the claims field for the snapshot rationale.
 func NewSubscriber(claims map[string]any) *Subscriber {
 	s := newSubscriber(defaultSubscriberQueue)
 	s.claims = cloneClaimsMap(claims)
