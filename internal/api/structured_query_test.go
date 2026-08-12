@@ -29,8 +29,8 @@ func structuredQueryRequest(t *testing.T, table string, sq query.StructuredQuery
 	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table="+url.QueryEscape(table), bytes.NewReader(body))
 }
 
-func newStructuredQueryHandler() *StructuredQueryHandler {
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+func newStructuredQueryHandler(t testing.TB) *StructuredQueryHandler {
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{
 			Name: "clicks",
 			Columns: []discovery.Column{
@@ -76,7 +76,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newStructuredQueryHandler()
+			h := newStructuredQueryHandler(t)
 
 			body, err := json.Marshal(query.StructuredQuery{Columns: []string{"page"}})
 			require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestStructuredQuery_MissingTable(t *testing.T) {
 
 func TestStructuredQuery_UnknownTable(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	r := structuredQueryRequest(t, "nope", query.StructuredQuery{Columns: []string{"x"}})
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
@@ -112,7 +112,7 @@ func TestStructuredQuery_UnknownTable(t *testing.T) {
 
 func TestStructuredQuery_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/query?table=clicks", bytes.NewReader([]byte(`{bad}`)))
 	w := httptest.NewRecorder()
 	h.Handle(w, r)
@@ -131,7 +131,7 @@ func TestStructuredQuery_RequestBodyCap(t *testing.T) {
 	t.Parallel()
 
 	const testCap = 64
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.maxRequestBytes = testCap
 
 	// A valid query whose JSON exceeds the cap — a big `in`-list, the exact
@@ -163,7 +163,7 @@ func TestStructuredQuery_PolicyForbidden(t *testing.T) {
 			},
 		},
 	}
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.PolicyStore = policy.NewMemoryStore(p)
 
 	sq := query.StructuredQuery{Columns: []string{"page"}}
@@ -191,7 +191,7 @@ func TestStructuredQuery_ColumnNotAllowed(t *testing.T) {
 			},
 		},
 	}
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.PolicyStore = policy.NewMemoryStore(p)
 
 	// Request "count" column which is not in AllowColumns.
@@ -224,7 +224,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 			},
 		},
 	}
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	h.PolicyStore = policy.NewMemoryStore(p)
 
 	sq := query.StructuredQuery{
@@ -248,7 +248,7 @@ func TestStructuredQuery_AggregationNotAllowed(t *testing.T) {
 
 func TestStructuredQuery_NoPolicyAllowsAll(t *testing.T) {
 	t.Parallel()
-	h := newStructuredQueryHandler()
+	h := newStructuredQueryHandler(t)
 	// No PolicyStore — all queries should be allowed (past policy).
 	sq := query.StructuredQuery{Columns: []string{"page"}}
 	r := structuredQueryRequest(t, "clicks", sq)
@@ -281,7 +281,7 @@ func (c *sqlCapturingConn) Query(_ context.Context, sql string, _ ...any) (drive
 // sensitiveSchema has a column (payload, user_id) that restrictive policies hide.
 func newCapturingHandler(t *testing.T, conn driver.Conn, p *policy.Policy) *StructuredQueryHandler {
 	t.Helper()
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{
 			Name: "clicks",
 			Columns: []discovery.Column{

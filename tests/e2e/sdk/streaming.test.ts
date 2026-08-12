@@ -92,6 +92,56 @@ describe("Streaming", () => {
       }
     });
 
+    it("row DateTime columns arrive canonicalized, matching /v1/query (#372)", async () => {
+      // Ingest spells the row timestamp with an offset; the wire form everywhere
+      // downstream must be canonical RFC 3339 UTC, so the SSE frame and the
+      // /v1/query rendering of the same stored instant are byte-identical — the
+      // query/stream clock drift #372 reported.
+      const whPublic = publicClient();
+      const whAuth = dataClient();
+      const receivedEvents: any[] = [];
+      const id = testId();
+
+      const stream = whPublic.from(T.clicks).stream();
+      let unsub: (() => void) | undefined;
+      try {
+        unsub = stream.subscribe({
+          next: (event) => receivedEvents.push(event),
+          error: (err) => console.error("SSE error:", err),
+        });
+        await stream.connected(5_000);
+
+        await whAuth.from(T.clicks).insert({
+          event_id: id,
+          page: "/canonical-ts",
+          user_id: "canon-user",
+          session_id: "canon-sess",
+          received_timestamp: "2026-06-21T06:00:00.123+02:00",
+        });
+
+        await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
+        const frame = receivedEvents.find((e) => e.data?.event_id === id);
+        expect(frame?.data.received_timestamp).toBe("2026-06-21T04:00:00.123Z");
+
+        // The ClickHouse insert is async behind the stream event — poll the query
+        // path until the row lands, then compare the two renderings.
+        let queried: any[] = [];
+        await waitForCondition(async () => {
+          const result = await whAuth
+            .from(T.clicks)
+            .select("event_id", "received_timestamp")
+            .where("event_id", "=", id)
+            .fetch();
+          queried = result.data ?? [];
+          return queried.length === 1;
+        }, 15_000);
+        expect(queried[0].received_timestamp).toBe(frame?.data.received_timestamp);
+      } finally {
+        if (unsub) unsub();
+        stream.close();
+      }
+    });
+
     it("receives events after insert (authenticated via ?token=)", async () => {
       const whAuth = dataClient();
       const receivedEvents: any[] = [];

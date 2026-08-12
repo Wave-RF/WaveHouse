@@ -34,7 +34,7 @@ Fourteen internal packages under `internal/` (plus `internal/testutil/` for shar
 - **`chsql/`** — dependency-free ClickHouse SQL helpers shared by `query`/`policy` (avoids an import cycle): `QuoteIdent` (backtick-quote every identifier) + `BindUnsafe` (reject names with a literal `?`)
 - **`config/`** — YAML + env var config loading (cleanenv)
 - **`dedupe/`** — `Deduplicator` interface → `Embedded` (Pebble) — optional, controlled by `dedupe.enabled`
-- **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads
+- **`discovery/`** — `SchemaRegistry` that introspects ClickHouse `system.columns` + `Validate()` for ingest payloads + `CanonicalizeTimestamps()` rewriting top-level `DateTime`/`DateTime64` column values to the canonical RFC 3339 UTC wire form pre-publish (Key Design Decision #19)
 - **`ingest/`** — Ingest worker pipeline (`worker.go`: JetStream input → per-table batch INSERT with DLQ output). The pipeline is **insert-only**. The wire format `EventMessage` (`types.go`) carries `{table_name, scope, received_timestamp, data}` and nothing else; the worker accepts whatever table name the envelope carries (table existence was already checked by the HTTP ingest handler, which `404`s an unknown table before publish; the worker doesn't re-validate), then bulk-INSERTs. In the embedded-NATS deployment (the default), the server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (the same `RequireAdmin` gate as the rest of `/v1/admin/*`), so non-admin callers never reach the proxy. A request with no token (or an invalid one) resolves to the `default_role`, which in a production config is not the admin role (setting them equal is a loudly-warned dev-only setting), so it can't reach this endpoint. Plus `Sweeper` (Active Sweeper for NATS message lifecycle) + `EventMessage`/`BufferConsumerName` types (`types.go`)
 - **`mq/`** — `Publisher`/`Subscriber` interfaces → `EmbeddedNATS` + `RemoteNATS`
 - **`observability/`** — OpenTelemetry pipeline: `InitProvider` wires trace/metric/log providers via OTLP gRPC (each signal independently gated). A top-level `Prometheus` config block drives an optional `/metrics` scrape endpoint that runs independently of OTLP push — standalone (Alloy/Mimir scrape, no collector), alongside OTLP, or off. `NewLogger` produces a slog handler that fans out to stdout AND OTLP (stdout always 100%, OTLP sample-rate-aware). `TraceHandler` injects trace_id/span_id from active spans. `tracer.go` provides W3C trace context propagation over NATS headers.
@@ -65,6 +65,7 @@ The invariant index — what must stay true. Full narrative and rationale live i
 16. **Bearer-token-only CORS posture (security)** — Bearer JWT on every request, no cookies/sessions; `corsMiddleware` deliberately **never** emits `Access-Control-Allow-Credentials` (not needed, and `*` + credentials is a spec violation browsers reject). `cors_allowed_origins` controls who can *read* responses, not cookie scope; CSRF protection is structural. Don't reintroduce cookie auth or `Allow-Credentials` without a design discussion — answers GitHub #29/#30. Code: `internal/api/router.go`.
 17. **Non-fatal boot** — schema-discovery failure on boot is non-fatal: `cmd/wavehouse` records an `api.BootState`, binds `:8080`, serves 503 on `/livez`/`/readyz` with the diagnostic, and retries via `SchemaRegistry.RetryRefresh` (backoff 2s → 60s). Bounds supervisor restart loops.
 18. **Health endpoints** — liveness `/livez`, readiness `/readyz` (k8s convention); `/healthz` is a permanent alias of `/livez`; `/health` + `/ready` are deprecated (removal v0.2.0, CHANGELOG #144). `/v1/health` is the SDK's content-free public ping (no ClickHouse check), a `/v1` route so it survives reverse-proxy probe-path filtering. Point k8s at `/livez`/`/readyz`, SDK/online-checks at `/v1/health`, never the deprecated aliases.
+19. **Canonical timestamp wire form (fail-open at ingest)** — the HTTP ingest handler rewrites every top-level `DateTime`/`DateTime64` column value it can parse to RFC 3339 UTC (`discovery.CanonicalizeTimestamps`; per-column precision + zone precomputed at schema refresh) after validation + policy checks and **before** the NATS publish, so the one payload every consumer shares — SSE subscribers, the ClickHouse insert, the DLQ — carries the same spelling `/v1/query` renders: live and query reads can't drift on the instant (#372). Zone-less inputs are read in the column's declared zone, else the discovered server default — ClickHouse's own rule, so the spelling changes but never the instant. Deliberately **fail-open**: an unparseable value or unresolvable zone (no tzdata embedded — never a failed refresh, never a silent UTC reinterpretation, which would move instants) publishes verbatim; ingest must not reject a record over its timestamp spelling — fail-closed enforcement belongs to the stream row-filter (#381). Don't re-spell timestamps downstream. Preserve when touching `internal/discovery`, the ingest handler, or the SSE fan-out. Detail: architecture.md § `discovery/` + §Ingest Path; the exact spelling spec (truncation, zero-trimming, `Z`-only) lives in api.md §Timestamp canonicalization — keep it in sync with `canonicalTimestamp`.
 
 ## Code Conventions
 
@@ -120,7 +121,7 @@ Tooling notes (the non-obvious bits `make help` won't tell you):
 - **Table-driven tests**: Use `tests := []struct{ name string; ... }` with `t.Run(tt.name, ...)` for test cases.
 - **Shared mocks in `internal/testutil/`**: Use `MockPublisher`, `MockCache`, `MockDeduplicator`, `MockSubscriber` instead of creating ad-hoc mocks. See `testutil/mocks.go`.
 - **JWT helpers**: Use `testutil.MakeJWT(t, claims)` and `testutil.MakeExpiredJWT(t, claims)` for auth tests. See `testutil/jwt.go`.
-- **Schema helpers**: Use `testutil.NewTestSchemaRegistry(tables)` or `discovery.NewSchemaRegistryFromMap(tables)` for schema-aware tests.
+- **Schema helpers**: Use `testutil.NewTestSchemaRegistry(t, tables)` for schema-aware tests — it builds the registry through the real discovery path (`Refresh` against a mock ClickHouse connection), so timestamp specs are precomputed like production.
 - **Policy helpers**: Use `policy.NewMemoryStore(p)` for in-memory policy testing without NATS.
 - **Pipes helpers**: Use `pipes.NewMemoryStore(queries...)` for in-memory pipes testing without NATS.
 - **Response assertions**: Use `testutil.AssertJSONResponse(t, rec, status, expected)` and `testutil.AssertJSONContains(t, rec, status, substring)`.
@@ -304,7 +305,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 | Change | Files to update |
 | ------ | --------------- |
 | Add/modify API endpoint | `docs/src/content/docs/api.md`, `README.md` (if user-facing) |
-| Add/modify config option | `docs/src/content/docs/configuration.md`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
+| Add/modify config option | `docs/src/content/docs/configuration.mdx`, `config.yaml`, `deployments/compose/*` env blocks, `docs/src/content/docs/deployment.md` |
 | Change architecture / add a package | `docs/src/content/docs/architecture.md`, `AGENTS.md` |
 | Change ingest / event format | `docs/src/content/docs/api.md`, `docs/src/content/docs/deployment.md` (CH schema) |
 | Change deployment / Docker | `docs/src/content/docs/deployment.md`, compose files |
@@ -313,7 +314,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.md`, `config.yaml`, compose env blocks
+- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.mdx`, `config.yaml`, compose env blocks, `docs/src/content/docs/deployment.md`
 - `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE examples, ClickHouse INSERT columns
 - Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
@@ -363,7 +364,7 @@ Internal-only backend changes (middleware refactors, observability internals, de
 
 1. Add the field to the appropriate struct in `internal/config/config.go` with `yaml`, `env`, and `env-default` tags.
 2. Use the new config value in `cmd/wavehouse/main.go` or the relevant internal package.
-3. Document in `docs/src/content/docs/configuration.md`.
+3. Document in `docs/src/content/docs/configuration.mdx`.
 
 ### Adding a new internal package
 
@@ -378,7 +379,7 @@ Internal-only backend changes (middleware refactors, observability internals, de
 1. Create `*_test.go` files in the same package as the code under test.
 2. Use table-driven tests with `t.Run(tt.name, ...)` for multiple scenarios.
 3. Use shared mocks from `internal/testutil/` (MockPublisher, MockCache, MockDeduplicator, MockSubscriber).
-4. Use `testutil.MakeJWT(t, claims)` for auth tests, `discovery.NewSchemaRegistryFromMap(...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
+4. Use `testutil.MakeJWT(t, claims)` for auth tests, `testutil.NewTestSchemaRegistry(t, ...)` for schema-aware tests, `policy.NewMemoryStore(p)` for policy tests, `pipes.NewMemoryStore(queries...)` for pipes tests.
 5. Use `testutil.AssertJSONResponse` and `testutil.AssertJSONContains` for HTTP handler assertions.
 6. Run `make test` — it gates the unit-test coverage threshold from `.testcoverage.yml`, so a passing run already confirms coverage.
 7. Aim for 80%+ coverage on new code. The project-wide CI-enforced minimum is 80% (merged unit + integration + e2e via `.testcoverage.yml`'s `threshold.total`); per-suite minima are unit 80%, integration 20%, e2e 60%, sdk 50%.

@@ -3,7 +3,6 @@ package discovery
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -19,6 +18,12 @@ type Column struct {
 	Type       string `json:"type"`
 	IsNullable bool   `json:"is_nullable"`
 	HasDefault bool   `json:"has_default"`
+
+	// tsSpec is a DateTime/DateTime64 column's canonicalization spec, resolved
+	// once at schema build (Refresh). nil for non-timestamp columns, hand-built
+	// Column literals, and unresolvable zones — CanonicalizeTimestamps passes
+	// those through untouched (fail-open, #372).
+	tsSpec *timestampSpec
 }
 
 // TableSchema holds the discovered schema for one ClickHouse table.
@@ -61,11 +66,28 @@ func NewSchemaRegistry(conn driver.Conn, database string, refreshInterval time.D
 	}
 }
 
-// Refresh queries system.columns and rebuilds the in-memory schema cache.
+// Refresh rebuilds the in-memory schema cache: it discovers the server's default
+// time zone, queries system.columns, and precomputes timestamp column specs.
 func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 	tracer := otel.GetTracerProvider().Tracer("wavehouse-discovery")
 	ctx, span := tracer.Start(ctx, "SchemaRegistry.Refresh")
 	defer span.End()
+
+	// ClickHouse interprets zone-less timestamp strings in the server's default
+	// zone; canonicalization applies the same rule so the instant never changes (#372).
+	var tzName string
+	if err := sr.conn.QueryRow(ctx, "SELECT timezone()").Scan(&tzName); err != nil {
+		return fmt.Errorf("query server timezone: %w", err)
+	}
+	var serverTZ *time.Location
+	if loc, err := loadLocation(tzName); err == nil {
+		serverTZ = loc
+	} else {
+		// Unresolvable — warn, not fatal, and no UTC fallback (that could move
+		// instants). A nil server zone means zone-less values pass through.
+		sr.logger.Warn("cannot resolve server timezone; zone-less timestamps will pass through un-canonicalized",
+			"timezone", tzName, "error", err)
+	}
 
 	rows, err := sr.conn.Query(ctx,
 		`SELECT table, name, type, default_kind
@@ -99,11 +121,21 @@ func (sr *SchemaRegistry) Refresh(ctx context.Context) error {
 		}
 		ts.Columns = append(ts.Columns, col)
 	}
+	// rows.Next() returns false on a mid-stream driver error too — check Err()
+	// so a truncated scan fails the refresh (callers keep the prior cache and
+	// retry) instead of publishing a partial registry.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate system.columns: %w", err)
+	}
+
+	for _, ts := range tables {
+		resolveTimestampSpecs(ts, serverTZ, sr.logger)
+	}
 
 	sr.mu.Lock()
 	sr.tables = tables
 	sr.mu.Unlock()
-	sr.logger.Info("schema registry refreshed", "tables", len(tables))
+	sr.logger.Info("schema registry refreshed", "tables", len(tables), "server_tz", tzName)
 
 	return nil
 }
@@ -198,17 +230,4 @@ func (sr *SchemaRegistry) StartAutoRefresh(ctx context.Context) {
 // isNullable checks if a ClickHouse type string is Nullable.
 func isNullable(chType string) bool {
 	return len(chType) > 9 && chType[:9] == "Nullable("
-}
-
-// NewSchemaRegistryFromMap creates a SchemaRegistry pre-loaded with the given
-// table schemas. Intended for testing — no ClickHouse connection is required.
-func NewSchemaRegistryFromMap(tables []*TableSchema) *SchemaRegistry {
-	m := make(map[string]*TableSchema, len(tables))
-	for _, t := range tables {
-		m[t.Name] = t
-	}
-	return &SchemaRegistry{
-		tables: m,
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
 }

@@ -43,7 +43,7 @@ Open a [feature request issue](https://github.com/Wave-RF/WaveHouse/issues/new?t
 
 3. Update documentation if your change affects:
    - API endpoints → update `docs/src/content/docs/api.md`
-   - Configuration options → update `docs/src/content/docs/configuration.md`
+   - Configuration options → update `docs/src/content/docs/configuration.mdx`
    - Deployment → update `docs/src/content/docs/deployment.md`
    - Architecture → update `docs/src/content/docs/architecture.md`
 
