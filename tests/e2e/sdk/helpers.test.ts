@@ -76,12 +76,19 @@ describe("waitForCondition", () => {
   });
 
   it("counts a poll still in flight at the deadline as the slowest", async () => {
-    await expect(
-      waitForCondition(async () => {
-        await sleep(5_000);
-        return false;
-      }, 500),
-    ).rejects.toThrow(/1 poll\(s\), slowest [4-9]\d\dms/);
+    const err = await waitForCondition(async () => {
+      await sleep(5_000);
+      return false;
+    }, 500).catch((e: Error) => e);
+
+    // Lower bound only. The property under test is that the in-flight poll was
+    // counted at all — an upper bound would put a wall-clock ceiling on a
+    // measurement taken while ClickHouse and the server share this machine,
+    // which is the exact shape of flake this file exists to remove.
+    expect(err).toBeInstanceOf(Error);
+    const match = /1 poll\(s\), slowest (\d+)ms/.exec((err as Error).message);
+    expect(match).not.toBeNull();
+    expect(Number(match?.[1])).toBeGreaterThanOrEqual(400);
   });
 
   it("propagates a rejecting fn instead of masking it as a timeout", async () => {

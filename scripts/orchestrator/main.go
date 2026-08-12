@@ -67,22 +67,42 @@ func run() error {
 		return fmt.Errorf("%s missing — run `make build-cover` first", binPath)
 	}
 
-	// Refuse to start alongside a previous run's server. Both would use the
-	// JetStream/pebble state under tmp/data and both would write
-	// tmp/wavehouse-cov.log, so the survivor corrupts this run's state and
+	// Clear any server left over from a previous run before touching shared
+	// state. Both would use the JetStream/pebble state under tmp/data and both
+	// would write tmp/wavehouse-cov.log, so a survivor corrupts this run and
 	// interleaves its output into this run's log — which surfaces as a dozen
-	// unrelated tests failing to see their rows, in a log that blames the
-	// wrong ClickHouse. `make test-e2e` cleans up after itself; a leftover
-	// means the previous run was killed (a harness timeout, a stop button, an
-	// impatient SIGKILL) rather than interrupted. Fail loudly instead of
-	// producing a mystery.
+	// unrelated tests failing to see their rows, in a log that blames the wrong
+	// ClickHouse. `make test-e2e` cleans up after itself; a leftover means the
+	// previous run was killed (a harness timeout, a stop button, an impatient
+	// SIGKILL) rather than interrupted.
+	//
+	// Kill rather than refuse: a match is by construction this repo's own cover
+	// binary from a dead run, the very next statement wipes the data dir out
+	// from under it anyway, and refusing would wedge every subsequent run on a
+	// shared CI runner until someone got shell access. Loud, because silently
+	// killing processes should never be a surprise.
 	if stale, err := staleServerPIDs(ctx, binPath); err != nil {
 		log.Printf("  (could not check for leftover servers: %v)", err)
 	} else if len(stale) > 0 {
-		return fmt.Errorf(
-			"a previous wavehouse-cov is still running (pid %s) — it shares tmp/data and "+
-				"tmp/wavehouse-cov.log with this run and will corrupt it.\n  kill it with: kill %s",
-			strings.Join(stale, " "), strings.Join(stale, " "))
+		log.Printf("! killing %d leftover wavehouse-cov process(es) from a previous run: %s",
+			len(stale), strings.Join(stale, " "))
+		log.Printf("  (they share tmp/data and tmp/wavehouse-cov.log with this run)")
+		for _, pid := range stale {
+			n, convErr := strconv.Atoi(pid)
+			if convErr != nil {
+				continue
+			}
+			proc, findErr := os.FindProcess(n)
+			if findErr != nil {
+				continue
+			}
+			if killErr := proc.Kill(); killErr != nil {
+				return fmt.Errorf(
+					"leftover wavehouse-cov (pid %s) could not be killed: %w\n"+
+						"  it will corrupt this run — kill it manually with: kill -9 %s",
+					pid, killErr, pid)
+			}
+		}
 	}
 
 	coverDir := filepath.Join(repoRoot, "tmp", "coverage", "e2e", "data")
