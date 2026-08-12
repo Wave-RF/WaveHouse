@@ -146,8 +146,9 @@ and `EventSource` are built into every modern browser; no polyfills are
 required.
 
 **Node.js** — non-streaming features (`wh.from().fetch()`, `.insert()`,
-`.sql()`, pipes, admin) work in Node 18 and later (the package's minimum,
-per `engines.node`). Streaming (`.stream()`, `.liveQuery()`) uses
+`.sql()`, pipes, admin) work in Node 22 and later (the package's minimum,
+per `engines.node`). 22 is the oldest line we test against, and older
+releases are past end-of-life upstream. Streaming (`.stream()`, `.liveQuery()`) uses
 `EventSource`, which is **not** a default global in Node. The SDK
 feature-detects with `typeof EventSource === "undefined"` and throws a
 descriptive error if it is absent. To use streaming in Node you must
