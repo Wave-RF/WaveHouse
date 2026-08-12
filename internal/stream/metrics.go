@@ -86,12 +86,9 @@ func (m *Metrics) FrameDropped(kind string) {
 }
 
 // RowWithheld records one event row withheld from one subscriber (live or replay)
-// because the role's row-level-security filter did not admit it — including every
-// fail-closed evaluation: a filter column absent from the event, a non-scalar or
-// unparseable value, and a column with no usable schema. Labeled by table and role
-// (bounded by the policy, not by data) so an operator can tell "no matching rows"
-// from "a misconfigured filter is withholding everything for this role" — without
-// it, a fail-closed security feature is indistinguishable from an idle stream.
+// by the role's row-level-security filter, including fail-closed evaluations.
+// Labeled by table and role (policy-bounded, not data-bounded) so an operator can
+// tell "no matching rows" from "a misconfigured filter withholding everything".
 func (m *Metrics) RowWithheld(table, role string) {
 	if m == nil {
 		return

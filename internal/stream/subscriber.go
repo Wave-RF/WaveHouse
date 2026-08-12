@@ -25,11 +25,13 @@ type Subscriber struct {
 
 	// claims are this connection's JWT claims, evaluated against a role's row-level
 	// security filter so the Hub can decide, per subscriber, whether each event row is
-	// visible (see Hub.Broadcast). Fixed at construction — claims are a property of the
-	// authenticated connection, and there is deliberately no setter, so the fan-out
-	// goroutine's unsynchronized read is race-free structurally (publication happens
-	// under the bucket mutex in Hub.Add). A policy reload needs no claims update: the
-	// Hub re-reads the policy store on every event, and claims only feed Evaluate.
+	// visible (see Hub.Broadcast). A private deep-copied snapshot, fixed at
+	// construction — claims are a property of the authenticated connection, and there
+	// is deliberately no setter — so the fan-out goroutine's unsynchronized read is
+	// race-free structurally: publication happens under the bucket mutex in Hub.Add,
+	// and no caller retains a reference that could mutate a nested claim (and with it
+	// an authorization decision) mid-stream. A policy reload needs no claims update:
+	// the Hub re-reads the policy store on every event, and claims only feed Evaluate.
 	// nil ⇒ no claims (a tokenless subscriber), which fails any claim-scoped
 	// row-filter closed.
 	claims map[string]any
@@ -45,12 +47,44 @@ type Subscriber struct {
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
 // event Hub, carrying the connection's JWT claims (nil for a tokenless caller). The
 // Hub evaluates the claims against a role's row-level-security filter to decide,
-// per subscriber, whether each event row is visible; taking them here — with no
-// setter — is what makes the claims immutable for the connection's lifetime.
+// per subscriber, whether each event row is visible; the claims are deep-copied
+// here — and there is no setter — so the subscriber owns an immutable snapshot: a
+// caller that keeps the source map (e.g. the middleware-owned jwt.MapClaims) can
+// neither change a visibility decision after registration nor race the fan-out's
+// claims read.
 func NewSubscriber(claims map[string]any) *Subscriber {
 	s := newSubscriber(defaultSubscriberQueue)
-	s.claims = claims
+	s.claims = cloneClaimsMap(claims)
 	return s
+}
+
+// cloneClaimsMap deep-copies a decoded-JSON claims tree (nested objects and
+// arrays; scalars — string, bool, float64, json.Number, nil — are immutable and
+// shared). nil in, nil out, preserving the tokenless-subscriber signal.
+func cloneClaimsMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = cloneClaimValue(v)
+	}
+	return out
+}
+
+func cloneClaimValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return cloneClaimsMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cloneClaimValue(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // newSubscriber builds a Subscriber with an explicit queue size — the seam tests

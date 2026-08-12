@@ -211,6 +211,38 @@ func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	assertNoFrame(t, acme)
 }
 
+// TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation: NewSubscriber deep-copies
+// the claims, so a caller that keeps the source map (the middleware-owned
+// jwt.MapClaims outlives Hub.Add) can neither widen row visibility after
+// registration nor race Broadcast's claims read. The mutation targets a NESTED
+// value to prove the copy is deep, not a top-level shallow copy.
+func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
+	t.Parallel()
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {Select: map[string]policy.RolePermissions{
+				"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: new("{{ jwt.org.tenant }}")}}},
+			}},
+		},
+	}
+	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
+	const topic = "ingest.clicks"
+
+	org := map[string]any{"tenant": "globex"}
+	claims := map[string]any{"org": org}
+	sub := NewSubscriber(claims)
+	hub.Add(topic, "viewer", sub)
+
+	org["tenant"] = "acme" // the caller mutates its retained map after registration
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a"}))
+	assertNoFrame(t, sub) // visibility follows the snapshot ("globex"), not the mutation
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "globex", "page": "/g"}))
+	assert.Equal(t, "/g", frameData(t, recvFrame(t, sub))["data"].(map[string]any)["page"],
+		"the snapshot keeps admitting the tenant the connection authenticated as")
+}
+
 // TestHub_RowFilter_MissingColumn_FailsClosed: an event that lacks the filtered
 // column can't be proven visible, so it is withheld rather than leaked.
 func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
@@ -631,17 +663,60 @@ func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
 	for _, n := range []int{100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("subscribers=%d", n), func(b *testing.B) {
 			hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
+			subs := make([]*Subscriber, n)
 			for i := range n {
 				tenant := "acme"
 				if i%2 == 1 {
 					tenant = "globex"
 				}
-				hub.Add(topic, "viewer", NewSubscriber(map[string]any{"tenant": tenant}))
+				subs[i] = NewSubscriber(map[string]any{"tenant": tenant})
+				hub.Add(topic, "viewer", subs[i])
 			}
 			b.ReportAllocs()
 			for b.Loop() {
 				hub.Broadcast(topic, raw)
+				// Drain the delivered frames so every iteration measures successful
+				// row-filtered delivery: without this, queues fill after 64 events and
+				// later iterations measure the dropped-send path instead. The drain is
+				// one buffered-channel receive per visible subscriber — noise next to
+				// the per-subscriber policy evaluation under measurement.
+				for _, s := range subs {
+					for len(s.out) > 0 {
+						<-s.out
+					}
+				}
 			}
+		})
+	}
+}
+
+// TestDecodeEvent_RequiresCleanEOF: Decoder.More is not an end-of-input check —
+// it reports false for a trailing "}" or "]" without consuming it — so decodeEvent
+// must read the decoder to io.EOF or a valid event followed by a stray delimiter
+// would be accepted where json.Unmarshal (whose strictness this path preserves)
+// rejects it.
+func TestDecodeEvent_RequiresCleanEOF(t *testing.T) {
+	t.Parallel()
+	const valid = `{"table_name":"clicks","received_timestamp":"t","data":{"a":1}}`
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"clean event", valid, true},
+		{"trailing whitespace", valid + " \n", true},
+		{"trailing close-brace", valid + "}", false},
+		{"trailing close-bracket", valid + "]", false},
+		{"trailing second value", valid + " 42", false},
+		{"trailing garbage", valid + "garbage", false},
+		{"missing table name", `{"received_timestamp":"t","data":{"a":1}}`, false},
+		{"not json", "not json", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var evt ingest.EventMessage
+			assert.Equal(t, tt.want, decodeEvent([]byte(tt.raw), &evt))
 		})
 	}
 }

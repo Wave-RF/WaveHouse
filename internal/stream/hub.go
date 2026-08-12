@@ -3,6 +3,7 @@ package stream
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"sync"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -219,9 +220,15 @@ func (h *Hub) columnKinds(table string) map[string]policy.ColumnKind {
 func decodeEvent(raw []byte, evt *ingest.EventMessage) bool {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	// !More() rejects trailing content after the object, matching the strictness of
-	// the json.Unmarshal this replaces.
-	return dec.Decode(evt) == nil && !dec.More() && evt.TableName != ""
+	if dec.Decode(evt) != nil || evt.TableName == "" {
+		return false
+	}
+	// Token, not More: More() is an in-array/object cursor, not an end-of-input
+	// check — it reports false for a trailing "}" or "]" without consuming it. An
+	// io.EOF from Token proves nothing follows the object, matching the strictness
+	// of the json.Unmarshal this replaces.
+	_, err := dec.Token()
+	return err == io.EOF
 }
 
 // snapshotPolicy returns the current policy and whether filtering is configured.
