@@ -39,6 +39,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -64,6 +65,24 @@ func run() error {
 	binPath := filepath.Join(repoRoot, "bin", "wavehouse-cov")
 	if _, err := os.Stat(binPath); err != nil {
 		return fmt.Errorf("%s missing — run `make build-cover` first", binPath)
+	}
+
+	// Refuse to start alongside a previous run's server. Both would use the
+	// JetStream/pebble state under tmp/data and both would write
+	// tmp/wavehouse-cov.log, so the survivor corrupts this run's state and
+	// interleaves its output into this run's log — which surfaces as a dozen
+	// unrelated tests failing to see their rows, in a log that blames the
+	// wrong ClickHouse. `make test-e2e` cleans up after itself; a leftover
+	// means the previous run was killed (a harness timeout, a stop button, an
+	// impatient SIGKILL) rather than interrupted. Fail loudly instead of
+	// producing a mystery.
+	if stale, err := staleServerPIDs(ctx, binPath); err != nil {
+		log.Printf("  (could not check for leftover servers: %v)", err)
+	} else if len(stale) > 0 {
+		return fmt.Errorf(
+			"a previous wavehouse-cov is still running (pid %s) — it shares tmp/data and "+
+				"tmp/wavehouse-cov.log with this run and will corrupt it.\n  kill it with: kill %s",
+			strings.Join(stale, " "), strings.Join(stale, " "))
 	}
 
 	coverDir := filepath.Join(repoRoot, "tmp", "coverage", "e2e", "data")
@@ -201,8 +220,17 @@ func run() error {
 	// straight to `pnpm exec vitest run --coverage` skips the script-arg
 	// forwarding layer entirely, matching how scripts/cov invokes `pnpm exec
 	// nyc`.
+	//
+	// E2E_NO_COVERAGE=1 drops it for local debugging only. Coverage is on by
+	// default and `make ci` never sets this — a run without it writes no
+	// report, so `make cov` would gate on stale numbers.
+	args := []string{"exec", "vitest", "run", "--coverage"}
+	if os.Getenv("E2E_NO_COVERAGE") == "1" {
+		args = args[:len(args)-1]
+		log.Println("  (E2E_NO_COVERAGE=1 — running without coverage; no report will be written)")
+	}
 	// #nosec G204 — args are a fixed string slice, not user input.
-	vitest := exec.CommandContext(ctx, "pnpm", "exec", "vitest", "run", "--coverage")
+	vitest := exec.CommandContext(ctx, "pnpm", args...)
 	vitest.Dir = filepath.Join(repoRoot, "tests", "e2e", "sdk")
 	vitest.Env = append(os.Environ(),
 		"WAVEHOUSE_URL="+whURL,
@@ -255,6 +283,26 @@ func run() error {
 		dumpLogHeadTail(whLogPath, "vitest failed; showing some wavehouse logs for context")
 	}
 	return vitestErr
+}
+
+// staleServerPIDs returns the PIDs of any wavehouse-cov left over from an
+// earlier run. Called before this run starts its own, so every match is stale.
+// A missing/failed pgrep is reported as an error and treated as "unknown" by
+// the caller — this is a guard rail, not a gate.
+func staleServerPIDs(ctx context.Context, binPath string) ([]string, error) {
+	// #nosec G204 — binPath is filepath.Join(repoRoot, "bin", "wavehouse-cov")
+	// with constant components, not user input; it is only ever a search
+	// pattern here, never executed.
+	out, err := exec.CommandContext(ctx, "pgrep", "-f", binPath).Output()
+	if err != nil {
+		// pgrep exits 1 with no output when nothing matches — the common case.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return strings.Fields(string(out)), nil
 }
 
 // pickFreePort asks the OS for an available port on 127.0.0.1, then

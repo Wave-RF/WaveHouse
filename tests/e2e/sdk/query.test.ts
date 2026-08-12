@@ -31,9 +31,10 @@ describe("Query", () => {
       });
     }
     // Poll until all seeded rows are visible in ClickHouse
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE event_id IN ('${seededIds.join("','")}')`,
+        signal,
       );
       return Number((r[0] as any).cnt) === seededIds.length;
     }, 15_000);
