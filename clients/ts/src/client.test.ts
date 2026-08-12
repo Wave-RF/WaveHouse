@@ -149,6 +149,7 @@ describe("options.fetch", () => {
     const custom = vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
     const client = createClient({
       baseURL: "http://localhost:8080",
+      auth: () => "test-token",
       options: { fetch: custom as unknown as typeof fetch },
     });
 
@@ -156,9 +157,17 @@ describe("options.fetch", () => {
 
     expect(custom).toHaveBeenCalledTimes(1);
     expect(fetchSpy).not.toHaveBeenCalled();
+    // The documented contract: a string URL and a complete RequestInit —
+    // proxy/middleware consumers rely on the whole request reaching them.
     const [url, init] = custom.mock.calls[0];
+    expect(typeof url).toBe("string");
     expect(String(url)).toContain("http://localhost:8080");
-    expect(init).toMatchObject({ method: expect.any(String) });
+    expect(init.method).toBe("POST");
+    expect(init.headers).toMatchObject({
+      "Content-Type": "application/json",
+      Authorization: "Bearer test-token",
+    });
+    expect(typeof init.body).toBe("string");
   });
 
   it("falls back to the global fetch when no override is given", async () => {

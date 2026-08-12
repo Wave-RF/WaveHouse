@@ -81,9 +81,17 @@ export interface ClientConfig<_DB extends Database = Database> {
 }
 
 /**
- * A `fetch`-compatible function. Matches the global `fetch` signature, so
- * undici's export, `node-fetch`, or a thin wrapper around either satisfies it
- * without casting.
+ * A `fetch`-compatible function, matching the global `fetch` signature.
+ *
+ * Implementations that ship their own request/response types (undici,
+ * `node-fetch`) generally need a cast: their declarations are separate from the
+ * ones behind your global `fetch`, so the two are not structurally assignable.
+ *
+ * The SDK only ever calls it with a string URL and a plain `RequestInit`, and
+ * only reads `.ok`, `.status`, `.headers`, and `.text()` off the response — so
+ * a cast here is safe in practice. A rejection is surfaced as a
+ * `NETWORK_ERROR` result and retried with backoff; an `AbortError` becomes
+ * `ABORTED` without a retry.
  */
 export type FetchLike = typeof fetch;
 
@@ -99,16 +107,21 @@ export interface ClientOptions {
    * `keepAliveTimeout`:
    *
    * ```ts
-   * import { Agent, fetch as undiciFetch } from "undici";
+   * import { Agent, fetch as undiciFetch } from "undici"; // npm install undici
    * const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
    * createClient({
    *   baseURL,
-   *   options: { fetch: (url, init) => undiciFetch(url, { ...init, dispatcher }) },
+   *   options: {
+   *     fetch: ((url: string, init?: RequestInit) =>
+   *       undiciFetch(url, { ...init, dispatcher } as never)) as unknown as FetchLike,
+   *   },
    * });
    * ```
    *
-   * Only the request path is affected — streaming (`.stream()`, `.liveQuery()`)
-   * goes through `EventSource`, which this does not replace.
+   * Only the SSE transport is exempt: the live connection behind `.stream()`
+   * and `.liveQuery()` uses `EventSource`, which this does not replace.
+   * `.liveQuery()`'s initial backfill is an ordinary request and does go
+   * through your function.
    */
   fetch?: FetchLike;
 }
@@ -304,9 +317,6 @@ export interface StreamOptions {
 export interface HttpContext {
   baseURL: string;
   auth?: () => Promise<string> | string;
-  // `fetch` stays optional here rather than being defaulted at construction:
-  // resolving it per call keeps the global late-bound, so replacing
-  // `globalThis.fetch` after a client exists still works (vi.stubGlobal does
-  // exactly that).
+  // Stays optional rather than defaulted here, to keep the global late-bound.
   options: { maxRetries: number; fetch?: FetchLike };
 }

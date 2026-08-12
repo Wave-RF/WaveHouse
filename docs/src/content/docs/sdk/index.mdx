@@ -326,32 +326,7 @@ const wh = createClient<Database>({
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
-| `options.fetch` | `typeof fetch` | global `fetch` | HTTP implementation used for every request |
-
-### Supplying your own `fetch`
-
-`options.fetch` replaces the HTTP implementation the SDK uses. Reach for it to
-route through a proxy, attach client certificates, wrap requests in your own
-middleware (logging, tracing, circuit breaking), or to work around transport
-behavior of the runtime you happen to be on:
-
-```ts
-import { Agent, fetch as undiciFetch } from 'undici';
-
-// e.g. retire idle sockets sooner than the runtime's default
-const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
-
-const wh = createClient({
-  baseURL: 'https://wavehouse.example.com',
-  options: {
-    fetch: (url, init) => undiciFetch(url, { ...init, dispatcher }),
-  },
-});
-```
-
-Retries go through the same function, so middleware sees every attempt. Only the
-request path is affected — streaming (`.stream()`, `.liveQuery()`) uses
-`EventSource`, which this does not replace.
+| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation used for every request ([details](#supplying-your-own-fetch)) |
 
 :::note[How the token is transmitted]
 The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.
@@ -372,6 +347,73 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/warehouse' });
 Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``.
 
 The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
+
+### Supplying your own `fetch`
+
+`options.fetch` replaces the HTTP implementation the SDK uses. Reach for it to
+route through a proxy, attach client certificates, wrap requests in your own
+middleware (logging, tracing, circuit breaking), or to work around transport
+behavior of the runtime you happen to be on:
+
+```ts
+const wh = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: {
+    fetch: async (url, init) => {
+      const started = performance.now();
+      const res = await fetch(url, init);
+      console.log(res.status, url, `${Math.round(performance.now() - started)}ms`);
+      return res;
+    },
+  },
+});
+```
+
+Retries go through the same function, so middleware sees every attempt.
+
+The SDK always calls your function with a **string** URL and a plain
+`RequestInit`, and reads only `.ok`, `.status`, `.headers`, and `.text()` off
+the response. If it rejects, the request becomes a `NETWORK_ERROR` result and is
+retried with backoff; an `AbortError` becomes `ABORTED` and is not retried. The
+option's type is exported as `FetchLike`.
+
+Only the SSE transport is exempt: the live connection behind `.stream()` and
+`.liveQuery()` uses `EventSource`, which this does not replace. `.liveQuery()`'s
+[initial backfill](/sdk/streaming#live-queries) is an ordinary request and *does*
+go through your function.
+
+#### Swapping in undici
+
+The motivating case is a transport bug you can't fix from inside the SDK — for
+example [undici #5600](https://github.com/nodejs/undici/issues/5600), where
+8.8.0–8.9.0 (bundled in Node 26) stalls for seconds before writing a request
+onto a briefly idle socket. A dispatcher with a tuned `keepAliveTimeout` works
+around it:
+
+```ts
+import { Agent, fetch as undiciFetch } from 'undici'; // npm install undici
+
+// Retire idle sockets sooner than the runtime's default
+const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
+
+const wh = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: {
+    fetch: ((url: string, init?: RequestInit) =>
+      undiciFetch(url, { ...init, dispatcher } as never)) as unknown as FetchLike,
+  },
+});
+```
+
+The casts are load-bearing: undici declares its own `Request`/`Response` types,
+separate from the ones behind your global `fetch`, so the two aren't
+structurally assignable and TypeScript rejects the direct form. They're safe
+because of the narrow contract above. `undici` is a dependency you add — the SDK
+itself stays dependency-free.
+
+If you only need the dispatcher (and not middleware), `setGlobalDispatcher(new
+Agent({ keepAliveTimeout: 1_000 }))` achieves the same thing process-wide
+without `options.fetch`.
 
 ### Type-Safe Tables
 
