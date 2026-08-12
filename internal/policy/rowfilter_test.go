@@ -132,6 +132,25 @@ func TestRowVisible_NaN_FailsClosed(t *testing.T) {
 	assert.False(t, neq.RowVisible(map[string]any{"amount": float64(100)}, num), "NaN is uncomparable, so even != fails closed")
 }
 
+// TestRowVisible_Inf_FailsClosed: ParseFloat also accepts "Inf"/"+Inf"/"-Inf"/
+// "Infinity" (any case), and an infinite bound would make _gt/_lt admit every
+// finite row — a fail-open the query path can't reproduce (ClickHouse rejects
+// binding an Inf-spelled string to an integer column). Either operand parsing
+// to ±Inf must withhold the row instead.
+func TestRowVisible_Inf_FailsClosed(t *testing.T) {
+	t.Parallel()
+	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+
+	byClaim := evalRowFilter(t, map[string]Filter{"amount": {Gt: new("{{ jwt.min }}")}}, map[string]any{"min": "-Inf"})
+	assert.False(t, byClaim.RowVisible(map[string]any{"amount": float64(5)}, num), "-Inf lower bound must not admit finite rows")
+
+	lt := evalRowFilter(t, map[string]Filter{"amount": {Lt: new("Infinity")}}, nil)
+	assert.False(t, lt.RowVisible(map[string]any{"amount": float64(5)}, num), "Infinity upper bound must not admit finite rows")
+
+	byRow := evalRowFilter(t, map[string]Filter{"amount": {Gt: new("100")}}, nil)
+	assert.False(t, byRow.RowVisible(map[string]any{"amount": "+Inf"}, num), "Inf row value is uncomparable, fail closed")
+}
+
 // TestRowVisible_NumericEquality_ExactBeyondFloat64: ingest accepts string-encoded
 // numerics precisely so 64-bit IDs survive JS precision loss; equality must not
 // collapse distinct IDs that round to the same float64 (adjacent values past 2^53).

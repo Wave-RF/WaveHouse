@@ -182,9 +182,11 @@ func compareScalar(rowVal any, filterVal string, spec ColumnSpec) (int, bool) {
 		}
 		a, err1 := strconv.ParseFloat(s, 64)
 		b, err2 := strconv.ParseFloat(filterVal, 64)
-		// NaN must be rejected explicitly: ParseFloat accepts "NaN", and NaN's
-		// three-way comparison reads as "equal to everything" below — a fail-open.
-		if err1 != nil || err2 != nil || math.IsNaN(a) || math.IsNaN(b) {
+		// NaN and ±Inf must be rejected explicitly: ParseFloat accepts "NaN" and
+		// "Inf" spellings, NaN's three-way comparison reads as "equal to
+		// everything" below, and an infinite bound makes _gt/_lt admit every
+		// finite row — both fail-opens the query path can't reproduce.
+		if err1 != nil || err2 != nil || math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) {
 			return 0, false
 		}
 		switch {
