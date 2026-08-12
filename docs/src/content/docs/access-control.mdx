@@ -238,7 +238,7 @@ Values are always bound as SQL **parameters**, never concatenated into the query
 
 `check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected at config load**.
 
-Unlike row filters, an unresolvable claim in an `_eq` check is **not** fail-closed: it still resolves to the empty string, so an omitted column is auto-injected as `''`, and any supplied value other than `''` is rejected with `403 check failed`. (An unresolvable `_in` check *does* fail closed — the claim-derived set is empty, so every insert to that column is rejected.) Check-path semantics are being standardized in [#371](https://github.com/Wave-RF/WaveHouse/issues/371).
+Unlike row filters, an unresolvable claim in an `_eq` check is **not** fail-closed: the template still renders, with the unresolvable placeholder replaced by the empty string and any surrounding literal text kept (`"acct-{{ jwt.org_id }}"` → `acct-`, a bare `"{{ jwt.sub }}"` → `''`). That rendered value becomes the required value: an omitted column is auto-injected with it, and any other supplied value is rejected with `403 check failed for column "x"`. (An unresolvable `_in` check *does* fail closed — the claim-derived set is empty, so every insert to that column is rejected.) Check-path semantics are being standardized in [#371](https://github.com/Wave-RF/WaveHouse/issues/371).
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">

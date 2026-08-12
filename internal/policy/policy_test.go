@@ -397,25 +397,28 @@ func TestResolveTemplate(t *testing.T) {
 		"nested": map[string]any{"val": "deep"},
 	}
 	tests := []struct {
+		name   string
 		tmpl   string
 		want   string
 		wantOK bool
 	}{
-		{"{{ jwt.org_id }}", "org-123", true},
-		{"{{ jwt.nested.val }}", "deep", true},
-		{"{{ jwt.missing }}", "", false},
-		{"literal", "literal", true},
+		{"single claim", "{{ jwt.org_id }}", "org-123", true},
+		{"nested claim", "{{ jwt.nested.val }}", "deep", true},
+		{"missing claim", "{{ jwt.missing }}", "", false},
+		{"literal value", "literal", "literal", true},
 		// A template-free empty string is the policy author's literal value, not
 		// an unresolvable claim — it must stay ok so `_eq: ""` binds as written.
-		{"", "", true},
+		{"empty literal", "", "", true},
 		// One unresolvable claim poisons the whole template, even alongside a
 		// resolvable one or surrounding text.
-		{"{{ jwt.org_id }}-{{ jwt.missing }}", "org-123-", false},
+		{"mixed resolvable and missing", "{{ jwt.org_id }}-{{ jwt.missing }}", "org-123-", false},
 	}
 	for _, tt := range tests {
-		got, ok := resolveTemplate(tt.tmpl, claims)
-		assert.Equal(t, tt.want, got, tt.tmpl)
-		assert.Equal(t, tt.wantOK, ok, tt.tmpl)
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := resolveTemplate(tt.tmpl, claims)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantOK, ok)
+		})
 	}
 }
 
