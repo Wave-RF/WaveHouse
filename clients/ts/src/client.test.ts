@@ -27,6 +27,19 @@ describe("createClient", () => {
     expect(client._ctx.baseURL).toBe("http://localhost:8080");
   });
 
+  it("keeps a path prefix on baseURL, minus trailing slashes", () => {
+    const client = createClient({ baseURL: "https://app.example.com/api/warehouse/" });
+    expect(client._ctx.baseURL).toBe("https://app.example.com/api/warehouse");
+  });
+
+  it("sends requests under the baseURL path prefix", async () => {
+    const client = createClient({ baseURL: "https://app.example.com/api/warehouse" });
+    await client.from("clicks").select("page").limit(1);
+
+    const [url] = fetchSpy.mock.calls[0];
+    expect(new URL(url as string).pathname).toBe("/api/warehouse/v1/query");
+  });
+
   it("defaults maxRetries to 2", () => {
     const client = createClient({ baseURL: "http://localhost:8080" });
     expect(client._ctx.options.maxRetries).toBe(2);

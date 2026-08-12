@@ -11,6 +11,8 @@
  *   npm run codegen -- --url http://localhost:8080 --out ./db.d.ts
  */
 
+import { resolveURL } from "../url.js";
+
 // ── Arg parsing (zero deps) ────────────────────────────────────────────────
 
 interface CliArgs {
@@ -163,7 +165,7 @@ async function fetchSchemas(url: string, auth?: string): Promise<Schemas> {
   const headers: Record<string, string> = {};
   if (auth) headers.Authorization = `Bearer ${auth}`;
 
-  const res = await fetch(`${url.replace(/\/+$/, "")}/v1/schema`, { headers });
+  const res = await fetch(resolveURL(url, "/v1/schema").toString(), { headers });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);

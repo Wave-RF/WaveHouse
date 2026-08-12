@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws**. All errors are returned in `Result.error`.
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -37,6 +37,10 @@ The SDK **never throws**. All errors are returned in `Result.error`.
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
+| 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. a non-absolute `baseURL`) |
+| 0 | `SSE_ERROR` | Yes | Stream connection error |
+
+The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Their `retryable: true` is advisory: unlike the REST codes above, the SDK never re-dials a stream itself. After the connection is open, drops surface through the `status` callback (`reconnecting` → `live`, or `closed`) while the native `EventSource` re-dials on its own; `SSE_ERROR` is a defensive fallback for a transport left in an unexpected state. A failure *before* the `EventSource` is constructed — a non-absolute `baseURL`, a rejecting `auth` callback — is terminal (`SSE_CONNECT_ERROR`), so fix the cause and start a new stream.
 
 ---
 
