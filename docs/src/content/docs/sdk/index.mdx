@@ -372,9 +372,9 @@ const wh = createClient({
 Retries go through the same function, so middleware sees every attempt.
 
 The SDK always calls your function with a **string** URL and a plain
-`RequestInit`. Off the response it reads `.ok`, `.status` and `.headers`
-always, `.text()` on success, and `.json()` plus `.statusText` when the response
-is not `ok` — so a hand-rolled response object needs all six. If your function
+`RequestInit`. Off the response it reads `.ok` and `.headers` always, `.text()`
+on success, and `.status`, `.statusText` plus `.json()` when the response is not
+`ok` — so a hand-rolled response object needs all six. If your function
 rejects, the request becomes a `NETWORK_ERROR` result and is retried with
 backoff; the one exception is a `DOMException` named `AbortError` — what the
 platform `fetch` and undici throw on abort — which becomes `ABORTED` and is not
@@ -393,29 +393,28 @@ go through your function.
 
 #### Swapping in undici
 
-The motivating case is a transport bug you can't fix from inside the SDK — for
-example [undici #5600](https://github.com/nodejs/undici/issues/5600), where
-reusing a keep-alive socket on an idle event loop stalls roughly 500 ms per
-request (the reporter measured ~450–465 ms against a 10 ms server). It affects
-undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
+The motivating case is a transport bug in the runtime's own HTTP stack, which
+you can't fix from inside the SDK — for example
+[undici #5600](https://github.com/nodejs/undici/issues/5600): reusing a
+keep-alive socket while the event loop is idle stalls the request before it
+goes out. The upstream report measured ~450–465 ms against a 10 ms server; our
+own measurements on 8.9.0 saw it swing erratically from ~100 ms to ~2.5 s
+depending on the idle gap. It affects undici 8.8.0–8.9.0, and Node 26 bundles
+8.9.0.
 
-**Upgrade first if you can:** this was fixed in undici 8.10.0, so a runtime with
-8.10.0 or newer needs no workaround. Reach for `options.fetch` when you're
-pinned to an affected version — a dispatcher with a tuned `keepAliveTimeout`
-sidesteps it:
+**Upgrading undici is the actual fix** — it landed in 8.10.0. What
+`options.fetch` buys you is a way to do that without waiting for a new runtime:
+install undici yourself and route requests through it, so the version bundled
+with your Node never handles them.
 
 ```ts
 import { createClient } from '@wavehouse/sdk';
-import { Agent, fetch as undiciFetch } from 'undici'; // npm install undici
-
-// Retire idle sockets sooner than the runtime's default
-const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
+import { fetch as undiciFetch } from 'undici'; // npm install undici — 8.10.0+
 
 const wh = createClient({
   baseURL: 'https://wavehouse.example.com',
   options: {
-    fetch: (url, init) =>
-      undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+    fetch: (url, init) => undiciFetch(url, init as never) as unknown as Promise<Response>,
   },
 });
 ```
@@ -426,9 +425,17 @@ structurally assignable and TypeScript rejects the direct form. They're safe
 because of the narrow contract above. `undici` is a dependency you add — the SDK
 itself stays dependency-free.
 
-If you only need the dispatcher (and not middleware), `setGlobalDispatcher(new
-Agent({ keepAliveTimeout: 1_000 }))` achieves the same thing process-wide
-without `options.fetch`.
+If you're genuinely pinned to an affected undici, a dispatcher that never reuses
+a keep-alive socket avoids the stall — `new Agent({ pipelining: 0 })`, passed as
+`dispatcher` in the `RequestInit`. It costs you a fresh connection per request,
+so prefer upgrading. Note that tuning `keepAliveTimeout` does **not** help: the
+retirement timer is starved by the same idle event loop that triggers the bug,
+so the socket is still there to be reused.
+
+To change the transport process-wide instead of per-client, an installed undici's
+`setGlobalDispatcher(new Agent())` is picked up by Node's built-in global
+`fetch`, no `options.fetch` needed — but that only helps if the *installed*
+undici is 8.10.0+, since it's the bundled implementation doing the stalling.
 
 ### Type-Safe Tables
 

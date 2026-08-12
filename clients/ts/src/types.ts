@@ -90,8 +90,8 @@ export interface ClientConfig<_DB extends Database = Database> {
  * fetch` would reject, since a parameter accepting only `string` is not
  * assignable to one accepting `RequestInfo | URL`.
  *
- * The response is read for `.ok`, `.status` and `.headers` always, `.text()` on
- * success, and `.json()` plus `.statusText` when it is not `ok`. A rejection
+ * The response is read for `.ok` and `.headers` always, `.text()` on success,
+ * and `.status`, `.statusText` plus `.json()` when it is not `ok`. A rejection
  * becomes a `NETWORK_ERROR` result and is retried with backoff — except a
  * `DOMException` named `AbortError` (what the platform `fetch` and undici throw
  * on abort), which becomes `ABORTED` and is not retried. Implementations that
@@ -111,18 +111,17 @@ export interface ClientOptions {
    * Defaults to the global `fetch`.
    *
    * Provide one to route through a proxy, attach client certificates, add
-   * middleware (logging, tracing, circuit breaking), or work around transport
-   * behavior your runtime gets wrong — e.g. an undici dispatcher with a tuned
-   * `keepAliveTimeout`:
+   * middleware (logging, tracing, circuit breaking), or bypass a transport bug
+   * in the runtime's bundled HTTP stack by routing through an implementation
+   * you install yourself — e.g. an undici new enough to be free of
+   * {@link https://github.com/nodejs/undici/issues/5600 | undici #5600}:
    *
    * ```ts
-   * import { Agent, fetch as undiciFetch } from "undici"; // npm install undici
-   * const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
+   * import { fetch as undiciFetch } from "undici"; // npm install undici — 8.10.0+
    * createClient({
    *   baseURL,
    *   options: {
-   *     fetch: (url, init) =>
-   *       undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+   *     fetch: (url, init) => undiciFetch(url, init as never) as unknown as Promise<Response>,
    *   },
    * });
    * ```
