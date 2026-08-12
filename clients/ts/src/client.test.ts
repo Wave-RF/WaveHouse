@@ -259,6 +259,22 @@ describe("options.headers", () => {
     expect(sent.authorization).toBeUndefined();
   });
 
+  it("collapses two configured spellings of one header instead of sending both", async () => {
+    // Left as separate keys, the Headers constructor comma-joins them at fetch
+    // time — `x-tenant: acme, beta` — which is the corruption this guards.
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { headers: { "x-tenant": "acme", "X-Tenant": "beta" } },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    const sent = headersOf(0);
+    const spellings = Object.keys(sent).filter((k) => k.toLowerCase() === "x-tenant");
+    expect(spellings).toHaveLength(1);
+    expect(new Headers(sent).get("x-tenant")).toBe("beta");
+  });
+
   it("still applies when no auth is configured", async () => {
     const client = createClient({
       baseURL: "http://localhost:8080",

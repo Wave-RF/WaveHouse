@@ -119,7 +119,7 @@ export interface ClientOptions {
    * createClient({
    *   baseURL,
    *   options: {
-   *     fetch: (url, init) => undiciFetch(url, init as never) as unknown as Promise<Response>,
+   *     fetch: (url, init) => undiciFetch(url as string, init as never) as unknown as Promise<Response>,
    *   },
    * });
    * ```

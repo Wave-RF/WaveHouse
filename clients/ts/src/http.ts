@@ -37,11 +37,20 @@ function mergeHeaders(
   extra: Record<string, string> | undefined,
 ): Record<string, string> {
   if (!extra) return base;
-  const taken = new Map(Object.keys(base).map((k) => [k.toLowerCase(), k]));
+  const sdkNames = new Set(Object.keys(base).map((k) => k.toLowerCase()));
   const merged = { ...base };
+  // Spelling each configured name was last stored under, so two entries
+  // differing only in case replace each other here rather than surviving as
+  // separate keys for `Headers` to comma-join at fetch time.
+  const configured = new Map<string, string>();
   for (const [name, value] of Object.entries(extra)) {
+    const lower = name.toLowerCase();
     // Skip rather than overwrite: `base` is the SDK's own, which outranks.
-    if (!taken.has(name.toLowerCase())) merged[name] = value;
+    if (sdkNames.has(lower)) continue;
+    const prior = configured.get(lower);
+    if (prior !== undefined) delete merged[prior];
+    merged[name] = value;
+    configured.set(lower, name);
   }
   return merged;
 }
