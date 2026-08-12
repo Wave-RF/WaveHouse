@@ -9,26 +9,26 @@ Everything you need to build, test, lint, and contribute to WaveHouse — from f
 
 ## Prerequisites
 
-You need these on your `PATH` before any `make` recipe will work end-to-end:
+Ensure these are on your `PATH` before running `make`:
 
 | Tool | Required version | Why | Install |
 | ---- | ---------------- | --- | ------- |
-| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse`; also runs the pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
-| **GNU Make** | **4.0+** | The Makefile uses `--output-sync=target` (Make 4 only) and bash-pinned recipes. macOS ships with BSD Make 3.81, which **will not work** | macOS: `brew install make` then use `gmake` or put `$(brew --prefix make)/libexec/gnubin` on your PATH. Linux: usually already installed |
-| **bash** | 4+ recommended | Recipes are pinned to `bash`; the helper scripts under `scripts/` use `set -euo pipefail` and bash arrays | macOS default is bash 3.2 (works for current recipes, but `brew install bash` is safer); Linux distros ship 4+ |
-| **Docker** *(or Podman)* | Engine 20.10+ with the Compose **v2** plugin (`docker compose`, no hyphen) | Compose stacks under `deployments/compose/`; the E2E and integration suites boot ClickHouse via testcontainers (no compose file) | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io) with `podman-compose` / the `podman compose` plugin. The testcontainers Go library also honors `DOCKER_HOST` for rootless Podman setups |
-| **Node.js** | 22 LTS — pinned via `.nvmrc` at the repo root | Runtime for pnpm and the Vitest suites. Pinned to match CI (`setup-node` uses 22) and to avoid Node-major surprises; older Vitest versions in this repo were known to crash on Node 26 with a V8 heap-allocation abort | [nodejs.org](https://nodejs.org/) or `nvm use` / `fnm use` / `volta` (all read `.nvmrc`) |
-| **pnpm** | 11.1+ (pinned via `packageManager` in the root `package.json`) | Package manager for the TypeScript SDK, E2E test harness, and docs site (managed as a single pnpm workspace from the repo root); `make build-ts`, `make test-ts`, `make test-e2e`, `make build-docs`, `make dev-docs`, `make preview-docs` all shell out to `pnpm` | `corepack enable && corepack prepare pnpm@11.1.3 --activate` (recommended), or `npm i -g pnpm` |
-| **git** + **curl** | any recent | `git` for source + version metadata in builds; `curl` is used by the Makefile to fetch the pinned `golangci-lint` binary into `.bin/` | usually preinstalled |
+| **Go** | 1.26+ (matches `go.mod`) | Compiles `cmd/wavehouse` and runs pinned `tool` deps (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `deadcode`, `gsa`, `goda`) via `go tool` | [go.dev/dl](https://go.dev/dl/) |
+| **GNU Make** | **4.0+** | Required for `--output-sync=target` and bash-pinned recipes. macOS BSD Make 3.81 is incompatible | macOS: `brew install make` (use `gmake` or add `$(brew --prefix make)/libexec/gnubin` to PATH). Linux: usually preinstalled |
+| **bash** | 4+ recommended | Recipes and `scripts/` use `set -euo pipefail` and bash arrays | macOS default is 3.2 (`brew install bash` recommended); Linux ships 4+ |
+| **Docker** *(or Podman)* | Engine 20.10+ with Compose **v2** plugin | Used for `deployments/compose/` and testcontainers (ClickHouse) in E2E/integration suites | [Docker Desktop](https://docs.docker.com/get-docker/), [colima](https://github.com/abiosoft/colima), or [Podman](https://podman.io). Honors `DOCKER_HOST` for rootless Podman |
+| **Node.js** | 22 LTS (via `.nvmrc`) | Runtime for pnpm and Vitest; matches CI to avoid V8 heap-allocation aborts seen in Node 26 | [nodejs.org](https://nodejs.org/) or `nvm`/`fnm`/`volta` |
+| **pnpm** | 11.1+ (pinned via `packageManager` in `package.json`) | Manages TypeScript SDK, E2E harness, and docs workspace; used by `make build-ts`, `test-ts`, `test-e2e`, and `*-docs` targets | `corepack enable && corepack prepare pnpm@11.1.3 --activate` or `npm i -g pnpm` |
+| **git** + **curl** | any recent | `git` for source/versioning; `curl` fetches `golangci-lint` into `.bin/` | usually preinstalled |
 
 ### Auto-installed by `make tools`
 
-Run `make tools` once after cloning to populate everything that doesn't have to be on your PATH:
+Run `make tools` after cloning to install:
 
-- **`golangci-lint` v2.11.4** → installed to `.bin/<os>_<arch>/` (version-pinned in the Makefile; bumping the version triggers a reinstall). Not in `go.mod` because its dependency tree conflicts with the main module.
-- **`air` v1.65.1** → installed to `.bin/<os>_<arch>/` via `go install`; used by `make dev` for hot-reload. Same exclusion principle as `golangci-lint` — air's transitive deps (Hugo, Sass libs) would bloat `go.sum`.
-- **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) — pinned in `go.mod` via native `tool` directives (Go 1.24+), invoked with `go tool <name>`. `make tools` runs `go mod download` so they're cached; they compile lazily on first invocation.
-- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` (via `pnpm install --frozen-lockfile`). `make tools` runs only the pnpm install; the Playwright Chromium binary (~130 MB) is fetched on-demand by `make build-docs` / `make dev-docs` via the internal `install-playwright-docs` target, so Go-only contributors don't pay the download cost. When you do hit `build-docs` / `dev-docs`, Chromium is required by two parts of the docs *build*: `rehype-mermaid` (SVG diagram rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes each diagram to light/dark PNGs (a solid surface-card variant plus a transparent-background variant for slide decks) at `astro:build:done` for the Copy/Download buttons in the zoom lightbox. Both reuse the same Playwright Chromium, as does the manual `docs/scripts/screenshot.mjs` QA helper. `starlight-links-validator` runs under `build-docs` / CI only — the `dev-docs` watch loop skips it so a mid-edit dangling link doesn't fail every rebuild (CI still enforces link validity before merge; run `DOCS_WATCH_STRICT=1 make dev-docs` to keep the validator on locally). The `--with-deps` flag (which apt-installs Chromium's system libraries: `libnspr4`, `libnss3`, etc.) is only added when `$CI` is set, so contributor laptops don't get an unexpected `sudo` prompt. On Linux dev machines without those libs already present, run `pnpm exec playwright install-deps chromium` once manually. The docs site is a pnpm workspace package (`wavehouse-docs`); the root Makefile drives it directly via `pnpm --filter` (no sub-Makefile) — the `*-docs` targets show up in `make help`. It is also a real `@wavehouse/sdk` consumer (the landing page's live demo imports the workspace package), so `check-docs` / `build-docs` / `dev-docs` build the SDK first via `build-ts`; if you drive Astro directly through pnpm (e.g. `pnpm --filter wavehouse-docs run start`), run `make build-ts` once first so the dep resolves.
+- **`golangci-lint` v2.11.4** $\rightarrow$ installed to `.bin/<os>_<arch>/`. Not in `go.mod` due to dependency conflicts.
+- **`air` v1.65.1** $\rightarrow$ installed to `.bin/<os>_<arch>/` for hot-reload via `make dev`. Excluded from `go.sum` to avoid bloating with Hugo/Sass deps.
+- **Go `tool` deps** (`gotestsum`, `gofumpt`, `goimports`, `govulncheck`, `go-test-coverage`, `gocover-cobertura`, `deadcode`, `gsa`, `goda`) $\rightarrow$ pinned in `go.mod` (Go 1.24+); cached via `go mod download`.
+- **pnpm deps** for `clients/ts/`, `tests/e2e/sdk/`, and `docs/` $\rightarrow$ installed via `pnpm install --frozen-lockfile`. Playwright Chromium (~130 MB) is fetched on-demand by `make build-docs` or `dev-docs` for `rehype-mermaid` (SVG rendering) and the `diagram-png` integration (`docs/src/integrations/diagram-png.mjs`), which rasterizes diagrams to light/dark PNGs at `astro:build:done`; the manual `docs/scripts/screenshot.mjs` QA helper reuses the same Chromium. `--with-deps` (apt-installing `libnspr4`, `libnss3`, etc.) is added only when `$CI` is set, so laptops get no surprise `sudo` prompt; on Linux without those libs, run `pnpm exec playwright install-deps chromium` once. The docs site (`wavehouse-docs`) is a pnpm workspace package driven by the root Makefile via `pnpm --filter`. Since it consumes `@wavehouse/sdk`, `make build-ts` must run before Astro builds. `starlight-links-validator` runs in CI and `build-docs`; skip it in `dev-docs` unless `DOCS_WATCH_STRICT=1` is set.
 
 ### Verify your setup
 
@@ -40,18 +40,18 @@ node --version      # v22.x (matches .nvmrc and CI)
 pnpm --version      # 11.1+
 ```
 
-If any of those are wrong/missing, the Makefile recipes will fail with confusing errors (e.g. `--output-sync` is unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
+Wrong or missing versions produce confusing recipe errors (`--output-sync` unrecognized on Make 3.81; `pnpm: command not found` on `make test-ts`).
 
 ### Optional but recommended
 
 | Tool | Why | Install |
 | ---- | --- | ------- |
-| **[Claude Code](https://claude.com/claude-code)** | The repo ships team-wide configuration in `.claude/` — slash commands, subagents, hooks, status line. See [Claude Code & AI agents](/claude-code) for setup. | `brew install --cask claude-code` (macOS) or follow [official install](https://code.claude.com/docs/en/quickstart) |
-| **[worktrunk](https://worktrunk.dev)** | Wraps `git worktree` for parallel-agent workflows. Project hooks live in `.config/wt.toml` (auto-runs `make tools` on new worktrees, `make verify` on pre-merge). | `brew install worktrunk && wt config shell install` |
+| **[Claude Code](https://claude.com/claude-code)** | Uses repo config in `.claude/` (commands, subagents, hooks). See [Claude Code & AI agents](/claude-code) | `brew install --cask claude-code` or [official install](https://code.claude.com/docs/en/quickstart) |
+| **[worktrunk](https://worktrunk.dev)** | Wraps `git worktree`. `.config/wt.toml` auto-runs `make tools` on new worktrees and `make verify` pre-merge | `brew install worktrunk && wt config shell install` |
 
 ## Quick Start
 
-This is the fastest way to get a fully functional local environment:
+Fastest way to get a functional local environment:
 
 ```bash
 # 1. Clone and bootstrap (Go modules + golangci-lint + pnpm deps)
@@ -78,23 +78,22 @@ docker compose -f deployments/compose/dependencies.yaml exec clickhouse \
 make dev
 ```
 
-WaveHouse is now running at `http://localhost:8080` in standalone mode with:
+WaveHouse runs at `http://localhost:8080` in standalone mode with:
 
-- **Embedded NATS** (JetStream) — no external MQ needed
-- **L1 cache only** (Ristretto) — no external cache needed
-- **Fail-closed** by default — `config.yaml` seeds no policy, so every request is denied until you seed one (see [Test the API](#test-the-api))
-- **Dedup disabled** by default — no Pebble needed
-- **Schema discovery** — automatically finds your ClickHouse tables
+- **Embedded NATS** (JetStream) and **L1 cache** (Ristretto): no external MQ or cache needed.
+- **Fail-closed**: `config.yaml` seeds no policy, so requests are denied until you seed one (see [Test the API](#test-the-api)).
+- **Dedup disabled**: Pebble not required by default.
+- **Schema discovery**: automatically finds ClickHouse tables.
 
 ### Test the API
 
-`make dev` is **fail-closed** — `config.yaml` seeds no policy, so every request is denied. Point it at the shipped dev policy (the `public` trial role: read/write `clicks`/`events`, no token) and (re)start it:
+`make dev` is fail-closed. Use the shipped dev policy (`public` trial role: read/write `clicks`/`events`, no token) to enable requests:
 
 ```bash
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 ```
 
-Then the tokenless data-plane calls work (create a `clicks` table first — see the [Getting Started](/getting-started) walkthrough):
+Tokenless data-plane calls (ensure `clicks` table exists):
 
 ```bash
 # Ingest an event
@@ -119,7 +118,7 @@ curl http://localhost:8080/livez   # → {"status":"ok"}
 curl http://localhost:8080/readyz  # → {"status":"ready"}
 ```
 
-The admin surface — `/v1/schema`, `/v1/admin/query` (raw SQL), `/v1/dlq/stats` — needs the **admin** role, which the `public` trial role doesn't have. Mint an admin JWT (see [Validating tokens](#validating-tokens) below) and pass it:
+Admin endpoints (`/v1/schema`, `/v1/admin/query`, `/v1/dlq/stats`) require the **admin** role. Mint an admin JWT (see [Validating tokens](#validating-tokens)) and pass it:
 
 ```bash
 curl -s http://localhost:8080/v1/schema -H "Authorization: Bearer $TOKEN" | jq
@@ -130,83 +129,68 @@ curl -s http://localhost:8080/v1/dlq/stats -H "Authorization: Bearer $TOKEN"
 
 ### How `make dev` works
 
-`make dev` is a one-stop convenience target for backend and frontend
-development. The recipe is essentially:
+`make dev` is a convenience target for backend and frontend development:
 
 ```make
 dev: deps-up $(AIR)
     air -c .air.toml
 ```
 
-`deps-up` runs `docker compose ... up -d --wait clickhouse`, which blocks until the ClickHouse container's `/ping` healthcheck flips to healthy. `$(AIR)` lazily installs air to `.bin/<os>_<arch>/` if missing. Then air takes over: it watches `cmd/` and `internal/` (the `.go` and `.yaml` files within them), rebuilds `tmp/wavehouse` on change, and restarts the binary. Config is **not** hot-reloaded: `make dev` runs the binary with `WH_CONFIG=.config.local.yaml` — a gitignored personal copy seeded **once** from `config.yaml` on first run (it won't re-copy if it already exists). So to change dev config, edit `.config.local.yaml` (not `config.yaml`) and restart `make dev`; air watches neither root file.
+`deps-up` starts ClickHouse and blocks until the `/ping` healthcheck is healthy. `$(AIR)` installs air to `.bin/<os>_<arch>/`. Air watches `cmd/` and `internal/`, rebuilds `tmp/wavehouse` on change, and restarts the binary.
 
-`air` is pinned to a specific version and installed via `go install` rather than a `go.mod` tool directive — its transitive deps (Hugo, godartsass, Sass libs) would bloat `go.sum` for everyone. Same exclusion principle as `golangci-lint`.
+Config is **not** hot-reloaded: `make dev` uses `WH_CONFIG=.config.local.yaml` (a gitignored copy seeded once from `config.yaml`). To apply config changes, edit `.config.local.yaml` and restart `make dev`. Air is installed via `go install` to avoid bloating `go.sum` with transitive dependencies.
 
-**While `make dev` is running you get:**
+**Features of `make dev`:**
 
-- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so a browser-based app on any localhost port can hit the API directly.
-- A placeholder JWT secret (`change-me-in-production`) ships in `config.yaml`, but **no policy** is seeded — so the stack is fail-closed until you seed one (see [Test the API](#test-the-api)). Override the secret via `WH_AUTH_JWT_SECRET`.
-- ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native protocol), Compose project name `wavehouse-dev` so containers/volumes are namespaced.
-- Hot reload: editing any `.go` file under `cmd/` or `internal/` triggers a debounced rebuild + restart. Config isn't hot-reloaded — `make dev` loads `.config.local.yaml` (a gitignored copy seeded once from `config.yaml`), so edit `.config.local.yaml` and restart to apply config changes. Air's stdout/stderr stream live so you see compile errors and server logs in the same terminal.
+- WaveHouse on `http://localhost:8080` with `cors_allowed_origins: ["*"]`, so any localhost-port browser app can hit the API.
+- Placeholder JWT secret `change-me-in-production` in `config.yaml`; override via `WH_AUTH_JWT_SECRET`.
+- ClickHouse on `http://localhost:8123` (HTTP) and `localhost:9000` (native), namespaced under `wavehouse-dev`.
+- Debounced rebuilds for `.go` files in `cmd/` or `internal/`.
 
 ### Dev convenience targets
-
-These are the small targets behind `make dev` — useful directly when you want
-to run WaveHouse outside of air (e.g. `make build && ./bin/wavehouse`), or
-when you need to poke at ClickHouse:
 
 | Target | What it does |
 | ------ | ------------ |
 | `make deps-up` | Start ClickHouse and block until healthy. Idempotent. |
-| `make deps-down` | Stop ClickHouse. Data volume is preserved. |
-| `make deps-logs` | `docker compose logs -f clickhouse` (Ctrl+C detaches; container keeps running). |
-| `make deps-shell` | Drop into a `clickhouse-client` REPL on the running container. |
-| `make deps-wipe` | Stop ClickHouse **and destroy its data volume**. Use when you want a clean schema. |
-| `make clean-all` | Nuclear option — every `make` artifact + dev/E2E containers + volumes + `data/`. |
+| `make deps-down` | Stop ClickHouse; preserves data volume. |
+| `make deps-logs` | Stream ClickHouse logs (`docker compose logs -f clickhouse`). |
+| `make deps-shell` | Enter `clickhouse-client` REPL on the container. |
+| `make deps-wipe` | Stop ClickHouse and destroy its data volume for a clean schema. |
+| `make clean-all` | Remove all make artifacts, containers, volumes, and `data/`. |
 
-**Stopping `make dev`**: `Ctrl+C` stops air, which propagates SIGINT to WaveHouse for a graceful shutdown (NATS JetStream flush, etc.). ClickHouse stays up — re-running `make dev` is fast because the volume is preserved. Use `make deps-down` or `make deps-wipe` to stop ClickHouse explicitly.
+**Stopping**: `Ctrl+C` stops air and gracefully shuts down WaveHouse (e.g., NATS JetStream flush). ClickHouse remains running; use `make deps-down` or `make deps-wipe` to stop it.
 
 ### Running with observability
 
-WaveHouse natively exports standard OpenTelemetry (OTLP) data to `127.0.0.1:4317`. Rather than coupling a heavy observability database stack to the dev server, we provide three lightweight, single-container dashboard options.
-
-You run these in a separate terminal tab alongside `make dev` or your test suites (`make test-e2e`).
-
-They block the terminal and stream logs; simply press `Ctrl+C` to instantly tear them down and clean up the container.
+WaveHouse exports OTLP data to `127.0.0.1:4317`. Run these in a separate terminal alongside `make dev` or `make test-e2e`:
 
 | Target | What it does | UI URL |
 | ------ | ------------ | ------ |
-| `make obs-aspire` | Boots the Aspire dashboard. Extremely fast, in-memory only, and requires no login. Ideal for quick trace and log debugging. | `http://localhost:18888` |
-| `make obs-grafana` | Boots Grafana LGTM (Loki, Grafana, Tempo, Prometheus). Pre-configured to bypass login. Best for advanced UI charting and trace-to-log correlation. | `http://localhost:3000` |
-| `make obs-front` | Boots OTel-Front for a basic, alternative trace viewer. | `http://localhost:8000` |
+| `make obs-aspire` | Aspire dashboard. Fast, in-memory, no login. Ideal for quick debugging. | `http://localhost:18888` |
+| `make obs-grafana` | Grafana LGTM (Loki, Grafana, Tempo, Prometheus). Best for charting and correlation. | `http://localhost:3000` |
+| `make obs-front` | OTel-Front basic trace viewer. | `http://localhost:8000` |
 
-**Typical Workflow:**
-
-1. Open Tab 1: run `make obs-aspire` (UI opens automatically)
-2. Open Tab 2: run `make dev` (or `make test-e2e`)
-3. View traces, metrics, and logs flowing into the UI instantly. No accounts or auth tokens required.
+**Workflow:** Run `make obs-aspire` in Tab 1, then `make dev` in Tab 2 to view traces and metrics instantly.
 
 ### Using the SDK against `make dev`
 
-There's no bundled playground — point the published `@wavehouse/sdk` client at your local server (`baseURL: "http://localhost:8080"`), with the dev policy seeded so requests are authorized:
+Point the `@wavehouse/sdk` client at `baseURL: "http://localhost:8080"` with a seeded dev policy:
 
 ```bash
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml make dev
 ```
 
-See the [SDK guide](/sdk) for the client API and examples.
-
-Frontend devs running their own dev server (Vite, Next.js, etc.) can `import { createClient } from '@wavehouse/sdk'` and point `baseURL: 'http://localhost:8080'`; CORS is permissive so cross-origin browser requests just work.
+See the [SDK guide](/sdk) for examples. Frontend apps (Vite, Next.js) can use `createClient` directly; permissive CORS allows cross-origin requests.
 
 ### Validating tokens
 
-There is no auth on/off switch — the JWT middleware always runs, but authorization is the policy's job (a `nil`/unseeded policy denies every token-based caller, admins included — only the operator key below still reaches the admin surface). To exercise token auth in dev, seed a policy *and* set a known secret — the dev policy's `admin_role` defaults to `admin`, so a JWT with `role: admin` unlocks the admin surface:
+There is no auth on/off switch: the JWT middleware always runs, but authorization is the policy's job — a `nil`/unseeded policy denies every token-based caller, admins included, and only the operator key still reaches the admin surface. To test token auth, seed a policy and set a known secret:
 
 ```bash
 WH_POLICY_FILE_PATH=deployments/compose/dev-policy.yaml WH_AUTH_JWT_SECRET=my-secret make dev
 ```
 
-The **operator key** is a non-JWT alternative: set one and send it in an `Authorization: Operator <key>` header (or the `X-Operator-Key` alias). Before any policy is seeded it reaches the **admin surface** — enough to seed or restore a policy over HTTP (the break-glass path). Once a policy is loaded, the key's role resolves to `admin`, so it then has full data-plane access too (pipes, queries, streaming, ingest) — handy for trialing without minting a JWT:
+The **operator key** is a non-JWT alternative via `Authorization: Operator <key>` or `X-Operator-Key`. It accesses the admin surface even without a seeded policy (break-glass path). Once a policy is loaded, it resolves to `admin` for full data-plane access.
 
 ```bash
 WH_AUTH_OPERATOR_KEY=dev-operator-key make dev
@@ -216,7 +200,7 @@ curl -H "Authorization: Operator dev-operator-key" http://localhost:8080/v1/admi
 curl -H "X-Operator-Key: dev-operator-key" http://localhost:8080/v1/admin/policy
 ```
 
-Then mint a token (role == the policy `admin_role`) and call an admin endpoint:
+Mint a token (role must match the policy `admin_role`):
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli)
@@ -236,7 +220,7 @@ Set `WH_DEDUPE_ENABLED=true` and `WH_DEDUPE_ID_FIELD=event_id`:
 WH_DEDUPE_ENABLED=true WH_DEDUPE_ID_FIELD=event_id make dev
 ```
 
-Then include the dedup field in your ingest body:
+Include the dedup field in ingest:
 
 ```bash
 curl -s -X POST "http://localhost:8080/v1/ingest?table=clicks" \
@@ -275,22 +259,24 @@ make build
 go build -o bin/wavehouse ./cmd/wavehouse
 ```
 
+Run `make build` for all binaries or `go build -o bin/wavehouse ./cmd/wavehouse` individually.
+
 ## Running Modes at a Glance
 
-| What you want | Command |
+| Goal | Command |
 | ------------- | ------- |
-| Hot-reload standalone dev server | `make dev` |
-| Standalone binary (default config) | `make build && ./bin/wavehouse` |
+| Hot-reload dev server | `make dev` |
+| Standalone binary (default) | `make build && ./bin/wavehouse` |
 | Standalone via Docker Compose | `docker compose -f deployments/compose/standalone.yaml up -d` |
-| Infrastructure deps only (ClickHouse) | `docker compose -f deployments/compose/dependencies.yaml up -d clickhouse` |
+| ClickHouse deps only | `docker compose -f deployments/compose/dependencies.yaml up -d clickhouse` |
 
 ## Testing
 
 ### How It Works
 
-All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for pytest-style colored output with pass/fail icons, durations, and a summary. Tool versions are pinned in `go.mod` via `tool` directives — the Makefile uses `go run` so no global installation is needed.
+All test commands use [gotestsum](https://github.com/gotestyourself/gotestsum) for colored output and summaries. Tool versions are pinned in `go.mod` via `tool` directives; the Makefile uses `go run`, removing the need for global installations.
 
-All tests run with Go's **race detector** (`-race`) enabled by default. WaveHouse is highly concurrent (NATS consumers, singleflight caching, SSE hubs) — the race detector catches data races that would panic in production.
+Tests run with Go's **race detector** (`-race`) by default to catch concurrency issues in NATS consumers, singleflight caching, and SSE hubs.
 
 ### Quick Reference
 
@@ -324,44 +310,41 @@ make ci
 make cov
 ```
 
-Each test target writes `covdata` to `tmp/coverage/<suite>/data/`, renders a textfmt + HTML report, and gates against the per-suite threshold in `.testcoverage.yml`. `make cov` merges whichever suites have run and gates against the total.
+Each target writes `covdata` to `tmp/coverage/<suite>/data/`, renders reports, and gates against thresholds in `.testcoverage.yml`. `make cov` merges run suites and gates against the total.
 
-**Verbose output**: Use `V=1` to switch from compact `testdox` format to full verbose output. This is a standard Makefile convention (`make test -v` can't work because `-v` is a `make` flag).
-
-**Extra flags**: All test targets accept `ARGS="..."` for additional `go test` flags (e.g., `-run`, `-count`, `-timeout`).
-
-**Note on timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time. The total wall time includes Go compiling all packages — the first run compiles everything (~15s), subsequent runs use the build cache (~1s).
+**Verbose output**: Use `V=1` for full output instead of compact `testdox` format.
+**Extra flags**: Pass `ARGS="..."` for additional `go test` flags (e.g., `-run`, `-count`).
+**Timing**: gotestsum's `DONE ... in X.XXXs` reports pure test execution time; total wall time includes compilation (~15s first run, ~1s cached).
 
 ### Test Structure
 
 | Category | Location | Docker? | Command |
 | -------- | -------- | ------- | ------- |
 | Unit tests | `internal/*/_test.go` | No | `make test` |
-| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` (always includes coverage + gate) |
+| SDK unit tests | `clients/ts/src/**/*.test.ts` | No | `make test-ts` |
 | Integration tests (Go) | `tests/integration/*_test.go` | Yes | `make test-integration` |
 | E2E tests (SDK) | `tests/e2e/sdk/*.test.ts` | Yes | `make test-e2e` |
 
-- **Unit tests** live beside the code they test (e.g., `internal/discovery/discovery_test.go`). They use mocks or embedded NATS (in-process, no Docker needed).
-- **Integration tests** use the `//go:build integration` build tag. The `setupTestEnv` helper starts a ClickHouse testcontainer, embedded NATS, ingest worker, and a full API router via `httptest.Server`. DLQ tests use `assert.Eventually` with a 30-second timeout for the 5-second ingest worker batch window.
-
-Shared test utilities live in `internal/testutil/` (e.g., `testutil.NopLogger()` for silencing embedded NATS output).
+- **Unit tests**: beside the code they test (e.g. `internal/discovery/discovery_test.go`); use mocks or embedded NATS.
+- **Integration tests**: Use `//go:build integration`. `setupTestEnv` starts a ClickHouse testcontainer, embedded NATS, ingest worker, and API router via `httptest.Server`. DLQ tests use `assert.Eventually` (30s timeout) for the 5s batch window.
+- **Utilities**: `internal/testutil/` (Go), e.g. `testutil.NopLogger()` to silence embedded NATS.
 
 ### Adding New Tests
 
-- **Unit test for `internal/foo/`** → create `internal/foo/foo_test.go` (same package).
-- **Integration test needing Docker** → add a subtest under `tests/integration/` (e.g. a new file with `//go:build integration`).
-- **E2E test via SDK** → add a `tests/e2e/sdk/*.test.ts` file. These tests exercise the full pipeline (ingest → ClickHouse → query) through the TypeScript SDK. Run with `make test-e2e`.
-- **Test helpers** → add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
+- **Unit test (`internal/foo/`)** $\rightarrow$ create `internal/foo/foo_test.go`.
+- **Integration test (Docker)** $\rightarrow$ add subtest under `tests/integration/` with `//go:build integration`.
+- **E2E SDK test** $\rightarrow$ add `tests/e2e/sdk/*.test.ts` to exercise the full pipeline via the TS SDK. Run with `make test-e2e`.
+- **Helpers** $\rightarrow$ add to `internal/testutil/` (Go) or `tests/e2e/sdk/helpers.ts` (E2E).
 
 ### E2E Tests via SDK
 
-The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the TypeScript SDK as the test harness — every ingest→query test simultaneously validates the full Go backend pipeline and confirms SDK compatibility.
+Located in `tests/e2e/sdk/`, these use the TS SDK as a harness to validate the Go backend and SDK compatibility.
 
 **Architecture**:
 
-- `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
-- `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and bootstraps the baseline policy. It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
-- `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
+- `scripts/orchestrator`: Entrypoint for `make test-e2e`. Starts a ClickHouse testcontainer, launches `wavehouse-cov` on a random port, runs the suite, then SIGINTs the binary to flush coverage. No Compose file is used.
+- `tests/e2e/sdk/setup.ts`: `globalSetup`. Probes injected URLs, creates tables, refreshes schema, and bootstraps policy. Fails fast if URLs are unreachable. Warns if local Node major differs from `.nvmrc` to avoid transport bugs (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
+- `tests/e2e/sdk/helpers.ts`: JWT factories, typed clients, async wait helpers, and ClickHouse query helpers.
 
 **Running E2E tests**:
 
@@ -370,31 +353,27 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 make test-e2e
 ```
 
-`make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
+`make test-e2e` builds `bin/wavehouse-cov` (instrumented) and runs the orchestrator. Coverage flushes to `tmp/coverage/e2e/data/`. The orchestrator provisions its own stack, so it won't collide with `make dev`.
 
-The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, start the server from the **repo root** with the E2E fixture config:
+To run vitest against a manual stack, start the server from the **repo root** using the E2E fixture:
 
 ```bash
 WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture pins no ClickHouse address, so the server looks for one on `localhost:9000`; point it elsewhere with `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if yours isn't there.
+The fixture is required: the suite signs tokens with its `sdk-dev-secret` and needs its dedupe, DLQ, and 5s schema-refresh settings. Point it at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root is required because `policy.file_path` is relative. Use `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if ClickHouse isn't on `localhost:9000`. Note: Prefixing `make dev` with variables fails as it pins `WH_CONFIG=.config.local.yaml` inline.
 
-Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
-
-Then set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`; teardown is a no-op on that path, so your stack survives between iterations.
-
-If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
+Set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`. A run killed by a harness timeout, stop button, or `SIGKILL` can leave a `wavehouse-cov` behind that shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and corrupts it, so the orchestrator kills leftovers first and says so.
 
 **Environment knobs**:
 
 | Variable | Effect |
 |----------|--------|
-| `V=1` | Stream the WaveHouse subprocess log live *in addition to* capturing it to `tmp/wavehouse-cov.log`. The on-failure log excerpt is then skipped — you have already seen it |
-| `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
-| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run (skips v8 instrumentation and report generation) while chasing a flake. **Local debugging only** — no report is written. Ignored (with a log line) under `make ci` / `make test-all`, so an exported-and-forgotten var can't produce a green coverage gate with the TS e2e report missing |
+| `V=1` | Streams WaveHouse logs live; skips on-failure log excerpt. |
+| `E2E_CH_QUERY_TIMEOUT_MS` | Ceiling for direct ClickHouse queries (default `10000`). |
+| `E2E_NO_COVERAGE=1` | Skips `--coverage` in vitest. Local debugging only; ignored in `make ci`/`test-all`. |
 
-**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's `waitForCondition` poll helper, not a pipeline test.
 
 ## Linting
 
@@ -402,31 +381,31 @@ If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can l
 make lint
 ```
 
-`golangci-lint` is installed separately (not in `go.mod` — its massive dependency tree causes conflicts). If not found, `make lint` prints install instructions.
+`golangci-lint` is installed separately to avoid dependency conflicts; `make lint` provides install instructions if missing.
 
 Install options:
 
 - **macOS**: `brew install golangci-lint`
-- **Binary**: See [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
+- **Binary**: [golangci-lint.run/welcome/install/](https://golangci-lint.run/welcome/install/)
 - **Go install**: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
 
-The configuration is in `.golangci.yml` (v2 format with `default: none` for explicit control) — that file is the authoritative list of enabled linters. Highlights:
+`.golangci.yml` (v2 format, `default: none`) is the authoritative list of enabled linters:
 
-- **errcheck** — Unchecked error returns
-- **govet** — Suspicious constructs
-- **staticcheck** — Static analysis
-- **unused** — Unused code
-- **gosec** — Security issues
-- **gocritic** — Opinionated style checks
-- **revive** — Extensible linter (replaces golint)
-- **ineffassign** — Ineffective assignments
-- **misspell** — Spelling errors in comments/strings
-- **bodyclose** — Unclosed HTTP response bodies
-- **noctx** — HTTP requests without context
-- **errorlint** — Proper error wrapping checks (`%w`, `errors.Is/As`)
-- **tparallel** — Missing `t.Parallel()` in test subtests
+- **errcheck**: Unchecked error returns
+- **govet**: Suspicious constructs
+- **staticcheck**: Static analysis
+- **unused**: Unused code
+- **gosec**: Security issues
+- **gocritic**: Style checks
+- **revive**: Extensible linter (replaces golint)
+- **ineffassign**: Ineffective assignments
+- **misspell**: Spelling errors
+- **bodyclose**: Unclosed HTTP bodies
+- **noctx**: HTTP requests without context
+- **errorlint**: Error wrapping (`%w`, `errors.Is/As`)
+- **tparallel**: Missing `t.Parallel()` in subtests
 
-Formatting (**gofumpt** — strict superset of gofmt — and **goimports** import grouping) is enforced through the v2 `formatters:` section rather than as linters.
+Formatting (**gofumpt** and **goimports**) is enforced via the v2 `formatters:` section.
 
 ## Project Structure
 
@@ -472,65 +451,65 @@ WaveHouse/
 
 ## Code Conventions
 
-- **Strict Go formatting**: Use `gofumpt` (a stricter superset of `gofmt`, enforced by CI). Run `make fmt` to format.
-- **Interface-first design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) are defined as interfaces so implementations can be swapped behind a stable contract.
-- **Package boundaries**: The `internal/` directory ensures packages are private to this module.
-- **Error handling**: Return errors to callers. Use `slog` for structured logging.
-- **Schema-driven**: ClickHouse is the schema source of truth. WaveHouse discovers and validates against real table schemas.
+- **Formatting**: Use `gofumpt` (stricter than `gofmt`, CI-enforced). Run `make fmt`.
+- **Design**: Core behaviors (`Cache`, `Deduplicator`, `Publisher`, `Subscriber`) use interfaces for swappable implementations.
+- **Boundaries**: `internal/` keeps packages private to this module.
+- **Errors & Logging**: Return errors; use `slog` for structured logging.
+- **Schema**: ClickHouse is the source of truth; WaveHouse validates against real schemas.
 
 ## Makefile Targets
 
-Run `make help` to see all targets. Key ones:
+Run `make help` to see all targets.
 
 | Target | Description |
 | ------ | ----------- |
-| `make help` | Show all targets with descriptions (always the source of truth) |
-| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`), Go modules, pnpm deps |
+| `make help` | Show all targets with descriptions (source of truth) |
+| `make tools` | Bootstrap: install pinned tools (`golangci-lint`, `air`), Go modules, and pnpm deps |
 | **Dev** | |
-| `make dev` | Hot-reload dev server: ClickHouse via Compose + WaveHouse under air on `:8080` |
-| `make deps-up` | Start ClickHouse alone (idempotent; blocks until healthy) |
+| `make dev` | Hot-reload server: ClickHouse via Compose + WaveHouse under air on `:8080` |
+| `make deps-up` | Start ClickHouse (idempotent; blocks until healthy) |
 | `make deps-down` | Stop ClickHouse (preserves data volume) |
 | `make deps-logs` | Tail ClickHouse logs |
 | `make deps-shell` | `clickhouse-client` REPL on the running container |
-| `make deps-wipe` | Stop ClickHouse AND destroy its data volume (DESTRUCTIVE) |
+| `make deps-wipe` | Stop ClickHouse and destroy its data volume (DESTRUCTIVE) |
 | **Observability** | |
-| `make obs-aspire` | Prebuilt 0-config o11y UI to show WaveHouse metrics, logs, and traces locally |
-| `make obs-grafana` | Grafana alternative to aspire, more advanced and complicated |
-| `make obs-front` | Custom graphs like grafana, but is simpler and easier to configure like aspire |
+| `make obs-aspire` | 0-config o11y UI for WaveHouse metrics, logs, and traces locally |
+| `make obs-grafana` | Advanced Grafana alternative to aspire |
+| `make obs-front` | Simple custom graphs; easier to configure than grafana |
 | **Static checks** | |
-| `make fmt` | Check formatting across Go (`gofumpt`) + TS (Biome). Run `make fix` to apply. |
-| `make tidy` | Verify `go.mod`/`go.sum` are tidy (run `make fix` to apply) |
-| `make lint` | Run linters across Go (`golangci-lint`) + TS (Biome) |
-| `make vulncheck` | Run `govulncheck` (V=1 for full call stacks) |
-| `make verify` | Repo-wide static checks: Go (tidy + fmt + vulncheck + lint) + TS (Biome + `tsc` typecheck) (parallel-safe: `make -j verify`) |
-| `make fix` | Auto-fixes across Go (`tidy` + `gofumpt` + `goimports` + `lint --fix`) and TS (Biome `--write`) |
+| `make fmt` | Check Go (`gofumpt`) and TS (Biome) formatting. Use `make fix` to apply. |
+| `make tidy` | Verify `go.mod`/`go.sum` are tidy (use `make fix` to apply) |
+| `make lint` | Run linters for Go (`golangci-lint`) and TS (Biome) |
+| `make vulncheck` | Run `govulncheck` (`V=1` for full call stacks) |
+| `make verify` | Repo-wide checks: Go (tidy, fmt, vulncheck, lint) + TS (Biome, `tsc`). Parallel-safe: `make -j verify` |
+| `make fix` | Auto-fix Go (`tidy`, `gofumpt`, `goimports`, `lint --fix`) and TS (Biome `--write`) |
 | **Build** | |
-| `make build` | Compile `wavehouse` → `bin/wavehouse` (debug symbols kept) |
-| `make build-release` | Stripped release-style build → `bin/wavehouse-release` |
+| `make build` | Compile `wavehouse` → `bin/wavehouse` (keeps debug symbols) |
+| `make build-release` | Stripped release build → `bin/wavehouse-release` |
 | `make build-cover` | Coverage-instrumented build → `bin/wavehouse-cov` (used by E2E) |
 | `make build-ts` | Build TypeScript SDK → `clients/ts/dist/` |
 | **Test** | |
 | `make test` | Alias for `test-unit` |
-| `make test-unit` | Go unit tests + render coverage + gate suite threshold |
+| `make test-unit` | Go unit tests + coverage render + threshold gate |
 | `make test-integration` | Go integration tests (requires Docker) + coverage gate |
-| `make test-ts` | SDK vitest unit tests + v8 coverage + gate against `suites.ts-unit` (matches Go's "always coverage" pattern) |
-| `make cov` | Merge Go + TS coverage and gate against thresholds. Auto-runs after `make test-all` and `make ci`; standalone `make cov` is "show me the merged numbers without re-running." Each side skips silently if its data is missing, but `make cov` fails if *both* are empty (you ran it before any test target). |
+| `make test-ts` | SDK vitest unit tests + v8 coverage + `suites.ts-unit` gate |
+| `make cov` | Merge Go + TS coverage and gate against thresholds. Fails if both are empty; otherwise skips missing data. |
 | `make test-e2e` | E2E SDK suite against `bin/wavehouse-cov` + coverage gate |
 | `make test-all` | All four suites sequentially + merged coverage gate |
-| `make ci` | Full pipeline: parallel `verify` + builds + unit/SDK tests, then integration + E2E + cov |
-| **Analysis** (informational, not in CI) | |
-| `make size` | Binary size analysis → `tmp/analysis/` (text + SVG + interactive HTML) |
+| `make ci` | Pipeline: parallel `verify`, builds, unit/SDK tests, then integration, E2E, and cov |
+| **Analysis** (informational) | |
+| `make size` | Binary size analysis → `tmp/analysis/` (text, SVG, HTML) |
 | `make audit-cgo` | Audit dependency tree for C files (builds use `CGO_ENABLED=0`) |
 | `make deadcode` | Find unreachable functions |
 | `make dep-cut` | Top cuttable deps by transitive weight (`LIMIT=N` to override) |
-| `make binary-analysis` | Combined: `size` + `audit-cgo` + `deadcode` |
-| **Cleanup** (tiered — compose explicitly for partial resets) | |
-| `make clean` | Build outputs only (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
-| `make clean-test` | Test outputs only (`tmp/` — coverage data, logs, NATS state) |
-| `make clean-tools` | Installed tools and pnpm deps (`.bin/`, `node_modules/`) |
-| `make clean-all` | Full reset: above + `data/` + Docker volumes |
+| `make binary-analysis` | Combined: `size`, `audit-cgo`, and `deadcode` |
+| **Cleanup** | |
+| `make clean` | Remove build outputs (`bin/`, `dist/`, `clients/ts/dist/`, `docs/dist/`, `docs/.dev-dist/`) |
+| `make clean-test` | Remove test outputs (`tmp/` coverage, logs, NATS state) |
+| `make clean-tools` | Remove installed tools and pnpm deps (`.bin/`, `node_modules/`) |
+| `make clean-all` | Full reset: all above + `data/` + Docker volumes |
 
-All test targets accept `ARGS="..."` for pass-through `go test` flags. Build targets accept `TAGS="..."` for Go build tags. `V=1` switches to verbose `gotestsum` output.
+Test targets accept `ARGS="..."` for `go test` flags. Build targets accept `TAGS="..."` for Go build tags. `V=1` enables verbose `gotestsum` output.
 
 ## Dependency Management
 
@@ -543,32 +522,34 @@ go mod tidy            # Remove unused, add missing
 
 ### Vulnerability Scanning
 
-`govulncheck` analyzes your actual call graph — not just the module graph — so it only reports vulnerabilities in code paths you use.
+`govulncheck` analyzes the actual call graph, reporting only vulnerabilities in used code paths.
 
 ```bash
 make vulncheck
 ```
 
-For a combined security scan, run `make verify` — it runs `vulncheck` alongside `lint`, and `gosec` is one of the linters enabled in `.golangci.yml`. This is also what CI runs on every push and pull request.
+Run `make verify` for a combined scan; it executes `vulncheck`, `lint`, and `gosec` (via `.golangci.yml`). CI runs this on every push and pull request.
 
 ### Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` to open weekly grouped PRs for three update configs:
+Configured in `.github/dependabot.yml`, Dependabot opens weekly grouped PRs:
 
-- **Go modules** (root) — outdated or vulnerable Go dependencies, commit prefix `deps:`
-- **GitHub Actions** (root) — outdated action versions tracked against the SHA pins in `ci.yml` / `release.yml`, commit prefix `ci:`
-- **npm — pnpm workspace** (root) — covers all three TypeScript packages (the docs site, the SDK, and the E2E tests) in one grouped PR, commit prefix `deps:`
+- **Go modules** (root): Outdated or vulnerable dependencies; prefix `deps:`
+- **GitHub Actions** (root): Outdated versions against SHA pins in `ci.yml` / `release.yml`; prefix `ci:`
+- **npm — pnpm workspace** (root): All three TypeScript packages (docs site, SDK, E2E tests) in one PR; prefix `deps:`
 
-PRs are grouped per config to reduce noise. The npm config is pointed at the workspace **root** (`directory: /`), not the individual member directories. The repo has a single root `pnpm-lock.yaml`, and Dependabot only updates a lockfile co-located with the manifest it targets — so a per-member config (the previous setup) bumped a member's `package.json` without regenerating the root lockfile, and every such PR then failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`. Pointing at the root lets Dependabot read `pnpm-workspace.yaml`, walk every member, and update the one lockfile.
+The npm config targets the root (`directory: /`) because Dependabot only updates lockfiles co-located with the target manifest. Previous per-member configs failed CI's `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE` as they didn't regenerate the root `pnpm-lock.yaml`. Root targeting allows Dependabot to use `pnpm-workspace.yaml` to update all members and the single lockfile.
 
-**No auto-merge.** Dependabot PRs go through the same merge gate as any other PR — an approval from the `@Wave-RF/wavehouse-admins` team (the ruleset's `required_reviewers` rule) plus the required checks. (The former `dependabot-automerge.yml`, which auto-approved and merged patch/minor bumps hands-off, was removed — every bump now gets a human admin review.)
+**No auto-merge.** All PRs require an approval from `@Wave-RF/wavehouse-admins` (via ruleset `required_reviewers`) and passing checks. The `dependabot-automerge.yml` was removed; every bump now requires human admin review.
 
 ## Releasing the SDK
 
-The TypeScript SDK (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing — no `NPM_TOKEN`. It is independent of the server's Go/Docker release (`release.yml`): the `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint, so the two never collide. There are two channels:
+The TypeScript SDK (`@wavehouse/sdk`, in `clients/ts/`) publishes to npm via `.github/workflows/publish-npm.yml` using OIDC trusted publishing (no `NPM_TOKEN`). It is independent of the server's Go/Docker release (`release.yml`); `v*` (server) and `sdk-v*` (SDK) tag globs are disjoint.
 
-- **Dev snapshots.** Every push to `main` publishes `0.0.0-dev.<hash>` under the `dev` dist-tag — but only when the built `dist/` actually changed (the version is a hash of the build output, so an unchanged build resolves to an already-published version and is skipped). Install the bleeding edge with `npm install @wavehouse/sdk@dev`.
-- **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. A stable version goes to the `latest` dist-tag; a prerelease (`sdk-v0.2.0-rc.1`) is published under `alpha`/`beta`/`rc`/`next` — derived from the suffix — and marked as a GitHub pre-release. The tag **must** match `clients/ts/package.json`'s `version`, or the job fails fast.
+Two channels exist:
+
+- **Dev snapshots.** Pushes to `main` publish `0.0.0-dev.<hash>` under the `dev` dist-tag if `dist/` changed. Install via `npm install @wavehouse/sdk@dev`.
+- **Tagged releases.** Pushing a `sdk-vX.Y.Z` tag publishes that version and creates a GitHub Release. Stable versions use the `latest` dist-tag; prereleases (e.g., `sdk-v0.2.0-rc.1`) use tags like `alpha`/`beta`/`rc`/`next` based on the suffix and are marked as GitHub pre-releases. The tag **must** match `clients/ts/package.json`'s `version`.
 
 To cut a release:
 
@@ -580,97 +561,93 @@ git push origin sdk-v0.1.0
 ```
 
 :::caution[The first tagged release promotes `latest`]
-npm sets a package's `latest` dist-tag on its *first* publish even under `--tag dev`, so until the first `sdk-v*` release a bare `npm install @wavehouse/sdk` (and the bare CDN URLs) resolve to a `0.0.0-dev.*` snapshot. The first tagged stable release moves `latest` to a real version and fixes this for every consumer.
+npm sets `latest` on the first publish, even under `--tag dev`. Until the first `sdk-v*` release, `npm install @wavehouse/sdk` and bare CDN URLs resolve to a `0.0.0-dev.*` snapshot. The first stable release fixes this.
 :::
 
 ## CI & review automation
 
-This repo has three tiers of AI automation sitting alongside the normal CI checks. Full detail lives in `AGENTS.md`; this section covers the contributor-facing behavior.
+This repo uses three tiers of AI automation alongside standard CI checks. Full details are in `AGENTS.md`.
 
 ### PR title and Conventional Commits
 
-PR titles must match Conventional Commits format and stay ≤ 72 characters — the title becomes the squash-merge commit subject. Both rules are enforced by the `PR title` job under the required `CI` check (`.github/workflows/ci.yml`); validate locally with `scripts/lint-pr-title.sh "<title>"`:
+PR titles must follow Conventional Commits format and be $\le$ 72 characters, as they become the squash-merge commit subject. The `PR title` job in `.github/workflows/ci.yml` enforces this; validate locally via `scripts/lint-pr-title.sh "<title>"`.
 
 ```text
 <type>(optional-scope)(optional-!): <lowercase subject, no trailing period>
 ```
 
-Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`.
+Allowed types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `deps`, `build`, `perf`, `revert`, `style`. Use `!` before `:` for breaking changes per Conventional Commits 1.0.0 (e.g. `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Dependabot PRs are exempt from the length cap.
 
-The `!` before `:` marks a breaking change per Conventional Commits 1.0.0 (e.g., `feat!: remove deprecated endpoint`, `refactor(api)!: rename handlers`). Titles are also capped at **72 characters** — they become squash-merge commit subjects (Dependabot PRs are exempt from the cap).
-
-If the title doesn't match, a sticky comment posts on the PR explaining the format (from the `PR housekeeping` workflow, which mirrors the same script); it auto-removes once the title is fixed. Fixing the title needs no new push — the edit triggers housekeeping, which re-runs the failed `PR title` job (the job re-reads the title from the API, not the stale event payload).
+If invalid, the `PR housekeeping` workflow posts a sticky comment explaining the format. Editing the title triggers an automatic re-run of the `PR title` job without requiring a new push.
 
 ### Required status checks
 
-The `main branch protection` ruleset requires one status check to pass before any PR can merge:
+The `main branch protection` ruleset requires the `CI` aggregator job (`.github/workflows/ci.yml`) to pass before merging. This DAG runs:
 
-- `CI` — the aggregator job of `.github/workflows/ci.yml`. The workflow is a job DAG over the same Makefile targets local `make ci` runs: `lint` (`make verify`), `unit` (`make test-unit test-ts`), `integration` (`make test-integration`), `e2e` (`make -j test-e2e` — builds its own SDK dist + cover binary on a warm cache, runs the suite exactly like a local run), `coverage` (`make cov` over every suite's uploaded coverage fragment + threshold gates, like local `make ci`'s final step), `docs-build` (`make build-docs` when docs-affecting files changed, uploading the docs dist artifact), `PR title` (Conventional Commits), and the docs preview/deploy jobs. The aggregator fails if any job failed or was canceled and treats skipped jobs as passing — docs-only PRs skip the Go test suites by design, and fork PRs run everything except the (secret-bearing) docs deploys. Every run's Summary page gets a per-job wall-clock table from the non-gating `Timing summary` job. The full architecture — DAG diagram, design invariants, cache policy, how to add a job — lives in [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md).
+- `lint` (`make verify`)
+- `unit` (`make test-unit test-ts`)
+- `integration` (`make test-integration`)
+- `e2e` (`make -j test-e2e`)
+- `coverage` (`make cov`)
+- `docs-build` (`make build-docs`)
+- `PR title` (Conventional Commits)
+- Docs preview/deploy jobs
 
-The `PR housekeeping` workflow still runs on every PR (labels + the title explainer comment) but is no longer a required check.
+The aggregator fails if any job fails or is canceled; skipped jobs are treated as passing. Fork PRs skip secret-bearing docs deploys, and docs-only PRs skip Go tests. A non-gating `Timing summary` job provides wall-clock data on the Summary page. See [`.github/workflows/README.md`](https://github.com/Wave-RF/WaveHouse/blob/main/.github/workflows/README.md) for architecture and cache policy.
 
-The ruleset also requires an approval from the `@Wave-RF/wavehouse-admins` team (the `required_reviewers` rule — this is what mandates an admin sign-off, replacing the old `Admin approval` status-check workflow), plus 1 approving review, approval of the most recent push by someone other than its author, resolution of all review threads, linear history, no branch deletion, no force-push, and squash-merge only. Repository admins may bypass these requirements when merging their own PR (e.g. a trivial `.github` change) but still cannot push directly to `main`.
+The ruleset also mandates:
 
-Approved, green PRs land through a **merge queue** ("Merge when ready"): the queue re-runs the required `CI` check against the PR merged with *current* main (a `merge_group` event — the CI workflow runs the full test suite for these) and fast-forwards only on green. That integration re-test replaces the old "branch is out-of-date with the base branch" requirement — queued PRs don't need manual branch updates, and the queue never pushes to the PR branch.
+- Approval from `@Wave-RF/wavehouse-admins` (via `required_reviewers`).
+- One additional approving review.
+- Approval of the most recent push by a non-author.
+- Resolution of all review threads.
+- Linear history, no force-push, and squash-merge only.
 
-Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
+Admins may bypass these for their own PRs but cannot push directly to `main`. Approved PRs use a **merge queue** ("Merge when ready"), which re-runs `CI` against the current `main` via a `merge_group` event before fast-forwarding. This replaces manual branch updates. Dependabot PRs require standard admin review; there is no auto-merge.
 
 ### Merge behavior
 
-Squash-only merges. The **PR title** becomes the commit subject (with `(#NN)` appended automatically), the **PR body** becomes the commit message. Keep PR bodies tight — they land in `git log` on `main`. The PR template gives the right shape (Summary / Test plan / Related Issues).
-
-Include `Closes #NN` in the PR body to auto-close the related issue on merge. Alternatively, link the issue in the sidebar's **Development** section — that triggers auto-close even without the keyword.
-
-Auto-merge is enabled repo-wide: click "Enable auto-merge (squash)" on a PR and it merges once checks + approvals land.
+Only squash-merges are permitted. The PR title becomes the commit subject (with `(#NN)` appended) and the body becomes the commit message. Use the PR template (Summary / Test plan / Related Issues). Include `Closes #NN` in the body or link the issue in the **Development** sidebar to auto-close it on merge. Auto-merge is enabled repo-wide via "Enable auto-merge (squash)".
 
 ### AI reviewers
 
-Advisory PR review comes from marketplace apps configured at the org/repo level:
+Marketplace apps provide advisory reviews:
 
-- **CodeRabbit** — automated PR review; auto-reviews on open + push, re-trigger with `@coderabbitai review`.
-- **Copilot** — tied to individual reviewer subscriptions; shows up on PRs where a maintainer with Copilot Pro is listed as a reviewer.
+- **CodeRabbit**: Reviews on open/push; re-trigger with `@coderabbitai review`.
+- **Copilot**: Appears when a maintainer with Copilot Pro is a reviewer.
 
-Both are **advisory** — the ruleset's `required_reviewers` rule (an `@Wave-RF/wavehouse-admins` approval) plus its thread-resolution / linear-history / required-check rules are the actual merge-gate.
+These are non-gating; the `required_reviewers` rule and thread resolution remain the actual merge gates.
 
 ### Reviewer assignment and the Task Board
 
-Reviewer assignment is GitHub-native, and so is the board:
-
-- **Reviewer assignment**: the `main branch protection` ruleset's `required_reviewers` rule requests the `@Wave-RF/wavehouse-admins` team on every PR, and the team's **code-review assignment** (configured on the team) auto-assigns and load-balances a specific member. No workflow is involved; `dismiss_stale_reviews_on_push` clears approvals on new commits, and GitHub re-requests per its own rules.
-- **Merge gate**: the ruleset's `required_reviewers` rule requires an `APPROVED` review from the `@Wave-RF/wavehouse-admins` team; it also adds review-thread resolution, linear history, and squash-only. Auto-merge (squash) takes over once checks and approvals land.
-- **Task Board** (Projects v2, project #7): card placement and status are handled by GitHub-native Projects v2 automation configured in the project UI — there is no workflow-driven board state machine. Priority lives on the board's `Priority` field (set during issue triage, below).
-
-Dependabot PRs go through the same admin review as any other PR — there is no auto-merge (see the Dependabot section above).
+- **Assignment**: The ruleset requests `@Wave-RF/wavehouse-admins`, and GitHub's team code-review assignment load-balances members. `dismiss_stale_reviews_on_push` clears approvals on new commits.
+- **Merge gate**: Requires an `APPROVED` review from the admin team, thread resolution, linear history, and squash-only merges.
+- **Task Board** (Projects v2, project #7): Managed via native Projects v2 automation; no workflow is used for state transitions. Priority is set in the board's `Priority` field during triage.
 
 ### Invoking bots manually
 
-- **CodeRabbit**: comment `@coderabbitai review` to re-trigger a review, or `@coderabbitai <question>` to ask it something. Works in both top-level and inline review comments.
-- **Copilot**: the re-request-review button on the PR page sends a fresh request.
+- **CodeRabbit**: Comment `@coderabbitai review` to re-trigger or `@coderabbitai <question>` for inquiries.
+- **Copilot**: Use the "re-request-review" button on the PR page.
 
 ### Review-response expectations
 
-Every review comment (human or AI) must get a substantive reply before merge — not "fixed" alone. The ruleset's `required_review_thread_resolution: true` means unresolved conversations literally block merge. Agents working on PRs follow the pattern documented in `AGENTS.md` §"Review Response": accept / push back / defer, reply with detail, resolve when settled.
-
-When pushing back on a bot's suggestion, end the reply with the bot's mention (e.g. `@coderabbitai`) to invite a counter-reply so the dialog actually loops.
+All comments must receive a substantive reply; `required_review_thread_resolution: true` blocks merges until resolved. Agents follow the "Review Response" pattern in `AGENTS.md`. When pushing back against bots, end replies with their mention (e.g., `@coderabbitai`) to ensure a response loop.
 
 ### Issue triage
 
-`.github/workflows/triage.yml` classifies new and edited issues via GitHub Models (`gpt-4o-mini`) and applies:
+`.github/workflows/triage.yml` uses GitHub Models (`gpt-4o-mini`) to apply:
 
-- `area/*` labels based on the issue body (areas pulled dynamically from the `area/*` repo labels — adding a new `area/foo` label with a description is all you need; no workflow edit)
-- `security` if the model flags a security concern
-- `breaking-change` if the model flags a public-API break
-- Priority on the **Task Board** project #7 via the board's `Priority` field (requires `PROJECT_BOARD_TOKEN` secret — labels apply with or without it)
+- `area/*` labels based on the body (pulled from existing repo label descriptions).
+- `security` and `breaking-change` labels if flagged.
+- Priority in project #7 via `PROJECT_BOARD_TOKEN`.
 
 ### Auto-labeling PRs
 
-The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels to PRs based on the files they change. Sync-mode: labels follow the current changed-file set.
+The `PR housekeeping` workflow (`.github/workflows/housekeeping.yml`) runs `actions/labeler` with `.github/labeler.yml` to apply `area/*`, `dependencies`, `github_actions`, `go`, and `documentation` labels based on changed files.
 
 ### When adding a new `internal/<pkg>/` package
 
-Follow the checklist in `AGENTS.md` §"Common Tasks / Adding a new internal package" — the automation-relevant steps are:
+Per `AGENTS.md`:
 
-1. Create a matching `area/<pkg>` repo label with a meaningful description (triage reads the description as the classifier's per-area hint).
-2. Add the path → label mapping to `.github/labeler.yml` so PRs touching the new package get auto-labeled.
-
-Triage picks up the new label automatically; no workflow edit needed.
+1. Create an `area/<pkg>` repo label with a description (used as a classifier hint).
+2. Add the path $\to$ label mapping to `.github/labeler.yml`.

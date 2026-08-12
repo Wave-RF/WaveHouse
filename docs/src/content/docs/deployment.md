@@ -9,7 +9,7 @@ How to run WaveHouse in production — single binary, Docker images, releases, h
 
 ## Single binary
 
-WaveHouse runs as one process with embedded NATS and optional Pebble dedup. The only external dependency is ClickHouse.
+WaveHouse runs as one process with embedded NATS and optional Pebble dedup; ClickHouse is the only external dependency.
 
 ### Quick Start with Docker Compose
 
@@ -38,10 +38,7 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   -d '{"page": "/home", "button": "signup", "score": 42.5}'
 ```
 
-This starts:
-
-- **ClickHouse** on ports 8123 (HTTP) and 9000 (native)
-- **WaveHouse** on port 8080
+This starts ClickHouse (ports 8123 HTTP, 9000 native) and WaveHouse (port 8080).
 
 ### Binary
 
@@ -53,7 +50,7 @@ make build
 ./bin/wavehouse
 ```
 
-Or override any config with environment variables:
+Override config via environment variables:
 
 ```bash
 WH_CH_ADDR=clickhouse.example.com:9000 \
@@ -69,9 +66,7 @@ WH_SCHEMA_REFRESH_INTERVAL=30 \
 docker build -f deployments/Dockerfile -t wavehouse:latest .
 ```
 
-This builds the runtime image `wavehouse:latest`. (The published `ghcr.io` images are built by GoReleaser from `deployments/Dockerfile.goreleaser`, not this command — see Registry below.)
-
-All images use multi-stage builds (Go Alpine builder → distroless runtime) for minimal attack surface.
+Builds runtime image `wavehouse:latest`. Published `ghcr.io` images use GoReleaser and `deployments/Dockerfile.goreleaser`. All images use multi-stage builds (Go Alpine builder → distroless runtime) for minimal attack surface.
 
 ### Registry
 
@@ -81,7 +76,7 @@ Production images are published to GitHub Container Registry via GoReleaser:
 ghcr.io/wave-rf/wavehouse:<tag>
 ```
 
-Published images carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation (stored in the registry). Verify one before deploying:
+Images have signed [Sigstore](https://www.sigstore.dev/) build-provenance attestations. Verify before deploying:
 
 ```bash
 gh attestation verify oci://ghcr.io/wave-rf/wavehouse:<tag> --repo Wave-RF/WaveHouse
@@ -89,7 +84,7 @@ gh attestation verify oci://ghcr.io/wave-rf/wavehouse:<tag> --repo Wave-RF/WaveH
 
 ## Releases
 
-Releases are built with [GoReleaser](https://goreleaser.com/). The configuration is in `.goreleaser.yaml`. The release archives attached to each GitHub Release carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify a downloaded archive with `gh attestation verify <file> --repo Wave-RF/WaveHouse`. (This covers the prebuilt archives, not `go install`, which compiles from source.)
+Releases use [GoReleaser](https://goreleaser.com/) via `.goreleaser.yaml`. GitHub Release archives include signed [Sigstore](https://www.sigstore.dev/) build-provenance attestations; verify with `gh attestation verify <file> --repo Wave-RF/WaveHouse`. This applies to prebuilt archives, not source-compiled `go install`.
 
 ### Supported Platforms
 
@@ -102,7 +97,7 @@ Releases are built with [GoReleaser](https://goreleaser.com/). The configuration
 
 ### Creating a Release
 
-Tag and push to trigger the release workflow:
+Tag and push to trigger the workflow:
 
 ```bash
 git tag v0.1.0
@@ -111,9 +106,9 @@ git push origin v0.1.0
 
 ## Environment Variables
 
-All configuration can be set via environment variables. This is the recommended approach for container deployments. See [Configuration Reference](/configuration) for the full list.
+Configuration via environment variables is recommended for container deployments. See [Configuration Reference](/configuration) for the full list.
 
-Key variables for production:
+Key production variables:
 
 ```bash
 # Required
@@ -170,18 +165,18 @@ WH_DLQ_ENABLED=true                # Dead Letter Queue for failed inserts
 
 ## Persistent Storage (REQUIRED for containers)
 
-WaveHouse keeps all embedded state under a single configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention, not config:
+WaveHouse stores embedded state under a configurable root, `WH_DATA_DIR` (yaml: `data_dir`). Subdirectories are convention-based:
 
-- `<data_dir>/nats` — embedded NATS JetStream. Holds in-flight events between an ingest POST and the ingest worker → ClickHouse flush, plus the `mq.gap_window_minutes` window of history that powers SSE gap-fill across restarts.
-- `<data_dir>/pebble` — Pebble dedup KV. Only used when `WH_DEDUPE_ENABLED=true`.
+- `<data_dir>/nats`: Embedded NATS JetStream. Holds in-flight events between ingest POST and ClickHouse flush, plus the `mq.gap_window_minutes` history for SSE gap-fill across restarts.
+- `<data_dir>/pebble`: Pebble dedup KV. Used only when `WH_DEDUPE_ENABLED=true`.
 
-In a Docker / Podman / Kubernetes deployment, **`data_dir` must resolve to a host-backed volume**. The reference compose file `deployments/compose/standalone.yaml` sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume — copy that pattern. The bundled Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates the `nats/` and `pebble/` subdirectories under `/app/data` itself on first run.
+In Docker, Podman, or Kubernetes, **`data_dir` must resolve to a host-backed volume**. Follow the pattern in `deployments/compose/standalone.yaml`, which sets `WH_DATA_DIR=/app/data` and binds a `wavehouse-data:/app/data` volume. Dockerfiles pre-create `/app/data` and `/app/pipes` owned by the nonroot user (UID 65532); the binary creates `nats/` and `pebble/` subdirectories on first run.
 
-If `data_dir` resolves into the container's writable overlay layer instead, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill stops bridging restarts, and disk usage accumulates inside `/var/lib/docker` instead of the volume the operator chose.
+If `data_dir` resides in the container's writable overlay layer, **JetStream state is wiped on every restart**: in-flight events are lost, gap-fill fails, and disk usage accumulates in `/var/lib/docker`.
 
-Beyond persistence, the *speed* of that volume matters: JetStream `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`, so the volume's `fsync` latency is your ingest latency floor. Managed cloud block storage handles this without thinking; commodity or virtualized substrates (ZFS without a SLOG, qcow2-on-`ext4`, spinning disks) can stall ingest with multi-second `fsync` tails. See [Durability & Storage](/durability) to measure yours before going live.
+Volume speed is critical: JetStream `fsync`s every event to `<data_dir>/nats` before the ingest endpoint returns `200`. Volume `fsync` latency defines your ingest latency floor. Managed cloud block storage is typically sufficient; however, commodity or virtualized substrates (e.g., ZFS without SLOG, qcow2-on-`ext4`, spinning disks) may cause multi-second `fsync` stalls. See [Durability & Storage](/durability) to measure performance.
 
-WaveHouse runs a simple existence check on startup and logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty:
+WaveHouse logs a `WARN` if `<data_dir>/nats` (or `<data_dir>/pebble` when dedupe is on) is missing or empty at startup:
 
 ```text wrap=false
 WARN  data directory does not exist — starting with no prior state.
@@ -189,20 +184,20 @@ WARN  data directory does not exist — starting with no prior state.
       persisting; verify your mount.
 ```
 
-On a first-ever run this is expected. On every subsequent run it should be silent — so when this warning *does* fire after a redeploy, that's the most direct signal that the persistent volume isn't actually persisting.
+This is expected on the first run but signals a persistence failure if it occurs after a redeploy.
 
 ### Distroless Permission Traps (named volume vs bind mount)
 
-WaveHouse images run as the distroless `nonroot` user (UID 65532). Bind mounts and named volumes interact with this differently, and the distroless image has no shell to `chown` things at runtime — so getting the host side wrong produces a hard-to-read permission error from NATS or Pebble at startup.
+Images run as the distroless `nonroot` user (UID 65532). Because distroless images lack a shell to `chown` at runtime, incorrect host permissions cause NATS or Pebble startup errors.
 
-**Named volumes** (the recommended pattern):
+**Named volumes** (recommended):
 
 ```yaml
 volumes:
   - wavehouse-data:/app/data
 ```
 
-On first attach to an empty named volume, Docker performs a "copy-up": the contents and ownership of `/app/data` *from the image* are copied into the volume. The bundled `Dockerfile` and `Dockerfile.goreleaser` both pre-create `/app/data` and `/app/pipes` with `chown -R 65532:65532`, so the volume inherits the right ownership automatically. **No host-side `chown` needed.** Subsequent restarts reuse whatever's in the volume.
+On first attach, Docker performs a "copy-up" of the image's `/app/data` contents and ownership. Since `Dockerfile` and `Dockerfile.goreleaser` pre-create these with `chown -R 65532:65532`, the volume inherits correct ownership automatically. **No host-side `chown` is needed.**
 
 **Bind mounts** (host directory):
 
@@ -211,7 +206,7 @@ volumes:
   - /srv/wavehouse:/app/data
 ```
 
-Bind mounts do **not** copy-up — Docker exposes the host directory as-is, and the image's pre-created dir is masked entirely. If `/srv/wavehouse` is owned by `root:root` on the host (the default for a freshly `mkdir`'d directory), the binary fails at startup with a permission error from NATS:
+Bind mounts do not copy-up; they expose the host directory as-is. If `/srv/wavehouse` is owned by `root:root`, the binary fails with a permission error:
 
 ```text wrap=false
 ERROR  mq init failed  error="..."  path=/app/data/nats
@@ -219,27 +214,27 @@ ERROR  mq init failed  error="..."  path=/app/data/nats
        directory must be owned by UID 65532..."
 ```
 
-The fix is one host-side command before first start:
+UID 65532 is the canonical distroless `nonroot` user; the number works whether or not your host has a matching name in `/etc/passwd`. The error log carries this hint, so copy the suggested `chown` and re-run. Fix before starting:
 
 ```bash
 sudo mkdir -p /srv/wavehouse
 sudo chown -R 65532:65532 /srv/wavehouse
 ```
 
-UID 65532 is the canonical distroless `nonroot` user; the same number works regardless of whether your host has a matching name in `/etc/passwd`. The error log includes this remediation hint, so if you see "permission denied" at startup, copy the suggested `chown` command and re-run.
+UID 65532 is the canonical distroless `nonroot` user. If you see "permission denied," use the suggested `chown` command from the logs.
 
-**Pipes bind mount** follows the same rule — but mount it **read-only** since pipes is a seed, not state:
+**Pipes bind mounts** follow the same rules but should be **read-only**, as pipes are seeds, not state:
 
 ```yaml
 volumes:
   - ./my-pipes:/app/pipes:ro    # :ro is intentional, see below
 ```
 
-Read-only mounts don't need write permission for the container user, so `chown` isn't strictly required — but matching ownership keeps everything consistent.
+Read-only mounts do not strictly require `chown` for the container user, though matching ownership maintains consistency.
 
 ## Pipes Bootstrap (optional, read-only)
 
-Named query pipes live in NATS KV (`WAVEHOUSE_PIPES`). On first run, you can seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
+Named query pipes reside in NATS KV (`WAVEHOUSE_PIPES`). Seed them from `.sql` files by setting `WH_PIPES_DIR` and bind-mounting the directory **read-only**:
 
 ```yaml
 services:
@@ -251,56 +246,54 @@ services:
       - ./my-pipes:/app/pipes:ro     # ← read-only seed
 ```
 
-The directory is a *seed*, not authoritative storage: after bootstrap, the API + KV are the source of truth. Runtime pipe edits go through `PUT /v1/admin/pipes/{name}`, not by editing the files. The `:ro` mount makes that contract explicit and prevents accidental writes from confusing future readers. Empty default (`WH_PIPES_DIR=""`) skips bootstrap entirely — most users will create pipes via the API.
+This directory is a seed; thereafter, the API and KV are authoritative. Edit runtime pipes via `PUT /v1/admin/pipes/{name}`, not files. The `:ro` mount prevents accidental writes. Setting `WH_PIPES_DIR=""` skips bootstrap.
 
 ## Health Checks
 
-API servers in standalone mode expose liveness and readiness endpoints under the Kubernetes-convention names `/livez` and `/readyz`:
+Standalone API servers expose Kubernetes-convention endpoints:
 
-- `GET /livez` — Liveness probe. Returns 200 once the gateway has discovered ClickHouse table schemas at least once. Returns 503 with a diagnostic body while the boot-time schema discovery retry loop is still running (e.g. ClickHouse unreachable, target database missing). After successful boot, `/livez` stays 200 — transient ClickHouse blips at runtime are reflected in `/readyz`, not `/livez`.
-- `GET /readyz` — Readiness probe. Returns 200 if the gateway is fully booted and ClickHouse is currently reachable, 503 otherwise.
+- `GET /livez` — Liveness probe. Returns 200 after the gateway discovers ClickHouse table schemas once. Returns 503 with diagnostics during boot-time schema discovery retries (e.g., ClickHouse unreachable). After boot, it remains 200; runtime ClickHouse blips affect `/readyz` only.
+- `GET /readyz` — Readiness probe. Returns 200 if the gateway is booted and ClickHouse is reachable; otherwise 503.
 
-`/healthz` remains registered as a **permanent alias** of `/livez` (it's the most widely-recognized name); `/health` and `/ready` are **deprecated aliases** for the v0.1.x line and will be removed in v0.2.0. Point new deployments at the `/livez` / `/readyz` names.
+`/healthz` is a **permanent alias** of `/livez`. `/health` and `/ready` are **deprecated aliases** for v0.1.x and will be removed in v0.2.0. Use `/livez` and `/readyz` for new deployments.
 
-Configure your load balancer or orchestrator to use these endpoints.
-
-**Exposure.** Probes share the API server's port (`:8080`) — kubelet probes the container internally, so there's no separate-port convention for them (metrics are the signal that optionally gets its own `prometheus.port`). If you forward `:8080` to the public internet the probe paths become reachable. The **recommended** posture is to keep `/livez`/`/readyz`/`/healthz` to internal callers and expose only **`/v1/health`** publicly (the SDK's content-free liveness ping, which never touches ClickHouse). `/readyz` issues a ClickHouse `Ping` on every call, so a public `/readyz` lets an unauthenticated flood become per-request backend pings, and the bare probes leak boot/readiness state — keeping them internal is a [reverse-proxy/ingress concern](/reverse-proxy#health-probes), and your orchestrator reaches them the internal way (kubelet on the container, LB on the backend) regardless.
+**Exposure.** Probes use the API server port (`:8080`). Metrics optionally use `prometheus.port`. If `:8080` is public, probe paths are reachable. **Recommended:** keep `/livez`, `/readyz`, and `/healthz` internal; expose only **`/v1/health`** publicly (a content-free ping that doesn't touch ClickHouse). `/readyz` issues a ClickHouse `Ping` per call, so a public `/readyz` turns an unauthenticated flood into per-request backend pings, and bare probes leak boot state. Internal routing is a [reverse-proxy/ingress concern](/reverse-proxy#health-probes); orchestrators reach probes internally via kubelet or LB.
 
 ### Boot-time degraded mode
 
-If ClickHouse is unreachable when WaveHouse starts (connection refused, missing database, DNS failure, etc.), the gateway no longer exits — it binds `:8080` and serves `/livez` 503 with the latest schema-discovery error as the diagnostic. Schema discovery retries in the background with exponential backoff (2s → 60s cap). Once a Refresh succeeds, `/livez` flips to 200 and normal serving begins automatically.
+If ClickHouse is unreachable at start, the gateway binds `:8080` and serves `/livez` 503 with the latest schema-discovery error instead of exiting. Discovery retries in the background with exponential backoff (2s $\to$ 60s cap). Once a Refresh succeeds, `/livez` flips to 200 and serving begins.
 
-This means:
+Consequently:
 
-- The binary itself no longer exits and crash-loops every ~10s under a supervisor. Process state is preserved across CH outages.
-- An operator can `curl /livez` and read the exact failure mode instead of grepping a restart-loop log.
-- `/v1/ingest?table={table}` and other schema-aware endpoints will reject requests with a 4xx until discovery succeeds, since the schema registry is empty.
+- The binary does not crash-loop under a supervisor; process state is preserved across outages.
+- Operators can `curl /livez` for failure modes instead of grepping logs.
+- Schema-aware endpoints (e.g., `/v1/ingest?table={table}`) return 4xx until discovery succeeds.
 
-**Important — orchestrator restart semantics.** `/livez` returning 503 during the retry window is what most LB / `depends_on` setups want (route around the unready instance, hold dependents), but a Kubernetes `livenessProbe` pointed at `/livez` will still mark the pod unhealthy and restart it after `failureThreshold × periodSeconds` elapses (default ~30s) — effectively re-creating the restart loop at a slower cadence. Use a `startupProbe` to gate liveness/readiness until the first successful schema discovery (see the K8s example below). Docker `HEALTHCHECK` marks the container `(unhealthy)` but does not restart it by default, so docker-compose deployments don't need a separate startupProbe-equivalent — the `HEALTHCHECK`'s `--start-period=15s` plus `service_healthy` dependency wait covers the same idea at a smaller scale.
+**Orchestrator restart semantics.** A Kubernetes `livenessProbe` on `/livez` will restart the pod after `failureThreshold × periodSeconds` (default ~30s), recreating a restart loop. Use a `startupProbe` to gate liveness/readiness until first schema discovery. Docker `HEALTHCHECK` marks containers `(unhealthy)` without restarting them, so `docker-compose` deployments only need `--start-period=15s` and `service_healthy` dependencies.
 
 ### Docker `HEALTHCHECK`
 
-Both bundled Dockerfiles (`deployments/Dockerfile` and `deployments/Dockerfile.goreleaser`) ship a built-in `HEALTHCHECK` that probes `/livez` every 10 seconds. Because the runtime image is distroless (no shell, no `curl`/`wget`), the check uses the binary's own `health` subcommand:
+Bundled Dockerfiles (`deployments/Dockerfile` and `deployments/Dockerfile.goreleaser`) include a `HEALTHCHECK` probing `/livez` every 10 seconds. Since the runtime image is distroless (no shell, no `curl`/`wget`), it uses the binary's `health` subcommand:
 
 ```dockerfile
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
   CMD ["/app/wavehouse", "health"]
 ```
 
-The `health` subcommand is a thin client that does an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/livez` and exits 0 (200 OK) or 1 (anything else). It honors `WH_SERVER_PORT` so it tracks whatever port the server is actually listening on.
+The `health` subcommand performs an HTTP `GET http://127.0.0.1:$WH_SERVER_PORT/livez`, exiting 0 (200 OK) or 1. It honors `WH_SERVER_PORT`.
 
-You can run it manually for debugging:
+Debug manually:
 
 ```bash
 docker exec my-wavehouse /app/wavehouse health
 echo $?   # 0 = healthy, 1 = unhealthy
 ```
 
-`docker ps` will show `(healthy)` / `(unhealthy)` in the STATUS column once the start-period elapses.
+`docker ps` shows status in the STATUS column after the start-period.
 
 ### Compose `depends_on: service_healthy`
 
-The Dockerfile `HEALTHCHECK` lets dependent services wait for WaveHouse to be ready before starting:
+The Dockerfile `HEALTHCHECK` allows dependent services to wait for WaveHouse:
 
 ```yaml
 services:
@@ -315,11 +308,11 @@ services:
         condition: service_healthy
 ```
 
-If you need different intervals (e.g. faster probes for E2E tests), override per-service via the compose `healthcheck:` block — that replaces the image's HEALTHCHECK for that container.
+Override via a compose `healthcheck:` block for different intervals (e.g., E2E tests).
 
 ### Kubernetes / orchestrator note
 
-K8s `livenessProbe` and `readinessProbe` use kubelet HTTP probes from outside the container — they don't go through the Dockerfile `HEALTHCHECK` at all. Configure them directly against `/livez` and `/readyz` in the PodSpec, and add a `startupProbe` so the boot-time schema-discovery retry window doesn't trip liveness and restart the pod:
+K8s probes use kubelet HTTP calls, bypassing the Dockerfile `HEALTHCHECK`. Configure them in the PodSpec with a `startupProbe` to prevent boot-time restarts:
 
 ```yaml
 startupProbe:
@@ -333,15 +326,15 @@ readinessProbe:
   httpGet: { path: /readyz, port: 8080 }
 ```
 
-Until `startupProbe` succeeds, kubelet doesn't run `livenessProbe` or `readinessProbe` against the pod — so a slow or temporarily-unreachable ClickHouse can't restart-loop the pod via the liveness path. Size `failureThreshold` to your expected worst-case CH boot time; the default 30 × 10s = 5min is generous and works for compose-on-NAS-style deployments where CH and WaveHouse can race during a host reboot.
+`livenessProbe` and `readinessProbe` only run after `startupProbe` succeeds. Set `failureThreshold` to your worst-case CH boot time; 5min (30 $\times$ 10s) is generally sufficient.
 
 ## Behind a reverse proxy
 
-WaveHouse serves plain HTTP on `:8080` and does **not** terminate TLS, manage certificates, or rate-limit — put a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) in front for any internet-facing deployment. A few behaviors only matter behind a proxy: TLS termination, the request-body size limits, Server-Sent Events buffering (WaveHouse now sends keepalive comments so quiet streams survive proxy idle timeouts, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)), header/auth forwarding, and which health paths to expose. See **[Behind a reverse proxy](/reverse-proxy)** for the full guide and example nginx/Caddy/Cloudflare configs.
+WaveHouse serves plain HTTP on `:8080` without TLS termination, certificate management, or rate-limiting; use a reverse proxy, CDN, or tunnel (nginx, Caddy, Cloudflare Tunnel) for internet deployments. Proxy considerations include TLS termination, request-body size limits, header/auth forwarding, health paths, and SSE buffering (keepalive comments now prevent idle timeouts, [#226](https://github.com/Wave-RF/WaveHouse/issues/226)). See **[Behind a reverse proxy](/reverse-proxy)** for guides and configs.
 
 ## ClickHouse Schema
 
-WaveHouse uses a **Bring Your Own Schema** model. You create your tables in ClickHouse with whatever columns and engines you need. WaveHouse discovers the schemas automatically via `system.columns` and validates ingest data against them.
+WaveHouse uses **Bring Your Own Schema**. Create tables in ClickHouse with any columns or engines; WaveHouse automatically discovers schemas via `system.columns` and validates ingest data.
 
 Example table:
 
@@ -355,21 +348,21 @@ CREATE TABLE IF NOT EXISTS clicks (
 ORDER BY (page);
 ```
 
-WaveHouse discovers this schema on startup and refreshes it every `schema.refresh_interval` seconds (default: 60). You can also trigger an immediate refresh via `POST /v1/schema/refresh` (admin-only).
+Schemas refresh every `schema.refresh_interval` seconds (default: 60) or via admin-only `POST /v1/schema/refresh`.
 
 ## Dead Letter Queue (DLQ)
 
-When `dlq.enabled` is `true` (default), a failed batch insert is retried row by row and the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
+If `dlq.enabled` is `true` (default), failed batch inserts retry row by row; persistent failures publish to `WAVEHOUSE_DLQ` NATS stream under `dlq.{table}` to prevent infinite loops. Monitor via `GET /v1/dlq/stats`.
 
 ## Observability
 
-Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) to export traces, metrics, and logs, then point the OpenTelemetry SDK at your collector or gateway with the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var (always include a scheme — `https://` selects TLS, `http://` selects plaintext; with the endpoint unset the SDK defaults to **TLS** at `localhost:4317`, so a plaintext local collector needs `http://localhost:4317` set explicitly). `OTEL_EXPORTER_OTLP_HEADERS` carries cloud auth and `OTEL_EXPORTER_OTLP_CERTIFICATE` trusts a private CA, so telemetry can go to a local collector or straight to a TLS-protected cloud gateway with no sidecar. Each signal can be toggled independently — see [Configuration → OTel](/configuration#otel) for the full table of knobs.
+Set `otel.enabled: true` (or `WH_OTEL_ENABLED=true`) to export traces, metrics, and logs. Use `OTEL_EXPORTER_OTLP_ENDPOINT` for the collector/gateway; include a scheme (`https://` for TLS, `http://` for plaintext). If unset, the SDK defaults to **TLS** at `localhost:4317`. Use `OTEL_EXPORTER_OTLP_HEADERS` for cloud auth and `OTEL_EXPORTER_OTLP_CERTIFICATE` for private CAs. See [Configuration → OTel](/configuration#otel) for all toggles.
 
-WaveHouse **pushes** to an OTel collector; scraping-style pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly and own their own sample rates. The `otel.{traces,logs}.sample_rate` knobs apply only to the OTLP push path. Stdout always emits 100%. The logger fans out to both stdout and OTLP, so stdout output never disappears regardless of collector state. gRPC exporters are lazy, so an unreachable collector does not block startup — transient export errors are surfaced via the OTel SDK's error handler instead.
+WaveHouse **pushes** to OTel collectors. Scraping pipelines (Promtail/Grafana Alloy → Loki, Vector, Fluent Bit) read stdout directly; `otel.{traces,logs}.sample_rate` only affects the OTLP push path. Stdout always emits 100% and remains active regardless of collector state. gRPC exporters are lazy; unreachable collectors won't block startup, and errors surface via the SDK handler.
 
 ### Pattern: Local collector (SigNoz, OTel Collector, Alloy)
 
-A local collector almost always speaks **plaintext** gRPC, but the SDK's unset default endpoint is **TLS** at `localhost:4317` — so enabling OTel alone is not enough. Point it at the collector with an explicit `http://` scheme: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or set `OTEL_EXPORTER_OTLP_INSECURE=true`). All three signals (traces, metrics, logs) push through the same connection. This is the simplest setup.
+Local collectors usually use **plaintext** gRPC. Since the SDK default is TLS, you must explicitly set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` (or `OTEL_EXPORTER_OTLP_INSECURE=true`). All signals push through one connection.
 
 ```yaml
 otel:
@@ -378,9 +371,9 @@ otel:
 
 ### Pattern: Direct-to-cloud OTLP (Honeycomb, Grafana Cloud)
 
-Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an `https://` URL to select TLS (system root CAs), and `OTEL_EXPORTER_OTLP_HEADERS` for the per-RPC auth every cloud OTLP gateway expects — no sidecar required to terminate TLS or inject auth. For a private or self-signed gateway, point `OTEL_EXPORTER_OTLP_CERTIFICATE` at the CA certificate; for mutual TLS, add `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`. These apply to the **trace and metric** signals only — the pinned gRPC logs exporter ignores the env TLS-cert vars (upstream bug [open-telemetry/opentelemetry-go#6661](https://github.com/open-telemetry/opentelemetry-go/issues/6661)), so against a private-CA gateway the logs signal falls back to system roots and won't connect; route logs through a local collector (which terminates TLS itself) until the fix lands upstream.
+Use an `https://` URL for TLS and `OTEL_EXPORTER_OTLP_HEADERS` for auth. For private gateways, use `OTEL_EXPORTER_OTLP_CERTIFICATE`; for mutual TLS, add `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`. Note: the gRPC logs exporter ignores these TLS-cert vars (upstream bug [open-telemetry/opentelemetry-go#6661](https://github.com/open-telemetry/opentelemetry-go/issues/6661)); route logs through a local collector if using a private CA.
 
-**Honeycomb** (single endpoint, per-RPC auth):
+**Honeycomb**:
 
 ```bash
 export WH_OTEL_ENABLED=true
@@ -388,7 +381,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io:443
 export OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=YOUR_API_KEY
 ```
 
-**Grafana Cloud OTLP gateway** (Basic auth):
+**Grafana Cloud OTLP gateway**:
 
 ```bash
 export WH_OTEL_ENABLED=true
@@ -399,7 +392,7 @@ export OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic $(printf '%s' "$INSTANCE_
 
 ### Pattern: Datadog (via local DDOT Collector)
 
-Datadog has no public direct-to-cloud OTLP endpoint — telemetry must transit a local OTLP receiver that re-exports over Datadog's own protocol. The supported receiver is the [DDOT Collector](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/) embedded in the Datadog Agent, which exposes a standard OTLP receiver on `4317`. Point WaveHouse at the local receiver as plaintext — the API-key auth lives on the Agent, so no `OTEL_EXPORTER_OTLP_HEADERS` is needed:
+Datadog requires a local OTLP receiver (e.g., [DDOT Collector](https://docs.datadoghq.com/opentelemetry/setup/ddot_collector/) in the Datadog Agent). Point WaveHouse at the local plaintext receiver; auth is handled by the Agent:
 
 ```bash
 export WH_OTEL_ENABLED=true
@@ -408,25 +401,19 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317   # plaintext gRPC; DD_
 
 ### Pattern: Grafana Cloud / Mimir / Loki / Tempo via Grafana Alloy
 
-The Grafana stack typically wants Prometheus-style scraping for metrics, stdout scraping for logs, and OTLP push for traces. Wire it like this:
+- **Logs**: Alloy scrapes stdout (Docker socket/file tail/k8s API). No WaveHouse config needed.
+- **Traces**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` to Alloy's `otelcol.receiver.otlp` listener (`http://alloy:4317`); Alloy forwards to Tempo.
+- **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics`. The `prometheus` block is independent of `otel.*`: leave `otel.enabled: false` for scrape-only, or combine both if traces still go via OTLP.
 
-- **Logs**: Alloy scrapes stdout via the Docker socket / file tail / k8s logs API. No WaveHouse config needed — stdout always emits 100%.
-- **Traces**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` to Alloy's `otelcol.receiver.otlp` listener (`http://alloy:4317`). Alloy forwards to Tempo.
-- **Metrics**: Set `prometheus.enabled: true`. Alloy's `prometheus.scrape` reads `http://wavehouse:8080/metrics` (or whatever port you configured). The `prometheus` block is independent of `otel.*` — you can leave `otel.enabled: false` if Alloy is only scraping (no OTLP push at all), or combine the two if traces still go via OTLP.
-
-For the metrics path specifically: WaveHouse uses the OTel SDK's Prometheus exporter under the hood, which translates OTel metric names to Prometheus conventions automatically (dots and dashes become underscores; counters get a `_total` suffix). Existing OTel instruments don't need renaming.
+WaveHouse uses the OTel SDK Prometheus exporter, automatically translating OTel metric names to Prometheus conventions (e.g., dots to underscores; counters get `_total`).
 
 ### Separating the `/metrics` listener
 
-By default, `prometheus.port` is `0`, which mounts `/metrics` on the main API server port (typically `8080`). This is the friendliest setup for compose / quick-start use.
-
-For production posture where metrics should not be exposed on the public API listener, set `port` to a separate non-zero value (e.g. `9091`). WaveHouse spins up a dedicated HTTP listener bound to that port serving only `/metrics`. Firewall the port to internal networks only; the main API listener stays where it was. Both listeners participate in graceful shutdown.
+By default, `prometheus.port: 0` mounts `/metrics` on the main API port (usually `8080`). For production, set `port` to a non-zero value (e.g., `9091`) to create a dedicated HTTP listener for metrics. Firewall this port to internal networks.
 
 ### Local Observability Stack
 
-We intentionally do not maintain a heavy, multi-node observability cluster (like SigNoz or an ELK stack) for local development. Instead, we use lightweight, ephemeral, single-container tools that boot instantly and clean themselves up.
-
-The underlying Docker run scripts live in `scripts/otel/` and are invoked via Make:
+We use lightweight, ephemeral tools via scripts in `scripts/otel/`:
 
 ```bash
 make obs-aspire   # Simplest, in-memory, no login
@@ -435,19 +422,20 @@ make obs-grafana  # Full Grafana LGTM stack, auto-login enabled
 make obs-front
 ```
 
-All options automatically listen on standard OTLP ports (`4317` gRPC / `4318` HTTP) as **plaintext** receivers. If you are running WaveHouse directly on your host (e.g. `make dev`), set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` to reach them — the SDK's unset default dials `localhost:4317` over **TLS**, which a plaintext receiver rejects.
+These use **plaintext** receivers on ports `4317` (gRPC) and `4318` (HTTP).
 
-If you are running a containerized WaveHouse (e.g., via `deployments/compose/standalone.yaml`), you must override its environment to reach the host-bound collector: `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
+- Host-run WaveHouse (`make dev`): Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`.
+- Containerized WaveHouse: Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317`.
 
 ### Dashboards
 
-Because we use ephemeral, single-container observability tools for local development, we no longer maintain strict, version-controlled JSON dashboards in this repository.
+We do not maintain version-controlled JSON dashboards due to the ephemeral nature of local tools.
 
-- If you use `make obs-aspire`, the UI is pre-built and requires zero configuration.
-- If you use `make obs-grafana`, it is pre-configured to automatically provision the internal data sources and bypass the login screen. You can use Grafana's "Explore" tab to quickly jump between logs and traces.
-- If you use `make obs-front`, it allows custom and comparison dashboards like grafana, but is simpler and easier to configure like aspire.
+- `make obs-aspire`: Pre-built UI, zero config.
+- `make obs-grafana`: Auto-provisioned data sources and bypassed login; use "Explore" for logs/traces.
+- `make obs-front`: Supports custom dashboards with simpler configuration than Grafana.
 
-For production deployments, you should construct dashboards specific to your telemetry vendor (Datadog, Honeycomb, New Relic, etc.) based on the standard OpenTelemetry metrics and traces WaveHouse emits.
+For production, build vendor-specific dashboards based on standard OTel emissions.
 
 ## Resetting Data in Development
 

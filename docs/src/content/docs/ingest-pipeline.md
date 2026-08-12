@@ -15,24 +15,15 @@ goroutine / channel / timer interplay is subtle.
 
 | File | Contents |
 | --- | --- |
-| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, the per-table `tableBatcher`/`tableLoop`, `flushTable` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ` |
-| `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
-| `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
+| `worker.go` | `StartIngestWorker`, `dispatchLoop`, per-table `tableBatcher`/`tableLoop`, `flushTable` (bulk insert with row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ` |
+| `sweeper.go` | **Active Sweeper**: purges stream messages written to ClickHouse and past the SSE gap window |
+| `types.go` | `EventMessage` wire format, `BufferConsumerName` constant |
 
-The pipeline is **insert-only**. The wire format carries
-`{table_name, received_timestamp, data}` and nothing else; the worker parses
-the envelope and bulk-`INSERT`s — schema validation already happened at the
-HTTP ingest handler, before publish. Non-insert mutations go through a
-different admin path.
+The pipeline is **insert-only**. The `{table_name, received_timestamp, data}` wire format is parsed by the worker for bulk-`INSERT`. HTTP ingest handlers validate schemas before publishing. Non-insert mutations use a separate admin path.
 
 ## High-level shape
 
-One process consumes a single durable JetStream consumer and fans events out to
-a goroutine per table. Each table batches independently and POSTs to ClickHouse
-over the HTTP interface (`JSONEachRow`). On a bulk-insert failure the batch is
-re-inserted row by row, so a single poison row can't sink it: clean rows ack,
-and only the rows that fail again go to the dead-letter stream. A separate
-sweeper reclaims stream storage.
+One process consumes a single durable JetStream consumer and fans events to one goroutine per table. Each table batches independently and POSTs to ClickHouse via HTTP (`JSONEachRow`). On bulk-insert failure, rows are re-inserted individually: clean rows ack, while failing rows go to the dead-letter stream. A separate sweeper reclaims storage.
 
 ```mermaid
 flowchart LR
@@ -62,29 +53,10 @@ flowchart LR
     Stream -.->|"DeliverByStartTime gap-fill"| Hub["hub-bridge consumer<br/>(SSE fan-out)"]
 ```
 
-Note the stream is **dual-use**: it is both the durable buffer feeding the
-worker and the replay buffer that SSE clients gap-fill from. That is why a
-custom sweeper exists instead of plain work-queue auto-deletion (see
-[Scaling out](#scaling-to-multiple-instances)).
+The stream is **dual-use**: a durable buffer for the worker and a replay buffer for SSE client gap-fills. Thus, a custom sweeper replaces work-queue auto-deletion (see [Scaling out](#scaling-to-multiple-instances)).
 
 :::note[ClickHouse timestamp parsing]
-Inserts pin `date_time_input_format=best_effort` — the server default since
-ClickHouse 26.5, but on older servers the `basic` default rejects the canonical
-RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)).
-The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings)
-parse identically under both settings, so pre-canonical messages still in the
-stream replay unchanged. Bare digit-strings of other lengths are the exception:
-`best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic`
-read a plain `DateTime` column's digit string of five or more digits as Unix
-seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"`
-as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic`
-stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped
-runs, and additionally whenever an epoch run's unit doesn't match the column
-scale (under `basic`, runs longer than 10 digits are ticks at the column's
-own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A
-producer relying on the old `basic` reading changes meaning as soon as this
-WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what
-flips the parse.
+Inserts pin `date_time_input_format=best_effort`—the server default since ClickHouse 26.5; older servers' `basic` default rejects RFC 3339 `Z` suffixes ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). Zone-less date-times and 9–10-digit Unix strings parse identically under both. However, `best_effort` reads calendar shapes (e.g., `"20260711"`) as dates, whereas `basic` read them as Unix seconds. For `DateTime64`, they diverge on calendar shapes and when epoch run units mismatch column scale (`basic` treats >10 digits as column-scale ticks; `best_effort` detects 13/16/19-digit runs as ms/µs/ns). Producers relying on `basic` parsing change meaning upon deploying this WaveHouse version via the pin.
 :::
 
 ## The journey of one event
@@ -112,8 +84,7 @@ sequenceDiagram
 
 ## Goroutine topology
 
-The design rule is **single-owner state, lock-free**: each piece of mutable
-state is touched by exactly one goroutine. There are no mutexes in the hot path.
+Design rule: **single-owner state, lock-free**. One goroutine touches each piece of mutable state; no mutexes exist in the hot path.
 
 ```mermaid
 flowchart TD
@@ -127,34 +98,21 @@ flowchart TD
     F2 --> A2["ack goroutines (ackWg)"]
 ```
 
-Three `WaitGroup`s form a strict containment hierarchy, which is what makes
-shutdown correct (below):
+Three `WaitGroup`s ensure correct shutdown via a strict containment hierarchy:
 
-- **`wg`** tracks the `dispatchLoop` goroutine.
-- **`tableWg`** (owned by `dispatchLoop`) tracks the per-table `tableLoop`s.
-- **`ackWg`** tracks the background `DoubleAck` goroutines.
+- **`wg`**: tracks `dispatchLoop`.
+- **`tableWg`** (owned by `dispatchLoop`): tracks per-table `tableLoop`s.
+- **`ackWg`**: tracks background `DoubleAck` goroutines.
 
 ## Why per table? The bug this design fixes
 
-A single shared batch across all tables couples them: a high-volume table can
-trip the size trigger and strand a low-volume table's rows in a batch that then
-waits for the time trigger, and vice-versa. Routing each table to its own
-`tableLoop` gives every table an **independent** size trigger and timer, so one
-table's traffic never delays another's. (`dispatchLoop` does no batching itself
-— it only parses enough to pick the route key.)
+Shared batches couple tables: high-volume tables can trip size triggers, stranding low-volume rows until time triggers fire. Routing each table to its own `tableLoop` provides **independent** size triggers and timers; one table's traffic never delays another's. (`dispatchLoop` does no batching—it only parses enough to pick the route key.)
 
 ## The `tableBatcher` state machine
 
-Each `tableLoop` owns a `tableBatcher`. It has exactly two flush **triggers** —
-the batch reaching `maxBatch` (checked in `add`) and the `maxWait` deadline
-timer — plus a rule that **at most one insert runs per table at a time**
-("coalescing"). A flush *completing* is **not** a trigger.
+Each `tableLoop` owns a `tableBatcher`. Flushes are triggered by reaching `maxBatch` (checked in `add`) or the `maxWait` deadline timer. Only one insert runs per table at a time ("coalescing"); a flush completing is not a trigger.
 
-The `flushing` channel signals "an insert is in flight" (it is `nil` when idle —
-and receiving from a `nil` channel blocks forever, so the loop's `<-flushing`
-arm is automatically inert while idle). The `flushQueued` flag **latches** a
-trigger that fires while an insert is already running, so the deferred flush runs
-the moment the slot frees.
+The `flushing` channel signals an active insert; it is `nil` when idle, making the loop's `<-flushing` arm inert. The `flushQueued` flag latches triggers that fire during an active insert, ensuring a deferred flush runs once the slot frees.
 
 ```mermaid
 stateDiagram-v2
@@ -170,23 +128,14 @@ stateDiagram-v2
     FlushingQueued --> Flushing: done — deferred flush
 ```
 
-Two consequences worth internalizing:
+Two key consequences:
 
-- **`maxBatch` is a "try to flush" threshold, not a hard cap.** If rows keep
-  arriving while a flush is in flight, the next batch coalesces and can exceed
-  `maxBatch`, flushing as one larger insert when the slot frees. That is *good*
-  for ClickHouse part pressure (bigger batches when hot) and is bounded upstream
-  by `maxAckPending`.
-- **A partial leftover after a size flush waits for its own size/timer.** When
-  500 rows flush and 100 remain, those 100 do **not** flush just because the
-  first insert finished — they wait for their own `maxBatch` or `maxWait`. The
-  `flushQueued` latch is also what prevents a stranding bug: if the leftover's
-  timer fires *during* the in-flight insert, the latch remembers it so the rows
-  still flush when the slot frees (rather than the tick being silently lost).
+- **`maxBatch` is a "try to flush" threshold, not a hard cap.** If rows arrive during a flush, the next batch coalesces and may exceed `maxBatch`, flushing as one larger insert. This reduces ClickHouse part pressure and is bounded upstream by `maxAckPending`.
+- **Leftovers wait for their own size/timer.** If 500 rows flush and 100 remain, those 100 wait for `maxBatch` or `maxWait`. The `flushQueued` latch prevents stranding: if a leftover's timer fires during an insert, the latch ensures they flush when the slot frees.
 
 ### Why there are no data races
 
-When a flush starts, the batcher hands the goroutine a **private snapshot**:
+Flushes use a **private snapshot**:
 
 ```go
 rows := b.batch   // snapshot the slice header
@@ -194,16 +143,11 @@ b.batch = nil     // fresh batch here; appends allocate a new backing array
 go func() { w.flushTable(ctx, b.table, rows) }()
 ```
 
-The flush goroutine only ever touches `rows` and the worker's
-concurrency-safe collaborators (HTTP client, cache, `ackWg`); it never touches
-`b.batch`, `b.timer`, or `b.flushing`. Those are touched solely by the
-`tableLoop` goroutine. `b.batch = nil` (rather than `b.batch[:0]`) is load-bearing
-— reusing the array would let new appends overwrite rows the flush is still
-reading. The race detector (`go test -race`) guards this.
+The flush goroutine only touches `rows` and concurrency-safe collaborators (HTTP client, cache, `ackWg`). It never touches `b.batch`, `b.timer`, or `b.flushing`, which are exclusive to the `tableLoop` goroutine. Setting `b.batch = nil` instead of `b.batch[:0]` prevents new appends from overwriting rows being read. The race detector (`go test -race`) guards this.
 
 ## Contexts
 
-There are three contexts, each with one job.
+Three contexts each perform one job.
 
 ```mermaid
 flowchart LR
@@ -213,28 +157,17 @@ flowchart LR
     FC -.->|"passed down; never watched"| TL["tableLoops + flushes"]
 ```
 
-- **`workerCtx`** is the stop signal. **Only `dispatchLoop` watches it.** Every
-  downstream goroutine stops via channel-close instead, which gives a
-  deterministic drain with no select race that could abandon buffered rows.
-- **`flushCtx` = `context.WithoutCancel(workerCtx)`** carries trace values but is
-  never canceled. A flush that has started must finish, so data already written
-  to ClickHouse gets acked rather than redelivered. It is bounded by the HTTP
-  client timeout (30s); shutdown bounds the *wait* for it with a deadline.
-- A separate **shutdown-deadline context** lives only in `main`'s signal handler
-  and is rooted in `context.Background()` (so it survives `workerCtx` being
-  canceled) — it caps how long shutdown waits.
+- **`workerCtx`**: The stop signal. Only `dispatchLoop` watches it. Downstream goroutines stop via channel-close to ensure deterministic drain without select races abandoning buffered rows.
+- **`flushCtx` = `context.WithoutCancel(workerCtx)`**: Carries trace values; never canceled. Started flushes must finish so ClickHouse data is acked, not redelivered. It is bounded by the 30s HTTP client timeout; shutdown bounds the wait via a deadline.
+- **Shutdown-deadline context**: Rooted in `context.Background()` within `main`'s signal handler to survive `workerCtx` cancellation and cap shutdown wait time.
 
-The principle: **`ctx` cancellation is the stop mechanism for long-running
-loops; `Close()`/stop-funcs are the mechanism for resources.**
+Principle: **`ctx` cancellation stops long-running loops; `Close()`/stop-funcs manage resources.**
 
 ## Lifecycle and shutdown
 
-Startup: `StartIngestWorker` creates the consumer, builds the worker, and
-launches `dispatchLoop`. It returns a `stopFunc` closure that `main` holds and
-calls during graceful shutdown.
+Startup: `StartIngestWorker` creates the consumer, builds the worker, and launches `dispatchLoop`, returning a `stopFunc` closure for `main` to call during graceful shutdown.
 
-Shutdown drains **bottom-up through the containment hierarchy**, under a single
-deadline:
+Shutdown drains **bottom-up through the containment hierarchy** under one deadline:
 
 ```mermaid
 sequenceDiagram
@@ -255,53 +188,35 @@ sequenceDiagram
     SF-->>M: waitOrDeadline returns nil (or deadline error)
 ```
 
-Why this ordering is correct: every `ackWg.Add` happens inside a `tableLoop`'s
-lifetime, so all of them complete before `tableWg.Wait()` returns — which means
-`dispatchLoop` can safely `ackWg.Wait()` afterward with no `Add` racing `Wait`.
-The old code relied on "flush runs synchronously" for this; the hierarchy makes
-it structural instead.
+This ordering is correct because every `ackWg.Add` occurs within a `tableLoop`'s lifetime; all complete before `tableWg.Wait()` returns, ensuring `dispatchLoop` can safely call `ackWg.Wait()` without racing `Add`. This structural hierarchy replaces the old reliance on synchronous flushes.
 
-If the deadline fires first, `waitOrDeadline` returns the deadline error and the
-in-flight goroutines are abandoned — the process is exiting anyway, and anything
-un-acked is redelivered on the next boot (at-least-once).
+If the deadline fires, `waitOrDeadline` returns a deadline error and in-flight goroutines are abandoned; un-acked data is redelivered next boot (at-least-once).
 
-Messages still sitting in `msgChan` or the consumer's prefetch buffer at shutdown
-are **not** flushed; they are simply redelivered next boot. Graceful shutdown
-flushes the in-hand per-table batches, not the entire in-flight pipeline.
+Messages in `msgChan` or the consumer's prefetch buffer at shutdown are **not** flushed—only in-hand per-table batches are.
 
 ## Backpressure and durability knobs
 
-Several layers throttle the pipeline, inner to outer:
+Pipeline throttling layers (inner to outer):
 
-1. **`batch`** flushes at `maxBatch` rows or `maxWait`.
-2. **`msgChan`** (cap `maxBatch*2`) — when full, the consume callback blocks and
-   delivery pauses.
-3. **`pullMaxMessages`** — nats.go's client-side prefetch buffer in front of
-   `msgChan`.
-4. **`maxAckPending`** — the server suspends delivery once this many messages are
-   delivered-but-unacked. The outermost in-memory bound.
-5. **`MaxBytes` + `DiscardNew`** on the stream — when disk fills (e.g. ClickHouse
-   is down so nothing acks/purges), new publishes are rejected and the API
-   returns 503.
+1. **`batch`**: flushes at `maxBatch` rows or `maxWait`.
+2. **`msgChan`** (cap `maxBatch*2`): when full, consume callback blocks and delivery pauses.
+3. **`pullMaxMessages`**: nats.go client-side prefetch buffer before `msgChan`.
+4. **`maxAckPending`**: server suspends delivery once this many messages are delivered-but-unacked; the outermost in-memory bound.
+5. **`MaxBytes` + `DiscardNew`** (stream): if disk fills (e.g. ClickHouse down), new publishes are rejected via 503 API errors.
 
 | Knob | Default | Meaning / invariant |
 | --- | --- | --- |
-| `maxBatch` | 500 | rows that trigger a flush (soft — coalescing can exceed it) |
-| `maxWait` | 5s | max time a row waits before its batch flushes |
-| `ackWait` | 60s | server redelivery timeout; **must exceed `maxWait` + flush time** or in-flight rows get redelivered → duplicate inserts |
+| `maxBatch` | 500 | rows triggering flush (soft; coalescing may exceed) |
+| `maxWait` | 5s | max row wait before batch flushes |
+| `ackWait` | 60s | server redelivery timeout; **must exceed `maxWait` + flush time** to prevent duplicate inserts |
 | `pullMaxMessages` | 500 | client prefetch; keep `<= maxAckPending` |
-| `maxAckPending` | 10,000 | server cap on unacked messages (backpressure) |
+| `maxAckPending` | 10,000 | server unacked message cap (backpressure) |
 
-`DoubleAck` is used (not fire-and-forget `Ack`) because acking is what records
-"this data is durably in ClickHouse." With the embedded server's `SyncAlways`,
-every ack is an fsync and therefore *slow*, which is exactly why acks run in the
-background (`ackWg`) off the insert path.
+`DoubleAck` records durable ClickHouse storage. With embedded server `SyncAlways`, every ack is a slow fsync; thus, acks run backgrounded via `ackWg` off the insert path.
 
 ## The Active Sweeper
 
-The worker advances the consumer's `AckFloor` by acking; the sweeper observes it
-to decide what is safe to purge. They never call each other — the consumer's
-`AckFloor` is their only contract.
+The worker advances the consumer's `AckFloor` by acking; the sweeper observes it to decide what to purge. They communicate only via `AckFloor`.
 
 ```mermaid
 flowchart TD
@@ -312,19 +227,11 @@ flowchart TD
     Purge -->|"deletes msgs that are BOTH<br/>written to ClickHouse AND past the gap window"| Stream[("WAVEHOUSE stream")]
 ```
 
-`MIN(ackFloor+1, gapSeq)` is the safety argument: never purge past what is in
-ClickHouse, and never past the SSE replay window. If ClickHouse is down the
-`AckFloor` stops advancing, purging freezes, and the stream fills toward
-`MaxBytes` — backpressure by construction. The sweeper is launched fire-and-forget
-(`go sweeper.Start(ctx)`); an interrupted sweep is harmless and idempotent, so it
-needs no drain on shutdown — the opposite posture from the worker.
+`MIN(ackFloor+1, gapSeq)` ensures no purging past ClickHouse data or the SSE replay window. If ClickHouse fails, `AckFloor` stops, purging freezes, and the stream hits `MaxBytes`, creating backpressure. The sweeper starts via `go sweeper.Start(ctx)`; as an idempotent process, it requires no shutdown drain.
 
 ## Scaling to multiple instances
 
-Today this is a **single-process** design (embedded, in-process NATS — the
-"connection" cannot blip independently of the process, so there is intentionally
-no reconnect logic). Running multiple instances against a real/clustered NATS
-changes several things:
+The current **single-process** design uses embedded NATS; since the connection cannot fail independently, there is no reconnect logic. Moving to clustered NATS requires several changes:
 
 ```mermaid
 flowchart TD
@@ -341,48 +248,18 @@ flowchart TD
     IB --> CH
 ```
 
-What will need to change, and the trade-offs (discussed at length on the
-batching work):
+Required changes and trade-offs:
 
-- **Work distribution.** Either a *shared* durable pull consumer (competing
-  consumers — coordination-free, but a hot table's rows spread across instances,
-  shrinking per-instance batches), or **partitioned consumer groups** that hash
-  by table-name subject token so a table always lands on one owner (pinned
-  consumer → per-table affinity + automatic failover, at the cost of an
-  assignment layer).
-- **Idempotent inserts become mandatory.** At-least-once + redelivery-on-crash
-  means another instance can re-insert a batch the dead one had written but not
-  acked. Use `ReplacingMergeTree` (or a dedup key). The single-instance design
-  hides this today.
-- **NATS resilience.** Remote NATS needs explicit reconnect/backoff and a
-  `Consume` error handler — none of which the embedded path needs.
-- **The sweeper.** Its single-`AckFloor` model assumes one consumer. With
-  per-table/partition consumers you either rework it to purge below the *minimum*
-  AckFloor across consumers, or — cleaner — **split the dual-use stream**: a
-  `WorkQueuePolicy` work stream (auto-deletes on ack, no sweeper) plus a
-  `MaxAge` replay stream (server-expired by time, no sweeper), joined by stream
-  sourcing. That deletes the sweeper and its leader-election problem entirely,
-  at the cost of duplicating the in-flight overlap on disk.
+- **Work distribution.** Use either a *shared* durable pull consumer (competing consumers; coordination-free, but shrinks per-instance batches) or **partitioned consumer groups** hashing by table-name subject token (pinned consumer; provides per-table affinity and automatic failover via an assignment layer).
+- **Idempotent inserts.** Mandatory due to at-least-once delivery and redelivery-on-crash. Use `ReplacingMergeTree` or a dedup key.
+- **NATS resilience.** Remote NATS requires explicit reconnect/backoff and a `Consume` error handler.
+- **The sweeper.** Replace the single-`AckFloor` model by **splitting the dual-use stream**: use a `WorkQueuePolicy` work stream (auto-deletes on ack) and a `MaxAge` replay stream (server-expired). This removes the sweeper and leader-election issues, though it duplicates in-flight overlap on disk.
 
 ## Deferred / not yet implemented
 
 Tracked under [#191](https://github.com/Wave-RF/WaveHouse/issues/191):
 
-- **Pipelining beyond coalescing** — more than one insert in flight per table
-  (with a documented bound), once benchmarks justify the added concurrency.
-- **`tableLoop` reaping** — loops are spawned per distinct table and never
-  reaped; safe while table names are bounded (schema-validated, in-process
-  publishers only). Needs idle-reaping before untrusted/remote publishers can
-  create unbounded cardinality.
-- **Per-table / partitioned consumers** and the **two-stream retention
-  redesign**.
-- **Parallel e2e test files.** The e2e suite now isolates tables **per file**
-  (`tests/e2e/sdk/tables.ts` — each file gets its own
-  `clicks_<suite>`/`events_<suite>`/`users_<suite>`), so cross-file *data*
-  contamination is structurally impossible. Running the files in parallel
-  (dropping `maxWorkers: 1` in `vitest.config.ts`) is still deferred: several
-  files do read-modify-write on the **single global policy document** and
-  `streaming.test.ts` flips the global `default_role`, so concurrent files would
-  race those writes. Parallelism needs per-table policy storage with atomic
-  per-table updates first — tracked in
-  [#214](https://github.com/Wave-RF/WaveHouse/issues/214).
+- **Pipelining beyond coalescing**: multiple in-flight inserts per table (with documented bound), pending benchmark justification.
+- **`tableLoop` reaping**: loops spawn per distinct table and aren't reaped; safe for bounded, schema-validated, in-process publishers. Idle-reaping is required before allowing untrusted/remote publishers to create unbounded cardinality.
+- **Per-table / partitioned consumers** and the **two-stream retention redesign**.
+- **Parallel e2e test files**: tables are isolated per file (`tests/e2e/sdk/tables.ts` — each file gets its own `clicks_<suite>`/`events_<suite>`/`users_<suite>`), so data contamination is structurally impossible. Parallel execution (removing `maxWorkers: 1` in `vitest.config.ts`) is deferred; files race on the global policy document and `streaming.test.ts` flips the global `default_role`. Requires per-table policy storage with atomic updates ([#214](https://github.com/Wave-RF/WaveHouse/issues/214)).

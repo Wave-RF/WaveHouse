@@ -9,7 +9,7 @@ This document describes the internal architecture of WaveHouse, a schema-aware C
 
 ## Overview
 
-WaveHouse is a Go-based gateway that sits in front of ClickHouse, acting as the entry and exit point for data. It discovers your real ClickHouse table schemas, validates data at ingest time, batches inserts asynchronously, and provides real-time streaming and query caching.
+WaveHouse is a Go gateway for ClickHouse. It discovers table schemas, validates ingest data, batches asynchronous inserts, and provides real-time streaming and query caching.
 
 ```mermaid
 flowchart TD
@@ -43,7 +43,7 @@ flowchart TD
 
 ## Binaries
 
-WaveHouse ships a single binary, `wavehouse`: an all-in-one process running the API, batch worker, embedded NATS JetStream, and optional embedded Pebble dedup. The only external dependency is ClickHouse.
+`wavehouse` is a single binary running the API, batch worker, embedded NATS JetStream, and optional Pebble dedup. Dependency: ClickHouse.
 
 ## Internal Packages
 
@@ -67,94 +67,94 @@ internal/
 
 ### `api/` — HTTP Layer
 
-The API layer uses [Chi](https://github.com/go-chi/chi) for routing with RequestID, a CORS middleware, and a custom JSON recoverer (`jsonRecoverer`) that emits a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
+The API layer routes with [Chi](https://github.com/go-chi/chi): RequestID, CORS middleware, and a custom `jsonRecoverer` emitting a JSON `500` on panic instead of chi's plain-text `middleware.Recoverer`.
 
-- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus the permanent `/healthz` alias and the deprecated `/health`, `/ready` aliases). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role`, or a request bearing the operator key's operator bit, which passes even under a nil policy): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, `/v1/admin/query` (raw SQL — same gate as the rest of `/v1/admin/*`).
-- **auth middleware** — the JWT/JWKS authentication middleware is its own package, [`auth/`](#auth--authentication); the router runs it on every `/v1/*` route.
+- **router.go** — Route definitions. Public: `/livez`, `/readyz`, and the content-free `/v1/health` SDK ping (plus permanent alias `/healthz` and deprecated `/health`, `/ready`). Policy-gated: `/v1/ingest?table={table}`, `/v1/query?table={table}` (structured), `/v1/pipes/{name}` (named pipes), `/v1/stream`. Admin-only (`RequireAdmin` — role == `policy.admin_role` or operator key bit): `/v1/schema/*`, `/v1/dlq/stats`, `/v1/admin/policy`, `/v1/admin/pipes/*`, and `/v1/admin/query` (raw SQL).
+- **auth middleware** — JWT/JWKS authentication via [`auth/`](#auth--authentication); applied to all `/v1/*` routes.
 - **policy.go** — CRUD handler for access control policies (`/v1/admin/policy`).
 - **pipes.go** — Named query pipe handlers: admin CRUD and execution with parameter binding.
-- **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates query AST, enforces permissions, builds and executes SQL.
-- **ingest.go** — Accepts flat JSON body for `POST /v1/ingest?table={table}`, validates against discovered schema, optional dedup, publishes to NATS subject `ingest.{table}`. When dedup is on, a row missing the configured `id_field` can't be deduped: it is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped — or rejected when `dedupe.require_id` is set ([#219](https://github.com/Wave-RF/WaveHouse/issues/219)).
-- **query.go** — Proxies raw SQL for `POST /v1/admin/query` straight to ClickHouse's HTTP interface. **Not cached** — sets `Cache-Control: no-store` so every request hits ClickHouse; DateTime is rendered ISO-8601 via `date_time_output_format=iso` (the Go-side type conversion lives in the structured-query / pipes path, not here).
-- **stream.go** — Real-time streaming via SSE. Callers select a table with the `?table=` query parameter. Each connection registers one `Subscriber` (the `stream/` package) with both the event `Hub` (under its `(topic, role)`) and the shared keepalive wheel, then drains both from a single byte-pump — so idle streams keep emitting `:` keepalive comments (surviving reverse-proxy idle timeouts) while live events arrive already projected and serialized. Per-event projection/serialization happens **once per role** in the `Hub`, not once per subscriber ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)). Gap-fill replay from NATS JetStream (`DeliverByStartTime`) stays per-connection (low-volume, one-time on connect).
-- **schema.go** — Schema discovery API: list all schemas, get one table, trigger refresh.
-- **dlq.go** — DLQ stats endpoint and `EnsureDLQStream` helper for creating the `WAVEHOUSE_DLQ` NATS stream.
-- **health.go** — Liveness (`/livez`), readiness (`/readyz`), and a content-free `Online` ping (`/v1/health`, the SDK's public liveness check); `/healthz` is a permanent alias of `/livez`, and `/health`/`/ready` are deprecated aliases. All three consult an optional `BootState` so they can return 503 while boot-time schema discovery is still failing in the retry loop (see `cmd/wavehouse/main.go`); once `BootState.Set(nil)` fires, `/livez` returns 200 and stays there. `/readyz` additionally pings ClickHouse each call; `/v1/health` deliberately does not.
+- **structured_query.go** — Handler for `POST /v1/query?table={table}`: validates AST, enforces permissions, executes SQL.
+- **ingest.go** — Accepts flat JSON for `POST /v1/ingest?table={table}`, validates schema, optionally dedups, and publishes to NATS subject `ingest.{table}`. If dedup is on but `id_field` is missing: logged at `WARN`, counted by `wavehouse_ingest_dedupe_missing_id_total` (labeled by `table`), then published un-deduped—or rejected if `dedupe.require_id` is set ([#219](https://github.com/Wave-RF/WaveHouse/issues/219)).
+- **query.go** — Proxies raw SQL for `POST /v1/admin/query` to ClickHouse's HTTP interface. Sets `Cache-Control: no-store`; renders DateTime as ISO-8601 via `date_time_output_format=iso`.
+- **stream.go** — SSE streaming via `?table=` parameter. Each connection registers one `Subscriber` (`stream/` package) with the event `Hub` (by topic, role) and keepalive wheel. Idle streams emit `:` comments to prevent proxy timeouts. Projection/serialization happens once per role in the `Hub` ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)). NATS JetStream gap-fill (`DeliverByStartTime`) is per-connection.
+- **schema.go** — Schema discovery: list schemas, get table, trigger refresh.
+- **dlq.go** — DLQ stats and `EnsureDLQStream` helper for the `WAVEHOUSE_DLQ` NATS stream.
+- **health.go** — Liveness (`/livez`), readiness (`/readyz`), and a content-free `Online` ping (`/v1/health`, the SDK's liveness check). `/healthz` aliases `/livez`; `/health`/`/ready` are deprecated. All consult `BootState` to return 503 during boot-time schema discovery (see `cmd/wavehouse/main.go`). Once `BootState.Set(nil)` fires, `/livez` returns 200. `/readyz` pings ClickHouse; `/v1/health` does not.
 
 ### `stream/` — SSE keepalive & fan-out
 
-The SSE fan-out, factored out of `api/` so the delivery hot path ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)) lives next to the keepalive primitives it shares. One abstraction per file.
+The SSE fan-out is factored out of `api/` so the delivery hot path ([#294](https://github.com/Wave-RF/WaveHouse/issues/294)) resides with its shared keepalive primitives. One abstraction per file.
 
-- **hub.go** — `Hub`, the event fan-out. Subscribers register under `(topic, role)`; `Broadcast` decodes each event once, applies each subscribed role's column policy once, builds one SSE frame per role, and fans it to every member of that role's `Bucket` — collapsing the prior per-subscriber `unmarshal → evaluate → filter → marshal` into one pass per distinct `(role, table)` output shape (the [#294](https://github.com/Wave-RF/WaveHouse/issues/294) lever; the measured ceiling was ~2 270 deliveries/s from re-projecting per subscriber). The `(topic, role)` key is sufficient because column visibility derives only from the role+table policy entry, never from JWT claims (claims feed only the row-level `WHERE`/`CHECK`, which the stream path does not apply). `ReplayFrame` shares the same projection for the handler's per-connection gap-fill.
-- **subscriber.go** — `Subscriber`, the per-connection handle. It owns a single ready-to-write outbound queue of `Frame`s (each tagged with its `kind`, so the handler labels the write where it happens): producers — the keepalive wheel and the event `Hub` — fan frames in with `Send` (non-blocking; a full queue drops and the `Hub` counts it), and the handler drains `Frames()` to the client verbatim. The queue is sized for buffering live events (cap 64, up from the keepalive-only cap 1; #152 will make it a knob), and an `Evicted()` channel is the seam the slow-consumer follow-up closes to disconnect a wedged consumer.
-- **bucket.go** — `Bucket`, the reusable fan-out primitive: a concurrency-safe set of subscribers. `Push` delivers a shared `Frame` to each fire-and-forget (the keepalive wheel's ring); `Snapshot` exposes the members so the event `Hub` can fan out while inspecting each `Send` result (to count drops). The `Hub` holds one `Bucket` per `(topic, role)` so a projected frame is built once and sent to every member instead of re-projected per subscriber.
-- **heartbeat.go** — The keepalive wheel (`Heartbeater`). A single process-wide ticker fans a minimal `:` comment across the ring of `Bucket`s, waking ~1/N of live streams per tick so the writes don't synchronize. The effective per-connection keepalive period is `stream.keepalive_interval` (the wheel ticks every `keepalive_interval ÷ keepalive_buckets`, so one rotation spans the interval); the owning handler goroutine does the actual write, so the shared ticker never touches a `ResponseWriter` directly.
-- **metrics.go** — `Metrics`, the SSE instrument set: `wavehouse_sse_active_streams` (open streams), `wavehouse_sse_stream_duration_seconds` (lifetime), `wavehouse_sse_frames_sent_total` / `wavehouse_sse_bytes_sent_total` (labeled by `kind`: `keepalive`, `event`, `replay`), and `wavehouse_sse_dropped_frames_total` (frames dropped to a full subscriber queue — the slow-consumer signal that was silent before #294). Nil-safe, so the handler holds one unconditionally and tests skip wiring it; one shared instance records both the handler's write sites and the `Hub`'s drop counts. Separate from `observability.RegisterSystemMetrics`, which covers only the NATS/Pebble system gauges. Streams are observed through these metrics rather than per-event traces (the router excludes `/v1/stream` from the HTTP tracer).
+- **hub.go** — `Hub`, the event fan-out. Subscribers register under `(topic, role)`. `Broadcast` decodes each event once, applies the role's column policy once, builds one SSE frame per role, and fans it to every member of that role's `Bucket`. This collapses the prior per-subscriber `unmarshal → evaluate → filter → marshal` into one pass per distinct `(role, table)` output shape (the [#294](https://github.com/Wave-RF/WaveHouse/issues/294) lever; previous ceiling was ~2 270 deliveries/s). The `(topic, role)` key suffices because column visibility derives from the role+table policy, not JWT claims (claims only feed row-level `WHERE`/`CHECK`, which the stream path ignores). `ReplayFrame` uses this projection for per-connection gap-fill.
+- **subscriber.go** — `Subscriber`, the per-connection handle. It owns an outbound queue of `Frame`s tagged by `kind`. Producers (keepalive wheel and event `Hub`) use `Send` (non-blocking; full queues drop frames and the `Hub` counts them), while the handler drains `Frames()` to the client. The queue is sized for live events (cap 64, up from keepalive cap 1; #152 will make this a knob). An `Evicted()` channel allows slow-consumer follow-up to disconnect wedged clients.
+- **bucket.go** — `Bucket`, a concurrency-safe set of subscribers. `Push` delivers a shared `Frame` to each (used by the keepalive wheel); `Snapshot` exposes members so the `Hub` can fan out and count drops via `Send` results. The `Hub` holds one `Bucket` per `(topic, role)` to avoid re-projecting frames per subscriber.
+- **heartbeat.go** — The keepalive wheel (`Heartbeater`). A process-wide ticker fans a `:` comment across the `Bucket` ring, waking ~1/N of streams per tick to prevent synchronized writes. The effective period is `stream.keepalive_interval` (wheel ticks every `keepalive_interval ÷ keepalive_buckets`). The handler goroutine performs the write; the ticker never touches a `ResponseWriter`.
+- **metrics.go** — `Metrics`, the SSE instrument set: `wavehouse_sse_active_streams`, `wavehouse_sse_stream_duration_seconds`, `wavehouse_sse_frames_sent_total` / `wavehouse_sse_bytes_sent_total` (labeled by `kind`: `keepalive`, `event`, `replay`), and `wavehouse_sse_dropped_frames_total` (slow-consumer signal added in #294). Nil-safe, one shared instance records handler writes and `Hub` drops. Separate from `observability.RegisterSystemMetrics` (NATS/Pebble gauges). Streams use these metrics instead of per-event traces; the router excludes `/v1/stream` from the HTTP tracer.
 
 ### `auth/` — Authentication
 
-- **auth.go** — `Middleware(cfg, store, logger)`: the auth middleware. Verifies JWT tokens with HMAC **or** JWKS (never both), with the accepted `alg` pinned to the active verifier and checked before any key is consulted (rejects `alg: none` and cross-family confusion). Extracts the caller's role from a configurable dot-path claim (`auth.role_claim`, default `role`). It always runs and never rejects — a missing/invalid/expired token yields an empty role (resolved to `default_role` downstream), with the token error stashed in context so a denying gate can fail loud (`401`, not a bare `403`). Before the Bearer token it checks a non-JWT operator key (`auth.operator_key`): a constant-time match on the presented credential — an `Authorization: Operator <key>` header, or the `X-Operator-Key` alias — stamps the live admin role plus an operator bit (`auth.WithOperator`) that `RequireAdmin` honors even under a nil policy — a full-access break-glass credential, audit-logged at Info with no client IP (`store`/`logger` back this path). A presented-but-wrong operator key is logged at `WARN` and counted by `wavehouse_auth_operator_key_failures_total` — a probing signal on the most privileged credential — then falls through like any unauthenticated request (the middleware never rejects).
-- **context.go** — request-context accessors and their setters for the role, claims, and token error (`RoleFromContext`, `ClaimsFromContext`, `AuthErrorFromContext`, and the matching `With*` helpers).
+- **auth.go** — `Middleware(cfg, store, logger)`: auth middleware. Verifies JWT tokens via HMAC **or** JWKS (never both), pinning the accepted `alg` to the active verifier and checking it before key consultation (rejects `alg: none` and cross-family confusion). Extracts caller roles from a configurable dot-path claim (`auth.role_claim`, default `role`). It never rejects; missing/invalid/expired tokens yield an empty role (resolved to `default_role` downstream), stashing the error in context so denying gates can return `401` instead of `403`. Before JWTs, it checks a non-JWT operator key (`auth.operator_key`) via constant-time match on `Authorization: Operator <key>` or `X-Operator-Key`. Matches grant the admin role and an operator bit (`auth.WithOperator`), which `RequireAdmin` honors even under nil policy—a break-glass credential audit-logged at Info without client IP (`store`/`logger` backed). Wrong keys log at `WARN`, increment `wavehouse_auth_operator_key_failures_total`, then fall through as unauthenticated.
+- **context.go** — Request-context accessors and setters for role, claims, and token error (`RoleFromContext`, `ClaimsFromContext`, `AuthErrorFromContext`, and matching `With*` helpers).
 
 ### `cache/` — Query Cache
 
 - **cache.go** — `Cache` interface: `Get`, `Set`, `Close`.
-- **local.go** — In-process cache using [Ristretto](https://github.com/dgraph-io/ristretto) with `sync.Map` TTL tracking.
-- **tiered.go** — Wraps the local cache with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent cache stampede on concurrent misses. The tiered interface accepts an optional second cache slot for future shared-cache backends, but ships with the slot empty.
+- **local.go** — In-process cache via [Ristretto](https://github.com/dgraph-io/ristretto) and `sync.Map` TTL tracking.
+- **tiered.go** — Wraps local cache with [singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight) to prevent stampedes; includes an empty second slot for future shared backends.
 
 ### `config/` — Configuration
 
-- **config.go** — Loads configuration from YAML file with environment variable overrides (using [cleanenv](https://github.com/ilyakaznacheev/cleanenv)). All settings use `WH_` prefixed env vars. See [Configuration Reference](/configuration).
+- **config.go** — Loads YAML config with `WH_` environment variable overrides via [cleanenv](https://github.com/ilyakaznacheev/cleanenv). See [Configuration Reference](/configuration).
 
 ### `dedupe/` — Deduplication (Optional)
 
 - **dedupe.go** — `Deduplicator` interface: `CheckAndMark(ctx, eventID) (bool, error)`.
-- **embedded.go** — Uses [Pebble](https://github.com/cockroachdb/pebble) (embedded key-value store). Key = event ID.
+- **embedded.go** — Uses [Pebble](https://github.com/cockroachdb/pebble). Key = event ID.
 
 ### `discovery/` — Schema Discovery & Validation
 
-- **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse table schemas. Each refresh also discovers the server's default time zone (`SELECT timezone()`) and bakes every `DateTime`/`DateTime64` column's canonicalization spec (precision + resolved zone) into the cached schema, so the per-record ingest path parses no type strings and loads no zones ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). Supports periodic auto-refresh, on-demand refresh, and `RetryRefresh` (boot-time exponential backoff loop used by `cmd/wavehouse` so a transiently unreachable ClickHouse doesn't crash-loop the binary). Thread-safe via `sync.RWMutex`.
-- **timestamp.go** — `CanonicalizeTimestamps(schema, data)` rewrites every parseable value in a top-level `DateTime`/`DateTime64` column to the canonical RFC 3339 UTC wire form before the event is published ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)): zone-less values are interpreted in the column's declared zone, else the discovered server default — ClickHouse's own rule, so the spelling changes but never the instant. Fail-open: an unparseable value or unresolvable zone passes through verbatim for ClickHouse's own parser to judge; ingest never rejects a record over its timestamp spelling.
-- **validation.go** — `Validate(schema, data)` checks incoming JSON against the discovered schema: unknown fields, type compatibility, missing required columns, null handling.
+- **discovery.go** — `SchemaRegistry` queries `system.columns` to discover ClickHouse schemas. Refreshes also fetch the server's default time zone (`SELECT timezone()`) and bake each `DateTime`/`DateTime64` column's canonicalization spec (precision + resolved zone) into the cache, eliminating per-record type string parsing or zone loading ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). Supports periodic auto-refresh, on-demand refresh, and `RetryRefresh` (boot-time exponential backoff for `cmd/wavehouse` to prevent crash-loops during transient outages). Thread-safe via `sync.RWMutex`.
+- **timestamp.go** — `CanonicalizeTimestamps(schema, data)` rewrites top-level `DateTime`/`DateTime64` values to RFC 3339 UTC wire form before publishing ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). Zone-less values use the column's declared zone or server default; unparseable values pass through verbatim for ClickHouse to judge.
+- **validation.go** — `Validate(schema, data)` checks JSON against schemas for unknown fields, type compatibility, missing required columns, and null handling.
 - **discovery_test.go** — Unit tests for validation logic.
 
 ### `ingest/` — Ingest Pipeline, DLQ & Sweeping
 
-- **worker.go** — `StartIngestWorker` launches an ingest pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and performs bulk INSERTs to ClickHouse. The pipeline is **insert-only**. The wire format `EventMessage` carries `{table_name, received_timestamp, data}` and nothing else; the worker accepts any table name now (the table name in the NATS subject is `query.SafeEncodeNATS(rawUnsafeTableName)`), then bulk-INSERTs. The embedded NATS server runs with `DontListen: true` (`internal/mq/embedded.go`), so the only Publishers reachable on the `ingest.>` subjects are in-process Go code — today, only the HTTP `/v1/ingest?table={table}` handler. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) must go through `POST /v1/admin/query` under the admin role (`policy.admin_role`) — see the Query Path section below; the `/v1/admin/*` `RequireAdmin` middleware enforces the check at the API layer, so a no/invalid-token request (resolved to `default_role`, not admin in a production config) never reaches the proxy. On a bulk-insert failure the batch is re-inserted row by row; rows that succeed are acked, and only the rows that fail again are routed to the DLQ (`sendToDLQ`), which republishes the as-published `EventMessage` envelope to `dlq.{table}` NATS subjects with the failure context in `X-DLQ-*` headers when DLQ is enabled — see [Ingest Pipeline](/ingest-pipeline) for the worker internals.
-- **types.go** — `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant, shared across API handlers and the ingest pipeline.
-- **sweeper.go** — `Sweeper` implements the Active Sweeper pattern. It runs every minute and purges NATS JetStream messages that are **both** ACKed by the buffer consumer (written to ClickHouse) **and** older than the configurable gap window.
+- **worker.go** — `StartIngestWorker` launches an insert-only pipeline: a JetStream consumer reads from the `WAVEHOUSE` stream via a durable `buffer-consumer` pull subscription, batches events per table, and bulk-INSERTs to ClickHouse. The `EventMessage` wire format contains `{table_name, received_timestamp, data}`. The worker accepts any table name (NATS subject: `query.SafeEncodeNATS(rawUnsafeTableName)`). Since the embedded NATS server uses `DontListen: true` (`internal/mq/embedded.go`), only in-process Go code—currently the `/v1/ingest?table={table}` handler—can publish to `ingest.>` subjects. Non-insert mutations (`DELETE`/`UPDATE`/`TRUNCATE`/…) require `POST /v1/admin/query` under `policy.admin_role`; the `/v1/admin/*` `RequireAdmin` middleware blocks non-admin requests at the API layer. On bulk-insert failure, rows are re-inserted individually; failed rows route to the DLQ (`sendToDLQ`), republishing the `EventMessage` to `dlq.{table}` with `X-DLQ-*` headers if enabled. See [Ingest Pipeline](/ingest-pipeline).
+- **types.go** — Contains `EventMessage` struct (TableName, ReceivedTimestamp, Data) and `BufferConsumerName` constant.
+- **sweeper.go** — `Sweeper` implements the Active Sweeper pattern, purging NATS JetStream messages every minute if they are ACKed by the buffer consumer and older than the configured gap window.
 
 ### `mq/` — Message Queue
 
-- **mq.go** — `Publisher` and `Subscriber` interfaces. `Message` struct with `DoubleAck(ctx)`, `Ack()`, and `Nak()`.
-- **embedded.go** — In-process NATS server with JetStream. Creates stream `WAVEHOUSE` with subjects `ingest.>`.
+- **mq.go** — `Publisher`/`Subscriber` interfaces; `Message` struct with `DoubleAck(ctx)`, `Ack()`, and `Nak()`.
+- **embedded.go** — In-process NATS JetStream server. Creates stream `WAVEHOUSE` (subjects `ingest.>`).
 
 ### `observability/` — OpenTelemetry Pipeline
 
-- **provider.go** — `InitProvider(ctx, serviceName, ProviderConfig)` wires the OTel pipeline. Each output is independently gated; the W3C TraceContext + Baggage propagator is always installed (cheap, harmless when traces are off). Returns `(shutdown, promHandler http.Handler, err)` — `promHandler` is non-nil only when `PrometheusEnabled` is true and reads from a *private* `prometheus.Registry` to avoid leaking the process/Go collectors that `prometheus.DefaultRegisterer` auto-registers. OTLP-metrics push (`MetricsEnabled`) and Prometheus exposition (`PrometheusEnabled`) are independent: either, both, or neither may be set, and any combination produces a single MeterProvider feeding the active readers. The Endpoint field is only dialed by the OTLP exporters (traces / metrics-OTLP / logs); Prometheus-only operation leaves it untouched. Provider init in `main.go` runs whenever `otel.enabled` OR `prometheus.enabled` is true, so Prometheus-only operation (Alloy/scrape, no collector) is a first-class mode.
-- **logger.go** — `NewLogger(component, level, isJSON, otlpSampleRate)` produces a slog logger that fans out to stdout (always 100%) and the OTLP log exporter (DEBUG/INFO sampled at `otlpSampleRate`, WARN/ERROR always 100% as a non-configurable safety floor). `TraceHandler` injects `trace_id`/`span_id` from the active span when one exists. `otlpSamplerFn` is exposed (lowercase) for unit testing the per-level rate logic without driving through the slogmulti middleware.
-- **metrics.go** — `RegisterSystemMetrics(natsServer, dedup)` registers observable gauges for embedded NATS connections, in-msgs, and Pebble dedupe storage stats. Wired in `cmd/wavehouse/main.go` after the providers are up.
-- **tracer.go** — W3C TraceContext propagation over NATS message headers (`InjectNATS` / `ExtractNATS`) — bridges the API request span into the ingest worker so end-to-end traces survive the queue handoff.
+- **provider.go** — `InitProvider(ctx, serviceName, ProviderConfig)` wires the OTel pipeline. W3C TraceContext + Baggage propagators are always installed. Returns `(shutdown, promHandler http.Handler, err)`. `promHandler` is non-nil if `PrometheusEnabled` is true; it uses a *private* `prometheus.Registry` to avoid leaking the process/Go collectors `prometheus.DefaultRegisterer` auto-registers. OTLP-metrics push (`MetricsEnabled`) and Prometheus exposition (`PrometheusEnabled`) are independent; any combination produces one MeterProvider. The Endpoint field is only used by OTLP exporters (traces/metrics-OTLP/logs). Provider init in `main.go` runs if `otel.enabled` OR `prometheus.enabled` is true, making Prometheus-only operation a first-class mode.
+- **logger.go** — `NewLogger(component, level, isJSON, otlpSampleRate)` creates a slog logger fanning out to stdout (100%) and the OTLP log exporter (DEBUG/INFO sampled at `otlpSampleRate`, WARN/ERROR always 100%). `TraceHandler` injects `trace_id`/`span_id` from active spans. `otlpSamplerFn` is exposed for unit testing rate logic.
+- **metrics.go** — `RegisterSystemMetrics(natsServer, dedup)` registers observable gauges for embedded NATS connections, in-msgs, and Pebble dedupe storage stats. Wired in `cmd/wavehouse/main.go`.
+- **tracer.go** — W3C TraceContext propagation over NATS headers (`InjectNATS` / `ExtractNATS`) bridges API request spans into ingest workers for end-to-end traces.
 
-The package's design invariants — stdout always 100%, WARN+ERROR always export at 100%, gRPC exporters dial lazily so unreachable collectors never block startup, private Prometheus registry — are documented in AGENTS.md "Key Design Decisions" #15 and must be preserved by anything touching this package.
+Design invariants—100% stdout, 100% WARN+ERROR export, lazy gRPC dialing to prevent startup blocks, and private Prometheus registry—are documented in AGENTS.md "Key Design Decisions" #15.
 
 ### `policy/` — Access Control
 
-- **policy.go** — Hasura-style policy types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`), `Evaluate()` function that resolves permissions against JWT claims (including `{{ jwt.claim.path }}` template resolution), the per-column decision `IsColumnAllowed()` plus its batch/projection forms `AllowedProjection()` and `RestrictsColumns()` (used to expand a `select_all` request into a role's allowed columns), `IsAggregationAllowed()`, `Validate()`.
-- **store.go** — `Store` backed by NATS KV bucket `WAVEHOUSE_POLICY`. Supports file-based bootstrap (YAML/JSON), cluster-wide sync via KV Watch, local caching.
+- **policy.go** — Hasura-style types (`Policy`, `TablePolicy`, `RolePermissions`, `Filter`). Includes `Evaluate()` for JWT claims (resolving `{{ jwt.claim.path }}`), column decisions via `IsColumnAllowed()`, `AllowedProjection()`, and `RestrictsColumns()` (expanding `select_all`), `IsAggregationAllowed()`, and `Validate()`.
+- **store.go** — `Store` using NATS KV bucket `WAVEHOUSE_POLICY`. Supports YAML/JSON bootstrap, KV Watch sync, and local caching.
 
 ### `pipes/` — Named Query Pipes
 
-- **pipes.go** — `NamedQuery` type with SQL template and parameter definitions, `Store` backed by NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` file directory bootstrap. `BindParams()` resolves `{{param}}` / `{{param:default}}` placeholders by inlining escaped literal values into the SQL (strings single-quote-escaped; arrays rendered as escaped `(…)` `IN`-lists). A non-scalar value with no SQL form (a JSON object, or an empty array) is rejected rather than emitted raw.
+- **pipes.go** — `NamedQuery` type defines SQL templates and parameters; `Store` uses NATS KV bucket `WAVEHOUSE_PIPES`. Supports `.sql` directory bootstrap. `BindParams()` resolves `{{param}}`/`{{param:default}}` by inlining escaped literals (single-quoted strings, `(…)` `IN`-lists). Non-scalar values without SQL forms (JSON objects, empty arrays) are rejected.
 
 ### `query/` — Structured Query Engine
 
 - **ast.go** — `StructuredQuery` AST types: columns, aggregations, filters, group by, order by, limit, time range.
-- **builder.go** — `Build()` converts AST to parameterized SQL. It is the single chokepoint that validates every referenced identifier against the schema **and** authorizes every column reference — projection, aggregation args, filters, group_by, order_by, time_range — against the role's column allowlist (the [#223](https://github.com/Wave-RF/WaveHouse/issues/223) hard cap). A full-row read is requested with `select_all`, which expands to the role's allowed columns rather than emitting a raw `SELECT *`; an omitted projection selects nothing, and `*` in `columns` is a literal column name. Every identifier is backtick-quoted via `internal/chsql` (`QuoteIdent`) so any ClickHouse-legal name is accepted — a name containing `?` is refused fail-closed ([#279](https://github.com/Wave-RF/WaveHouse/issues/279)). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing for cache optimization.
+- **builder.go** — `Build()` converts AST to parameterized SQL. It validates identifiers against the schema and authorizes all column references—projection, aggregation args, filters, group_by, order_by, time_range—against the role's allowlist ([#223](https://github.com/Wave-RF/WaveHouse/issues/223)). `select_all` expands to allowed columns instead of `SELECT *`; omitted projections select nothing; `*` is a literal name. Identifiers are backtick-quoted via `internal/chsql` (`QuoteIdent`); names with `?` fail closed ([#279](https://github.com/Wave-RF/WaveHouse/issues/279)). `InjectPermissionFilters()` adds row-level security. `ApplyMaxRows()` enforces limits. Timestamp bucketing optimizes cache.
 
 ### `chsql/` — ClickHouse SQL Helpers
 
-- **chsql.go** — Dependency-free ClickHouse SQL helpers shared by `query/` and `policy/`, kept in their own package to break an import cycle. `QuoteIdent` is the single place every identifier — column, table, alias — becomes SQL text: always backtick-quoted and escaped, so any ClickHouse-legal name (dots, spaces, unicode, keywords) is safe. `BindUnsafe` reports whether a name contains a literal `?`, which would desync clickhouse-go's positional binder; such names are rejected fail-closed rather than silently mis-bound.
+- **chsql.go** — Dependency-free helpers for `query/` and `policy/`, isolated to prevent import cycles. `QuoteIdent` backtick-quotes and escapes all identifiers (columns, tables, aliases), ensuring any ClickHouse-legal name is safe. `BindUnsafe` detects literal `?` characters; such names are rejected to avoid desyncing clickhouse-go's positional binder.
 
 ## Data Flows
 
@@ -236,21 +236,7 @@ Client POST /v1/admin/query
     (browser, CDN, corp proxy) caches the result.
 ```
 
-The proxy-pattern wins are: zero classification logic on the WaveHouse
-side (no isMutation heuristic to maintain), and any ClickHouse statement
-type — including verbs added in future versions and inline FORMAT
-overrides — works without WaveHouse code changes. Multi-statement input
-(`SELECT 1; TRUNCATE t`) is supported when the upstream ClickHouse has
-multi-query enabled, which is the default on recent versions; older or
-restrictively-configured servers will return a clear error from
-ClickHouse itself for the second statement. The proxy buffers the response in memory with a
-64 MiB cap (502 with `clickhouse response exceeded N bytes` on overflow,
-to keep a runaway `SELECT *` from pinning RAM on the API server), and
-passes ClickHouse's `Content-Type` through when an inline `FORMAT`
-directive overrides the default JSON envelope. The structured query
-endpoint and pipes still go through `clickhouse-go`'s native driver
-(Query/Exec) for performance and to keep the cached row-array shape
-consistent.
+This proxy pattern keeps classification logic out of WaveHouse: all ClickHouse statements — future verbs, inline `FORMAT` overrides — work without code changes. Multi-statement input (`SELECT 1; TRUNCATE t`) is supported if enabled on the server. The proxy buffers responses up to 64 MiB (502 with `clickhouse response exceeded N bytes` on overflow) and passes through ClickHouse's `Content-Type` for inline `FORMAT` directives. Structured queries and pipes use `clickhouse-go` native drivers for performance and consistent row-array shapes.
 
 ### Streaming Path
 

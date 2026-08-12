@@ -3,19 +3,15 @@ title: "SDK Streaming & Live Queries"
 description: "Real-time SSE streams, client-side filtering, and backfill-then-live queries in @wavehouse/sdk."
 ---
 
-Real-time consumption with `@wavehouse/sdk`: SSE event streams from tables,
-builders, and pipes, plus live queries that backfill history before going
-live. Builders and table refs come from [Queries](/sdk/queries).
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Real-time consumption with `@wavehouse/sdk`: SSE event streams from tables, builders, and pipes, plus live queries that backfill history before going live. Builders and table refs come from [Queries](/sdk/queries). Import from `@wavehouse/sdk` or the CDN `https://esm.sh/@wavehouse/sdk` ([Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Streaming
 
-Streams use SSE (Server-Sent Events) for both unauthenticated connections and for authenticated ones.
+Streams use SSE for both authenticated and unauthenticated connections.
 
 ### `StreamController`
 
-Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace` (the DLQ variant is not yet functional server-side — [#197](https://github.com/Wave-RF/WaveHouse/issues/197)). It is **NOT thenable**.
+Returned by `.stream()` on `TableRef`, `QueryBuilder`, `PipeRef`, and `DLQNamespace` (DLQ is not yet functional server-side — [#197](https://github.com/Wave-RF/WaveHouse/issues/197)). It is **NOT thenable**.
 
 ```ts
 const stream = wh.from('clicks').stream({ since: '2026-01-01T00:00:00Z' });
@@ -57,7 +53,7 @@ for await (const event of stream) {
 
 ### `.close()`
 
-Explicitly close the stream and release all resources.
+Close the stream and release all resources.
 
 ```ts
 stream.close();
@@ -84,25 +80,13 @@ interface StreamEvent<T> {
 }
 ```
 
-Row values of top-level `DateTime`/`DateTime64` columns inside `data` (not
-timestamps nested in `Array`/`Map`/`Tuple` columns) arrive in canonical RFC 3339
-UTC (`2026-06-21T04:00:00.123Z`), matching what `/v1/query` returns for the
-same row — `new Date(value)` parses correctly with no zone fix-up.
-Values WaveHouse couldn't canonicalize (ingest is fail-open) stream in the
-producer's original spelling, and the `/v1/query` match doesn't hold for them:
-a spelling ClickHouse accepted anyway still queries back in canonical UTC (one
-it rejected never lands in the table at all), and a zone-less date-time is
-what `new Date()` reads as *local* time — though a date-only `YYYY-MM-DD`
-string is read as UTC, an ECMAScript quirk
-(see [Timestamp canonicalization](/api#timestamp-canonicalization)).
+Top-level `DateTime`/`DateTime64` columns in `data` (not timestamps nested in `Array`/`Map`/`Tuple`) arrive in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), matching `/v1/query`. Non-canonicalized values keep the producer's spelling; `new Date()` reads zone-less date-times as local, `YYYY-MM-DD` as UTC ([Timestamp canonicalization](/api#timestamp-canonicalization)).
 
 ### Transport Behavior
 
 | Transport | Reconnect | Protocol |
 | --------- | --------- | -------- |
 | SSE | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
-<!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
-<!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
 :::note[SSE connection limit]
 The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
@@ -110,7 +94,7 @@ The SDK warns when more than 5 concurrent SSE connections are open (browser limi
 
 ### Client-Side Stream Filtering
 
-When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:
+`QueryBuilder` `.stream()` applies `.where()`/`.select()` filters client-side:
 
 ```ts
 const stream = wh.from('clicks')
@@ -121,13 +105,13 @@ const stream = wh.from('clicks')
 // Only events where page === '/home' are emitted, with only page + button columns
 ```
 
-Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the same `FilterOp` set `.where()` takes everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
+Supported operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `not_like` — the `FilterOp` set `.where()` takes everywhere (mapped to wire tokens `eq`/`neq`).
 
 ---
 
 ## Live Queries
 
-Live queries combine a historical backfill (`.fetch()`) with a real-time stream, providing a seamless initial load + live updates experience.
+Live queries combine a historical backfill (`.fetch()`) with a live stream: initial load plus live updates.
 
 ```ts
 const lq = wh.from('clicks')
@@ -164,9 +148,7 @@ interface StreamSubscriber<T> {
 
 ### How it works
 
-1. Opens the stream **immediately** and buffers incoming events.
-2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result.
-3. Deduplicates buffered events by comparing timestamps against the latest historical timestamp.
+1. Opens the stream immediately and buffers incoming events.
+2. Runs `.fetch()` for historical data, calling `subscriber.initial()`.
+3. Deduplicates buffered events against the latest historical timestamp.
 4. Flushes remaining buffered events and switches to live mode.
-
-This "stream-first" approach ensures no events are lost between the fetch and stream start.

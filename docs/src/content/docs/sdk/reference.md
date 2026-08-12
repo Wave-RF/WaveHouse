@@ -3,13 +3,11 @@ title: "SDK Reference & CLI"
 description: "Error codes, AbortController, the full API tree, the codegen CLI, and E2E testing with @wavehouse/sdk."
 ---
 
-Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model
-behind every [`Result<T>`](/sdk#result-type), the complete API tree at a
-glance, and the tooling that ships in the package.
+Cross-cutting reference for `@wavehouse/sdk`: cancellation, the error model behind [`Result<T>`](/sdk#result-type), the API tree, and tooling.
 
 ## AbortController Support
 
-All async operations accept an `AbortSignal` for cancellation:
+All async operations accept an `AbortSignal`:
 
 ```ts
 const controller = new AbortController();
@@ -25,7 +23,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
+The SDK **never throws** for server responses; API errors land in `Result.error`. It throws only on caller/environment errors: non-absolute `baseURL` (REST rejects with `TypeError`, streams report `SSE_CONNECT_ERROR` — [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()`/`.liveQuery()` without `EventSource` ([Runtime support](/sdk#runtime-support)), and rejecting `auth` callbacks (refresh failures propagate from REST or surface as `SSE_CONNECT_ERROR` on streams).
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -35,12 +33,12 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 404 | `HTTP_404` | No | Table or pipe not found |
 | 500 | `HTTP_500` | Yes | Server error (retried per `maxRetries`) |
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
-| 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
+| 0 | `NETWORK_ERROR` | Yes | Network failure (exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
-| 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. a non-absolute `baseURL`) |
+| 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. non-absolute `baseURL`) |
 | 0 | `SSE_ERROR` | Yes | Stream connection error |
 
-The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Their `retryable: true` is advisory: unlike the REST codes above, the SDK never re-dials a stream itself. After the connection is open, drops surface through the `status` callback (`reconnecting` → `live`, or `closed`) while the native `EventSource` re-dials on its own; `SSE_ERROR` is a defensive fallback for a transport left in an unexpected state. A failure *before* the `EventSource` is constructed — a non-absolute `baseURL`, a rejecting `auth` callback — is terminal (`SSE_CONNECT_ERROR`), so fix the cause and start a new stream.
+`SSE_*` codes arrive via the subscriber's `error` callback — streams have no single result object. Their `retryable: true` is advisory; the SDK never re-dials. Post-connection drops surface on the `status` callback (`reconnecting` → `live`, or `closed`) while `EventSource` re-dials natively; `SSE_ERROR` is a defensive fallback. Failures *before* `EventSource` construction (non-absolute `baseURL`, rejecting `auth`) are terminal (`SSE_CONNECT_ERROR`).
 
 ---
 
@@ -94,7 +92,7 @@ StreamController (NOT thenable)
 
 ## Codegen CLI
 
-Generate TypeScript types from a running WaveHouse instance. The package ships a `wavehouse-codegen` bin, so after installing `@wavehouse/sdk` you can run it with `npx`:
+Generate TypeScript types from a running instance with `wavehouse-codegen`:
 
 ```bash
 npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
@@ -103,7 +101,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`.
+Codegen reads the admin-only `/v1/schema`; on non-dev servers pass `--auth <jwt>` to avoid `403`.
 
 **Options:**
 
@@ -145,7 +143,7 @@ export interface ClicksRow {
 
 ## E2E Testing
 
-The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` exercise the full pipeline (ingest → ClickHouse → query) through the SDK, validating both the backend and the client library in one pass.
+The SDK is the E2E integration test harness; tests in `tests/e2e/sdk/` validate the full pipeline (ingest → ClickHouse → query).
 
 ```bash
 # Run all E2E tests: the orchestrator boots a ClickHouse testcontainer +
@@ -153,6 +151,6 @@ The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` e
 make test-e2e
 ```
 
-Test files live in `tests/e2e/sdk/` (each `*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
+Test files in `tests/e2e/sdk/` (each `*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's `waitForCondition` poll helper, not a pipeline test.
 
-See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.
+See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk).

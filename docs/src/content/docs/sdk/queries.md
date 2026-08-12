@@ -14,7 +14,7 @@ Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 
 ## Tables — `wh.from(table)`
 
-`from()` returns a `TableRef` — a reference to a table. It is **NOT thenable**, so it's safe to pass around or store in a variable without triggering requests.
+`from()` returns a `TableRef`. **NOT thenable** — safe to store without triggering requests.
 
 ```ts
 const clicks = wh.from('clicks');
@@ -22,9 +22,9 @@ const clicks = wh.from('clicks');
 
 ### `.fetch(opts?)`
 
-Shortcut for "select every column", with a default limit of 1000. When an access-control policy restricts your role's columns, the server returns only the columns your role is allowed to read — `.fetch()` is never a way around `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
+Shortcut for "select every column", default limit 1000. Server-side `deny_columns`/`allow_columns` policies restrict returned columns and `.fetch()` cannot bypass them ([Access control](/access-control#column-permissions)).
 
-To paginate, chain an explicit `.orderBy()` — a bare `.fetch()` sends no default order (see [Pagination](#pagination)). Ordering, grouping, or filtering by a column your role can't read is rejected, so a column-restricted role must reference only readable columns in those clauses.
+Chain `.orderBy()` to paginate — bare `.fetch()` sends no default order (see [Pagination](#pagination)). Roles may only reference readable columns when ordering, grouping, or filtering.
 
 ```ts
 const { data, error, hasMore, next } = await clicks.fetch();
@@ -33,7 +33,7 @@ const { data } = await clicks.fetch({ limit: 50, signal: controller.signal });
 
 ### `.insert(data, opts?)`
 
-Insert one row or many. A single object is sent as a JSON `POST /v1/ingest?table={table}`. An **array** is serialized to NDJSON (one record per line) and sent as a single `application/x-ndjson` request, so a bad record no longer fails or hides the rest of the batch — per-record outcomes come back in the result.
+Insert one or many rows. Single objects use JSON `POST /v1/ingest?table={table}`. Arrays serialize to NDJSON in one `application/x-ndjson` request returning per-record outcomes, so bad records don't fail the batch.
 
 ```ts
 // Single row → { ok: true } (or { ok: true, duplicate: true } when dedup skips it)
@@ -47,13 +47,13 @@ const { data } = await clicks.insert([
 // data: { ok, total, succeeded, failed, duplicates, results? }
 ```
 
-For an array insert, `data.ok` is `true` only when every record succeeded (`failed === 0`). Inspect `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures — the call's top-level `error` is reserved for whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). An empty array is a no-op and sends no request. The array path sends one request regardless of size; bounded-concurrency chunking of very large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
+For arrays, `data.ok` is `true` only if `failed === 0`. Use `data.failed` and `data.results` (each `{ index, ok|duplicate|error }`, 1-based `index`) for partial failures. Top-level `error` covers whole-request failures (network, `404` unknown table, `403` forbidden, `503` backpressure). Empty arrays are no-ops; chunking large arrays is tracked in [#196](https://github.com/Wave-RF/WaveHouse/issues/196).
 
-> The server itself is format-agnostic: `POST /v1/ingest` also accepts a raw JSON array or a single object directly (the `Content-Type` is only a hint), so non-SDK clients can send whichever shape is convenient. See the [API reference](/api#post-v1ingesttabletable--ingest-data).
+> The server is format-agnostic: `POST /v1/ingest` also accepts a raw JSON array or a single object (`Content-Type` is only a hint). See the [API reference](/api#post-v1ingesttabletable--ingest-data).
 
 ### `.insertNDJSON(source, opts?)`
 
-Insert pre-formatted NDJSON you already have — a `.ndjson` file, a byte stream, or a string — without first parsing it into objects. Accepts a `string`, `Uint8Array`, `Blob`/`File`, or `ReadableStream<Uint8Array>`; non-string sources are read fully into memory before sending. Returns the same per-record summary as an array `insert`.
+Insert pre-formatted NDJSON (`string`, `Uint8Array`, `Blob`/`File`, or `ReadableStream<Uint8Array>`) without parsing into objects. Non-string sources are read fully into memory. Returns the same per-record summary as array `insert`.
 
 ```ts
 // From a string
@@ -69,7 +69,7 @@ await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
 
 ### `.schema(opts?)`
 
-Fetch the table's column definitions from ClickHouse.
+Fetch table column definitions from ClickHouse.
 
 ```ts
 const { data } = await clicks.schema();
@@ -88,7 +88,7 @@ const { data } = await clicks.select('page', 'button').where('page', '=', '/home
 
 ### `.selectAll()`
 
-Start a query that selects **every column your role is allowed to read** — the explicit form of what a bare `.fetch()` does. Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.); the server expands it to your allowed columns (never a raw `SELECT *`) and never bypasses `deny_columns`/`allow_columns`. See [Access control → Column permissions](/access-control#column-permissions).
+Selects every column your role may read — the explicit `.fetch()`. Mutually exclusive with `.select(...)` and aggregations (`.count()`, `.sum()`, etc.). The server expands it to allowed columns, never a raw `SELECT *` ([Column permissions](/access-control#column-permissions)).
 
 ```ts
 const { data } = await clicks.selectAll().where('country', '=', 'US').limit(10);
@@ -102,11 +102,9 @@ Open a real-time event subscription. See [Streaming](/sdk/streaming).
 const stream = clicks.stream({ since: '2026-01-01T00:00:00Z' });
 ```
 
----
-
 ## Query Builder
 
-Returned by `tableRef.select()`. Immutable — every chain method returns a new `QueryBuilder`. The builder is **PromiseLike**, so `await builder` auto-executes `.fetch()`.
+Returned by `tableRef.select()`. Immutable — every chain method returns a new `QueryBuilder`. **PromiseLike**: `await builder` auto-executes `.fetch()`.
 
 ```ts
 // These are equivalent:
@@ -116,11 +114,11 @@ const result = await clicks.select('page').limit(10); // PromiseLike shortcut
 
 ### Chain Methods
 
-All methods return a new `QueryBuilder` — the original is unchanged.
+All return a new `QueryBuilder`; the original is unchanged.
 
 #### `.select(...columns)`
 
-Append columns to the SELECT clause. A literal `'*'` is the column *named* `*`, not a wildcard — use `.selectAll()` for all columns.
+Append columns to the SELECT clause. A literal `'*'` is a column *named* `*`; use `.selectAll()` for all columns.
 
 ```ts
 const q = clicks.select('page').select('button'); // SELECT page, button
@@ -128,7 +126,7 @@ const q = clicks.select('page').select('button'); // SELECT page, button
 
 #### `.selectAll()`
 
-Select every column your role may read (the all-columns wildcard, expanded server-side to your allowed columns). Mutually exclusive with `.select(...)` and with aggregations (`.count()`, `.sum()`, etc.).
+Selects every column your role may read (expanded server-side). Mutually exclusive with `.select(...)` and aggregations (`.count()`, `.sum()`, etc.).
 
 ```ts
 const q = clicks.selectAll().where('country', '=', 'US');
@@ -136,7 +134,7 @@ const q = clicks.selectAll().where('country', '=', 'US');
 
 #### `.where(column, op, value)`
 
-Add a filter condition. SDK operators are translated to backend format.
+Add a filter condition. SDK operators translate to backend format.
 
 ```ts
 clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
@@ -152,7 +150,7 @@ clicks.select('page').where('score', '>', 10).where('page', 'like', '/home%')
 | `'<='` | `lte` | Less than or equal |
 | `'in'` | `in` | Value in array |
 | `'like'` | `like` | SQL LIKE pattern |
-| `'not_like'` | — | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects it |
+| `'not_like'` | — | SQL NOT LIKE — **client-side only** (live-query/stream); `/v1/query` rejects it |
 
 #### Aggregations
 
@@ -167,8 +165,7 @@ clicks.select('page')
   .aggregate('uniqExact', 'user_id', 'unique_users') // custom fn
 ```
 
-Each aggregation method signature: `(column: string, alias?: string)`.  
-`count()` defaults to `column='*'`, `alias='count'`.
+Signature: `(column: string, alias?: string)`. `count()` defaults to `column='*'`, `alias='count'`.
 
 #### `.groupBy(...columns)`
 
@@ -190,11 +187,11 @@ clicks.select('page').count('*', 'total').orderBy('total', 'desc')
 clicks.select().limit(100)
 ```
 
-If no limit is specified, `QueryBuilder.DEFAULT_LIMIT` (1000) is applied automatically to prevent unbounded result sets. The server also enforces the configured maximum (`query.default_max_rows`, default 10,000 rows).
+Defaults to `QueryBuilder.DEFAULT_LIMIT` (1000); server max is `query.default_max_rows` (10,000).
 
 #### `.timeRange(column, since, until?)`
 
-Filter by a time window. `since` and `until` accept RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`, `'2w'` — day and week suffixes expand to hours, so `'7d'` is `'168h'`).
+Filter by time window. `since` and `until` take RFC3339 timestamps or relative durations (`'1h'`, `'30m'`, `'7d'`, `'2w'`; day/week suffixes expand to hours, so `'7d'` is `'168h'`).
 
 ```ts
 clicks.select('page').timeRange('received_timestamp', '1h')
@@ -205,7 +202,7 @@ clicks.select('page').timeRange(
 
 #### `.cacheTTL(seconds)`
 
-Records a desired result-cache TTL on the builder. **Currently client-side state only** — the value is never sent to the server, which derives each result's cache TTL adaptively from query execution time. Wiring it through the wire format is tracked in [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
+Desired result-cache TTL. **Client-side only**; the server derives TTL adaptively from execution time. See [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
 
 ```ts
 clicks.select('page').count().cacheTTL(300) // not yet honored server-side — see #280
@@ -213,7 +210,7 @@ clicks.select('page').count().cacheTTL(300) // not yet honored server-side — s
 
 ### `.fetch(opts?)`
 
-Execute the query. Returns `Result<Row[]>` with optional pagination.
+Execute query. Returns `Result<Row[]>` with optional pagination.
 
 ```ts
 const { data, error, hasMore, next } = await clicks.select('page').limit(50).fetch();
@@ -227,16 +224,16 @@ if (hasMore && next) {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `signal` | `AbortSignal` | Cancel the request |
+| `signal` | `AbortSignal` | Cancel request |
 | `limit` | `number` | Override builder limit for this fetch |
 
 ### `.stream(opts?)`
 
-Open a live stream from the builder's table. See [Streaming](/sdk/streaming).
+Open a live stream from the table. See [Streaming](/sdk/streaming).
 
 ### Pagination
 
-When `limit` is set and the result contains at least `limit` rows, `hasMore` is `true`. Cursor-based pagination's `next()` walks an **order column** — it adds a filter on that column using the last row's value — so `next()` is only attached when the query has an explicit `.orderBy()`. With no order column the result still reports `hasMore` honestly, but `next` is `undefined` (there is no deterministic cursor to build) — add an `.orderBy()` to paginate.
+`hasMore` is `true` when results meet the set `limit`. Cursor pagination's `next()` needs an explicit `.orderBy()`; without it `next` is `undefined` though `hasMore` stays true.
 
 ```ts
 let result = await clicks.select().orderBy('received_timestamp', 'desc').limit(100).fetch();
@@ -248,16 +245,14 @@ while (result.hasMore && result.next) {
 }
 ```
 
----
-
 ## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. `/v1/admin/query` is admin-only: the caller's JWT must resolve to the policy admin role (`admin_role`, `"admin"` by default). A request with no token, or an invalid/expired one, falls back to the `default_role` and is rejected.
+Execute raw SQL. `/v1/admin/query` needs a JWT resolving to the policy admin role (`admin_role`, default `"admin"`). Missing, invalid, or expired tokens fall back to `default_role` and are rejected.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
 ```
 
 :::note[No parameter binding through the SDK]
-Positional `?` substitution is not supported, and the SDK has no way to forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` + `param_id=42` query-string combo) — the proxy doesn't forward arbitrary query-string params and `wh.sql()` doesn't expose a hook to add them. Inline literals into the SQL, or — for safe binding from user-supplied input — use the structured query builder (`wh.from(table)…`).
+Positional `?` substitution is unsupported. The SDK can't forward ClickHouse named params (`WHERE id = {id:UInt32}` + `param_id=42`): the proxy blocks arbitrary query-string params and `wh.sql()` has no hook for them. Use inline literals or the structured builder (`wh.from(table)…`) to bind user input safely.
 :::

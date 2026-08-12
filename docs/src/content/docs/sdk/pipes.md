@@ -3,15 +3,11 @@ title: "SDK Pipes"
 description: "Execute and manage named query pipes with @wavehouse/sdk."
 ---
 
-Named pipes are server-defined, parameterized queries — the
-[Named Pipes guide](/pipes) covers defining them. The SDK executes pipes for
-any allowed role and manages their definitions under the admin role.
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Named pipes are server-defined, parameterized queries (see [Named Pipes guide](/pipes)). The SDK executes them for allowed roles and manages definitions via the admin role. Import from `@wavehouse/sdk` or `https://esm.sh/@wavehouse/sdk` ([Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Named Pipes — `wh.pipe(name, params?)`
 
-Execute a pre-defined named query pipe. Returns a `PipeRef` which is **PromiseLike**.
+Execute a pre-defined named query pipe. Returns a **PromiseLike** `PipeRef`.
 
 ```ts
 // These are equivalent (PipeRef is PromiseLike):
@@ -25,7 +21,7 @@ Execute and return results.
 
 ### `.stream(opts?)`
 
-Open a live stream. See [Streaming](/sdk/streaming).
+Open a live stream (see [Streaming](/sdk/streaming)).
 
 ---
 

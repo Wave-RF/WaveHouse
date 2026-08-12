@@ -9,27 +9,27 @@ Every HTTP endpoint WaveHouse exposes — ingest, query, streaming, schema intro
 
 ## Authentication
 
-**There is no auth on/off switch** — the JWT middleware always runs. A request to `/v1/*` may include a JWT Bearer token:
+**The JWT middleware always runs.** Requests to `/v1/*` may include a Bearer token:
 
 ```text
 Authorization: Bearer <token>
 ```
 
-The JWT must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (configured via `auth.jwks_url`). The accepted signing algorithm is pinned to the active verifier and checked *before* any key is consulted: an HMAC deployment accepts only `HS256`/`HS384`/`HS512`, and a JWKS deployment accepts only the asymmetric family (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none`, or an algorithm from the other family (e.g. an `HS256` token sent to a JWKS deployment), are rejected outright.
+JWTs must use HMAC signing (HS256/HS384/HS512) or be validated via a JWKS endpoint (`auth.jwks_url`). The algorithm is pinned to the verifier and checked before key consultation: HMAC deployments accept only `HS256`/`HS384`/`HS512`; JWKS deployments accept only asymmetric families (`RS256/384/512`, `ES256/384/512`, `PS256/384/512`, `EdDSA`). Tokens using `alg: none` or the wrong family are rejected.
 
-For SSE connections where custom headers are not possible, you can pass the token as a query parameter:
+For SSE connections, tokens can be passed as a query parameter:
 
 ```text
 GET /v1/stream?token=<jwt>
 ```
 
-The `Authorization` header takes precedence when both are provided: the `?token=` query parameter is only a fallback for clients that can't set headers (browser `EventSource`), so a token in the more log-leakable URL never overrides an explicit header credential. A `?token=` is stripped from the URL after extraction whichever credential wins, so it stays out of WaveHouse's own logs — but it has already crossed the wire in the request URI, so redact query strings at any proxy, CDN, or load balancer in front.
+The `Authorization` header takes precedence; `?token=` is a fallback for clients like browser `EventSource`. To prevent log leaks, WaveHouse strips `?token=` from the URL after extraction, though you should still redact query strings at your proxy or CDN.
 
-**Authentication is decoupled from authorization.** A request with **no token**, or an **invalid/expired/malformed** one, is *not* rejected outright — it falls back to an empty role that resolves to the policy `default_role`, and authorization is decided downstream. Because the bad-token reason is remembered, a request that is then denied for lacking permission fails loud (`401` "invalid/expired token") instead of a bare `403`. Elevated access requires a valid token whose role is granted (or equals the `admin_role`). A `403` body has two forms: a request that resolves to **no role at all** (no token and no `default_role` configured) returns `{"error":"forbidden: request has no role and no public default_role is configured"}`, while a request carrying a concrete-but-unauthorized role returns the bare `{"error":"forbidden"}` shown in the tables below.
+**Authentication is decoupled from authorization.** Requests with no token, or an invalid/expired/malformed one, fall back to an empty role resolving to the `default_role` policy. If a request is later denied for lacking permission, it fails with `401` ("invalid/expired token") if the token was bad, rather than a bare `403`. Elevated access requires a valid token granted the required role (or the `admin_role`). A `403` body returns `{"error":"forbidden: request has no role and no public default_role is configured"}` if there is no role/default role, otherwise it returns `{"error":"forbidden"}`.
 
-**Public (unauthenticated) access is driven by the policy.** Define a usable `default_role` and no-token requests are evaluated as that role (see [Roles & Access Control](#roles--access-control)); remove it and roleless requests are denied. Setting `default_role` equal to the `admin_role` is allowed — it makes every unauthenticated request admin (including `/v1/admin/*`), handy for local/dev — but it is logged loudly on every node that loads such a policy and must not be used in production. `/v1/admin/*` **and** the schema/DLQ endpoints are admin-only, and a pipe with **no `allowed_roles` authorizes nobody but the admin role** — but a pipe *can* be reached by the public when its `allowed_roles` lists the role the `default_role` resolves to (pipe access is plain allowlist membership, the same as any other role).
+**Public access is policy-driven.** Define a `default_role` to allow unauthenticated requests (see [Roles & Access Control](#roles--access-control)); without it, roleless requests are denied. Setting `default_role` to `admin_role` grants all unauthenticated requests admin access (including `/v1/admin/*`); this is for local development only and must not be used in production. `/v1/admin/*` and schema/DLQ endpoints are admin-only. A pipe with no `allowed_roles` authorizes only the admin role, but public access is possible if `allowed_roles` includes the `default_role`.
 
-**Operator key (non-JWT, break-glass).** A separate, role-free credential — `auth.operator_key` — authorizes a caller as a **full-access platform operator**: the entire data plane *and* the `/v1/admin/*` surface, without a JWT and independently of the token verifier. Present it in the standard `Authorization` header with the `Operator` scheme (forwarded verbatim by proxies, no collision with Bearer JWTs), or via the `X-Operator-Key` alias:
+**Operator key (break-glass).** The `auth.operator_key` provides full-access platform operator privileges to the data plane and `/v1/admin/*` without a JWT. Use the `Operator` scheme or the `X-Operator-Key` alias:
 
 ```text
 Authorization: Operator <operator-key>
@@ -37,58 +37,56 @@ Authorization: Operator <operator-key>
 X-Operator-Key: <operator-key>
 ```
 
-It is checked *before* the Bearer token (so it wins when both are present), compared in constant time, and — unlike a JWT bearing the `admin_role` — is honored **even when the policy is `nil`/deleted**, making it the only credential that can restore a wiped policy over HTTP. This deliberately bends "authentication is decoupled from authorization": a matching key both authenticates and authorizes in one step. It is disabled when empty (the default). See [Configuration — Authentication](/configuration#authentication) and [Access Control — Operator key](/access-control#operator-key).
+Checked before Bearer tokens using constant-time comparison, this key is honored even if the policy is `nil`/deleted, allowing restoration of wiped policies via HTTP. It is disabled by default (empty). See [Configuration — Authentication](/configuration#authentication) and [Access Control — Operator key](/access-control#operator-key).
 
 ### Roles & Access Control
 
-WaveHouse extracts the role from a configurable JWT claim path (`auth.role_claim`, default: `role`). Role handling:
+WaveHouse extracts roles from a configurable JWT claim path (`auth.role_claim`, default: `role`).
 
-- **`admin_role`** (policy field, `"admin"` by default, exact case-sensitive match) — Full access to all tables, raw SQL, and admin endpoints. There is no separate `service` role, though the non-JWT operator key (above) reaches the same surface without a token.
-- **Other roles** — Access determined by the access control policy (see Admin endpoints below).
+- **`admin_role`** (default `"admin"`, case-sensitive): Full access to all tables, raw SQL, and admin endpoints.
+- **Other roles**: Access determined by the access control policy.
 
-Policies support Hasura-style row-level and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
+Policies support Hasura-style row- and column-level permissions with JWT claim templating (e.g., `{{ jwt.app_metadata.tenant_id }}`).
 
 ## Response Format
 
 ### Error Responses
 
-Error responses from WaveHouse carry a JSON body and the following headers:
+WaveHouse error responses (4xx/5xx) include these headers:
 
 ```text
 Content-Type: application/json
 X-Content-Type-Options: nosniff
 ```
 
-The body is always a JSON object that includes an `error` field describing the failure:
+The body is always a JSON object containing an `error` field:
 
 ```json
 {"error": "invalid json"}
 ```
 
-Some endpoints attach extra fields alongside `error` on their **failure** responses — e.g. a failing `/readyz` returns `{"status":"not ready","error":"…"}`. The guarantee is scoped to failures: whenever a response signals an error (any 4xx/5xx), an `error` field is present and parseable. Success responses carry each endpoint's own shape and need **not** include `error` — a healthy `/readyz` returns just `{"status":"ready"}`.
+Some endpoints add extra fields; for example, a failing `/readyz` returns `{"status":"not ready","error":"…"}`. Success responses follow endpoint-specific shapes and may omit the `error` field (e.g., healthy `/readyz` returns `{"status":"ready"}`).
 
-This contract holds for:
+This contract applies to:
 
-- Handler-emitted errors — validation (4xx), permission denials (403), not-found (404), backend errors (5xx).
-- Router-level **404 Not Found** when the URL does not match any registered route.
-- Router-level **405 Method Not Allowed** when the URL matches a route but the method is not registered.
-- Server-level **500 Internal Server Error** when a handler panics — recovered, logged with stack, and reported to the client as JSON **when the handler has not yet committed any response headers or body bytes**.
+- Handler errors: validation (4xx), permission denials (403), not-found (404), and backend errors (5xx).
+- Router-level **404 Not Found** (unmatched URL).
+- Router-level **405 Method Not Allowed** (unsupported method).
+- Server-level **500 Internal Server Error** for recovered handler panics, provided no headers or body bytes were previously committed.
 
-Historically some error paths defaulted to `text/plain` because they were emitted via `http.Error` or chi's default handlers; those paths now route through a shared `writeJSONError` helper so strict clients can branch on `Content-Type` consistently.
-
-The per-endpoint error tables below list the bodies you can expect for each status code; the `Content-Type` and `X-Content-Type-Options` headers above apply uniformly and are not repeated.
+Paths that once defaulted to `text/plain` via `http.Error` or chi's defaults now route through a shared `writeJSONError` helper, so `Content-Type` is consistent. Per-endpoint tables below detail expected bodies per status code; the global headers apply uniformly.
 
 :::caution[Streaming / partial-write responses]
-For SSE, streaming endpoints, or any handler that has already started writing the response, a later panic is recovered and logged server-side but no JSON 500 body is written — once headers are flushed, replacing them would corrupt the stream. Clients consuming streams should treat connection termination or truncated output as the failure signal in those cases.
+For SSE, streaming endpoints, or handlers that have already started writing, later panics are logged server-side but no JSON 500 body is sent to avoid corrupting the stream. Clients should treat connection termination or truncated output as failure signals.
 :::
 
 ## Endpoints
 
 ### `GET /livez` — Liveness Probe
 
-> Canonical name (current Kubernetes convention — the kube-apiserver split that replaced the older conflated `/healthz`). Also served at **`/healthz`** (a permanent alias — the most widely-recognized name) and **`/health`** (a deprecated alias, scheduled for removal in v0.2.0).
+> Canonical name (Kubernetes convention). Also served at **`/healthz`** (permanent alias) and **`/health`** (deprecated; removed in v0.2.0).
 
-Returns `200 OK` once the gateway has discovered ClickHouse table schemas at least once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop is still running (ClickHouse unreachable, target database missing, etc.). No authentication required.
+Returns `200 OK` after the gateway discovers ClickHouse table schemas once. Returns `503 Service Unavailable` with a diagnostic body while the boot-time schema discovery retry loop runs (e.g., ClickHouse unreachable, missing database). No authentication required.
 
 **Response (ready):**
 
@@ -107,15 +105,13 @@ Returns `200 OK` once the gateway has discovered ClickHouse table schemas at lea
 
 Status code: `503 Service Unavailable`
 
-The boot-degraded response lets an operator `curl /livez` to learn why the gateway isn't ready to serve traffic yet, instead of grepping a restart-loop log. The binary is bound on `:8080` and serves diagnostics, but is not yet accepting ingest/query traffic. Schema discovery retries with exponential backoff (2s → 60s); once a Refresh succeeds, `/livez` flips to `200` and stays there for the rest of the process lifetime — transient ClickHouse blips after that point are reflected in `/readyz`, not `/livez`.
-
----
+The boot-degraded response allows operators to `curl /livez` for failure reasons instead of grepping logs. The binary binds on `:8080` for diagnostics before accepting traffic. Schema discovery retries with exponential backoff (2s → 60s); once successful, `/livez` stays `200`. Subsequent ClickHouse blips affect `/readyz`, not `/livez`.
 
 ### `GET /readyz` — Readiness Probe
 
-> Canonical name (current Kubernetes convention). Also served at **`/ready`** — a deprecated alias kept for v0.1.x and scheduled for removal in v0.2.0.
+Canonical name. **`/ready`** is a deprecated v0.1.x alias, removable in v0.2.0.
 
-Returns `200 OK` if the process is fully booted (schema discovery complete) and ClickHouse is currently reachable. Returns `503 Service Unavailable` otherwise. No authentication required.
+Returns `200 OK` if the process booted (schema discovery complete) and ClickHouse is reachable; otherwise `503 Service Unavailable`. No authentication required.
 
 **Response (ready):**
 
@@ -133,7 +129,7 @@ Status code: `503 Service Unavailable`
 
 ### Liveness vs readiness — behavior matrix
 
-`/livez` (liveness) and `/readyz` (readiness) answer different questions, so they diverge once the process has booted. `/livez` is **sticky**: after the first successful schema discovery it stays `200` for the rest of the process lifetime, even if ClickHouse later becomes unreachable — liveness asks "is the process alive and past boot," not "is its backend up right now." `/readyz` stays **conditional**: it pings ClickHouse on every call and drops back to `503` whenever ClickHouse is unreachable.
+`/livez` and `/readyz` diverge after boot. `/livez` is **sticky**: after initial schema discovery, it remains `200` regardless of ClickHouse availability; it only confirms the process is alive and past boot. `/readyz` is **conditional**, pinging ClickHouse every call and returning `503` if unreachable.
 
 | State                      | `/livez` | `/readyz` |
 |----------------------------|:--------:|:---------:|
@@ -142,21 +138,17 @@ Status code: `503 Service Unavailable`
 | Post-boot, ClickHouse dies | 200 ★    | 503       |
 | Post-boot, ClickHouse back | 200      | 200       |
 
-★ Once boot completes, `/livez` no longer tracks ClickHouse state — a runtime ClickHouse outage surfaces in `/readyz` only. This is what keeps a Kubernetes `livenessProbe` from restart-looping the pod during a transient backend blip (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)).
-
----
+★ After boot, `/livez` ignores ClickHouse state; outages surface only in `/readyz`. This prevents Kubernetes `livenessProbe` restart-loops during transient backend blips (see [Deployment → Boot-time degraded mode](/deployment#boot-time-degraded-mode)).
 
 ### `GET /v1/health` — Liveness ping (public, content-free)
 
-Returns **`200 OK` with an empty body** once the gateway is past boot, or **`503 Service Unavailable`** (also empty) while boot-time schema discovery is still failing. No authentication required and no response body — the caller only branches on the status code, so there's nothing to JSON-encode or cache per request.
+Returns **`200 OK`** when the gateway has booted, or **`503 Service Unavailable`** if boot-time schema discovery is failing. Both responses have empty bodies. No authentication required.
 
-This is what the SDK's `wh.sys.health()` calls, and the endpoint to use when choosing among multiple servers in a distributed setup. It mirrors `/livez` under the hood but is intentionally a `/v1` API route rather than a Kubernetes probe path: an operator may filter the bare probe paths (`/livez`, `/readyz`, `/healthz`) out at the reverse proxy since they're internal probes, so the SDK relies on `/v1/health`, which is documented public API surface meant to stay reachable. It does **not** ping ClickHouse — readiness-based load balancing is the proxy/LB's job (via `/readyz`), not the client's.
-
----
+The SDK's `wh.sys.health()` uses this endpoint for server selection in distributed setups. It mirrors `/livez` but exists as a `/v1` route because internal probes (`/livez`, `/readyz`, `/healthz`) may be filtered at the reverse proxy. This public API surface ensures reachability. It does **not** ping ClickHouse; readiness-based load balancing is handled by the proxy/LB via `/readyz`.
 
 ### `GET /version` — Build Info
 
-Returns the build metadata embedded in the running binary — the `version`, `git_commit`, and `build_time` injected at compile time via `-ldflags`, plus the `go_version` read from the runtime. No authentication required: these are the same values logged at startup, so the endpoint discloses nothing the logs don't already. Useful for confirming exactly which build is deployed when troubleshooting.
+Returns binary metadata: `version`, `git_commit`, and `build_time` (via `-ldflags`), plus the runtime `go_version`. No authentication required; these values are already logged at startup. Use this to confirm deployed builds during troubleshooting.
 
 **Response:**
 
@@ -169,30 +161,28 @@ Returns the build metadata embedded in the running binary — the `version`, `gi
 }
 ```
 
-A binary built without the `-ldflags` injection (e.g. a bare `go build` rather than `make build`) reports the fallback values `"dev"` / `"unknown"` for `version` / `git_commit`.
-
----
+Binaries built without `-ldflags` (e.g., `go build` instead of `make build`) report `"dev"` and `"unknown"` for `version` and `git_commit`.
 
 ### `POST /v1/ingest?table={table}` — Ingest Data
 
-Accepts a single flat JSON object, a JSON array of objects, or a newline-delimited JSON (NDJSON) batch, validates each record against the ClickHouse schema for `{table}`, and publishes it to the message queue. Returns immediately — ClickHouse insertion happens asynchronously via the batch consumer.
+Accepts a flat JSON object, JSON array of objects, or newline-delimited JSON (NDJSON) batch. Validates records against the ClickHouse schema for `{table}` and publishes them to a message queue. Returns immediately; insertion is asynchronous via the batch consumer.
 
-**The format is auto-detected from the body — `Content-Type` is only a hint.** The first non-whitespace byte decides: `[` selects a JSON array, anything else a single JSON object. An explicit `Content-Type: application/x-ndjson` selects NDJSON line-framing *unless* the body starts with `[` (the array wins), so a batch works whether or not the header matches.
+Format is auto-detected: `[` selects a JSON array; otherwise, it's a single JSON object. `Content-Type: application/x-ndjson` selects NDJSON unless the body starts with `[`.
 
 | Body | Typical `Content-Type` | Response |
 | ---- | ---------------------- | -------- |
 | one flat JSON object | `application/json` *(default)* | `{"ok":true}` (or `{"duplicate":true}`) |
-| a JSON array of objects (any length, even 1) | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
-| one JSON object per line (NDJSON) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
+| a JSON array of objects | `application/json` | per-record summary — see [Batch Ingest](#batch-ingest) |
+| NDJSON (one object per line) | `application/x-ndjson` | per-record summary — see [Batch Ingest](#batch-ingest) |
 
-The inbound request body is capped at 16 MiB; a body over the cap is rejected with `413` (matching [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)). For uploads larger than that, use the streaming NDJSON form below rather than one big body, and set your own outer limit at the [reverse proxy](/reverse-proxy#request-body-size-limits).
+Request bodies are capped at 16 MiB; overflows return `413` (see [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse)). For larger uploads, use streaming NDJSON and configure the [reverse proxy](/reverse-proxy#request-body-size-limits).
 
-The `{table}` URL query must match a table that exists in ClickHouse. WaveHouse discovers table schemas on startup and refreshes them periodically.
+The `{table}` query must match an existing ClickHouse table. WaveHouse discovers schemas on startup and refreshes them periodically.
 
 :::note[Insert-only]
-The ingest pipeline accepts only inserts. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must be issued through [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), which is restricted to the admin role (`admin_role`, the same gate as the rest of `/v1/admin/*`).
+Only inserts are accepted here. All other mutations — `DELETE`, `UPDATE`, `TRUNCATE`, `DROP`, `ALTER`, `REPLACE`, etc. — must use [`POST /v1/admin/query`](#post-v1adminquery--query-clickhouse), restricted to the admin role (`admin_role`).
 
-The policy engine authorizes mutations by inspecting the columns being written. That works for inserts but not for predicate-driven mutations like `DELETE … WHERE` — there's no way to prove the predicate matches only rows the caller is allowed to touch. Routing those statements through the admin-gated raw-SQL surface keeps the policy contract honest.
+The policy engine authorizes inserts by inspecting columns. Predicate-driven mutations (e.g., `DELETE … WHERE`) are routed through the admin-gated raw-SQL surface because predicates cannot be proven to match only authorized rows.
 :::
 
 **Request:**
@@ -206,17 +196,24 @@ The policy engine authorizes mutations by inspecting the columns being written. 
 }
 ```
 
-The body is a **flat JSON object** whose keys must match column names in the target ClickHouse table. Values must be type-compatible (see schema validation below).
+The body must be a **flat JSON object** with keys matching ClickHouse column names and type-compatible values.
 
 **Schema Validation:**
 
-- Unknown fields (not in the ClickHouse schema) are rejected.
-- Type mismatches are rejected (e.g., sending a boolean for a `Float64` column).
-- Missing required columns (non-nullable without a default) are rejected.
-- Null values for non-nullable columns without a default are rejected.
-- Type compatibility: `String` accepts JSON strings, numbers, and booleans (ClickHouse coerces the non-strings); `FixedString`/`UUID` accept the same at validation, but ClickHouse rejects a non-string value there, so it surfaces in the DLQ; `DateTime`/`Date`/`Enum` accept JSON strings or numbers; `IPv*` accepts JSON strings (a number passes validation but ClickHouse rejects it → DLQ); `Int*`/`Float*`/`Decimal` accept JSON numbers or strings — a string lets JavaScript callers avoid 64-bit precision loss, and its contents are ClickHouse's to judge (a non-numeric string is accepted here and surfaces in the DLQ, not as a `400`); `Bool` accepts JSON booleans and the numbers `0`/`1` (any other number, and *any* string — including `"true"` — passes validation but is rejected by ClickHouse → DLQ); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts JSON arrays or objects at validation, but ClickHouse takes an array only for an *unnamed* tuple and an object only for a *named* one — the other shape surfaces in the DLQ; any other ClickHouse type (`JSON`, `Variant`, `Dynamic`, geo, …) accepts any JSON value — WaveHouse defers to ClickHouse, so a bad value surfaces in the DLQ rather than as a `400`.
-- `Nullable()` and `LowCardinality()` wrappers are handled transparently.
-- Top-level `DateTime`/`DateTime64` values are rewritten to a canonical wire form on ingest — see [Timestamp canonicalization](#timestamp-canonicalization).
+- Rejected: Unknown fields, type mismatches, missing required columns (non-nullable without default), or nulls in non-nullable columns without defaults.
+- Type compatibility:
+  - `String`: JSON strings, numbers, booleans (coerced by ClickHouse).
+  - `FixedString`/`UUID`: Same as above at validation; non-strings are rejected by ClickHouse $\rightarrow$ DLQ.
+  - `DateTime`/`Date`/`Enum`: JSON strings or numbers.
+  - `IPv*`: JSON strings (numbers pass validation but fail in ClickHouse $\rightarrow$ DLQ).
+  - `Int*`/`Float*`/`Decimal`: JSON numbers or strings (strings prevent JS 64-bit precision loss; non-numeric strings $\rightarrow$ DLQ).
+  - `Bool`: JSON booleans, `0`, or `1` (others/strings pass validation but fail in ClickHouse $\rightarrow$ DLQ).
+  - `Array`: JSON arrays.
+  - `Map`: JSON objects.
+  - `Tuple`: JSON arrays (unnamed) or objects (named); opposite shapes $\rightarrow$ DLQ.
+  - Others (`JSON`, `Variant`, `Dynamic`, geo, …): any JSON value; failures surface in the DLQ.
+- `Nullable()` and `LowCardinality()` are handled transparently.
+- Top-level `DateTime`/`DateTime64` values use [Timestamp canonicalization](#timestamp-canonicalization).
 
 **Response (accepted):**
 
@@ -224,7 +221,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 {"ok": true}
 ```
 
-**Response (duplicate):** *(only when dedup is enabled)*
+**Response (duplicate):** *(dedup enabled)*
 
 ```json
 {"duplicate": true}
@@ -234,16 +231,16 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"invalid json"}` | Malformed request body |
-| 400 | `{"error":"unknown column ... for table ..."}` (also: `missing required column ...`, `type mismatch for column ...`, `null value for non-nullable column ...`) | Schema validation failure (unknown fields, type mismatches, missing required columns, null in a non-nullable column with no default). The body is the validator's message verbatim — there is no `validation failed:` prefix. |
-| 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
-| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
-| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
-| 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
-| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 500 | `{"error":"dedupe failed"}` | Deduplication backend error |
-| 500 | `{"error":"publish failed"}` | Message queue error |
-| 503 | `{"error":"service unavailable"}` | NATS JetStream stream full (backpressure). Response includes `Retry-After: 30` header. |
+| 400 | `{"error":"invalid json"}` | Malformed body |
+| 400 | `{"error":"..."}` | Schema failure (unknown column, missing required column, type mismatch, or null in non-nullable). Body is the validator's verbatim message. |
+| 400 | `{"error":"missing dedupe id field \"event_id\""}` | Dedupe enabled with `dedupe.require_id: true` and row lacks `id_field`. If `false`, row is published un-deduped. Logged at `WARN`; counted by `wavehouse_ingest_dedupe_missing_id_total`. Per-record failure in batches. |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | Invalid/expired token supplied. |
+| 403 | `{"error":"forbidden"}` (or empty-role variant) | Role lacks `insert` permission on table. |
+| 404 | `{"error":"unknown table: ..."}` | Table not found in schema. |
+| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Body over 16 MiB cap. |
+| 500 | `{"error":"dedupe failed"}` | Deduplication backend error. |
+| 500 | `{"error":"publish failed"}` | Message queue error. |
+| 503 | `{"error":"service unavailable"}` | NATS JetStream stream full; includes `Retry-After: 30`. |
 
 **curl example:**
 
@@ -255,45 +252,51 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
 
 #### Timestamp canonicalization
 
-**Send the canonical form — RFC 3339 UTC with the fraction already truncated to the column's precision and trailing zeros trimmed (spelled out below) — and the value is republished byte-for-byte.** A `DateTime`/`DateTime64` column value sent in any other accepted form — including RFC 3339 UTC with extra or trailing-zero fraction digits — is rewritten to that **one canonical wire form — RFC 3339 UTC** (`2026-06-21T04:00:00Z`, fraction truncated to the column's precision) before publishing, so the stored instant never changes but every consumer (the ClickHouse insert, [SSE subscribers](#get-v1stream--server-sent-events-stream), the DLQ) sees the same spelling `/v1/query` renders. The accepted input forms:
+**Send the canonical form—RFC 3339 UTC, fraction truncated to column precision and trailing zeros trimmed—and the value is republished byte-for-byte.** Other accepted forms are rewritten to this **one canonical wire form (RFC 3339 UTC)** (e.g., `2026-06-21T04:00:00Z`) before publishing. This ensures the stored instant remains unchanged while all consumers (ClickHouse insert, [SSE subscribers](#get-v1stream--server-sent-events-stream), DLQ, and `/v1/query`) see identical spelling.
 
-- RFC 3339, any offset (`.`-fractions only — ClickHouse has no `,` separator).
-- `YYYY-MM-DD[ T]HH:MM:SS[.fff]` or `YYYY-MM-DD`, zone-less — interpreted in the column's time zone, else the ClickHouse server's, exactly as ClickHouse itself would.
-- A Unix-seconds string of exactly 9–10 digits (a `.fff` fraction is honored only for `DateTime64` columns, as ClickHouse does).
-- A **non-negative integer** JSON number, unquoted — read the way ClickHouse reads bare numbers: Unix **seconds** for a `DateTime` column, but the column's raw **tick count** for `DateTime64` (a `DateTime64(3)` stores milliseconds, so `1750478400500` is the millisecond epoch `2025-06-21T04:00:00.5Z` — and `1750478400` is January 1970, not June 2025).
+Accepted input forms:
 
-**Fail-open**: a value in none of those forms is published verbatim — ClickHouse's more liberal parser decides insertability, and a value it too rejects surfaces via the DLQ, as before. `Date`/`Date32` columns pass through untouched.
+- RFC 3339 with any offset (`.` fractions only).
+- `YYYY-MM-DD[ T]HH:MM:SS[.fff]` or `YYYY-MM-DD` (zone-less): interpreted in the column's time zone, then the server's.
+- Unix-seconds string of exactly 9–10 digits (`.fff` fraction honored only for `DateTime64`).
+- **Non-negative integer** JSON number: read as Unix **seconds** for `DateTime`, or raw **tick count** for `DateTime64` (e.g., `1750478400500` is millisecond epoch `2025-06-21T04:00:00.5Z`).
+
+**Fail-open**: Values in other forms are published verbatim; ClickHouse's parser determines insertability. Rejected values surface via the DLQ. `Date`/`Date32` columns pass through untouched.
 
 :::note[Pass-through edge cases]
 
-- Digit-strings of lengths other than 9–10 are ClickHouse's own forms — calendar shapes like `YYYYMMDD`, or its 13/16/19-digit ms/µs/ns epochs — and pass through untouched.
-- A bare number with a fraction or exponent (`1750478400.5`) is passed through un-rewritten, and ClickHouse then fails the row for any timestamp column: it parses bare numbers as integers only — its lenient timestamp parsing, which accepts `"1750478400.5"` for a `DateTime64` column (on a plain `DateTime` the leftover fraction still fails the row), applies solely to quoted strings.
-- An instant outside the column type's range also passes through — ClickHouse *saturates* out-of-range values spelling-dependently (and a `DateTime64(9)` column rejects the insert outright past the Int64-nanosecond ceiling, 2262-04-11 — a bound WaveHouse conservatively applies to every `DateTime64` of precision ≥ 7 when deciding what it may rewrite), so no rewrite there is safe.
-- A time zone that doesn't resolve at runtime also causes pass-through: the binary embeds no tzdata, so named zones resolve from the runtime's zone database (the bundled distroless images ship one; a stripped-down custom runtime, or a server zone newer than the image's snapshot, may not resolve). An unresolvable *column* zone skips canonicalization for that column entirely; an unresolvable *server* default skips only zone-less values of columns without a declared zone — warned at schema refresh either way, and never guessed as UTC, which could move the stored instant. Remedy: install `tzdata` in a custom image, or point Go at a zone database via the `ZONEINFO` environment variable.
-- Timestamps nested inside a composite column (`Array(DateTime)`, `Map(K, DateTime64)`, `Tuple(…, DateTime)`) pass through untouched; only top-level `DateTime`/`DateTime64` columns (including `Nullable`/`LowCardinality` wrappers) are canonicalized.
-- The accepted grammar is differentially tested against a live ClickHouse: raw and canonicalized spellings must insert identically, or both fail.
+- Digit-strings not 9–10 characters (e.g., `YYYYMMDD` or 13/16/19-digit epochs) pass through untouched.
+- Bare numbers with fractions or exponents (`1750478400.5`) pass through; ClickHouse rejects these for timestamp columns as it parses bare numbers only as integers.
+- Instants outside the column type's range pass through because ClickHouse saturates values spelling-dependently (e.g., `DateTime64(9)` rejects inserts past 2262-04-11).
+- Unresolvable time zones cause pass-through: named zones resolve from the runtime database. If a column or server zone cannot resolve, canonicalization is skipped to avoid guessing UTC and shifting the instant. Remedy: install `tzdata` or set the `ZONEINFO` environment variable.
+- Timestamps in composite columns (`Array`, `Map`, `Tuple`) pass through; only top-level `DateTime`/`DateTime64` (including `Nullable`/`LowCardinality`) are canonicalized.
+- Grammar is differentially tested against live ClickHouse: raw and canonical spellings must insert identically or both fail.
 
 :::
 
 :::caution[Upgrading WaveHouse against a pre-26.5 ClickHouse]
-WaveHouse pins `date_time_input_format=best_effort` on its inserts — the ClickHouse server default since 26.5. On an older server whose default was `basic`, a plain `DateTime` column read an all-digit timestamp string of five or more digits as Unix seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"` as a year); under `best_effort`, `"20260711"` stores 2026-07-11, not 1970-08-23, and some lengths (e.g. 12 digits) are rejected outright. (`DateTime64` columns diverge the same way on calendar-shaped runs — `"20260711"` is 1970-08-23 under `basic`, 2026-07-11 under `best_effort` — and additionally whenever an epoch run's unit doesn't match the column scale, e.g. a 16-digit microsecond epoch into a `DateTime64(3)`; an epoch run whose unit matches the column scale (a 13-digit millisecond epoch into a `DateTime64(3)`) reads identically too — only 9–10-digit Unix-seconds runs, with an optional fraction, agree at *every* scale.) The canonical form itself is what the pin rescues: under `basic` an RFC 3339 value's `Z` suffix is rejected outright (the row fails and lands in the DLQ), and the pin is what makes it insertable regardless of server version. Zone-less date-times and 9–10-digit Unix-seconds strings parse identically under both settings.
+WaveHouse pins `date_time_input_format=best_effort` (the default since 26.5). On older servers using `basic`, all-digit strings $\ge$ 5 digits were read as Unix seconds; under `best_effort`, `"20260711"` is a date, not 1970-08-23. `DateTime64` columns diverge similarly on calendar shapes and mismatched epoch units (e.g., 16-digit $\mu$s into `DateTime64(3)`). The pin ensures RFC 3339 values with `Z` suffixes—which `basic` rejects—are insertable regardless of server version.
 :::
 
-**The canonical form, precisely.** This is the one strict timestamp spelling in WaveHouse — the same one `/v1/query` and `/v1/pipes/{name}` render for top-level timestamp columns and the SSE stream carries (the raw-SQL proxy `/v1/admin/query` instead renders server-side via `date_time_output_format=iso`, which keeps trailing fraction zeros), and the form the stream row-filter will require for timestamp comparisons once row-level enforcement lands ([#381](https://github.com/Wave-RF/WaveHouse/issues/381)):
+**The canonical form, precisely.** This strict spelling is used by `/v1/query`, `/v1/pipes/{name}`, the SSE stream, and future row-filter comparisons ([#381](https://github.com/Wave-RF/WaveHouse/issues/381)):
 
-- `YYYY-MM-DDTHH:MM:SSZ`, or `YYYY-MM-DDTHH:MM:SS.FZ` when there is a sub-second part: uppercase `T` separator, uppercase `Z` suffix, always UTC — never a numeric offset — and seconds always present.
-- The fraction is **truncated** (never rounded) to the column's precision: a `DateTime` column (whole seconds) never carries a fraction; a `DateTime64(3)` column carries at most three digits.
-- Trailing fractional zeros are trimmed and an all-zero fraction is dropped (Go's `time.RFC3339Nano` rendering): `.120` becomes `.12Z`, `.000` becomes plain `Z` — byte-for-byte what `/v1/query` returns for the same stored value.
-- A column's declared time zone changes only how zone-less *inputs* are interpreted, never the output: every canonical value ends in `Z`.
+- `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.FZ`. Uppercase `T` and `Z`, always UTC, seconds always present.
+- Fraction is **truncated** (not rounded) to column precision: `DateTime` has no fraction; `DateTime64(3)` has at most three digits.
+- Trailing fractional zeros are trimmed and all-zero fractions dropped (Go's `time.RFC3339Nano`): `.120` $\to$ `.12Z`, `.000` $\to$ `Z`.
+- Column time zones only affect *input* interpretation; output always ends in `Z`.
 
-Examples for a `DateTime64(3, 'America/New_York')` column: `"2026-06-21 00:00:00.1239"` (zone-less, read in New York) → `"2026-06-21T04:00:00.123Z"`; `"1750478400.5"` (Unix-seconds string) → `"2025-06-21T04:00:00.5Z"`; the integer number `1750478400500` (ticks at the column's millisecond scale) → `"2025-06-21T04:00:00.5Z"`.
+Examples for `DateTime64(3, 'America/New_York')`:
+
+- `"2026-06-21 00:00:00.1239"` (zone-less) $\to$ `"2026-06-21T04:00:00.123Z"`
+- `"1750478400.5"` (Unix-seconds string) $\to$ `"2025-06-21T04:00:00.5Z"`
+- `1750478400500` (integer ticks) $\to$ `"2025-06-21T04:00:00.5Z"`
 
 #### Batch Ingest
 
-A **JSON array** of objects (`[{…}, {…}]`) or an **NDJSON** body (`Content-Type: application/x-ndjson`, one JSON object per line) ingests a batch in a single request. Each record is validated, authorized, deduplicated, and published independently, so **one malformed or rejected record never blocks the rest of the batch**. (The SDK's `insert([...])` array helper uses the NDJSON form automatically; both forms return the same response.)
+Ingest batches via a **JSON array** (`[{…}, {…}]`) or **NDJSON** body (`Content-Type: application/x-ndjson`, one object per line). Each record is validated, authorized, deduplicated, and published independently; one rejected record never blocks the batch. The SDK's `insert([...])` helper uses NDJSON automatically.
 
-- **JSON array** — the most convenient form from most HTTP clients. A structural JSON syntax error fails the whole request (`400`), but a wrong-typed element (a non-object) is reported per-record like any other rejection. An explicit empty array (`[]`) is a valid, record-less batch (`200`, `total: 0`).
-- **NDJSON** — the streaming-friendly form for very large uploads. Blank lines are skipped, and a single malformed *line* is reported and skipped (the newline reframes the next record).
+- **JSON array**: Convenient for most clients. Structural syntax errors fail the whole request (`400`), but wrong-typed elements (non-objects) are reported per-record. An empty array (`[]`) is a valid batch (`200`, `total: 0`).
+- **NDJSON**: Streaming-friendly for large uploads. Blank lines are skipped; malformed lines are reported and skipped.
 
 **Request (JSON array):**
 
@@ -315,7 +318,7 @@ Content-Type: application/x-ndjson
 {"page": "/pricing", "score": 7}
 ```
 
-**Response (`200`):** a per-record summary. Each `results` entry mirrors the single-object response (`ok` / `duplicate` / `error`) plus its 1-based `index`.
+**Response (`200`):** A per-record summary where each `results` entry mirrors the single-object response (`ok` / `duplicate` / `error`) plus its 1-based `index`.
 
 ```json
 {
@@ -337,22 +340,22 @@ Content-Type: application/x-ndjson
 | `succeeded` | records validated and published |
 | `failed` | records rejected — see `results` |
 | `duplicates` | records skipped by dedup (when enabled) |
-| `results` | per-record outcomes, each `{ index, ok\|duplicate\|error }` with `index` the 1-based record position. Truncated to the first 10,000 entries for very large batches (the counts stay authoritative). |
+| `results` | per-record outcomes `{ index, ok\|duplicate\|error }`. Truncated to 10,000 entries for large batches; counts remain authoritative. |
 
-A `200` is returned whenever the body was read and the records were processed — **even if every record failed**, so branch on `failed`/`results`, not the status code. Per-record problems (a malformed NDJSON line, a non-object array element, schema validation, column/check permission failures) are reported in `results` and the batch continues. Whole-request conditions abort with a non-`200` instead:
+A `200` is returned if the body was read and processed—even if all records failed. Branch on `failed`/`results`, not status code. Per-record issues (malformed NDJSON lines, non-object array elements, schema/permission failures) are reported in `results`. Whole-request errors abort with non-`200`:
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | The body has no records |
-| 400 | `{"error":"invalid json: ..."}` | A structural JSON syntax error, or a truncated/unterminated JSON array (e.g. a cut-off upload — the whole request fails rather than reporting a partial success), or an oversized NDJSON line |
-| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (same auth gate as the single-object path; surfaces the token reason) |
-| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table (checked once, before any record) |
-| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
-| 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Message-queue or dedup-backend failure mid-batch |
-| 503 | `{"error":"service unavailable"}` | NATS JetStream full (backpressure) mid-batch; includes `Retry-After: 30` |
+| 400 | `{"error":"empty body"}` / `{"error":"empty ndjson body"}` | No records in body |
+| 400 | `{"error":"invalid json: ..."}` | Structural JSON error, truncated array, or oversized NDJSON line |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | Invalid/expired token |
+| 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | Role lacks `insert` on table |
+| 413 | `{"error":"request body exceeded 16777216 bytes"}` | Body over 16 MiB cap |
+| 500 | `{"error":"publish failed"}` / `{"error":"dedupe failed"}` | Queue or dedup-backend failure mid-batch |
+| 503 | `{"error":"service unavailable"}` | NATS JetStream full; includes `Retry-After: 30` |
 
 :::caution[At-least-once on retry]
-A batch aborted partway (a `503`/`500`, or a JSON-array syntax error, after some leading records were already published) re-publishes those leading records when the whole batch is retried. Enable deduplication if duplicate suppression matters — this is the same at-least-once property the single-object path already has (the SDK retries both on `503`).
+Batches aborted partway (`503`/`500`, or JSON syntax errors after some records published) re-publish leading records upon retry. Enable deduplication if duplicate suppression is required; the SDK retries both single and batch paths on `503`.
 :::
 
 **curl example (JSON array):**
@@ -371,27 +374,25 @@ curl -X POST "http://localhost:8080/v1/ingest?table=clicks" \
   --data-binary $'{"page":"/home"}\n{"page":"/about"}\n'
 ```
 
----
-
 ### `POST /v1/admin/query` — Query ClickHouse
 
-Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface** — any statement ClickHouse accepts works, including arbitrary DDL/DML/SYSTEM verbs and inline FORMAT directives. Multi-statement input (`SELECT 1; TRUNCATE t`) also works on recent ClickHouse versions where multi-query is enabled by default; older or restrictively-configured servers may reject the second statement with a clear error. Read queries return a JSON array of result rows; mutations/DDL return HTTP 200 with `[]` on success. DateTime columns are ISO-8601 formatted via the upstream `date_time_output_format=iso` setting — server-side rendering that keeps trailing fraction zeros, so a `DateTime64(3)` whole-second value returns `.000Z` here where `/v1/query` renders plain `Z`; other types are returned as ClickHouse renders them under `FORMAT JSON`.
+Executes a SQL statement directly against ClickHouse. **WaveHouse proxies the SQL string verbatim to ClickHouse's HTTP interface**; any statement ClickHouse accepts works, including DDL/DML/SYSTEM verbs and inline FORMAT directives. Multi-statement input (`SELECT 1; TRUNCATE t`) works on recent ClickHouse versions where multi-query is enabled by default; older servers may reject the second statement. Read queries return a JSON array of rows; mutations/DDL return HTTP 200 with `[]`. DateTime columns use ISO-8601 via the upstream `date_time_output_format=iso` setting, preserving trailing fraction zeros (e.g., `DateTime64(3)` returns `.000Z` where `/v1/query` renders plain `Z`). Other types follow `FORMAT JSON`.
 
 :::note[Inline `FORMAT` overrides the JSON envelope]
-ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON` setting. When the SQL contains an explicit `FORMAT`, the proxy forwards ClickHouse's raw response body (CSV, Pretty, TSV, …) and passes through the upstream `Content-Type` header — `text/csv`, `text/tab-separated-values`, etc. — so consumers see the right MIME type. The "extract the `data` array" behavior only applies when ClickHouse returned the `FORMAT JSON` envelope, which is the default.
+ClickHouse's inline `FORMAT` clause (e.g. `SELECT 1 FORMAT CSV` or `… FORMAT Pretty`) takes precedence over the URL-level `default_format=JSON`. The proxy forwards ClickHouse's raw body (CSV, Pretty, TSV, …) and the upstream `Content-Type` — `text/csv`, `text/tab-separated-values`, etc. The "extract the `data` array" behavior only applies when ClickHouse returns the default `FORMAT JSON` envelope.
 :::
 
 :::caution[64 MiB response cap]
-The proxy buffers the upstream response in memory before forwarding (no row-streaming yet), so a `SELECT *` from a large table can pin RAM on the API server. To avoid an admin OOMing themselves, responses larger than 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Narrow the query with `LIMIT`, or use a streaming client outside WaveHouse that talks to ClickHouse directly (the standard escape hatch — the same admin credentials work).
+The proxy buffers responses in memory; large `SELECT *` queries can pin RAM. Responses exceeding 64 MiB return 502 with a `clickhouse response exceeded N bytes` error. Use `LIMIT` or a streaming client talking to ClickHouse directly (using the same admin credentials).
 :::
 
-This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`** — every request goes straight to ClickHouse, mutation or read, and downstream HTTP caches are explicitly told not to store the response. Raw SQL is an admin escape hatch with infrequent, ad-hoc traffic, so the L1/singleflight machinery would only add complexity without a real hit-rate win. Use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe) for the cached read paths (dashboards, high-QPS clients, etc.) — both share an in-process L1 (Ristretto) with singleflight coalescing.
+This endpoint **does not cache, does not singleflight, and emits `Cache-Control: no-store`**. Every request goes straight to ClickHouse. For cached read paths (dashboards, high-QPS clients), use [`POST /v1/query?table={table}`](#post-v1querytabletable--structured-query) or [`GET/POST /v1/pipes/{name}`](#getpost-v1pipesname--execute-named-pipe), which share an in-process L1 (Ristretto) with singleflight coalescing.
 
 :::note[Admin only]
-The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a caller whose JWT role equals the policy `admin_role` (`"admin"` by default) may use it. A request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is rejected. Raw SQL has no per-statement scope check (a full SQL parser would be needed to authorize predicates), so the role gate is the entire authorization story, shared with the rest of `/v1/admin/*` (policy CRUD, pipes CRUD). The normal surfaces for non-admin callers are `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, and `GET/POST /v1/pipes/{name}` for pre-defined queries — none of which expose raw SQL.
+Mounted under `/v1/admin/*` behind the `RequireAdmin` gate: only callers with a JWT role matching the policy `admin_role` (`"admin"` by default) may use it. Requests with no/invalid tokens resolve to `default_role` and are rejected. Raw SQL has no per-statement scope check; the role gate is the sole authorization mechanism, shared with `/v1/admin/*` (policy/pipes CRUD). Non-admins should use `POST /v1/ingest?table={table}` for writes, `POST /v1/query?table={table}` for structured reads, or `GET/POST /v1/pipes/{name}` for pre-defined queries.
 :::
 
-`/v1/admin/query` is the only sanctioned surface for non-insert mutations (the ingest pipeline is insert-only). Granting raw-SQL access to a non-admin role via the policy engine is no longer supported: authenticate with the admin role (`admin_role`).
+`/v1/admin/query` is the only sanctioned surface for non-insert mutations. Granting raw-SQL access to non-admin roles via the policy engine is unsupported; authenticate with the `admin_role`.
 
 **Request:**
 
@@ -406,7 +407,7 @@ The route is mounted under `/v1/admin/*`, behind the `RequireAdmin` gate: only a
 | `sql` | string | Yes | SQL forwarded verbatim to ClickHouse's HTTP interface. |
 
 :::note[No parameter binding on this endpoint (yet)]
-The earlier handler accepted a `params` array bound to `?` placeholders; the HTTP proxy doesn't. ClickHouse's native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the URL query string) is *not* forwarded today either — the proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL, and the request body is `{"sql": "..."}` with no escape hatch for query-string params. The current contract is "send raw SQL, get rows back": inline literals into the SQL for now. For safe binding from user-supplied input, use the structured query endpoint (`POST /v1/query?table={table}`) — that's its job.
+The proxy does not support `params` arrays or ClickHouse native named-param syntax (`WHERE id = {id:UInt32}` with `param_id=42` on the query string). The proxy only sets `default_format`, `date_time_output_format`, and `database` on the upstream URL. Use inline literals for now, or use the structured query endpoint (`POST /v1/query?table={table}`) for safe binding from user input.
 :::
 
 **Response:**
@@ -428,12 +429,12 @@ The earlier handler accepted a `params` array bound to `?` placeholders; the HTT
 | ------ | ---- | ----- |
 | 400 | `{"error":"invalid json"}` | Malformed request body |
 | 400 | `{"error":"missing sql"}` | Missing `sql` field |
-| 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement with a 4xx (bad SQL, missing table, type error, …). The body carries ClickHouse's own error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.`. The proxy maps any ClickHouse 4xx to HTTP 400 — caller-fault, the request itself is what's wrong. |
-| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | The request carried a present-but-invalid/expired token and was denied for lacking permission (the gate surfaces the token reason) |
-| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
-| 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx (internal error, overloaded, etc.). The proxy maps any ClickHouse 5xx to HTTP 502 — gateway-fault, the upstream service had a problem. Same body convention: ClickHouse's text is forwarded as-is. |
-| 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse (connection refused, timeout, the upstream went away mid-request) |
-| 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB memory-safety cap. Narrow the query, add a `LIMIT`, or use `FORMAT JSONEachRow` with a streaming client outside WaveHouse. |
+| 400 | `{"error":"<ClickHouse error message>"}` | ClickHouse rejected the statement (4xx). Body carries ClickHouse's error text verbatim, e.g. `Code: 60. DB::Exception: Table default.x doesn't exist.` |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | Invalid/expired token |
+| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` |
+| 502 | `{"error":"<ClickHouse error message>"}` | ClickHouse returned a 5xx. Body contains verbatim ClickHouse error text. |
+| 502 | `{"error":"clickhouse request failed: ..."}` | Transport-level failure reaching ClickHouse |
+| 502 | `{"error":"clickhouse response exceeded N bytes; ..."}` | Response body exceeded the 64 MiB cap. Use `LIMIT` or `FORMAT JSONEachRow` via a direct streaming client. |
 
 **curl example:**
 
@@ -445,14 +446,12 @@ curl -X POST http://localhost:8080/v1/admin/query \
   -d '{"sql": "SELECT * FROM clicks LIMIT 10"}'
 ```
 
----
-
 ### `POST /v1/query?table={table}` — Structured Query
 
-Executes a type-safe structured query against a table. The query AST is validated against the schema and converted to parameterized SQL. Permissions from the access control policy are enforced (column filtering, row-level security, aggregation restrictions).
+Executes a type-safe structured query against a table. The AST is validated against the schema and converted to parameterized SQL, enforcing access control policies (column filtering, row-level security, aggregation restrictions).
 
 :::note[The column allowlist is a hard cap on every clause]
-Every column the query references — in `columns`, an aggregation argument, `filters`, `group_by`, `order_by`, or `time_range` — must be permitted by the role's `allow_columns`/`deny_columns`, or the request is rejected with `403 column "x" not allowed`. A full-row read is requested with `"select_all": true` (expanded to the columns the role may read — never a raw `SELECT *`); **omitting `columns` returns nothing**, so a hidden column never leaks by being left out, grouped on, or filtered on. See [Access control → Column permissions](/access-control#column-permissions).
+Every referenced column—in `columns`, aggregations, `filters`, `group_by`, `order_by`, or `time_range`—must be permitted by the role's `allow_columns`/`deny_columns` or the request returns `403 column "x" not allowed`. Use `"select_all": true` for a full-row read (expanded to permitted columns; never raw `SELECT *`). **Omitting `columns` returns nothing** to prevent hidden column leaks. See [Access control → Column permissions](/access-control#column-permissions).
 :::
 
 **Request:**
@@ -479,41 +478,39 @@ Every column the query references — in `columns`, an aggregation argument, `fi
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `columns` | string \| string[] | No | Columns to SELECT — an array, or a single string for one column. A literal `"*"` is the column *named* `*`, **not** a wildcard. Omit (or send `[]` / `""`) to select nothing; use `select_all` for a full-row read. Mutually exclusive with `select_all`. |
-| `select_all` | bool | No | Select every column the role may read (the all-columns wildcard, expanded server-side to the allow/deny set). Mutually exclusive with a non-empty `columns`, and with `aggregations`. |
+| `columns` | string \| string[] | No | Columns to SELECT. A literal `"*"` is a column *named* `*`, not a wildcard. Omit (or send `[]`/`""`) to select nothing; use `select_all` for full-row reads. Mutually exclusive with `select_all`. |
+| `select_all` | bool | No | Selects all columns the role may read. Mutually exclusive with non-empty `columns` and `aggregations`. |
 | `aggregations` | object[] | No | Aggregation functions (`fn`, `column`, `alias`). |
 | `filters` | object[] | No | WHERE conditions (`column`, `op`, `value`). Ops: eq, neq, gt, gte, lt, lte, in, like. |
 | `group_by` | string[] | No | GROUP BY columns. |
 | `order_by` | object[] | No | ORDER BY clauses (`column`, `dir`). |
-| `limit` | int | No | Max rows. Omitted or above the configured `query.default_max_rows` (default 10,000) → silently capped at that value; a policy `max_rows` can lower it further (see [Access Control](/access-control#resource-limits)). |
-| `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-duration relative values ("1h", "30m", "7d", "2w" — day and week suffixes expand to hours). Relative values mean that long *ago*. The window applies only when `column` and `since` are set — an `until` without `since` is ignored. |
+| `limit` | int | No | Max rows. Omitted or above `query.default_max_rows` (default 10,000) → silently capped; policy `max_rows` can lower this further ([Access Control](/access-control#resource-limits)). |
+| `time_range` | object | No | Time window (`column`, `since`, `until`). `since`/`until` accept RFC3339 or Go-durations ("1h", "30m", "7d", "2w"). Window applies only if `column` and `since` are set; `until` without `since` is ignored. |
 
 :::note[Identifier names]
-Table, column, and alias names may contain any characters ClickHouse accepts — dots, spaces, unicode, reserved keywords — because every identifier is backtick-quoted automatically. The one exception is a name containing a literal `?`, which is rejected with `400` (a clickhouse-go positional-binder limitation tracked in [#279](https://github.com/Wave-RF/WaveHouse/issues/279)).
+Identifiers are backtick-quoted, allowing dots, spaces, unicode, and keywords. Names containing literal `?` are rejected with `400` (clickhouse-go limitation [#279](https://github.com/Wave-RF/WaveHouse/issues/279)).
 :::
 
 **Response:**
 
-JSON array of result rows. Top-level `DateTime`/`DateTime64` values are returned in canonical RFC 3339 UTC (`2026-06-21T04:00:00.123Z`) — `Nullable` timestamp columns included (a SQL `NULL` renders as JSON `null`), while timestamps nested inside `Array`/`Map`/`Tuple` columns are rendered in the column's declared zone, else the ClickHouse server's, as the driver returns them — byte-identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for values [canonicalized at ingest](#timestamp-canonicalization) (a fail-open pass-through that ClickHouse accepted still comes back canonical here, though it streamed in the producer's spelling). The response carries an `X-Cache: HIT` or `X-Cache: MISS` header — this endpoint shares the in-process L1 (Ristretto) + singleflight machinery (unlike `/v1/admin/query`, which always hits ClickHouse).
+JSON array of result rows. Top-level `DateTime`/`DateTime64` values use RFC 3339 UTC (`2026-06-21T04:00:00.123Z`), including `Nullable` columns (SQL `NULL` as JSON `null`). Timestamps in `Array`/`Map`/`Tuple` use the column's or server's zone, identical to the [SSE stream](#get-v1stream--server-sent-events-stream) for values [canonicalized at ingest](#timestamp-canonicalization). Includes `X-Cache: HIT` or `X-Cache: MISS` headers via L1 (Ristretto) + singleflight machinery.
 
-The inbound request body is capped at 1 MiB; a body over the cap is rejected with `413`. A query AST is bounded by nature (far under 1 MiB even with a large `in`-list), and the cap blocks a single-request memory-exhaustion vector on this public endpoint. Set a tighter or higher outer limit at your [reverse proxy](/reverse-proxy#request-body-size-limits) — but it can only narrow the effective limit, not raise it past this cap.
+Request bodies are capped at 1 MiB (`413` if exceeded) to prevent memory exhaustion. Reverse proxy limits ([/reverse-proxy#request-body-size-limits](/reverse-proxy#request-body-size-limits)) can narrow but not raise this cap.
 
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation, or an unparseable `time_range` `since`/`until` — neither a relative duration nor an RFC3339 timestamp) |
+| 400 | `{"error":"..."}` | Schema validation error (unknown column, bad aggregation, or unparseable `time_range`) |
 | 403 | `{"error":"forbidden"}` | Role lacks select permission on table |
 | 403 | `{"error":"column \"x\" not allowed"}` | Column denied by policy |
 | 403 | `{"error":"aggregation \"x\" not allowed"}` | Aggregation fn denied by policy |
 | 404 | `{"error":"unknown table: x"}` | Table not found |
-| 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over the 1 MiB cap |
-
----
+| 413 | `{"error":"request body exceeded 1048576 bytes"}` | Request body over 1 MiB cap |
 
 ### `GET/POST /v1/pipes/{name}` — Execute Named Pipe
 
-Executes a pre-defined named query (pipe) with parameter binding. Parameters can be supplied via query string and/or JSON body. Results are cached in the shared L1 (Ristretto) with singleflight coalescing — same machinery as the structured query endpoint, and again, unlike `/v1/admin/query`.
+Executes a pre-defined named query (pipe) with parameter binding via query string and/or JSON body. Results use shared L1 (Ristretto) caching with singleflight coalescing, unlike `/v1/admin/query`.
 
 **Query Parameters:** Any key matching a pipe parameter name.
 
@@ -528,42 +525,40 @@ Executes a pre-defined named query (pipe) with parameter binding. Parameters can
 
 **Response:**
 
-JSON array of result rows, with `X-Cache: HIT` or `X-Cache: MISS` indicating whether the row came from the in-process L1.
+JSON array of result rows; `X-Cache: HIT` or `X-Cache: MISS` indicates if the row came from L1.
 
-The POST parameter body is capped at 1 MiB; a body over the cap is rejected with `413` (the same control-plane cap as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). A malformed-but-within-cap body is ignored rather than rejected, since parameters may legitimately come from the query string alone.
+POST bodies are capped at 1 MiB; exceeding this returns `413` (same as [`POST /v1/query`](#post-v1querytabletable--structured-query) — see [reverse proxy → body limits](/reverse-proxy#request-body-size-limits)). Malformed bodies within the cap are ignored, allowing parameters to come from the query string alone.
 
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
 | 404 | `{"error":"pipe not found"}` | Pipe name not registered |
-| 403 | `{"error":"forbidden"}` | Role not in pipe's `allowed_roles` (and not the admin role). Fails closed: a request with no role (no token, or a JWT missing `auth.role_claim`) is denied unless a `default_role` resolves it into the list; a pipe with no `allowed_roles` denies everyone but the admin role. |
-| 400 | `{"error":"missing required parameter: x"}` | Required parameter not supplied |
-| 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | A non-scalar value with no SQL literal form — a JSON object, whether supplied directly or nested as an array element. A JSON **array** is valid and renders as an `IN`-style `(…)` list. |
-| 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | An empty array — it would render as the invalid `IN ()`. |
-| 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over the 1 MiB cap |
-
----
+| 403 | `{"error":"forbidden"}` | Role not in `allowed_roles` (and not admin). Fails closed: requests without roles are denied unless a `default_role` resolves them; pipes with no `allowed_roles` deny all but admins. |
+| 400 | `{"error":"missing required parameter: x"}` | Required parameter missing |
+| 400 | `{"error":"parameter \"x\": unsupported parameter type object"}` | Non-scalar value without SQL literal form (JSON object). JSON arrays are valid and render as `IN` lists. |
+| 400 | `{"error":"parameter \"x\": array parameter must not be empty"}` | Empty array (renders as invalid `IN ()`) |
+| 413 | `{"error":"request body exceeded 1048576 bytes"}` | POST body over 1 MiB cap |
 
 ### `GET /v1/stream` — Server-Sent Events Stream
 
-Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream using `DeliverByStartTime`.
+Opens a persistent SSE connection for real-time event streaming. Supports historical gap-fill from NATS JetStream via `DeliverByStartTime`.
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `table` | string | (required) | Table name to subscribe to. Returns `400` only if missing/empty; other values aren't rejected — the name is encoded into a NATS-safe subject token (wildcards `*` / `>` are percent-encoded), so a nonexistent or odd name simply matches no events. |
-| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp. If provided, replays historical events from NATS before switching to live streaming. |
-| `token` | string | — | JWT token (alternative to `Authorization` header, useful for `EventSource`). Stripped from URL after extraction. |
+| `table` | string | (required) | Table name to subscribe to. Returns `400` if missing/empty. Names are encoded into NATS-safe subject tokens (wildcards `*` / `>` are percent-encoded); nonexistent names match no events. |
+| `since` | string | — | RFC 3339 or RFC 3339 Nano timestamp. Replays historical NATS events before live streaming. |
+| `token` | string | — | JWT token (alternative to `Authorization` header). Stripped from URL after extraction. |
 
 **Headers:**
 
 | Header | Description |
 | ------ | ----------- |
-| `Last-Event-ID` | RFC 3339 timestamp of the last received event. If present, overrides the `since` query parameter for automatic reconnection (standard `EventSource` behavior). |
+| `Last-Event-ID` | RFC 3339 timestamp of the last received event. Overrides `since` for automatic reconnection (`EventSource` behavior). |
 
-**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the event's `received_timestamp`. The stream opens with a `: connected` comment and emits a minimal `:` keepalive comment periodically (every 30 seconds by default), which keeps a quiet connection from being closed by a proxy; both are standard SSE comments that `EventSource` ignores (raw consumers should skip `:`-prefixed lines).
+**Response:** SSE stream (`text/event-stream`). Each event includes an `id:` field set to the `received_timestamp`. The stream starts with a `: connected` comment and emits a `:` keepalive comment every 30 seconds by default to prevent proxy closure; both are standard SSE comments ignored by `EventSource` (raw consumers should skip `:`-prefixed lines).
 
 ```text
 id: 2026-03-24T12:00:00.123Z
@@ -573,16 +568,16 @@ id: 2026-03-24T12:00:01.456Z
 data: {"table_name":"clicks","received_timestamp":"2026-03-24T12:00:01.456Z","data":{"page":"/pricing"}}
 ```
 
-Each SSE connection is bound to a single `?table=`; to consume multiple tables, open one connection per table.
+Each connection binds to one `?table=`; open separate connections for multiple tables.
 
-Row values of top-level `DateTime`/`DateTime64` columns inside `data` arrive in the canonical RFC 3339 UTC form (ingest rewrites them before publishing — see [timestamp canonicalization](#timestamp-canonicalization)), so a live event and a `/v1/query` read of the same row agree on the instant in zone-explicit form — a zone-less spelling no longer parses as local time in a browser ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)). The two renderings are byte-identical regardless of the declared time zone or a `Nullable` wrapper — a column declared with a non-UTC zone also streams as `Z`, and `/v1/query` normalizes it (nullable or not) to UTC before rendering. Canonicalization is fail-open at ingest, so a value outside the accepted input forms streams in whatever spelling the producer sent — and for exactly those events the byte-identity above does not hold: a spelling ClickHouse accepts anyway is stored and still queries back canonical, while one it too rejects lands in the DLQ and never becomes queryable at all. Events ingested before this behavior shipped likewise replay in their original spelling.
+Top-level `DateTime`/`DateTime64` columns in `data` use canonical RFC 3339 UTC form (see [timestamp canonicalization](#timestamp-canonicalization)). Live events and `/v1/query` reads of the same row are byte-identical regardless of declared time zone or `Nullable` wrapper; non-UTC zones stream as `Z`. Canonicalization is fail-open at ingest: values outside accepted forms stream in original spelling, breaking byte-identity. Spells ClickHouse accepts are stored and query back canonical; rejected ones land in the DLQ. Events ingested before this behavior replay in original spelling ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)).
 
-**Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
+**Note:** Streamed events are filtered by caller role—denied columns are removed and tables without select permission are skipped.
 
-**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
+**CORS:** Honors `server.cors_allowed_origins`. `Last-Event-ID` is allow-listed in CORS preflight for cross-origin resumption.
 
 :::caution[Behind a proxy: disable response buffering]
-SSE needs one bit of proxy configuration: disable response buffering, or the proxy holds events until a buffer fills and clients receive nothing in real time. Idle timeouts are handled for you — the `:` keepalive comment above keeps a quiet stream alive under typical proxy/tunnel idle windows ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so raising the idle/read timeout is now optional. Browser `EventSource` still auto-reconnects (resuming via `Last-Event-ID`) if a connection drops. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.
+Disable response buffering or proxies will hold events until the buffer fills. The `:` keepalive prevents idle timeouts ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), making higher idle/read timeouts optional. `EventSource` auto-reconnects via `Last-Event-ID`. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse).
 :::
 
 **curl example:**
@@ -595,14 +590,12 @@ curl -N "http://localhost:8080/v1/stream?table=clicks"
 curl -N "http://localhost:8080/v1/stream?table=clicks&since=2026-03-24T11:00:00Z"
 ```
 
----
-
 ### `GET /v1/schema` — List All Table Schemas
 
 Returns all discovered ClickHouse table schemas.
 
 :::note[Admin only]
-The schema and DLQ endpoints in this section require the `admin_role` (like [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); other callers get 401 (bad token) / 403. The quickstart's trial `public` role cannot call them.
+Schema and DLQ endpoints require `admin_role` (e.g., [`/v1/admin/query`](#post-v1adminquery--query-clickhouse)); others receive 401 or 403 errors. The trial `public` role cannot call them.
 :::
 
 **Response:**
@@ -620,11 +613,9 @@ The schema and DLQ endpoints in this section require the `admin_role` (like [`/v
 ]
 ```
 
----
-
 ### `GET /v1/schema?table={table}` — Get Table Schema
 
-Returns the schema for a specific table.
+Returns a specific table's schema.
 
 **Response:**
 
@@ -642,21 +633,19 @@ Returns the schema for a specific table.
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
-| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | Invalid or expired token supplied |
+| 403 | `{"error":"forbidden"}` | Caller lacks `admin_role` (`"admin"` default) |
 | 404 | `{"error":"table not found"}` | Table not in discovered schemas |
-
----
 
 ### `POST /v1/schema/refresh` — Refresh Schemas
 
-Triggers an immediate re-discovery of ClickHouse table schemas, then returns the refreshed schema list (same array shape as `GET /v1/schema`). Admin-only, like the rest of this section.
+Triggers immediate ClickHouse table schema re-discovery and returns the refreshed list (same array shape as `GET /v1/schema`). Admin-only.
 
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 401 / 403 | as above | Not the admin role |
+| 401 / 403 | as above | Not admin role |
 | 500 | `{"error":"refresh failed"}` | ClickHouse discovery query failed |
 
 **Response:**
@@ -672,25 +661,23 @@ Triggers an immediate re-discovery of ClickHouse table schemas, then returns the
 ]
 ```
 
----
-
 ### `GET /v1/dlq/stats` — DLQ Statistics
 
-Returns per-table message counts in the Dead Letter Queue. Admin-only, like the rest of this section. Before any failure has ever occurred, the endpoint returns `200` with `{"tables":{},"total":0}`.
+Returns per-table message counts in the Dead Letter Queue. Admin-only. If no failures occurred, returns `200` with `{"tables":{},"total":0}`.
 
 **Error responses:**
 
 | Status | Body | Cause |
 | ------ | ---- | ----- |
-| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason) |
-| 403 | `{"error":"forbidden"}` | Caller's role is not the policy `admin_role` (`"admin"` by default) |
+| 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | Invalid or expired token supplied |
+| 403 | `{"error":"forbidden"}` | Role is not the policy `admin_role` (`"admin"` default) |
 | 500 | `{"error":"stream info failed"}` | NATS JetStream stream-info lookup failed |
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `table` | string | — | Filter stats to a specific table name (e.g., `?table=clicks` returns only the `clicks` count). |
+| `table` | string | — | Filter stats to a specific table name (e.g., `?table=clicks`) |
 
 **Response:**
 
@@ -704,13 +691,11 @@ Returns per-table message counts in the Dead Letter Queue. Admin-only, like the 
 }
 ```
 
----
-
 ### Admin Endpoints
 
-Admin endpoints require the policy `admin_role` (`"admin"` by default, exact case-sensitive match). There is no separate `service` role. The JWT middleware always runs — a request with no/invalid token resolves to the `default_role` (not the admin role unless `default_role` is deliberately set to it — a loudly-warned dev-only setting) and is denied.
+Admin endpoints require the `admin_role` policy (`"admin"` by default, case-sensitive). There is no separate `service` role. JWT middleware always runs; requests with no or invalid tokens resolve to the `default_role` and are denied unless that role has permissions.
 
-The admin endpoints that accept a request body — `PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, and `PUT /v1/admin/pipes/{name}` — cap it at 1 MiB (the same control-plane backstop as the public read endpoints); an over-cap body is rejected with `413 {"error":"request body exceeded 1048576 bytes"}`. A policy document or pipe definition is bounded, so this never binds legitimate use.
+Endpoints accepting request bodies—`PUT /v1/admin/policy`, `POST /v1/admin/policy/validate`, and `PUT /v1/admin/pipes/{name}`—cap input at 1 MiB. Over-cap bodies return `413 {"error":"request body exceeded 1048576 bytes"}`.
 
 #### `GET /v1/admin/policy` — Get Access Control Policy
 
@@ -718,7 +703,7 @@ Returns the current access control policy.
 
 #### `PUT /v1/admin/policy` — Update Access Control Policy
 
-Replaces the entire access control policy. Validated before saving.
+Replaces and validates the entire access control policy.
 
 **Request:**
 
@@ -752,11 +737,11 @@ Replaces the entire access control policy. Validated before saving.
 }
 ```
 
-The `default_role` field (optional) is the role assigned to any request that reaches the policy engine **without** a role — a valid token carrying no role claim, a request with no token at all, or one whose token was invalid/expired. **Setting it enables unauthenticated access:** roleless requests are evaluated as that role and receive exactly its permissions (or are denied if it grants none on the table/operation). If `default_role` is unset, a roleless request is denied. Setting it equal to the `admin_role` is allowed — every roleless request then becomes admin (including `/v1/admin/*`), which is handy for local/dev — but each node that loads such a policy logs a loud warning, and it must not be used in production.
+The optional `default_role` is assigned to requests without a role (no token, invalid/expired token, or no role claim). **Setting this enables unauthenticated access.** If unset, roleless requests are denied. Setting it to `admin_role` grants admin access to all requests (including `/v1/admin/*`); this triggers a loud node warning and is for local/dev use only—not production.
 
 #### `POST /v1/admin/policy/validate` — Validate Policy (Dry Run)
 
-Validates a policy without saving it. Returns `{"valid": true}` or an error.
+Validates a policy without saving. Returns `{"valid": true}` or an error.
 
 #### `GET /v1/admin/pipes` — List Named Pipes
 
@@ -780,7 +765,7 @@ Returns a specific named pipe definition.
 }
 ```
 
-**`allowed_roles`** restricts execution: the caller's role (a tokenless or roleless request is first resolved to the policy `default_role`) must appear in the list. The admin role (`admin_role`) always passes. Matching is exact — there is no `"*"` wildcard — and empty-string entries are ignored. An empty or omitted list authorizes **nobody but the admin role**, and a request whose role is absent or unlisted is denied (fails closed).
+**`allowed_roles`** restricts execution: the caller's role (or `default_role` for roleless requests) must be in the list. The `admin_role` always passes. Matching is exact; no `"*"` wildcard exists, and empty strings are ignored. An empty or omitted list authorizes only the admin role; others are denied.
 
 #### `DELETE /v1/admin/pipes/{name}` — Delete Named Pipe
 
@@ -788,7 +773,7 @@ Returns a specific named pipe definition.
 
 ### Internal Wire Format (NATS)
 
-The message format used on NATS JetStream between ingest and the batch consumer:
+Message format between ingest and batch consumer on NATS JetStream:
 
 ```json
 {
@@ -805,12 +790,12 @@ The message format used on NATS JetStream between ingest and the batch consumer:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `table_name` | string | Target ClickHouse table (from URL). |
-| `received_timestamp` | string | RFC 3339 nano timestamp when WaveHouse received the event. |
-| `data` | object | The flat JSON body, with parseable `DateTime`/`DateTime64` column values rewritten to canonical RFC 3339 UTC (see [timestamp canonicalization](#timestamp-canonicalization)); other values as originally sent. |
+| `received_timestamp` | string | RFC 3339 nano timestamp of WaveHouse receipt. |
+| `data` | object | Flat JSON body; `DateTime`/`DateTime64` values rewritten to canonical RFC 3339 UTC ([timestamp canonicalization](#timestamp-canonicalization)); others as sent. |
 
 ### Client-Facing Format (SSE)
 
-Same as the wire format — events are passed through directly:
+Events pass through directly using the wire format:
 
 ```json
 {
@@ -826,15 +811,17 @@ Same as the wire format — events are passed through directly:
 
 ## Dead Letter Queue (DLQ)
 
-When a batch insert to ClickHouse fails (e.g., type errors, connection issues), the worker re-inserts the batch row by row: rows that succeed are acked, and only the rows that fail again are published to the DLQ NATS stream (`WAVEHOUSE_DLQ`) under subjects `dlq.{table}`. This prevents infinite retry loops — those messages are ACKed from the main stream and moved to the DLQ for inspection. The DLQ message body is the published `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}` — the failed row is under its `data` key, its `DateTime`/`DateTime64` values as published: canonicalized where WaveHouse could parse them, otherwise the producer's original spelling — see [timestamp canonicalization](#timestamp-canonicalization)); the failure reason, table, and time travel in the `X-DLQ-Table` / `X-DLQ-Error` / `X-DLQ-Timestamp` message headers.
+If batch inserts to ClickHouse fail (e.g., type errors, connection issues), the worker re-inserts rows individually. Successful rows are acked; failures are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}` and ACKed from the main stream to prevent infinite loops.
 
-Use `GET /v1/dlq/stats` to monitor DLQ depth.
+The DLQ message body is the `EventMessage` envelope (`{"table_name":…,"received_timestamp":…,"data":{…}}`). Failed rows are in the `data` key, with `DateTime`/`DateTime64` values canonicalized if WaveHouse parsed them, otherwise original (see [timestamp canonicalization](#timestamp-canonicalization)). Headers `X-DLQ-Table`, `X-DLQ-Error`, and `X-DLQ-Timestamp` contain failure details.
+
+Monitor depth via `GET /v1/dlq/stats`.
 
 ## Generating a JWT for Testing
 
-Needed whenever a caller must present a role — e.g. to reach an admin endpoint (role == `admin_role`) or any role beyond the policy `default_role`. The token must be signed with the configured `jwt_secret` (or a key the `jwks_url` serves) and must carry the role in its role claim (`auth.role_claim`, default `role`) — a token without the claim resolves to the policy `default_role`.
+Required when callers need a specific role (e.g., `admin_role`) beyond the `default_role`. Tokens must be signed with the configured `jwt_secret` or a key from `jwks_url` and include the role in the claim specified by `auth.role_claim` (default: `role`). Tokens lacking this claim resolve to `default_role`.
 
-`"change-me-in-production"` below is the placeholder shipped in the repo's `config.yaml` (what `make dev` / `./bin/wavehouse` load). The compose quickstart sets **no** secret — set `WH_AUTH_JWT_SECRET` on the `wavehouse` service and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
+`"change-me-in-production"` is the placeholder in `config.yaml` used by `make dev` or `./bin/wavehouse`. The compose quickstart sets no secret; set `WH_AUTH_JWT_SECRET` on the `wavehouse` service and sign with that value (see [Development — Validating tokens](/development#validating-tokens)).
 
 ```bash
 # Using jwt-cli (https://github.com/mike-engel/jwt-cli):

@@ -3,11 +3,7 @@ title: "SDK Admin & System"
 description: "Schema introspection, access-control policy, DLQ stats, and health checks in @wavehouse/sdk."
 ---
 
-Operational surfaces of `@wavehouse/sdk`. Everything here except
-`wh.sys.health()` requires the admin role (`policy.admin_role`) — see
-[Access Control](/access-control) for how roles resolve.
-Examples import from `@wavehouse/sdk`; using the CDN instead, import from
-`https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+Operational surfaces of `@wavehouse/sdk`. Except for `wh.sys.health()`, all require the admin role (`policy.admin_role`)—see [Access Control](/access-control). Examples import from `@wavehouse/sdk`; for CDN, use `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
 ## Schema — `wh.schema`
 
@@ -22,9 +18,9 @@ const { data: schemas } = await wh.schema.list();
 await wh.schema.refresh();
 ```
 
-Individual table schema is also available via `wh.from('clicks').schema()`.
+Individual table schema is available via `wh.from('clicks').schema()`.
 
-> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/schema*`, which are **admin-only** endpoints. Against any non-dev policy (anything but `default_role: admin`), construct the client with an admin-role token or these calls return `403`.
+> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit **admin-only** `/v1/schema*` endpoints. Use an admin-role token or these return `403` against non-dev policies.
 
 ---
 
@@ -72,7 +68,7 @@ const { data } = await wh.dlq.list();
 const { data } = await wh.dlq.table('clicks');
 ```
 
-`wh.dlq.stream()` exists in the API but is **not yet functional**: there is no server-side DLQ stream today (the SSE bridge only carries `ingest.>` subjects), so it connects and receives no events — live DLQ streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
+`wh.dlq.stream()` is **not yet functional**; there is no server-side DLQ stream today (SSE only carries `ingest.>` subjects). Live streaming is tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---
 
@@ -90,4 +86,4 @@ if (result.ok) {
 // on failure, result.error carries the reason (network vs. server error)
 ```
 
-> Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern, not the client's. Probe `/readyz` directly from your orchestrator if you need it.
+> Readiness (`/readyz`) is **not** exposed via SDK as it runs a ClickHouse query per call; probe `/readyz` directly from your orchestrator.
