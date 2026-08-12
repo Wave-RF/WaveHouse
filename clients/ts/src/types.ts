@@ -96,8 +96,9 @@ export interface ClientConfig<_DB extends Database = Database> {
  * some other abort error, such as `node-fetch`, are retried instead.
  *
  * Implementations shipping their own request/response declarations (undici,
- * `node-fetch`) need a cast, since those types are separate from the ones
- * behind your global `fetch`; the narrow contract above is what makes it safe.
+ * `node-fetch`) need casts on the URL, the init and the return value, since
+ * those types are separate from the ones behind your global `fetch`; the
+ * narrow runtime contract above is what makes them safe.
  */
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -115,11 +116,16 @@ export interface ClientOptions {
    * {@link https://github.com/nodejs/undici/issues/5600 | undici #5600}:
    *
    * ```ts
-   * import { fetch as undiciFetch } from "undici"; // npm install undici — 8.10.0+
+   * import { Agent, fetch as undiciFetch } from "undici"; // npm install undici — 8.10.0+
+   * // Pass the dispatcher explicitly: undici's pool lives on a shared
+   * // globalThis symbol claimed by whichever copy loaded first, so an implied
+   * // dispatcher can still be the runtime's affected one.
+   * const dispatcher = new Agent();
    * createClient({
    *   baseURL,
    *   options: {
-   *     fetch: (url, init) => undiciFetch(url as string, init as never) as unknown as Promise<Response>,
+   *     fetch: (url, init) =>
+   *       undiciFetch(url as string, { ...init, dispatcher } as never) as unknown as Promise<Response>,
    *   },
    * });
    * ```

@@ -415,7 +415,7 @@ const wh = createClient({
 
 It carries any `RequestInit` field — `mode`, `cache`, `keepalive`,
 `credentials`, `redirect` — plus runtime-specific extensions such as Next.js's
-`next: { tags }` for per-deployment cache control. Only those runtime
+`next: { tags }`, which tags the cached response for on-demand revalidation. Only those runtime
 extensions need a cast; the standard fields are declared on `RequestInit`
 already.
 
@@ -490,39 +490,16 @@ measured anything from ~100 ms to tens of seconds on a server answering
 instantly. It affects undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
 
 **Upgrading undici is the actual fix** — it landed in 8.10.0. What
-`options.fetch` buys you is a way to do that without waiting for a new runtime:
-install undici yourself and route requests through it, so the version bundled
-with your Node never handles them.
+`options.fetch` buys you is a way to get there without waiting for a new
+runtime: install undici yourself and route requests through it. The one
+non-obvious part is that you must pass its dispatcher **explicitly**.
 
 ```ts
 import { createClient } from '@wavehouse/sdk';
-import { fetch as undiciFetch } from 'undici'; // npm install undici — 8.10.0+
+import { Agent, fetch as undiciFetch } from 'undici'; // npm install undici — 8.10.0+
 
-const wh = createClient({
-  baseURL: 'https://wavehouse.example.com',
-  options: {
-    fetch: (url, init) => undiciFetch(url as string, init as never) as unknown as Promise<Response>,
-  },
-});
-```
-
-Both casts are load-bearing, for the same underlying reason: undici declares its
-own `Request`/`Response` types, separate from the ones behind your global
-`fetch`, so the two aren't structurally assignable. The return cast handles the
-`Response` mismatch; `url as string` is needed because `FetchLike` accepts the
-full `fetch` input union while undici's `RequestInfo` names its *own* `Request`.
-They're safe because of the narrow runtime contract above — the SDK only ever
-passes a string. `undici` is a dependency you add; the SDK itself stays
-dependency-free.
-
-If you're genuinely pinned to an affected undici, a dispatcher that never reuses
-a keep-alive socket avoids the stall. Merge it into the `init` the SDK hands
-you, as undici's `dispatcher` option:
-
-```ts
-import { Agent, fetch as undiciFetch } from 'undici';
-
-const dispatcher = new Agent({ pipelining: 0 }); // no keep-alive reuse
+// Explicit, not implied — see below.
+const dispatcher = new Agent();
 
 const wh = createClient({
   baseURL: 'https://wavehouse.example.com',
@@ -533,15 +510,47 @@ const wh = createClient({
 });
 ```
 
+:::caution[Importing a fixed undici is not enough on its own]
+undici keeps its connection pool on a shared `globalThis` symbol, and the first
+copy loaded claims it — which on an affected runtime is the *bundled* one. Call
+`undiciFetch` without a `dispatcher` and it resolves the global one, so requests
+can still go through the buggy pool even though you imported a fixed undici.
+
+Measured with 8.9.0 loaded first and 8.10.0's `fetch` doing the request, 1.5 s
+idle gaps against a 10 ms server:
+
+```
+no explicit dispatcher    21  1514  1495   583   ← still stalling
+explicit new Agent()      17    14    12    13
+```
+
+An explicit `dispatcher` (or an explicit `setGlobalDispatcher` call, below)
+always wins, because it never consults the shared symbol.
+:::
+
+All three casts are load-bearing, for one underlying reason: undici declares its
+own request/response types, separate from the ones behind your global `fetch`,
+so the two aren't structurally assignable. `url as string` is needed because
+`FetchLike` accepts the full `fetch` input union while undici's `RequestInfo`
+names its *own* `Request`; `init as never` covers the same split on
+`RequestInit`, which differs on `body` and `headers` (`never` is assignable to
+either spelling, so one snippet compiles whether or not your `lib` includes
+DOM); and the return cast handles the `Response` mismatch. They're safe because
+of the narrow runtime contract above — a string URL and a plain `RequestInit`
+in, six members read back. `undici` is a dependency you add; the SDK itself
+stays dependency-free.
+
+If you're genuinely pinned to an affected undici, the same snippet fixes it with
+a dispatcher that never reuses a keep-alive socket — `new Agent({ pipelining: 0 })`.
 That costs a fresh connection per request, so prefer upgrading. Note that tuning
 `keepAliveTimeout` does **not** help: the retirement timer is starved by the same
 idle event loop that triggers the bug, so the socket is still there to be reused.
 
 To change the transport process-wide instead of per-client, an installed undici's
 `setGlobalDispatcher(new Agent())` is picked up by Node's built-in global
-`fetch`, no `options.fetch` needed — but only if the *installed* undici is
-8.10.0+: `setGlobalDispatcher` hands connection handling to that copy, so it's
-the one that has to carry the fix.
+`fetch`, no `options.fetch` needed. That's an explicit write, so it wins the
+race described above — but only if the *installed* undici is 8.10.0+, since it
+hands connection handling to that copy.
 
 ### Type-Safe Tables
 
