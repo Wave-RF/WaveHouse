@@ -399,10 +399,10 @@ The motivating case is a transport bug in the runtime's own HTTP stack, which
 you can't fix from inside the SDK — for example
 [undici #5600](https://github.com/nodejs/undici/issues/5600): reusing a
 keep-alive socket while the event loop is idle stalls the request before it
-goes out. The upstream report measured ~450–465 ms against a 10 ms server; our
-own measurements on 8.9.0 saw it swing erratically from ~100 ms to ~2.5 s
-depending on the idle gap. It affects undici 8.8.0–8.9.0, and Node 26 bundles
-8.9.0.
+goes out. How bad it gets varies with the runtime and the idle gap: the
+upstream report measured ~450–465 ms against a 10 ms server, and we have
+measured anything from ~100 ms to tens of seconds on a server answering
+instantly. It affects undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
 
 **Upgrading undici is the actual fix** — it landed in 8.10.0. What
 `options.fetch` buys you is a way to do that without waiting for a new runtime:
