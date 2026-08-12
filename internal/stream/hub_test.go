@@ -116,16 +116,23 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 // (filter=false) may forward it, and invalid JSON is dropped either way.
 func TestProject_FailsClosedOnUndecodedPayload(t *testing.T) {
 	t.Parallel()
-	raw := []byte(`{"not":"an-event"}`) // valid JSON, but not a decoded EventMessage
-
-	_, ok := project(nil, true, "viewer", nil, raw, false)
-	assert.False(t, ok, "undecoded payload must be dropped when policy filtering is on")
-
-	_, ok = project(nil, false, "viewer", nil, raw, false)
-	assert.True(t, ok, "with no policy store wired, the legacy passthrough still forwards valid JSON")
-
-	_, ok = project(nil, false, "viewer", nil, []byte("not json"), false)
-	assert.False(t, ok, "invalid JSON is never forwarded")
+	tests := []struct {
+		name   string
+		filter bool
+		raw    []byte
+		wantOK bool
+	}{
+		{"filtered valid JSON is dropped", true, []byte(`{"not":"an-event"}`), false},
+		{"unfiltered valid JSON is forwarded (legacy passthrough)", false, []byte(`{"not":"an-event"}`), true},
+		{"unfiltered invalid JSON is dropped", false, []byte("not json"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, ok := project(nil, tt.filter, "viewer", nil, tt.raw, false)
+			assert.Equal(t, tt.wantOK, ok)
+		})
+	}
 }
 
 func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {

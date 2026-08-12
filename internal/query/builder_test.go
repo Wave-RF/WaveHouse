@@ -803,10 +803,20 @@ func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 // clause keyword is refused because it collides with the textual splice.
 func TestBuild_RejectsSpliceKeywordAlias(t *testing.T) {
 	t.Parallel()
-	for _, alias := range []string{"e WHERE z", "e GROUP BY z", "e ORDER BY z", "x LIMIT 1"} {
-		t.Run(alias, func(t *testing.T) {
+	tests := []struct {
+		name  string
+		alias string
+	}{
+		{"where", "e WHERE z"},
+		{"lowercase where (matcher is case-insensitive)", "e where z"},
+		{"group by", "e GROUP BY z"},
+		{"order by", "e ORDER BY z"},
+		{"limit", "x LIMIT 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: alias}}}
+			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: tt.alias}}}
 			_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "SQL clause keyword")
