@@ -372,7 +372,7 @@ make test-e2e
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
 
-The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/` instead; teardown is a no-op on that path, so your stack survives between iterations.
+The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, start the server with `WH_CONFIG=tests/e2e/fixtures/config.yaml` — the suite signs its tokens with that fixture's `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings, so a default `make dev` server (`jwt_secret: change-me-in-production`) rejects setup's schema calls and global setup dies 30s later on a misleading `schema not refreshed within 30s`. Then set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`; teardown is a no-op on that path, so your stack survives between iterations.
 
 If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
 
@@ -380,11 +380,11 @@ If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can l
 
 | Variable | Effect |
 |----------|--------|
-| `V=1` | Stream the WaveHouse subprocess log live instead of capturing it to `tmp/wavehouse-cov.log` |
+| `V=1` | Stream the WaveHouse subprocess log live *in addition to* capturing it to `tmp/wavehouse-cov.log`. The on-failure log excerpt is then skipped — you have already seen it |
 | `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
 | `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run. **Local debugging only** — no report is written, so a subsequent `make cov` would gate on stale numbers. `make ci` never sets it |
 
-**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own wait/query helpers rather than a pipeline test.
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
 ## Linting
 
