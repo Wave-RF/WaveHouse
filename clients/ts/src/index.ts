@@ -39,6 +39,7 @@ export type {
   ParamDef,
   // Pipes
   Pipe,
+  PipeRequestOptions,
   // Policy
   Policy,
   PolicyFilter,

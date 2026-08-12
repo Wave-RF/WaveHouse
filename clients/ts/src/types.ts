@@ -344,6 +344,23 @@ export interface RequestOptions {
   limit?: number;
 }
 
+/**
+ * Options for a single `PipeRef.fetch()` call.
+ *
+ * `limit` is declared `never` rather than simply left out. Omitting it would
+ * still admit a `RequestOptions` value that carries one — excess-property
+ * checking only rejects fresh object literals, so a variable would pass and the
+ * limit would be silently dropped, which is the whole defect this prevents.
+ *
+ * A pipe's row cap belongs in its SQL as a `{{limit}}` parameter, supplied via
+ * `wh.pipe(name, { limit })`.
+ */
+export interface PipeRequestOptions {
+  signal?: AbortSignal;
+  /** Not supported on pipes — pass `limit` as a pipe parameter instead. */
+  limit?: never;
+}
+
 // --- Stream options ---
 
 export interface StreamOptions {

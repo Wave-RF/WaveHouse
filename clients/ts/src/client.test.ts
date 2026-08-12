@@ -6,7 +6,7 @@ import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
 import { SysNamespace } from "./sys.js";
 import { TableRef } from "./table.js";
-import type { FetchLike } from "./types.js";
+import type { FetchLike, PipeRequestOptions, RequestOptions } from "./types.js";
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -122,13 +122,24 @@ describe("WaveHouseClient.pipe()", () => {
 
   it("rejects a per-call limit, which the pipes endpoint cannot honour", async () => {
     const client = createClient({ baseURL: "http://localhost:8080" });
-    // Compile-time assertion: accepting `limit` here would silently drop it,
+    // Compile-time assertions: accepting `limit` here would silently drop it,
     // since the endpoint binds the body as the pipe's parameters. A row cap
     // belongs in the pipe's own SQL, supplied via `wh.pipe(name, { limit })`.
-    // @ts-expect-error — `limit` is not part of PipeRef.fetch's options
+
+    // @ts-expect-error — as a fresh literal
     await client.pipe("top_pages").fetch({ limit: 10 });
-    // `signal` is accepted.
+
+    // ...and as a named value. This is the case a plain `Pick<>` would let
+    // through, since excess-property checking only rejects literals — so the
+    // limit would reach the endpoint, be ignored, and never be flagged.
+    const shared: RequestOptions = { signal: AbortSignal.timeout(1000), limit: 10 };
+    // @ts-expect-error — `limit` is not part of PipeRef.fetch's options
+    await client.pipe("top_pages").fetch(shared);
+
+    // `signal` alone is accepted, literal or named.
     await client.pipe("top_pages").fetch({ signal: AbortSignal.timeout(1000) });
+    const signalOnly: PipeRequestOptions = { signal: AbortSignal.timeout(1000) };
+    await client.pipe("top_pages").fetch(signalOnly);
   });
 });
 
