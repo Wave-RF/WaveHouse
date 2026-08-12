@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 )
 
 // errsThenSuccessConn drives the boot Refresh/RetryRefresh chain in tests.
@@ -36,6 +37,12 @@ func (c *errsThenSuccessConn) Query(_ context.Context, _ string, _ ...any) (driv
 		return nil, c.errs[n-1]
 	}
 	return &chainEmptyRows{}, nil
+}
+
+// QueryRow answers the SELECT timezone() probe Refresh issues before the
+// system.columns query (#372); the error sequencing above stays keyed on Query.
+func (c *errsThenSuccessConn) QueryRow(context.Context, string, ...any) driver.Row {
+	return testutil.UTCRow{}
 }
 
 type chainEmptyRows struct{ driver.Rows }

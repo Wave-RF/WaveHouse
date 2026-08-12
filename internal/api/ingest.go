@@ -401,6 +401,10 @@ func (h *IngestHandler) processRecord(
 		}
 	}
 
+	// Canonicalize timestamps to RFC 3339 UTC (#372; fail-open — #381's row-filter
+	// enforces) after the permission checks: check clauses keep pre-#372 semantics.
+	discovery.CanonicalizeTimestamps(schema, data)
+
 	// Optional deduplication.
 	if h.Dedup != nil && h.IDField != "" {
 		idVal, ok := data[h.IDField]
