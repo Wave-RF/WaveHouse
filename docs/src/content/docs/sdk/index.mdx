@@ -326,7 +326,7 @@ const wh = createClient<Database>({
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
-| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation used for every request ([details](#supplying-your-own-fetch)) |
+| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every REST request; SSE streams excluded ([details](#supplying-your-own-fetch)) |
 
 :::note[How the token is transmitted]
 The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.
@@ -372,10 +372,19 @@ const wh = createClient({
 Retries go through the same function, so middleware sees every attempt.
 
 The SDK always calls your function with a **string** URL and a plain
-`RequestInit`, and reads only `.ok`, `.status`, `.headers`, and `.text()` off
-the response. If it rejects, the request becomes a `NETWORK_ERROR` result and is
-retried with backoff; an `AbortError` becomes `ABORTED` and is not retried. The
-option's type is exported as `FetchLike`.
+`RequestInit`. Off the response it reads `.ok`, `.status` and `.headers`
+always, `.text()` on success, and `.json()` plus `.statusText` when the response
+is not `ok` — so a hand-rolled response object needs all six. If your function
+rejects, the request becomes a `NETWORK_ERROR` result and is retried with
+backoff; the one exception is a `DOMException` named `AbortError` — what the
+platform `fetch` and undici throw on abort — which becomes `ABORTED` and is not
+retried. An implementation that signals abort some other way (`node-fetch`
+throws its own `AbortError` class) gets retried instead.
+
+The option's type is exported as `FetchLike`, and is deliberately narrower than
+`typeof fetch` — it takes a `string` URL, so your own
+`(url: string, init?: RequestInit) => Promise<Response>` middleware assigns to it
+without a cast.
 
 Only the SSE transport is exempt: the live connection behind `.stream()` and
 `.liveQuery()` uses `EventSource`, which this does not replace. `.liveQuery()`'s
@@ -386,11 +395,17 @@ go through your function.
 
 The motivating case is a transport bug you can't fix from inside the SDK — for
 example [undici #5600](https://github.com/nodejs/undici/issues/5600), where
-8.8.0–8.9.0 (bundled in Node 26) stalls for seconds before writing a request
-onto a briefly idle socket. A dispatcher with a tuned `keepAliveTimeout` works
-around it:
+reusing a keep-alive socket on an idle event loop stalls roughly 500 ms per
+request (the reporter measured ~450–465 ms against a 10 ms server). It affects
+undici 8.8.0–8.9.0, and Node 26 bundles 8.9.0.
+
+**Upgrade first if you can:** this was fixed in undici 8.10.0, so a runtime with
+8.10.0 or newer needs no workaround. Reach for `options.fetch` when you're
+pinned to an affected version — a dispatcher with a tuned `keepAliveTimeout`
+sidesteps it:
 
 ```ts
+import { createClient } from '@wavehouse/sdk';
 import { Agent, fetch as undiciFetch } from 'undici'; // npm install undici
 
 // Retire idle sockets sooner than the runtime's default
@@ -399,8 +414,8 @@ const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
 const wh = createClient({
   baseURL: 'https://wavehouse.example.com',
   options: {
-    fetch: ((url: string, init?: RequestInit) =>
-      undiciFetch(url, { ...init, dispatcher } as never)) as unknown as FetchLike,
+    fetch: (url, init) =>
+      undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
   },
 });
 ```

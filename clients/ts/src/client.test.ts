@@ -6,6 +6,7 @@ import { PolicyNamespace } from "./policy.js";
 import { SchemaNamespace } from "./schema.js";
 import { SysNamespace } from "./sys.js";
 import { TableRef } from "./table.js";
+import type { FetchLike } from "./types.js";
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -150,7 +151,7 @@ describe("options.fetch", () => {
     const client = createClient({
       baseURL: "http://localhost:8080",
       auth: () => "test-token",
-      options: { fetch: custom as unknown as typeof fetch },
+      options: { fetch: custom as unknown as FetchLike },
     });
 
     await client.from("clicks").select("*").limit(1);
@@ -196,7 +197,7 @@ describe("options.fetch", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
     const client = createClient({
       baseURL: "http://localhost:8080",
-      options: { fetch: custom as unknown as typeof fetch, maxRetries: 1 },
+      options: { fetch: custom as unknown as FetchLike, maxRetries: 1 },
     });
 
     await client.from("clicks").select("*").limit(1);

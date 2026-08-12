@@ -81,25 +81,34 @@ export interface ClientConfig<_DB extends Database = Database> {
 }
 
 /**
- * A `fetch`-compatible function, matching the global `fetch` signature.
+ * A `fetch`-compatible function.
  *
- * Implementations that ship their own request/response types (undici,
- * `node-fetch`) generally need a cast: their declarations are separate from the
- * ones behind your global `fetch`, so the two are not structurally assignable.
+ * Deliberately narrower than `typeof fetch`: the SDK only ever calls it with a
+ * string URL, so this is what it actually requires. The global `fetch` still
+ * assigns to it, and so does middleware you declare as
+ * `(url: string, init?: RequestInit) => Promise<Response>` — which `typeof
+ * fetch` would reject, since a parameter accepting only `string` is not
+ * assignable to one accepting `RequestInfo | URL`.
  *
- * The SDK only ever calls it with a string URL and a plain `RequestInit`, and
- * only reads `.ok`, `.status`, `.headers`, and `.text()` off the response — so
- * a cast here is safe in practice. A rejection is surfaced as a
- * `NETWORK_ERROR` result and retried with backoff; an `AbortError` becomes
- * `ABORTED` without a retry.
+ * The response is read for `.ok`, `.status` and `.headers` always, `.text()` on
+ * success, and `.json()` plus `.statusText` when it is not `ok`. A rejection
+ * becomes a `NETWORK_ERROR` result and is retried with backoff — except a
+ * `DOMException` named `AbortError` (what the platform `fetch` and undici throw
+ * on abort), which becomes `ABORTED` and is not retried. Implementations that
+ * reject with some other abort error, such as `node-fetch`, are retried instead.
+ *
+ * Implementations shipping their own request/response declarations (undici,
+ * `node-fetch`) still need a cast, since those types are separate from the ones
+ * behind your global `fetch`; the narrow contract above is what makes it safe.
  */
-export type FetchLike = typeof fetch;
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface ClientOptions {
   /** Maximum retry attempts for failed requests. Default: 2. */
   maxRetries?: number;
   /**
-   * HTTP implementation used for every request. Defaults to the global `fetch`.
+   * HTTP implementation used for every REST request (SSE streams excluded).
+   * Defaults to the global `fetch`.
    *
    * Provide one to route through a proxy, attach client certificates, add
    * middleware (logging, tracing, circuit breaking), or work around transport
@@ -112,8 +121,8 @@ export interface ClientOptions {
    * createClient({
    *   baseURL,
    *   options: {
-   *     fetch: ((url: string, init?: RequestInit) =>
-   *       undiciFetch(url, { ...init, dispatcher } as never)) as unknown as FetchLike,
+   *     fetch: (url, init) =>
+   *       undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
    *   },
    * });
    * ```
