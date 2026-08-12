@@ -202,7 +202,12 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		for col, f := range perms.Check {
 			switch {
 			case f.Eq != nil:
-				resolved.CheckClauses[col] = resolveTemplate(*f.Eq, claims)
+				// The check path keeps the resolved scalar even when a claim is
+				// unresolvable — the write-path required value / auto-inject semantics
+				// are unchanged here (#385 fixed the read-path row filters; check
+				// operators are governed by #371 and validateRolePerms). Pinned by
+				// TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString.
+				resolved.CheckClauses[col], _ = resolveTemplate(*f.Eq, claims)
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -223,25 +228,24 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 		// caller columns, so a row-filter on a weird-but-legal column name (dots,
 		// spaces, keywords) is emitted safely.
 		qcol := chsql.QuoteIdent(col)
-		if f.Eq != nil {
-			val := resolveTemplate(*f.Eq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s = ?", qcol))
-			params = append(params, val)
-		}
-		if f.Neq != nil {
-			val := resolveTemplate(*f.Neq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s != ?", qcol))
-			params = append(params, val)
-		}
-		if f.Gt != nil {
-			val := resolveTemplate(*f.Gt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s > ?", qcol))
-			params = append(params, val)
-		}
-		if f.Lt != nil {
-			val := resolveTemplate(*f.Lt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s < ?", qcol))
-			params = append(params, val)
+		for _, c := range []struct {
+			op  string
+			val *string
+		}{{"=", f.Eq}, {"!=", f.Neq}, {">", f.Gt}, {"<", f.Lt}} {
+			if c.val == nil {
+				continue
+			}
+			if val, ok := resolveTemplate(*c.val, claims); ok {
+				clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, c.op))
+				params = append(params, val)
+			} else {
+				// An unresolvable claim fails closed: binding the '' it renders to
+				// would emit a real predicate against the empty string — `col != ''`
+				// or `col > ''` matches essentially every row, erasing the
+				// restriction (#385). Matching the _in branch below, a filter scoped
+				// to a claim the token doesn't carry matches no rows.
+				clauses = append(clauses, "1 = 0")
+			}
 		}
 		if f.In != nil {
 			vals := resolveInValues(*f.In, claims)
@@ -261,21 +265,27 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
-// If a claim path cannot be resolved, the template placeholder is replaced with
-// an empty string to prevent "<nil>" from leaking into SQL filters.
-func resolveTemplate(tmpl string, claims map[string]any) string {
-	return claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
+// If a claim path cannot be resolved, the placeholder is replaced with an empty
+// string (never "<nil>") and ok is false, so filter callers can fail the
+// predicate closed instead of binding a value the token never carried (#385).
+// A template with no placeholders — including a literal "" — is always ok.
+func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
+	ok := true
+	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
 		sub := claimTemplateRe.FindStringSubmatch(match)
 		if len(sub) < 2 {
+			ok = false
 			return ""
 		}
 		parts := strings.Split(sub[1], ".")
 		val := navigateClaims(claims, parts)
 		if val == nil {
+			ok = false
 			return ""
 		}
 		return fmt.Sprint(val)
 	})
+	return resolved, ok
 }
 
 // resolveInValues resolves a templated _in value into the set of bound values
@@ -301,7 +311,13 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 			return []any{fmt.Sprint(v)}
 		}
 	}
-	return []any{resolveTemplate(tmpl, claims)}
+	if v, ok := resolveTemplate(tmpl, claims); ok {
+		return []any{v}
+	}
+	// A template with surrounding text whose claim is unresolvable also yields
+	// nil (not a one-element set containing the partial literal), so it fails
+	// closed like the bare-claim case above (#385).
+	return nil
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.

@@ -219,7 +219,7 @@ Supported comparison operators:
 | `_lt` | `col < ?` | less than |
 | `_in` | `col IN (?, …)` | one of a set |
 
-`_in` scopes a column to a **set** of values. Unlike the other operators, its value is a single claim that resolves to a JSON **array**: `tenant_id: { _in: "{{ jwt.app_metadata.tenant_ids }}" }` with a token claim `tenant_ids: ["a", "b"]` produces `tenant_id IN ('a', 'b')`. This is the multi-tenant case — the allowed set rides on the signed token. A scalar claim yields a one-element set; a missing or empty claim matches **no rows** (fail-closed: an empty allowed-set sees nothing, never everything).
+`_in` scopes a column to a **set** of values. Unlike the other operators, its value is a single claim that resolves to a JSON **array**: `tenant_id: { _in: "{{ jwt.app_metadata.tenant_ids }}" }` with a token claim `tenant_ids: ["a", "b"]` produces `tenant_id IN ('a', 'b')`. This is the multi-tenant case — the allowed set rides on the signed token. A scalar claim yields a one-element set; a claim that is absent, `null`, or an empty **array** matches **no rows** (fail-closed: an empty allowed-set sees nothing, never everything). A claim present as an empty *string* is a value like any other and binds as the one-element set `IN ('')` — see [JWT claim templating](#jwt-claim-templating).
 
 Multiple columns (and multiple operators on one column) are combined with `AND`. The policy-derived predicate is ANDed with whatever filters the caller's own query supplies, so a caller can never widen their row visibility past the policy.
 
@@ -230,11 +230,15 @@ Any policy value may interpolate token claims with `{{ jwt.<dot.path> }}`:
 - `{{ jwt.sub }}` → the token's `sub` claim.
 - `{{ jwt.app_metadata.tenant_id }}` → a nested claim.
 
-Values are always bound as SQL **parameters**, never concatenated into the query, so templating is injection-safe. If a claim path can't be resolved, the template renders as an **empty string** (rather than leaking `<nil>` into the predicate) — which, for a tenant filter, means the caller matches no tenant and sees nothing. Make sure your identity provider actually issues the claims your policy templates reference.
+Values are always bound as SQL **parameters**, never concatenated into the query, so templating is injection-safe. If a claim path in a `filter` template can't be resolved (a validly-signed token that simply doesn't carry the claim), that filter **fails closed**: the predicate becomes constant-false and the role sees **no rows**. This holds for every operator — `_eq`, `_neq`, `_gt`, `_lt`, and `_in` alike. The alternative, binding the empty string the template would render to, would leave a live predicate against `''`: `_eq` would match every empty-valued row, and `_neq`/`_gt` on a string column would match essentially *all* rows, erasing the restriction. A literal value with no template in it — including an explicit `""` — binds exactly as written.
+
+"Can't be resolved" means the claim path is **absent** from the token (or `null`). A claim that is *present but empty* is a value the token vouches for: it resolves to `''` and binds normally, so `_neq` against an empty-string claim still emits `col != ''`. Make sure your identity provider actually issues the claims your policy templates reference — and omits unset claims rather than issuing them as empty strings.
 
 ## Insert checks
 
 `check` is the write-path counterpart to `filter`: it constrains the *values* a role may insert, again via claim templates. It supports `_eq` (the inserted value must equal the claim) and `_in` (it must be one of a claim-derived set); the comparison operators `_neq`/`_gt`/`_lt` have no insert-time meaning and are **rejected at config load**.
+
+Unlike row filters, an unresolvable claim in an `_eq` check is **not** fail-closed: it still resolves to the empty string, so an omitted column is auto-injected as `''`, and any supplied value other than `''` is rejected with `403 check failed`. (An unresolvable `_in` check *does* fail closed — the claim-derived set is empty, so every insert to that column is rejected.) Check-path semantics are being standardized in [#371](https://github.com/Wave-RF/WaveHouse/issues/371).
 
 <Tabs syncKey="policy">
   <TabItem label="YAML">

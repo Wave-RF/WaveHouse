@@ -396,22 +396,42 @@ func TestResolveTemplate(t *testing.T) {
 		"org_id": "org-123",
 		"nested": map[string]any{"val": "deep"},
 	}
-	assert.Equal(t, "org-123", resolveTemplate("{{ jwt.org_id }}", claims))
-	assert.Equal(t, "deep", resolveTemplate("{{ jwt.nested.val }}", claims))
-	assert.Equal(t, "", resolveTemplate("{{ jwt.missing }}", claims))
-	assert.Equal(t, "literal", resolveTemplate("literal", claims))
+	tests := []struct {
+		tmpl   string
+		want   string
+		wantOK bool
+	}{
+		{"{{ jwt.org_id }}", "org-123", true},
+		{"{{ jwt.nested.val }}", "deep", true},
+		{"{{ jwt.missing }}", "", false},
+		{"literal", "literal", true},
+		// A template-free empty string is the policy author's literal value, not
+		// an unresolvable claim — it must stay ok so `_eq: ""` binds as written.
+		{"", "", true},
+		// One unresolvable claim poisons the whole template, even alongside a
+		// resolvable one or surrounding text.
+		{"{{ jwt.org_id }}-{{ jwt.missing }}", "org-123-", false},
+	}
+	for _, tt := range tests {
+		got, ok := resolveTemplate(tt.tmpl, claims)
+		assert.Equal(t, tt.want, got, tt.tmpl)
+		assert.Equal(t, tt.wantOK, ok, tt.tmpl)
+	}
 }
 
 func TestResolveTemplate_NilClaims(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "", resolveTemplate("{{ jwt.org_id }}", nil))
+	got, ok := resolveTemplate("{{ jwt.org_id }}", nil)
+	assert.Equal(t, "", got)
+	assert.False(t, ok)
 }
 
 func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 	t.Parallel()
 	claims := map[string]any{"a": "1", "b": "2"}
-	result := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
+	result, ok := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
 	assert.Equal(t, "1-2", result)
+	assert.True(t, ok)
 }
 
 func TestValidate(t *testing.T) {
@@ -625,6 +645,115 @@ func TestResolveFilters_LtOperator(t *testing.T) {
 	require.Len(t, clauses, 1)
 	assert.Contains(t, clauses[0], "`price` < ?")
 	assert.Equal(t, "100", params[0])
+}
+
+// TestResolveFilters_UnresolvableClaim_FailsClosed: the #385 fix — a row-filter
+// template referencing a claim the token doesn't carry emits a constant-false
+// predicate for EVERY operator, never a real comparison against the empty
+// string it renders to (where not-equals / greater-than on a string column
+// would match essentially all rows).
+func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	tmpl := "{{ jwt.tenant_id }}"
+	partial := "t-{{ jwt.tenant_id }}"
+	claims := map[string]any{"role": "user"} // validly-signed token, no tenant_id
+	cases := map[string]Filter{
+		"_eq":               {Eq: &tmpl},
+		"_neq":              {Neq: &tmpl},
+		"_gt":               {Gt: &tmpl},
+		"_lt":               {Lt: &tmpl},
+		"_eq partial":       {Eq: &partial},
+		"_in template text": {In: &partial},
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(map[string]Filter{"tenant_id": f}, claims)
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
+// TestResolveFilters_LiteralEmptyValue_Binds: a template-free literal "" is the
+// policy author's chosen value, not a resolution failure — it must keep binding
+// an equality against the empty string rather than be mistaken for the #385
+// fail-closed case.
+func TestResolveFilters_LiteralEmptyValue_Binds(t *testing.T) {
+	t.Parallel()
+	empty := ""
+	clauses, params := resolveFilters(map[string]Filter{"status": {Eq: &empty}}, nil)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`status` = ?", clauses[0])
+	assert.Equal(t, []any{""}, params)
+}
+
+// TestResolveFilters_EmptyStringClaim_Binds: the boundary of the #385
+// fail-closed rule — only an ABSENT or null claim fails closed. A claim present
+// as an empty string resolves and binds normally, so `_neq` against an
+// empty-string claim still emits a real `col != ?` predicate bound to the
+// empty string, never a constant-false predicate.
+func TestResolveFilters_EmptyStringClaim_Binds(t *testing.T) {
+	t.Parallel()
+	neq := "{{ jwt.tenant_id }}"
+	claims := map[string]any{"tenant_id": ""}
+	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {Neq: &neq}}, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` != ?", clauses[0])
+	assert.Equal(t, []any{""}, params)
+}
+
+// TestResolveFilters_InEmptyStringClaim_Binds: an _in whose claim is present as
+// an empty STRING is a scalar, not an empty set — it binds as the one-element
+// set `IN (?)` bound to the empty string. Failing closed is reserved for
+// absent/null claims and empty arrays (TestResolveFilters_InEmptyClaim_FailsClosed).
+func TestResolveFilters_InEmptyStringClaim_Binds(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenant_id }}"
+	claims := map[string]any{"tenant_id": ""}
+	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {In: &in}}, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
+	assert.Equal(t, []any{""}, params)
+}
+
+// TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString: the deliberate
+// read/write asymmetry of #385 — a check _eq keeps the resolved scalar even
+// when the claim is unresolvable, so an omitted column auto-injects the empty
+// string and any other supplied value is rejected at ingest. Write-path
+// fail-closed semantics are #371's scope; this pins today's behavior so
+// neither path drifts silently.
+func TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.org_id }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Insert: map[string]RolePermissions{
+			"user": {Check: map[string]Filter{"org_id": {Eq: &eq}}},
+		}},
+	}}
+	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{"role": "user"}) // no org_id claim
+	require.True(t, perms.Allowed)
+	require.Contains(t, perms.CheckClauses, "org_id")
+	assert.Equal(t, "", perms.CheckClauses["org_id"])
+}
+
+// TestEvaluate_FilterUnresolvableClaim_FailsClosed: the issue #385 scenario
+// end-to-end — a select policy scoping tenant_id to {{ jwt.tenant_id }} against
+// a token without that claim yields a constant-false WHERE, never an equality
+// binding the empty string.
+func TestEvaluate_FilterUnresolvableClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	eq := "{{ jwt.tenant_id }}"
+	p := &Policy{Tables: map[string]TablePolicy{
+		"clicks": {Select: map[string]RolePermissions{
+			"user": {Filter: map[string]Filter{"tenant_id": {Eq: &eq}}},
+		}},
+	}}
+	perms := Evaluate(p, "user", "clicks", "select", map[string]any{"role": "user"})
+	require.True(t, perms.Allowed)
+	assert.Equal(t, "1 = 0", perms.WhereClause)
+	assert.Empty(t, perms.WhereParams)
 }
 
 // TestValidate_RejectsBindUnsafeFilterColumn: a policy whose row-filter column
