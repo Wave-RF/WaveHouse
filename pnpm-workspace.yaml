@@ -25,8 +25,9 @@ minimumReleaseAgeExclude:
   - "@wave-rf/*"
 
 # Fail an install when the active Node doesn't satisfy a package's engines.node.
-# The published SDK (clients/ts) declares ">=18" for external consumers; the
-# root, e2e, and docs packages require ">=22" — the dev/CI version pinned in .nvmrc.
+# Every workspace package — including the published SDK (clients/ts) — declares
+# ">=22", matching the dev/CI version pinned in .nvmrc. That is the only line CI
+# exercises, and Node 18/20 are past upstream end-of-life.
 engineStrict: true
 
 catalog:

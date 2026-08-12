@@ -154,6 +154,6 @@ The SDK doubles as the E2E integration test harness. Tests in `tests/e2e/sdk/` e
 make test-e2e
 ```
 
-Test files live in `tests/e2e/sdk/`: `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress` (each `*.test.ts`).
+Test files live in `tests/e2e/sdk/` (each `*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
 See [Development Guide — E2E Tests via SDK](/development#e2e-tests-via-sdk) for architecture details and workflow tips.

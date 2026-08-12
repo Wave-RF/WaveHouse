@@ -50,9 +50,10 @@ describe("Cache", () => {
 
     // 4. Wait for the async worker to flush to ClickHouse and invalidate the cache.
     // By querying ClickHouse directly, we don't accidentally trigger a cache re-prime!
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${eventId}'`,
+        signal,
       );
       return r.length === 1;
     }, 10_000);

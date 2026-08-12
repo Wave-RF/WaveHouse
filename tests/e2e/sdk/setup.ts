@@ -12,6 +12,8 @@
  * policy that covers every generated table.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { CH_URL, makeJWT, WH_URL } from "./helpers.js";
 import { allTableSpecs, TABLE_DDL } from "./tables.js";
 
@@ -96,8 +98,38 @@ async function bootstrapTestPolicy(): Promise<void> {
   }
 }
 
+/**
+ * Print the runtime this suite is actually running on, and say so loudly when
+ * it isn't the one CI pins.
+ *
+ * Worth the four lines: a Node-version-specific transport bug (undici 8.8-8.9
+ * stalling on idle pooled connections, nodejs/undici#5600) cost days of
+ * investigation that started from "my machine must be broken", because nothing
+ * in the output distinguished a local run from CI's. `.nvmrc` is read by CI's
+ * setup-node but is inert locally unless you use a version manager, so the two
+ * can drift silently. See #440.
+ */
+function reportRuntime(): void {
+  const nvmrc = (() => {
+    try {
+      return readFileSync(join(import.meta.dirname, "../../../.nvmrc"), "utf8").trim();
+    } catch {
+      return "";
+    }
+  })();
+  const undici = process.versions.undici ? ` (undici ${process.versions.undici})` : "";
+  console.log(`  node ${process.version}${undici}`);
+
+  const major = process.version.replace(/^v/, "").split(".")[0];
+  if (nvmrc && major !== nvmrc.replace(/^v/, "").split(".")[0]) {
+    console.log(`  ⚠ CI pins node ${nvmrc} (.nvmrc) — this run is on a different major.`);
+    console.log(`    A failure here may not reproduce in CI, and vice versa.`);
+  }
+}
+
 export async function setup(): Promise<void> {
   console.log(`\n🔍 E2E setup`);
+  reportRuntime();
   console.log(`  CLICKHOUSE_URL=${CH_URL}`);
   console.log(`  WAVEHOUSE_URL=${WH_URL}`);
 

@@ -33,9 +33,10 @@ describe("Ingest Batching Triggers", () => {
       // the worker's buffer held all 500 rows before the timer could fire —
       // an early flush below is attributable to the size trigger.
       await waitForCondition(
-        async () => {
+        async (signal) => {
           const r = await chQuery(
             `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+            signal,
           );
           return Number((r[0] as any).cnt) === 500;
         },
@@ -61,9 +62,10 @@ describe("Ingest Batching Triggers", () => {
         `ack took ${ackMs}ms (≥4s): linger fired mid-publish; size-trigger timing inconclusive — verifying integrity only`,
       );
       await waitForCondition(
-        async () => {
+        async (signal) => {
           const r = await chQuery(
             `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+            signal,
           );
           return Number((r[0] as any).cnt) === 500;
         },
@@ -95,15 +97,21 @@ describe("Ingest Batching Triggers", () => {
     );
     expect(Number((r[0] as any).cnt)).toBe(0);
 
-    // Wait until it appears
+    // Wait until it appears. The budget is only a "don't hang forever" bound —
+    // the assertion that carries this test's meaning is the >= 4500ms lower
+    // bound below. It used to be 6_000, which left ~700ms over the 5s linger
+    // and made this the most flake-prone wait in the suite; every other
+    // visibility wait allows 10s. Widening costs no test power (an early flush
+    // still fails the lower bound) and removes the false failures (#440).
     await waitForCondition(
-      async () => {
+      async (signal) => {
         const check = await chQuery(
           `SELECT count() as cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+          signal,
         );
         return Number((check[0] as any).cnt) === 1;
       },
-      6_000,
+      10_000,
       500,
     );
 
@@ -111,5 +119,5 @@ describe("Ingest Batching Triggers", () => {
 
     // It should take roughly ~5 seconds for ingest worker's period trigger to fire
     expect(elapsed).toBeGreaterThanOrEqual(4500);
-  }, 20_000);
+  }, 25_000);
 });
