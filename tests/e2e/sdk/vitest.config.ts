@@ -5,7 +5,8 @@ import { defineConfig } from "vitest/config";
 // e2e suite's SDK coverage lands at tmp/coverage/ts-e2e/, ready for
 // `cov ts-merge` (run via `make cov`) to combine with ts-unit.
 // Standalone runs (no env var) fall back to <thisdir>/coverage.
-const reportsDirectory = process.env.TS_E2E_COVERAGE_DIR ?? path.join(__dirname, "coverage");
+const reportsDirectory =
+  process.env.TS_E2E_COVERAGE_DIR ?? path.join(import.meta.dirname, "coverage");
 
 // Root at the REPO ROOT, not this config's dir. The e2e tests live here
 // (tests/e2e/sdk) but they exercise SDK source at clients/ts/src, which is
@@ -16,9 +17,9 @@ const reportsDirectory = process.env.TS_E2E_COVERAGE_DIR ?? path.join(__dirname,
 // resulting coverage-final.json keys are absolute paths identical to
 // ts-unit's — exactly what `cov ts-merge` (nyc merge) needs to combine the
 // two suites into ts-total.
-const repoRoot = path.resolve(__dirname, "../../..");
+const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const sdkSrc = path.join(repoRoot, "clients/ts/src");
-const here = path.relative(repoRoot, __dirname); // "tests/e2e/sdk"
+const here = path.relative(repoRoot, import.meta.dirname); // "tests/e2e/sdk"
 
 // Under COV_DEFER (set by `make ci`/`test-all`), drop the console reporter —
 // `make cov` (scripts/cov report) prints ONE consolidated table at the end.
@@ -41,9 +42,9 @@ export default defineConfig({
     // to this dir so the SDK's own *.test.ts unit files under clients/ts/src
     // are NOT pulled into the e2e run.
     include: [`${here}/*.test.ts`],
-    // Absolute (via __dirname) so they resolve regardless of root/cwd.
-    setupFiles: [path.join(__dirname, "polyfills.ts")],
-    globalSetup: path.join(__dirname, "setup.ts"),
+    // Absolute (via import.meta.dirname) so they resolve regardless of root/cwd.
+    setupFiles: [path.join(import.meta.dirname, "polyfills.ts")],
+    globalSetup: path.join(import.meta.dirname, "setup.ts"),
     testTimeout: 30_000,
     hookTimeout: 120_000,
     pool: "forks",

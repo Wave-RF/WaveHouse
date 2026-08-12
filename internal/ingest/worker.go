@@ -431,6 +431,7 @@ func (w *IngestWorker) insertToClickHouse(ctx context.Context, tableName string,
 	q.Set("database", w.db)
 	q.Set("param_target_table", tableName)
 	q.Set("query", "INSERT INTO {target_table:Identifier} FORMAT JSONEachRow")
+	q.Set("date_time_input_format", "best_effort")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", w.chURL+"?"+q.Encode(), &buf)
 	if err != nil {

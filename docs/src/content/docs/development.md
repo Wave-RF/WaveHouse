@@ -360,7 +360,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 **Architecture**:
 
 - `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
-- `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
+- `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and bootstraps the baseline policy. It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
@@ -372,9 +372,29 @@ make test-e2e
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
 
-**If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
+The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, start the server from the **repo root** with the E2E fixture config:
 
-**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`.
+```bash
+WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
+```
+
+The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture pins no ClickHouse address, so the server looks for one on `localhost:9000`; point it elsewhere with `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if yours isn't there.
+
+Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
+
+Then set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/`; teardown is a no-op on that path, so your stack survives between iterations.
+
+If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
+
+**Environment knobs**:
+
+| Variable | Effect |
+|----------|--------|
+| `V=1` | Stream the WaveHouse subprocess log live *in addition to* capturing it to `tmp/wavehouse-cov.log`. The on-failure log excerpt is then skipped — you have already seen it |
+| `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
+| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run (skips v8 instrumentation and report generation) while chasing a flake. **Local debugging only** — no report is written. Ignored (with a log line) under `make ci` / `make test-all`, so an exported-and-forgotten var can't produce a green coverage gate with the TS e2e report missing |
+
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 
 ## Linting
 
@@ -428,16 +448,20 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
+│   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
 │       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
+├── clients/                # Client SDKs
+│   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
+├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets

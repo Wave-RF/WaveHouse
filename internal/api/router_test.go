@@ -279,7 +279,7 @@ func TestCORSMiddleware_BlockedOriginPreflight(t *testing.T) {
 func TestNewRouter_RoutesRegistered(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
@@ -409,7 +409,7 @@ func TestNewRouter_CORSOnStream(t *testing.T) {
 func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil)
 
@@ -470,7 +470,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 func TestNewRouter_OptionalDepsNil(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil)
 
@@ -521,7 +521,7 @@ func TestCORSMiddleware_EmptyOrigins_AllowAll(t *testing.T) {
 func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil)
 	deps := Dependencies{
@@ -546,7 +546,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 	t.Parallel()
 
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil)
 	deps := Dependencies{
@@ -643,7 +643,7 @@ func TestJSONRecoverer_PanicAfterPartialWriteDoesNotCorrupt(t *testing.T) {
 // gate is its entire authorization story.
 func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	t.Parallel()
-	reg := discovery.NewSchemaRegistryFromMap(nil)
+	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
 	hub := stream.NewHub(nil, nil)
 
