@@ -511,15 +511,18 @@ const wh = createClient({
 ```
 
 :::caution[Importing a fixed undici is not enough on its own]
-undici keeps its connection pool on a shared `globalThis` symbol, and the first
-copy loaded claims it — which on an affected runtime is the *bundled* one. Call
-`undiciFetch` without a `dispatcher` and it resolves the global one, so requests
-can still go through the buggy pool even though you imported a fixed undici.
+undici keeps its connection pool on a shared `globalThis` symbol, and whichever
+copy loads first claims it. Node claims it for the *bundled* copy the first time
+anything calls the built-in `fetch` — not at startup — so which undici owns the
+pool comes down to a load order you don't really control. Call `undiciFetch`
+without a `dispatcher` and it resolves whatever is on that symbol, so requests
+can go through the buggy pool even though you imported a fixed undici.
 
 Measured with 8.9.0 loaded first and 8.10.0's `fetch` doing the request, 1.5 s
 idle gaps against a 10 ms server:
 
 ```
+                          per-request ms
 no explicit dispatcher    21  1514  1495   583   ← still stalling
 explicit new Agent()      17    14    12    13
 ```
