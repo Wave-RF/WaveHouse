@@ -8,6 +8,8 @@ Zero-dependency TypeScript client for [WaveHouse](https://github.com/Wave-RF/Wav
 npm install @wavehouse/sdk
 ```
 
+Requires Node 22 or newer — the only line this SDK is tested against; Node 18 and 20 are past upstream end-of-life. Browsers need no polyfill, and Node needs an `EventSource` polyfill only for streaming — see [Runtime support](https://wavehouse.dev/sdk/#runtime-support).
+
 This works in any framework that uses a bundler — React, Vue, Svelte, Angular, Astro, SolidJS, or plain Vite — with `import { createClient } from '@wavehouse/sdk'`.
 
 The package is published with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) — npm shows a verified provenance badge on the [package page](https://www.npmjs.com/package/@wavehouse/sdk), and `npm audit signatures` checks the attestation against this repository's signed build.

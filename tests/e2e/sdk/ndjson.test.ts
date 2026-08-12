@@ -24,9 +24,10 @@ describe("NDJSON ingest", () => {
     expect(result.error).toBeNull();
     expect(result.data).toMatchObject({ ok: true, total: 3, succeeded: 3, failed: 0 });
 
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() AS cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+        signal,
       );
       return Number((r[0] as { cnt: number }).cnt) === 3;
     }, 10_000);
@@ -61,9 +62,10 @@ describe("NDJSON ingest", () => {
     expect(failed?.index).toBe(2);
 
     // Exactly the two good rows reach ClickHouse; the bad one does not.
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+        signal,
       );
       return r.length === 2;
     }, 10_000);
@@ -91,9 +93,10 @@ describe("NDJSON ingest", () => {
     expect(result.error).toBeNull();
     expect(result.data).toMatchObject({ total: 2, succeeded: 2, failed: 0 });
 
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() AS cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+        signal,
       );
       return Number((r[0] as { cnt: number }).cnt) === 2;
     }, 10_000);
@@ -121,9 +124,10 @@ describe("NDJSON ingest", () => {
     expect(failed?.index).toBe(2);
     expect(failed?.error).toContain("invalid json");
 
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${good}'`,
+        signal,
       );
       return r.length === 1;
     }, 10_000);
@@ -152,9 +156,10 @@ describe("NDJSON ingest", () => {
     const body = (await res.json()) as { total: number; succeeded: number; failed: number };
     expect(body).toMatchObject({ total: 2, succeeded: 2, failed: 0 });
 
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() AS cnt FROM default.${T.clicks} WHERE user_id = 'user-${runId}'`,
+        signal,
       );
       return Number((r[0] as { cnt: number }).cnt) === 2;
     }, 10_000);

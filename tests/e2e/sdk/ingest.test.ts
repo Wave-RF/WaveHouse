@@ -30,8 +30,11 @@ describe("Ingest", () => {
     expect(result.data).toMatchObject({ ok: true });
 
     // Poll ClickHouse — pipeline flush timing varies
-    await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.${T.clicks} WHERE event_id = '${id}'`);
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT event_id FROM default.${T.clicks} WHERE event_id = '${id}'`,
+        signal,
+      );
       return r.length === 1;
     }, 10_000);
 
@@ -54,9 +57,10 @@ describe("Ingest", () => {
     expect(result.data).toMatchObject({ ok: true });
 
     // Poll ClickHouse — pipeline flush timing varies
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.${T.clicks} WHERE event_id IN ('${ids.join("','")}')`,
+        signal,
       );
       return r.length === 3;
     }, 10_000);
@@ -104,8 +108,11 @@ describe("Ingest", () => {
     expect(result.data).toMatchObject({ ok: true });
 
     // Poll ClickHouse — on cold-start the pipeline may take longer than 4s
-    await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`);
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`,
+        signal,
+      );
       return r.length === 1;
     }, 10_000);
 
@@ -137,8 +144,11 @@ describe("Ingest", () => {
     expect(result2.data).toMatchObject({ duplicate: true });
 
     // Poll ClickHouse — on cold-start the pipeline may take longer than 4s
-    await waitForCondition(async () => {
-      const r = await chQuery(`SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`);
+    await waitForCondition(async (signal) => {
+      const r = await chQuery(
+        `SELECT event_id FROM default.${T.events} WHERE event_id = '${id}'`,
+        signal,
+      );
       return r.length === 1;
     }, 10_000);
 
@@ -185,9 +195,10 @@ describe("Ingest", () => {
     expect(result.data).toMatchObject({ ok: true });
 
     // 5. Verify it successfully made it through NATS, ingest worker, and into ClickHouse
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.\`${weirdTableName}\` WHERE event_id = '${id}'`,
+        signal,
       );
       return r.length === 1;
     }, 10_000);
@@ -240,9 +251,10 @@ describe("Ingest", () => {
     expect(result.data).toMatchObject({ ok: true });
 
     // 5. Verify it landed in the weirdly named table (proving it was treated as a literal string)
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT event_id FROM default.\`${maliciousName}\` WHERE event_id = '${id}'`,
+        signal,
       );
       return r.length === 1;
     }, 10_000);
@@ -325,9 +337,10 @@ describe("Ingest", () => {
     expect(goodRes.error).toBeNull();
 
     // Verify the auto-injected row in CH has country=US
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT country FROM default.${T.clicks} WHERE event_id = '${autoId}'`,
+        signal,
       );
       return r.length === 1 && r[0].country === "US";
     }, 10_000);

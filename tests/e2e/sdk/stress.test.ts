@@ -40,9 +40,10 @@ describe("Stress & Concurrency", () => {
     // Verify all data landed intact
     // Because we inserted exactly 500 items, ingest worker should flush immediately,
     // making this relatively fast.
-    await waitForCondition(async () => {
+    await waitForCondition(async (signal) => {
       const r = await chQuery(
         `SELECT count() as cnt FROM default.${T.clicks} WHERE session_id = 'session-${runId}'`,
+        signal,
       );
       return Number((r[0] as any).cnt) === concurrency * insertsPerWorker;
     }, 10_000);
