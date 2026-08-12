@@ -12,6 +12,7 @@ import (
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/ingest"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -290,7 +291,7 @@ func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 // retries in the background while the server serves).
 func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	t.Parallel()
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{Name: "clicks", Columns: []discovery.Column{
 			{Name: "amount", Type: "UInt64"},
 			{Name: "page", Type: "String"},
@@ -582,7 +583,7 @@ func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 // marshaling a Go float64 would already have destroyed the value this test is about.
 func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 	t.Parallel()
-	reg := discovery.NewSchemaRegistryFromMap([]*discovery.TableSchema{
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
 		{Name: "clicks", Columns: []discovery.Column{
 			{Name: "tenant_id", Type: "UInt64"},
 			{Name: "page", Type: "String"},
