@@ -67,17 +67,6 @@ stream.close();
 
 Current connection status: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
 
-### `.connected(timeoutMs?)`
-
-Returns a promise that resolves once `.status` reaches `'live'` — the "safe to ingest now" barrier, so tests and scripts don't need sleep loops between opening a stream and inserting the rows they expect to see. Rejects if the stream is already `'closed'`, if it closes before connecting, or after `timeoutMs` milliseconds (default `5_000`) if it never reaches `'live'` — `await` it inside a `try`/`catch`. Safe to call before `.subscribe()`.
-
-```ts
-const stream = wh.from('clicks').stream();
-const unsub = stream.subscribe({ next: (e) => console.log(e) });
-await stream.connected(); // transport is live
-await wh.from('clicks').insert({ page: '/home', button: 'signup' }); // this row will arrive on the stream
-```
-
 ### `StreamOptions`
 
 | Field | Type | Description |

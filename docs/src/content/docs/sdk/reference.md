@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`. [`StreamController.connected()`](/sdk/streaming#connectedtimeoutms) also rejects — when the stream is already closed, closes before connecting, or doesn't reach `live` within `timeoutMs` (default `5_000` ms) — so `await` it inside a `try`/`catch`.
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -87,7 +87,6 @@ createClient<DB>(config) → WaveHouseClient
 
 StreamController (NOT thenable)
 ├── .subscribe({ next, status?, error? }) → unsubscribe()
-├── .connected(timeoutMs?) → Promise<void>
 ├── .close()
 ├── .status → StreamStatus
 └── [Symbol.asyncIterator]() → AsyncIterableIterator<StreamEvent>
@@ -110,7 +109,7 @@ Codegen reads `/v1/schema`, which is **admin-only**. Against a non-dev server, p
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--url`, `-u` | WaveHouse base URL (may include a path prefix) | `http://localhost:8080` |
+| `--url`, `-u` | WaveHouse base URL | `http://localhost:8080` |
 | `--out`, `-o` | Output .d.ts file path | `./wavehouse.d.ts` |
 | `--auth`, `-a` | Bearer token (if auth required) | — |
 

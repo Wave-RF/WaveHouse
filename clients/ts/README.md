@@ -131,7 +131,7 @@ const { data } = await wh.from('clicks').select('page').limit(10);
 
 Async request methods return a `Result<T>` object — destructure it as `{ data, error }` — and never throw for anything the server returns. `.stream()` and `.liveQuery()` return controllers instead, reporting failures through the subscriber's `error` callback.
 
-The SDK does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR`, and despite that error's `retryable: true` the SDK never re-dials the stream itself), `.stream()` / `.liveQuery()` in a runtime with no `EventSource`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call. `StreamController.connected()` also rejects — when the stream is already closed, closes before connecting, or doesn't reach `live` within `timeoutMs` (default `5_000` ms) — so `await` it inside a `try`/`catch`.
+The SDK does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR`, and despite that error's `retryable: true` the SDK never re-dials the stream itself), `.stream()` / `.liveQuery()` in a runtime with no `EventSource`, and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call.
 
 ```ts
 const { data, error } = await wh.from('clicks').fetch();
