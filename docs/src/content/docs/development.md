@@ -360,7 +360,7 @@ The primary E2E integration test suite lives in `tests/e2e/sdk/`. It uses the Ty
 **Architecture**:
 
 - `scripts/orchestrator` — the E2E entrypoint behind `make test-e2e`: it starts a clean ClickHouse **testcontainer** per run, launches the `wavehouse-cov` binary on a random free port, runs the SDK suite against it, then SIGINTs the binary to flush coverage. No Compose file is involved. CI runs the exact same path.
-- `tests/e2e/sdk/setup.ts` — Smart `globalSetup` that probes ports before starting Docker services, so tests work seamlessly whether you started services manually or let the setup do it.
+- `tests/e2e/sdk/setup.ts` — `globalSetup`. Probes the `CLICKHOUSE_URL` / `WAVEHOUSE_URL` the orchestrator injects, creates the per-suite tables, refreshes the schema, and bootstraps the baseline policy. It starts nothing itself and fails fast if either URL isn't up. It also prints the active Node/undici version, warning when the local Node major differs from `.nvmrc` — a runtime-specific transport bug is otherwise indistinguishable from a code failure (see [#440](https://github.com/Wave-RF/WaveHouse/issues/440)).
 - `tests/e2e/sdk/helpers.ts` — JWT factories, typed client constructors, async wait helpers, direct ClickHouse query helper.
 
 **Running E2E tests**:
@@ -372,9 +372,19 @@ make test-e2e
 
 `make test-e2e` builds `bin/wavehouse-cov` (coverage-instrumented) and runs the orchestrator under `scripts/orchestrator/` to wire ClickHouse + the cover binary into the suite. covdata flushes on SIGINT into `tmp/coverage/e2e/data/`.
 
-**If you already have `make dev` running**, the setup detects the healthy WaveHouse on `:8080` and skips starting it via Docker — only ClickHouse is started if needed.
+The orchestrator always provisions its own stack — a fresh ClickHouse testcontainer plus `wavehouse-cov` on a random free port — so a running `make dev` on `:8080` is neither detected nor reused, and the two don't collide. To run vitest against a stack you manage yourself, set `CLICKHOUSE_URL` / `WAVEHOUSE_URL` and run `pnpm test` from `tests/e2e/sdk/` instead; teardown is a no-op on that path, so your stack survives between iterations.
 
-**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`.
+If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can leave a `wavehouse-cov` behind. That process shares `tmp/data` and `tmp/wavehouse-cov.log` with the next run and will corrupt it, so the orchestrator kills any leftover before starting and says so.
+
+**Environment knobs**:
+
+| Variable | Effect |
+|----------|--------|
+| `V=1` | Stream the WaveHouse subprocess log live instead of capturing it to `tmp/wavehouse-cov.log` |
+| `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
+| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run. **Local debugging only** — no report is written, so a subsequent `make cov` would gate on stale numbers. `make ci` never sets it |
+
+**Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own wait/query helpers rather than a pipeline test.
 
 ## Linting
 

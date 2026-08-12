@@ -62,7 +62,7 @@ await clicks.insertNDJSON('{"page":"/a"}\n{"page":"/b"}\n');
 // From a browser <input type="file"> (a File is a Blob)
 await clicks.insertNDJSON(fileInput.files[0]);
 
-// From a Node file (Node 20+: fs.openAsBlob; or read it to a string)
+// From a Node file (fs.openAsBlob; or read it to a string)
 import { openAsBlob } from 'node:fs';
 await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
 ```
