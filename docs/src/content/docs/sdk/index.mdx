@@ -524,25 +524,27 @@ no explicit dispatcher    21  1514  1495   583   ← still stalling
 explicit new Agent()      17    14    12    13
 ```
 
-An explicit `dispatcher` (or an explicit `setGlobalDispatcher` call, below)
-always wins, because it never consults the shared symbol.
+An explicit `dispatcher` wins because the request never consults the shared
+symbol at all. An explicit `setGlobalDispatcher` call (below) wins the other
+way round — it overwrites the symbol after the first copy claimed it.
 :::
 
 All three casts are load-bearing, for one underlying reason: undici declares its
 own request/response types, separate from the ones behind your global `fetch`,
 so the two aren't structurally assignable. `url as string` is needed because
 `FetchLike` accepts the full `fetch` input union while undici's `RequestInfo`
-names its *own* `Request`; `init as never` covers the same split on
-`RequestInit`, which differs on `body` and `headers` (`never` is assignable to
-either spelling, so one snippet compiles whether or not your `lib` includes
-DOM); and the return cast handles the `Response` mismatch. They're safe because
+names its *own* `Request`; `{ ...init, dispatcher } as never` covers the same
+split on `RequestInit`, which differs on `body` and `headers` (`never` is
+assignable to either spelling, so one snippet compiles whether or not your `lib`
+includes DOM); and the return cast handles the `Response` mismatch. They're safe because
 of the narrow runtime contract above — a string URL and a plain `RequestInit`
 in, six members read back. `undici` is a dependency you add; the SDK itself
 stays dependency-free.
 
-If you're genuinely pinned to an affected undici, the same snippet fixes it with
-a dispatcher that never reuses a keep-alive socket — `new Agent({ pipelining: 0 })`.
-That costs a fresh connection per request, so prefer upgrading. Note that tuning
+If you're genuinely pinned to an affected undici, the same snippet fixes it —
+your pinned version, with a dispatcher that never reuses a keep-alive socket:
+`new Agent({ pipelining: 0 })`. That costs a fresh connection per request, so
+prefer upgrading. Note that tuning
 `keepAliveTimeout` does **not** help: the retirement timer is starved by the same
 idle event loop that triggers the bug, so the socket is still there to be reused.
 
