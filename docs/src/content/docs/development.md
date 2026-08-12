@@ -382,7 +382,7 @@ If a previous run was killed (harness timeout, stop button, `SIGKILL`), it can l
 |----------|--------|
 | `V=1` | Stream the WaveHouse subprocess log live *in addition to* capturing it to `tmp/wavehouse-cov.log`. The on-failure log excerpt is then skipped — you have already seen it |
 | `E2E_CH_QUERY_TIMEOUT_MS` | Per-request ceiling for the suite's direct ClickHouse queries (default `10000`) |
-| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run. **Local debugging only** — no report is written, so a subsequent `make cov` would gate on stale numbers. `make ci` never sets it |
+| `E2E_NO_COVERAGE=1` | Drop `--coverage` from the vitest run, halving its cost while chasing a flake. **Local debugging only** — no report is written. Ignored (with a log line) under `make ci` / `make test-all`, so an exported-and-forgotten var can't produce a green coverage gate with the TS e2e report missing |
 
 **Test files** (`tests/e2e/sdk/*.test.ts`): `admin`, `auth`, `batching`, `cache`, `dlq`, `ingest`, `ndjson`, `query`, `streaming`, `stress`, plus `helpers` — a stack-free unit test of the harness's own `waitForCondition` poll helper rather than a pipeline test.
 

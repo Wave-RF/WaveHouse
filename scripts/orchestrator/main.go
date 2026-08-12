@@ -96,7 +96,10 @@ func run() error {
 			if findErr != nil {
 				continue
 			}
-			if killErr := proc.Kill(); killErr != nil {
+			// ErrProcessDone means it exited between pgrep and here — the
+			// common case being a Ctrl-C'd run still flushing coverage. That
+			// is the outcome we wanted, not a failure.
+			if killErr := proc.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 				return fmt.Errorf(
 					"leftover wavehouse-cov (pid %s) could not be killed: %w\n"+
 						"  it will corrupt this run — kill it manually with: kill -9 %s",
@@ -241,13 +244,21 @@ func run() error {
 	// forwarding layer entirely, matching how scripts/cov invokes `pnpm exec
 	// nyc`.
 	//
-	// E2E_NO_COVERAGE=1 drops it for local debugging only. Coverage is on by
-	// default and `make ci` never sets this — a run without it writes no
-	// report, so `make cov` would gate on stale numbers.
+	// E2E_NO_COVERAGE=1 drops it for local debugging only, and is ignored under
+	// the gating targets. Left unconditional, an exported-and-forgotten var
+	// would let `make ci` write a green push marker with the TS e2e report
+	// missing: test-e2e wipes tmp/coverage/ts-e2e first, ts-e2e's own threshold
+	// is informational, and ts-total then gates on ts-unit alone — an `n/a` row
+	// in the table, but a pass. COV_DEFER is exported by exactly the targets
+	// that gate (ci / test-all), so it is the right thing to key off.
 	args := []string{"exec", "vitest", "run", "--coverage"}
 	if os.Getenv("E2E_NO_COVERAGE") == "1" {
-		args = args[:len(args)-1]
-		log.Println("  (E2E_NO_COVERAGE=1 — running without coverage; no report will be written)")
+		if os.Getenv("COV_DEFER") != "" {
+			log.Println("  (E2E_NO_COVERAGE=1 ignored — this run feeds a coverage gate)")
+		} else {
+			args = args[:len(args)-1]
+			log.Println("  (E2E_NO_COVERAGE=1 — running without coverage; no report will be written)")
+		}
 	}
 	// #nosec G204 — args are a fixed string slice, not user input.
 	vitest := exec.CommandContext(ctx, "pnpm", args...)
