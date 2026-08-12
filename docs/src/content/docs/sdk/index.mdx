@@ -326,6 +326,32 @@ const wh = createClient<Database>({
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
+| `options.fetch` | `typeof fetch` | global `fetch` | HTTP implementation used for every request |
+
+### Supplying your own `fetch`
+
+`options.fetch` replaces the HTTP implementation the SDK uses. Reach for it to
+route through a proxy, attach client certificates, wrap requests in your own
+middleware (logging, tracing, circuit breaking), or to work around transport
+behavior of the runtime you happen to be on:
+
+```ts
+import { Agent, fetch as undiciFetch } from 'undici';
+
+// e.g. retire idle sockets sooner than the runtime's default
+const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
+
+const wh = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: {
+    fetch: (url, init) => undiciFetch(url, { ...init, dispatcher }),
+  },
+});
+```
+
+Retries go through the same function, so middleware sees every attempt. Only the
+request path is affected — streaming (`.stream()`, `.liveQuery()`) uses
+`EventSource`, which this does not replace.
 
 :::note[How the token is transmitted]
 The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.

@@ -56,12 +56,17 @@ export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promis
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const res = await fetch(url, {
+      const init: RequestInit = {
         method: opts.method,
         headers,
         body: requestBody,
         signal: opts.signal,
-      });
+      };
+      // Call the global directly when no override is configured, rather than
+      // capturing it — a detached `fetch` reference is not universally safe to
+      // invoke, and late binding is what lets tests swap `globalThis.fetch`.
+      const doFetch = ctx.options.fetch;
+      const res = doFetch ? await doFetch(url, init) : await fetch(url, init);
 
       if (res.ok) {
         const text = await res.text();

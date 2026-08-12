@@ -143,3 +143,56 @@ describe("WaveHouseClient.sql()", () => {
     expect(callWithLegacyParams).toThrow(/client\.sql\(sql, params\) was removed/);
   });
 });
+
+describe("options.fetch", () => {
+  it("routes requests through a supplied fetch instead of the global", async () => {
+    const custom = vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { fetch: custom as unknown as typeof fetch },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    expect(custom).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const [url, init] = custom.mock.calls[0];
+    expect(String(url)).toContain("http://localhost:8080");
+    expect(init).toMatchObject({ method: expect.any(String) });
+  });
+
+  it("falls back to the global fetch when no override is given", async () => {
+    const client = createClient({ baseURL: "http://localhost:8080" });
+    await client.from("clicks").select("*").limit(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the global late-bound so it can be swapped after construction", async () => {
+    const client = createClient({ baseURL: "http://localhost:8080" });
+    const replacement = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    vi.stubGlobal("fetch", replacement);
+
+    await client.from("clicks").select("*").limit(1);
+
+    expect(replacement).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("applies the override to retries too, not just the first attempt", async () => {
+    const custom = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("boom", { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { fetch: custom as unknown as typeof fetch, maxRetries: 1 },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    expect(custom).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

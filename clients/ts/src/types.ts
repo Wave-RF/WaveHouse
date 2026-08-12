@@ -80,9 +80,37 @@ export interface ClientConfig<_DB extends Database = Database> {
   options?: ClientOptions;
 }
 
+/**
+ * A `fetch`-compatible function. Matches the global `fetch` signature, so
+ * undici's export, `node-fetch`, or a thin wrapper around either satisfies it
+ * without casting.
+ */
+export type FetchLike = typeof fetch;
+
 export interface ClientOptions {
   /** Maximum retry attempts for failed requests. Default: 2. */
   maxRetries?: number;
+  /**
+   * HTTP implementation used for every request. Defaults to the global `fetch`.
+   *
+   * Provide one to route through a proxy, attach client certificates, add
+   * middleware (logging, tracing, circuit breaking), or work around transport
+   * behavior your runtime gets wrong — e.g. an undici dispatcher with a tuned
+   * `keepAliveTimeout`:
+   *
+   * ```ts
+   * import { Agent, fetch as undiciFetch } from "undici";
+   * const dispatcher = new Agent({ keepAliveTimeout: 1_000 });
+   * createClient({
+   *   baseURL,
+   *   options: { fetch: (url, init) => undiciFetch(url, { ...init, dispatcher }) },
+   * });
+   * ```
+   *
+   * Only the request path is affected — streaming (`.stream()`, `.liveQuery()`)
+   * goes through `EventSource`, which this does not replace.
+   */
+  fetch?: FetchLike;
 }
 
 // --- Structured query AST (matches backend wire format) ---
@@ -276,5 +304,9 @@ export interface StreamOptions {
 export interface HttpContext {
   baseURL: string;
   auth?: () => Promise<string> | string;
-  options: { maxRetries: number };
+  // `fetch` stays optional here rather than being defaulted at construction:
+  // resolving it per call keeps the global late-bound, so replacing
+  // `globalThis.fetch` after a client exists still works (vi.stubGlobal does
+  // exactly that).
+  options: { maxRetries: number; fetch?: FetchLike };
 }
