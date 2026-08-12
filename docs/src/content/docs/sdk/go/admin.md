@@ -3,15 +3,11 @@ title: "Go SDK Admin & System"
 description: "Schema introspection, access-control policy, DLQ stats, and health checks in the WaveHouse Go SDK."
 ---
 
-Operational surfaces of `github.com/Wave-RF/WaveHouse/clients/go`.
-Everything here except `client.Sys.Health` requires the admin role
-(`policy.admin_role`) — see [Access Control](/access-control) for how roles
-resolve. Compare with the TypeScript SDK's [Admin & System](/sdk/admin)
-page.
+Operational surfaces of `github.com/Wave-RF/WaveHouse/clients/go`. All except `client.Sys.Health` require the admin role (`policy.admin_role`)—see [Access Control](/access-control) and the TypeScript SDK's [Admin & System](/sdk/admin) page.
 
 ## Schema — `client.Schema`
 
-Introspect ClickHouse table schemas.
+Introspect ClickHouse table schemas. `Schema.List`, `Schema.Refresh`, and `From(t).Schema` hit the **admin-only** `/v1/schema*`; against any non-dev policy (anything but `default_role: admin`) build the client with an admin-role token or they return a `*wavehouse.Error` with `Status: 403`.
 
 ```go
 // List all table schemas.
@@ -22,20 +18,13 @@ schemas, err := wh.Schema.List(ctx)
 err = wh.Schema.Refresh(ctx)
 ```
 
-Individual table schema is also available via `wh.From("clicks").Schema(ctx)`.
-
-> `wh.Schema.List`, `wh.Schema.Refresh`, and `wh.From(t).Schema` hit
-> `/v1/schema*`, which are **admin-only** endpoints. Against any non-dev
-> policy (anything but `default_role: admin`), construct the client with an
-> admin-role token or these calls return a `*wavehouse.Error` with
-> `Status: 403`.
+Individual table schema: `wh.From("clicks").Schema(ctx)`.
 
 ---
 
 ## Policy — `client.Policy`
 
-Manage Hasura-style access control policies. Requires the admin role
-(`policy.admin_role`).
+Manage Hasura-style access control policies (admin role required).
 
 ```go
 // Get current policy.
@@ -66,10 +55,7 @@ result, err := wh.Policy.Validate(ctx, policyDraft)
 // result.Valid == true, or err wraps the validation failure details
 ```
 
-`PolicyFilter`'s fields (`Eq`, `Neq`, `Gt`, `Lt`, `In`) are `*string`, not
-`string` — an intentional empty-string comparison round-trips distinctly
-from an absent operator. Take the address of a local variable (as above) or
-write a small helper if you find yourself doing this often:
+`PolicyFilter` fields (`Eq`, `Neq`, `Gt`, `Lt`, `In`) are `*string` to distinguish empty strings from absent operators. Use a helper:
 
 ```go
 func strPtr(s string) *string { return &s }
@@ -79,7 +65,7 @@ func strPtr(s string) *string { return &s }
 
 ## DLQ — `client.DLQ`
 
-Dead Letter Queue operations. Requires the admin role (`policy.admin_role`).
+Dead Letter Queue operations (admin role required).
 
 ```go
 // Get DLQ statistics.
@@ -91,17 +77,13 @@ stats, err := wh.DLQ.List(ctx)
 stats, err = wh.DLQ.Table(ctx, "clicks")
 ```
 
-`wh.DLQ.Stream(opts)` exists in the API but is **not yet functional**:
-there is no server-side DLQ stream today (the SSE bridge only carries
-`ingest.>` subjects), so it connects and receives no events — live DLQ
-streaming is tracked in
-[#197](https://github.com/Wave-RF/WaveHouse/issues/197).
+`wh.DLQ.Stream(opts)` is **not yet functional**: no server-side DLQ stream exists (the SSE bridge carries only `ingest.>` subjects), so it connects and receives nothing. Tracked in [#197](https://github.com/Wave-RF/WaveHouse/issues/197).
 
 ---
 
 ## System — `client.Sys`
 
-Content-free server-online check.
+Server-online check.
 
 ```go
 // Health hits the public, content-free /v1/health route — 200 → nil error,
@@ -113,7 +95,4 @@ if err := wh.Sys.Health(ctx); err != nil {
 }
 ```
 
-> Readiness (`/readyz`) is intentionally **not** exposed through the SDK —
-> it runs a ClickHouse query per call and is a load-balancer / reverse-proxy
-> concern, not the client's. Probe `/readyz` directly from your
-> orchestrator if you need it.
+> Readiness (`/readyz`) is intentionally **not** exposed through the SDK — it runs a ClickHouse query per call and is a load-balancer / reverse-proxy concern. Probe it directly from your orchestrator.

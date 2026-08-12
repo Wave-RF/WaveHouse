@@ -14,15 +14,11 @@ a `context.Context` or a browser's `EventSource`.
 
 ## Streaming
 
-Streams use SSE (Server-Sent Events), parsed by hand over `net/http` (no
-third-party SSE library — the SDK has zero runtime dependencies).
+Streams use SSE (Server-Sent Events) parsed via `net/http` with zero runtime dependencies.
 
 ### `*StreamController`
 
-Returned by `.Stream(opts)` on `*TableRef`, `*QueryBuilder`, `*PipeRef`, and
-`*DLQNamespace` (the DLQ variant is not yet functional server-side —
-[#197](https://github.com/Wave-RF/WaveHouse/issues/197)). Calling `.Stream`
-returns immediately; the connection opens in a background goroutine.
+Returned by `.Stream(opts)` on `*TableRef`, `*QueryBuilder`, `*PipeRef`, and `*DLQNamespace` (DLQ is not yet functional server-side — [#197](https://github.com/Wave-RF/WaveHouse/issues/197)). Calling `.Stream` returns immediately; the connection opens in a background goroutine.
 
 ```go
 stream := wh.From("clicks").Stream(&wavehouse.StreamOptions{
@@ -33,8 +29,7 @@ defer stream.Close()
 
 ### `.Subscribe(sub) → func()`
 
-Callback-based consumption. Returns an unsubscribe function. The
-subscriber's `Status` callback fires immediately with the current status.
+Callback-based consumption. Returns an unsubscribe function. The `Status` callback fires immediately with the current status.
 
 ```go
 unsub := stream.Subscribe(&wavehouse.StreamSubscriber{
@@ -57,10 +52,11 @@ unsub := stream.Subscribe(&wavehouse.StreamSubscriber{
 defer unsub()
 ```
 
+Cleanup via `unsub()` removes the subscriber; the connection remains open for others and must be closed with `stream.Close()`.
+
 ### Channel-based consumption — `.Events()`
 
-The idiomatic Go alternative to the TypeScript SDK's async iterator: a
-read-only channel, closed automatically when the stream shuts down.
+A read-only channel, closed automatically when the stream shuts down.
 
 ```go
 stream := wh.From("clicks").Stream(nil)
@@ -75,26 +71,14 @@ for event := range stream.Events() {
 ```
 
 :::caution[`break` does not close the stream]
-Unlike the TypeScript SDK's async iterator — where breaking out of a
-`for await` loop auto-closes the underlying connection — breaking a Go
-`for range stream.Events()` loop only stops consuming from the channel; the
-background goroutine and its HTTP connection keep running. Always pair a
-stream with `defer stream.Close()` (or an explicit `stream.Close()` on every
-exit path) regardless of which consumption style you use.
+Unlike the TypeScript SDK's async iterator, where breaking a `for await` loop closes the connection, breaking a Go `for range stream.Events()` loop only stops consumption — the background goroutine and HTTP connection persist. Always `defer stream.Close()`.
 :::
 
-The channel is buffered (256 events); a slow consumer that never drains it
-causes the SDK to **drop** new events for that channel rather than block the
-stream's read loop — the first drop logs one line via the standard `log`
-package, further drops are silent (`.Subscribe` callbacks still fire per
-event regardless of channel backpressure).
+The channel is buffered (256 events). A slow consumer makes the SDK **drop** new events for that channel rather than block the read loop. The first drop logs via `log`; later drops are silent (`.Subscribe` callbacks fire regardless).
 
 ### `.Close()`
 
-Explicitly close the stream and release its resources. Non-blocking — safe
-to call from inside a subscriber callback (which runs on the stream's own
-goroutine); it signals the goroutine to stop without waiting for it to
-finish.
+Explicitly closes the stream and releases resources. Non-blocking and safe to call from inside a subscriber callback.
 
 ```go
 stream.Close()
@@ -102,8 +86,7 @@ stream.Close()
 
 ### `.Status()`
 
-Returns the current `StreamStatus`. A method (not a field), since Go has no
-JS-style reactive property access.
+Returns the current `StreamStatus`.
 
 ```go
 status := stream.Status()
@@ -111,11 +94,7 @@ status := stream.Status()
 
 ### `.Connected(ctx)`
 
-**Go-only addition** — not present in the TypeScript SDK. Blocks until the
-stream reaches `StatusLive` or `ctx` is canceled; returns an error if the
-stream closes before connecting. Useful when you need to know a stream is
-live before doing something else (e.g. before starting a producer in a
-test).
+Blocks until the stream reaches `StatusLive` or `ctx` is canceled; returns an error if the stream closes before connecting. Useful for ensuring a stream is live (e.g., in tests).
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -131,8 +110,7 @@ if err := stream.Connected(ctx); err != nil {
 | ----- | ---- | ----------- |
 | `Since` | `string` | RFC3339 timestamp for gap-fill replay |
 
-There's no `Signal`/context field here — a stream isn't canceled by passing
-a `context.Context` into `.Stream()`; call `.Close()` instead (see above).
+There's no `Signal`/context field: a stream isn't canceled by passing a `context.Context` into `.Stream()` — call `.Close()` instead.
 
 ### `StreamEvent`
 
@@ -145,48 +123,26 @@ type StreamEvent struct {
 ```
 
 :::note[`Events()` carries events only]
-`Error` and `Status` are delivered exclusively through `.Subscribe(...)` —
-the channel is typed `chan StreamEvent` and simply ends (closes) when the
-stream closes, including on a terminal 401/403/404. Pair `Events()` with a
-`Subscribe(&StreamSubscriber{Error: ..., Status: ...})` if you need to know
-*why* a stream ended.
+`Error` and `Status` are delivered exclusively via `.Subscribe(...)`. The channel closes on terminal errors (401/403/404). Pair `Events()` with a subscriber to determine why a stream ended.
 :::
 
 :::note[The channel buffers from stream construction]
-Events buffer into the channel (up to 256) from the moment `.Stream()`
-constructs the stream, matching the TypeScript SDK — events arriving before
-your first `Events()` call are **not** lost, so you don't have to call
-`Events()` immediately. A consumer that never drains the channel still
-drops everything past the 256th buffered event (with the one-time log line
-described above).
+Events buffer (up to 256) starting at `.Stream()`; events arriving before the first `Events()` call are not lost.
 :::
 
 ### Transport Behavior
 
 | Transport | Reconnect | Protocol |
 | --------- | --------- | -------- |
-| SSE | Automatic, with exponential backoff (capped at 30s) and gap-fill replay via the last-seen event ID | HTTP/2 recommended |
+| SSE | Automatic, exponential backoff (max 30s), gap-fill replay via last event ID | HTTP/2 recommended |
 
-Reconnect covers transport failures and retryable (5xx/429) responses. A
-non-retryable response (401/403/404) is terminal: the error is delivered to
-the subscriber's `Error` callback, status goes to `StatusClosed`, and the
-stream does not reconnect — fix the cause (refresh the token, correct the
-table) and open a new stream. An `Auth` provider error during a (re)connect
-is treated as retryable (`SSE_ERROR`) and the stream keeps reconnecting —
-`ClientOptions.MaxRetries` bounds request retries only, not stream
-reconnects — so call `.Close()` if your token provider is failing
-permanently.
+Reconnect covers transport failures and retryable (5xx/429) responses. Non-retryable ones (401/403/404) are terminal: the `Error` callback fires, status goes `StatusClosed`, no reconnect. `Auth` provider errors during (re)connect are retryable (`SSE_ERROR`) and reconnects continue — `ClientOptions.MaxRetries` bounds request retries only, not stream reconnects — so call `.Close()` if the provider fails permanently.
 
-Auth is sent as an `Authorization: Bearer` header on every stream
-(re)connection — see
-[the note in the Getting Started guide](/sdk/go#creating-a-client). The
-TypeScript SDK's "more than 5 concurrent connections" warning is a
-browser-specific `EventSource` limit and doesn't apply here.
+Auth goes as an `Authorization: Bearer` header on every connection ([note in Getting Started](/sdk/go#creating-a-client)). Browser `EventSource` limits don't apply.
 
 ### Client-Side Stream Filtering
 
-When a `*QueryBuilder` with `.Where()` filters or `.Select()` columns calls
-`.Stream()`, the returned stream applies those filters client-side:
+When a `*QueryBuilder` with `.Where()` or `.Select()` calls `.Stream()`, filters are applied client-side:
 
 ```go
 stream := wh.From("clicks").
@@ -197,22 +153,11 @@ stream := wh.From("clicks").
 // Only events where page == "/home" are emitted, with only page + button fields
 ```
 
-Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`,
-`OpIn`, `OpLike`, `OpNotLike` — the same `FilterOp` set `.Where()` takes
-everywhere (the SDK maps them to wire tokens such as `eq`/`neq` internally).
-`OpLike` / `OpNotLike` match SQL LIKE semantics (`%` → any run of
-characters, `_` → any single character), case-insensitively. `OpIn` accepts
-any Go slice type on the right-hand side (`[]string`, `[]int`, `[]any`,
-...), not just `[]any`.
-
----
+Supported operators: `OpEq`, `OpNeq`, `OpGt`, `OpGte`, `OpLt`, `OpLte`, `OpIn`, `OpLike`, `OpNotLike` — the `FilterOp` set `.Where()` takes everywhere (mapped to wire tokens `eq`/`neq`). `OpLike`/`OpNotLike` use SQL LIKE semantics (`%`, `_`), case-insensitively. `OpIn` accepts any Go slice type (e.g., `[]string`, `[]int`).
 
 ## Live Queries
 
-Live queries combine a historical backfill (`.FetchUntyped`) with a
-real-time stream, providing a seamless initial-load + live-updates
-experience. Only available on `*QueryBuilder` (there's no `TableRef.LiveQuery`
-shortcut, matching the TypeScript SDK).
+Live queries combine a historical backfill (`.FetchUntyped`) with a real-time stream for seamless initial loads and updates. They are available only on `*QueryBuilder` (no `TableRef.LiveQuery` shortcut), matching the TypeScript SDK.
 
 ```go
 lq := wh.From("clicks").
@@ -254,51 +199,31 @@ type StreamSubscriber struct {
 ```
 
 :::note[`Initial` is always untyped]
-Unlike the TypeScript SDK's `initial: (result: Result<T[]>) => void`, the Go
-SDK's `LiveQuery` doesn't accept a type parameter — `Initial` always
-receives `[]map[string]any` plus a plain `error`, even if you'd otherwise
-use `wavehouse.FetchTyped[Row]` for the same query outside a live query.
-Decode into your own type inside the callback if you need one.
+Unlike the TypeScript SDK's `initial: (result: Result<T[]>) => void`, Go's `LiveQuery` takes no type parameter: `Initial` always receives `[]map[string]any` plus a plain `error`, even if you'd use `wavehouse.FetchTyped[Row]` for the same query outside a live query. Decode inside the callback if needed.
 :::
 
 ### How it works
 
-1. Subscribes to the stream **immediately** and buffers incoming events.
-2. Runs the `.FetchUntyped(ctx)` query for historical data, calls
-   `sub.Initial(rows, err)` with the result.
-3. Deduplicates buffered events against the **newest** `received_timestamp`
-   in the backfill — the maximum across all rows, not the last row's (an
-   `OrderBy(..., "desc")` puts the *oldest* row last).
-4. Flushes remaining buffered events (re-checking for anything that arrived
-   mid-flush) and switches to live mode.
+1. Subscribes to the stream immediately and buffers events.
+2. Runs `.FetchUntyped(ctx)` for historical data, then calls `sub.Initial(rows, err)`.
+3. Deduplicates buffered events against the maximum `received_timestamp` in the backfill (not necessarily the last row).
+4. Flushes remaining buffered events and switches to live mode.
 
-This "stream-first" approach ensures no events are lost between the fetch
-and stream start.
+This "stream-first" approach prevents event loss between fetch and stream start.
 
 :::caution[Dedup needs `received_timestamp` in the projection]
-The dedup bound comes from the backfill rows' `received_timestamp` values.
-`.SelectAll()` (or no projection) includes it; a `.Select(...)` projection
-that omits it disables dedup, and events in the fetch/stream overlap window
-are delivered twice — once in `Initial`, again via `Next`.
+Dedup relies on `received_timestamp`. `.SelectAll()` (or no projection) includes it; a `.Select(...)` omitting it disables dedup, causing events in the overlap window to be delivered twice (via `Initial` and `Next`).
 :::
 
 :::caution[`OpLike` matching differs between backfill and live]
-Client-side `OpLike` matching is case-**insensitive**, but the backfill runs
-server-side where the operator compiles to ClickHouse `LIKE`, which is
-case-**sensitive**. A live query filtering on `OpLike` can therefore
-disagree with itself: the backfill excludes rows the live stream includes.
-Tracked in [#451](https://github.com/Wave-RF/WaveHouse/issues/451).
+Client-side `OpLike` is case-insensitive, but server-side backfills use ClickHouse `LIKE`, which is case-sensitive. Consequently, a live query filtering on `OpLike` may exclude rows in the backfill that it includes in the live stream ([#451](https://github.com/Wave-RF/WaveHouse/issues/451)).
 
-`OpNotLike` never reaches the backfill at all — `/v1/query` rejects the
-operator with a `400`, so a live query filtering on it fails its `Initial`
-callback. See the operator table in
-[Queries](/sdk/go/queries#wherecolumn-op-value).
+`OpNotLike` is rejected by `/v1/query` with a `400`, causing `Initial` callbacks to fail. See [Queries](/sdk/go/queries#wherecolumn-op-value).
 :::
 
 ### `.Close()`
 
-Shuts down the live query and its underlying stream. Safe to call more than
-once (idempotent via `sync.Once`).
+Shuts down the live query and its underlying stream. Safe to call more than once (idempotent via `sync.Once`).
 
 ```go
 lq.Close()

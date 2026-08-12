@@ -14,8 +14,7 @@ chainable builder methods and `.Stream(opts)` are the exceptions — see
 
 ## Tables — `client.From(table)`
 
-`From` returns a `*TableRef` — a reference to a table. It performs no
-request by itself, so it's safe to store in a variable or pass around.
+`From` returns a `*TableRef`. It performs no request, making it safe to store or pass around.
 
 ```go
 clicks := wh.From("clicks")
@@ -23,17 +22,9 @@ clicks := wh.From("clicks")
 
 ### `.Fetch(ctx)`
 
-Shortcut for "select every column", with a default limit of 1000
-(`wavehouse.DefaultLimit`). Internally it's
-`t.SelectAll().Limit(DefaultLimit).FetchUntyped(ctx)` — unlike the
-TypeScript SDK's `.fetch(opts?)`, there's no options struct to override the
-limit or attach anything per-call; chain `.SelectAll().Limit(n)` yourself
-(see [Query Builder](#query-builder)) if you need a different limit.
+Shortcut for "select every column" with a default limit of 1000 (`wavehouse.DefaultLimit`). Internally it is `t.SelectAll().Limit(DefaultLimit).FetchUntyped(ctx)`. Unlike the TypeScript SDK's `.fetch(opts?)`, there is no options struct to override the limit or attach anything per-call; chain `.SelectAll().Limit(n)` yourself ([Query Builder](#query-builder)).
 
-When an access-control policy restricts your role's columns, the server
-returns only the columns your role is allowed to read — `.Fetch()` is never
-a way around `deny_columns`/`allow_columns` (see
-[Access control](/access-control#column-permissions)).
+Access-control policies restrict returned columns; `.Fetch()` cannot bypass `deny_columns`/`allow_columns` (see [Access control](/access-control#column-permissions)).
 
 ```go
 page, err := clicks.Fetch(ctx)
@@ -45,23 +36,14 @@ for _, row := range page.Data {
 }
 ```
 
-To paginate, use the query builder with an explicit `.OrderBy()` instead —
-see [Pagination](#pagination).
+For pagination, use the query builder with `.OrderBy()` (see [Pagination](#pagination)).
 
 ### `.Insert(ctx, data)`
 
-Insert one row or many. What you pass determines the wire format:
+Inserts one or many rows based on the input type:
 
-- A single **map or struct** (anything that isn't a slice — plus `[]byte`,
-  which is treated as one opaque value rather than a batch of numbers, and
-  would reach the server as a base64 string it rejects; pass raw NDJSON
-  through `.InsertNDJSON(ctx, string(raw))` instead) is sent as JSON:
-  `POST /v1/ingest?table={table}`.
-- **Any slice** — `[]map[string]any`, a generated/user-defined row type like
-  `[]ClickRow`, etc. — is serialized to NDJSON (one record per line, via
-  reflection for non-`[]map[string]any` slices) and sent as a single
-  `application/x-ndjson` request, so a bad record doesn't fail or hide the
-  rest of the batch. Per-record outcomes come back in the result.
+- **Map or struct** (excluding slices and `[]byte`): Sent as JSON via `POST /v1/ingest?table={table}`. For raw NDJSON, use `.InsertNDJSON`.
+- **Any slice** (`[]map[string]any`, `[]ClickRow`, etc.): Serialized to NDJSON via reflection and sent as one `application/x-ndjson` request. Per-record outcomes are returned in the result.
 
 ```go
 // Single row → InsertResult{OK: true} (or Duplicate: &true when dedup skips it)
@@ -85,23 +67,13 @@ res, err = clicks.Insert(ctx, []ClickRow{
 })
 ```
 
-For a batch insert, `res.OK` is `true` only when every record succeeded
-(`*res.Failed == 0`). Inspect `res.Failed` and `res.Results` (each
-`InsertRecordResult{Index, OK, Duplicate, Error}`, 1-based `Index`) for
-partial failures — the returned `error` is reserved for whole-request
-failures (network, `404` unknown table, `403` forbidden, `503`
-backpressure). An empty slice is a no-op and sends no request.
+For batches, `res.OK` is `true` only if all records succeeded (`*res.Failed == 0`). Check `res.Failed` and `res.Results` (each `InsertRecordResult{Index, OK, Duplicate, Error}`, 1-based `Index`) for partial failures. The returned `error` indicates whole-request failures (network, `404`, `403`, `503`). Empty slices are no-ops.
 
-> The server itself is format-agnostic: `POST /v1/ingest` also accepts a raw
-> JSON array or a single object directly (the `Content-Type` is only a
-> hint), so non-SDK clients can send whichever shape is convenient. See the
-> [API reference](/api#post-v1ingesttabletable--ingest-data).
+> The server is format-agnostic: `POST /v1/ingest` also accepts a raw JSON array or a single object (`Content-Type` is only a hint). See [API reference](/api#post-v1ingesttabletable--ingest-data).
 
 ### `.InsertNDJSON(ctx, ndjson)`
 
-Insert pre-formatted NDJSON you already have, as a plain `string` — a file
-you've read, or a string you built yourself — without first parsing it into
-Go values. Returns the same per-record summary as a slice `Insert`.
+Inserts pre-formatted NDJSON as a `string` without parsing it into Go values. Returns the same summary as slice `Insert`.
 
 ```go
 // From a literal string.
@@ -117,7 +89,7 @@ res, err = clicks.InsertNDJSON(ctx, string(raw))
 
 ### `.Schema(ctx)`
 
-Fetch the table's column definitions from ClickHouse. Admin-only.
+Fetch table column definitions from ClickHouse. Admin-only.
 
 ```go
 schema, err := clicks.Schema(ctx)
@@ -138,13 +110,7 @@ page, err := clicks.Select("page", "button").
 
 ### `.SelectAll()`
 
-Start a query that selects **every column your role is allowed to read** —
-the explicit form of what `.Fetch()` does. Mutually exclusive with
-`.Select(...)` and with aggregations (`.Count()`, `.Sum()`, etc.); for a
-column-restricted role the server expands it to exactly that role's allowed
-columns rather than a bare `SELECT *` (unrestricted/admin roles do get
-`SELECT *`), and it never bypasses `deny_columns`/`allow_columns`. See
-[Access control → Column permissions](/access-control#column-permissions).
+Selects every column your role is allowed to read. This is the explicit version of `.Fetch()`. It is mutually exclusive with `.Select(...)` and aggregations (`.Count()`, `.Sum()`). For restricted roles, the server expands this to allowed columns rather than a bare `SELECT *`; it never bypasses `deny_columns`/`allow_columns` (see [Access control → Column permissions](/access-control#column-permissions)).
 
 ```go
 page, err := clicks.SelectAll().Where("country", wavehouse.OpEq, "US").Limit(10).FetchUntyped(ctx)
@@ -158,15 +124,9 @@ Open a real-time event subscription. See [Streaming](/sdk/go/streaming).
 stream := clicks.Stream(&wavehouse.StreamOptions{Since: "2026-01-01T00:00:00Z"})
 ```
 
----
-
 ## Query Builder
 
-Returned by `tableRef.Select()`. Immutable — every chain method returns a
-new `*QueryBuilder`, so intermediate values can be reused safely. Unlike the
-TypeScript SDK's `PromiseLike` builder, a Go `*QueryBuilder` doesn't
-auto-execute — call `.FetchUntyped(ctx)` or the package-level
-`wavehouse.FetchTyped[Row](ctx, builder)` explicitly:
+Returned by `tableRef.Select()`. Immutable—every chain method returns a new `*QueryBuilder`. Unlike the TypeScript SDK, Go builders do not auto-execute; call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly:
 
 ```go
 page, err := clicks.Select("page").Limit(10).FetchUntyped(ctx)
@@ -174,12 +134,11 @@ page, err := clicks.Select("page").Limit(10).FetchUntyped(ctx)
 
 ### Chain Methods
 
-All methods return a new `*QueryBuilder` — the original is unchanged.
+All methods return a new `*QueryBuilder`; the original remains unchanged.
 
 #### `.Select(...columns)`
 
-Append columns to the SELECT clause. A literal `"*"` is the column *named*
-`*`, not a wildcard — use `.SelectAll()` for all columns.
+Append columns to the SELECT clause. A literal `"*"` is treated as a column named `*`—use `.SelectAll()` for all columns.
 
 ```go
 q := clicks.Select("page").Select("button") // SELECT page, button
@@ -187,10 +146,7 @@ q := clicks.Select("page").Select("button") // SELECT page, button
 
 #### `.SelectAll()`
 
-Select every column your role may read (the all-columns wildcard; a
-column-restricted role's projection is expanded server-side to its allowed
-columns). Mutually exclusive with `.Select(...)` and with aggregations
-(`.Count()`, `.Sum()`, etc.).
+Selects every readable column (expanded server-side based on role). Mutually exclusive with `.Select(...)` and aggregations (`.Count()`, `.Sum()`, etc.).
 
 ```go
 q := clicks.Select().SelectAll().Where("country", wavehouse.OpEq, "US")
@@ -198,7 +154,7 @@ q := clicks.Select().SelectAll().Where("country", wavehouse.OpEq, "US")
 
 #### `.Where(column, op, value)`
 
-Add a filter condition, using the `FilterOp` constants:
+Add a filter using `FilterOp` constants:
 
 ```go
 clicks.Select("page").
@@ -214,9 +170,9 @@ clicks.Select("page").
 | `wavehouse.OpGte` | `gte` | Greater than or equal |
 | `wavehouse.OpLt` | `lt` | Less than |
 | `wavehouse.OpLte` | `lte` | Less than or equal |
-| `wavehouse.OpIn` | `in` | Value in array — accepts a Go slice of any element type (`[]string`, `[]int`, `[]any`, ...) |
+| `wavehouse.OpIn` | `in` | Value in array (accepts any Go slice) |
 | `wavehouse.OpLike` | `like` | SQL LIKE pattern |
-| `wavehouse.OpNotLike` | `not_like` | SQL NOT LIKE — **client-side only** (live-query / stream filtering); the `/v1/query` backend rejects the token |
+| `wavehouse.OpNotLike` | `not_like` | SQL NOT LIKE — **client-side only**; `/v1/query` rejects this token |
 
 #### Aggregations
 
@@ -231,19 +187,9 @@ clicks.Select("page").
     Aggregate("uniqExact", "user_id", "unique_users") // allowlisted fn
 ```
 
-Custom function names pass through `.Aggregate(fn, column, alias)` but are
-validated server-side against a fixed allowlist (matched case-insensitively):
-`count`, `sum`, `avg`, `min`, `max`, `countDistinct`, `uniq`, `uniqExact`,
-`any`, `anyLast`, `argMin`, `argMax`, `groupArray`, `median`, `quantile`,
-`stddevPop`, `stddevSamp`, `varPop`, `varSamp`. Anything else is rejected
-with `400 unsupported aggregation function`.
+Custom functions via `.Aggregate(fn, column, alias)` are validated server-side (case-insensitive). Allowlist: `count`, `sum`, `avg`, `min`, `max`, `countDistinct`, `uniq`, `uniqExact`, `any`, `anyLast`, `argMin`, `argMax`, `groupArray`, `median`, `quantile`, `stddevPop`, `stddevSamp`, `varPop`, `varSamp`. Others return `400 unsupported aggregation function`.
 
-`Count`/`Sum`/`Avg`/`Min`/`Max`/`CountDistinct` take `(column, alias
-string)`; `Aggregate` takes `(fn, column, alias string)`. Empty-alias
-defaults: `Count` → `count` (and `column=""` becomes `*`); `Sum`/`Avg`/
-`Min`/`Max` → `sum_<column>`/`avg_<column>`/`min_<column>`/`max_<column>`;
-`CountDistinct` → `count_distinct_<column>`. `Aggregate` has **no** alias
-default — pass one explicitly or the query is sent with `"alias": ""`.
+`Count`/`Sum`/`Avg`/`Min`/`Max`/`CountDistinct` take `(column, alias)`; `Aggregate` takes `(fn, column, alias)`. Empty-alias defaults: `Count` → `count` (and `column=""` becomes `*`); `Sum`/`Avg`/`Min`/`Max` → `sum_<column>`/`avg_<column>`/`min_<column>`/`max_<column>`; `CountDistinct` uses `count_distinct_<column>`. `Aggregate` has no default; pass one or it is sent as `""`.
 
 #### `.GroupBy(...columns)`
 
@@ -257,7 +203,7 @@ clicks.Select("page").Count("", "").GroupBy("page")
 clicks.Select("page").Count("", "total").OrderBy("total", "desc")
 ```
 
-`dir` defaults to `"asc"` when passed as `""`.
+`dir` defaults to `"asc"` if `""`.
 
 #### `.Limit(n)`
 
@@ -265,16 +211,11 @@ clicks.Select("page").Count("", "total").OrderBy("total", "desc")
 clicks.Select().Limit(100)
 ```
 
-If no limit is specified, `wavehouse.DefaultLimit` (1000) is applied
-automatically to prevent unbounded result sets. The server also enforces the
-configured maximum (`query.default_max_rows`, default 10,000 rows).
+If unspecified, `wavehouse.DefaultLimit` (1000) is applied. The server also enforces a maximum (`query.default_max_rows`, default 10,000).
 
 #### `.TimeRange(column, since, until)`
 
-Filter by a time window. `since` and `until` accept RFC3339 timestamps or
-relative durations (`"1h"`, `"30m"`, `"7d"`, `"2w"` — day and week suffixes
-expand to hours, so `"7d"` is `"168h"`). Pass `""` for `until` to leave it
-open-ended.
+Filter by time window. `since`/`until` accept RFC3339 timestamps or relative durations (`"1h"`, `"30m"`, `"7d"`, `"2w"`; day/week suffixes expand to hours, so `"7d"` is `"168h"`). Pass `""` for `until` for open-ended ranges.
 
 ```go
 clicks.Select("page").TimeRange("received_timestamp", "1h", "")
@@ -285,11 +226,7 @@ clicks.Select("page").TimeRange(
 
 #### `.CacheTTL(seconds)`
 
-Records a desired result-cache TTL on the builder. **Currently client-side
-state only** — the value is never sent to the server, which derives each
-result's cache TTL adaptively from query execution time. Wiring it through
-the wire format is tracked in
-[#280](https://github.com/Wave-RF/WaveHouse/issues/280).
+Sets a desired result-cache TTL. **Currently client-side only**; the server derives TTL adaptively from execution time. See [#280](https://github.com/Wave-RF/WaveHouse/issues/280).
 
 ```go
 clicks.Select("page").Count("", "").CacheTTL(300) // not yet honored server-side — see #280
@@ -297,8 +234,7 @@ clicks.Select("page").Count("", "").CacheTTL(300) // not yet honored server-side
 
 ### `wavehouse.FetchTyped[Row](ctx, q)`
 
-Execute the query and decode rows into `[]Row`. Package-level generic
-function (Go has no generic methods) — takes the builder as its argument.
+Executes the query and decodes rows into `[]Row`.
 
 ```go
 type PageCount struct {
@@ -314,8 +250,7 @@ page, err := wavehouse.FetchTyped[PageCount](ctx,
 
 ### `.FetchUntyped(ctx)`
 
-Execute the query and decode rows into `[]map[string]any`. The ordinary
-(non-generic) method form of `FetchTyped`.
+Executes the query and decodes rows into `[]map[string]any`.
 
 ```go
 page, err := clicks.Select("page").OrderBy("page", "asc").Limit(50).FetchUntyped(ctx)
@@ -333,9 +268,7 @@ if page.HasMore && page.Next != nil {
 
 ### `.Stream(opts)`
 
-Open a live stream from the builder's table, applying `.Where()`/`.Select()`
-filters and column projection client-side. See
-[Streaming](/sdk/go/streaming).
+Opens a live stream from the builder's table with client-side filtering and projection. See [Streaming](/sdk/go/streaming).
 
 ### Pagination
 
@@ -349,30 +282,11 @@ type Page[T any] struct {
 }
 ```
 
-When `Limit` is set and the result contains at least that many rows,
-`HasMore` is `true`. Cursor-based pagination's `Next` walks the **first**
-`.OrderBy()` column — it adds a filter on that column using the last row's
-value — so `Next` is only attached when the query has an explicit
-`.OrderBy()`. With no order column the result still reports `HasMore`
-honestly, but `Next` is `nil` (there is no deterministic cursor to build) —
-add an `.OrderBy()` to paginate. If the order column was left out of an
-explicit `.Select(...)` projection, `Next` quietly returns an empty page
-instead of erroring (there is no cursor value to read).
+If `Limit` is set and results meet that limit, `HasMore` is `true`. `Next` walks the **first** `.OrderBy()` column using a filter on the last row's value; thus, `Next` requires an explicit `.OrderBy()`. Without one, `Next` is `nil`. If the order column is omitted from `.Select(...)`, `Next` returns an empty page.
 
-The cursor filter is strict (`gt`/`lt` against the last row's value) and uses
-only that first `.OrderBy()` column, with no tie-breaker — so rows sharing the
-boundary value with the last row of a page are skipped. Paginate on a column
-that is unique per row (or made unique by a monotonic timestamp), or accept
-that ties at a page edge can be dropped. The TypeScript SDK's `next()` has the
-same limitation ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
+The cursor filter is strict (`gt`/`lt` on the first `.OrderBy()` column, no tie-breaker), so rows sharing a boundary value with the last row are skipped. Paginate on a per-row-unique column, or accept dropped ties; the TypeScript SDK's `next()` has the same limitation ([#452](https://github.com/Wave-RF/WaveHouse/issues/452)).
 
-One precision caveat on the untyped path (`FetchUntyped` / `TableRef.Fetch`):
-rows decode into `map[string]any`, where JSON numbers become `float64`, so an
-integer cursor column loses exactness past 2^53 and pagination can repeat or
-skip a row at that scale — the same ceiling the TypeScript SDK has with JS
-numbers. `FetchTyped` with an `int64` field keeps the cursor exact, and
-codegen structs are unaffected (their 64-bit integer columns are `int64`/
-`uint64`, decoded exactly).
+On the untyped path (`FetchUntyped` / `TableRef.Fetch`), JSON numbers decode as `float64`, so integer cursors lose exactness past 2^53 and pagination can repeat or skip a row. `FetchTyped` with an `int64` field, or codegen structs, keep it exact.
 
 ```go
 page, err := clicks.Select().
@@ -393,21 +307,9 @@ for page.HasMore && page.Next != nil {
 }
 ```
 
----
-
 ## Raw SQL — `wavehouse.SQL[Row](ctx, client, query)`
 
-Execute a raw SQL query. `/v1/admin/query` is admin-only: for JWT callers,
-the token must resolve to the policy admin role (`admin_role`, `"admin"` by
-default) — a JWT request with no token, or an invalid/expired one, falls
-back to the `default_role`, and is rejected unless the deployment sets
-`default_role` to the admin role (permitted, but dev-only). Alternatively, a configured
-operator key (`Authorization: Operator <key>` or `X-Operator-Key`)
-authorizes `/v1/admin/*` without a JWT — but note `Config.Auth` always
-sends its token as `Bearer <token>`, so to use an operator key from this
-SDK supply a `Config.HTTPClient` whose `Transport` sets the
-`X-Operator-Key` header on each request. Package-level generic function —
-use `map[string]any` for a dynamic/unknown schema.
+Execute a raw SQL query via `/v1/admin/query`. This endpoint is admin-only: JWT tokens must resolve to the admin role (`admin_role`, default `"admin"`). Requests without valid tokens fall back to `default_role` and are rejected unless `default_role` is set to admin (dev-only). Alternatively, an operator key (`Authorization: Operator <key>` or `X-Operator-Key`) authorizes `/v1/admin/*`. Since `Config.Auth` uses `Bearer <token>`, provide a `Config.HTTPClient` with a `Transport` that sets the `X-Operator-Key` header to use an operator key. Use `map[string]any` for dynamic schemas.
 
 ```go
 rows, err := wavehouse.SQL[map[string]any](ctx, wh,
@@ -426,10 +328,5 @@ typed, err := wavehouse.SQL[PageTotal](ctx, wh,
 ```
 
 :::note[No parameter binding through the SDK]
-Positional `?` substitution is not supported, and the SDK has no way to
-forward ClickHouse-style named params (the `WHERE id = {id:UInt32}` +
-`param_id=42` query-string combo) — the proxy doesn't forward arbitrary
-query-string params and `SQL[Row]` doesn't expose a hook to add them. Inline
-literals into the SQL, or — for safe binding from user-supplied input — use
-the structured query builder (`wh.From(table)...`).
+Positional `?` substitution is unsupported. The SDK cannot forward ClickHouse named params (`WHERE id = {id:UInt32}` + `param_id=42`) because the proxy blocks arbitrary query-string params and `SQL[Row]` lacks a hook to add them. Use inline literals or the structured query builder (`wh.From(table)...`) for safe binding of user input.
 :::

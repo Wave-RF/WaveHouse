@@ -2,7 +2,7 @@
 
 Official Go client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — a schema-aware real-time API gateway for ClickHouse.
 
-**Zero third-party runtime dependencies** — stdlib only.
+**Zero third-party runtime dependencies** (stdlib only).
 
 **[Full SDK documentation on wavehouse.dev](https://wavehouse.dev/sdk/go)**
 
@@ -80,7 +80,7 @@ client = wavehouse.NewClient(wavehouse.Config{
 })
 ```
 
-`BaseURL` may include a path prefix (`https://app.example.com/api/warehouse`) when WaveHouse is served under one. A trailing `/` is trimmed and every request path is appended to it, on both REST and SSE — see [Config](https://wavehouse.dev/sdk/go#config).
+`BaseURL` may include a path prefix (`https://app.example.com/api/warehouse`). A trailing `/` is trimmed, and request paths are appended, for both REST and SSE alike ([Config](https://wavehouse.dev/sdk/go#config)).
 
 ## Typed Queries (Generics)
 
@@ -206,7 +206,7 @@ See the [full type mapping in the docs](https://wavehouse.dev/sdk/go/reference#c
 
 ## Error Handling
 
-Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)` — or a bare `error` for operations with no result body (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). Errors originating from the HTTP exchange are `*wavehouse.Error` — unwrap with `errors.As`. Client-side failures before a request goes out (an `Auth` provider error, a request-body marshal failure) are plain wrapped errors, so handle the `errors.As == false` case too. Streaming lifecycle methods (`Stream`, `Subscribe`, `Close`, and `Connected`) deliver errors through callbacks or plain errors instead:
+Request-response ops return `(T, error)`, or bare `error` for body-less calls (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). HTTP errors are `*wavehouse.Error` (unwrap with `errors.As`); failures before the request goes out (`Auth` provider, body marshal) are plain wrapped errors, so handle `errors.As == false` too. Streaming lifecycle (`Stream`, `Subscribe`, `Close`, `Connected`) reports via callbacks or plain errors:
 
 ```go
 page, err := client.From("clicks").Fetch(ctx)
@@ -218,7 +218,7 @@ if err != nil {
 }
 ```
 
-The HTTP layer retries 5xx, 429, and network errors with exponential backoff (default 2 retries). `Retry-After` on a 503 or 429 is honored, capped at 30s. Context cancellation returns immediately with code `ABORTED`.
+The HTTP layer retries 5xx, 429, and network errors with exponential backoff (2 retries by default). `Retry-After` on 503/429 is honored, capped at 30s. Context cancellation returns `ABORTED` immediately.
 
 ## License
 

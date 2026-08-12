@@ -20,7 +20,7 @@ either page mostly carries over.
 go get github.com/Wave-RF/WaveHouse/clients/go
 ```
 
-Requires Go 1.24 or later (the module's `go.mod` floor — deliberately a supported-releases floor rather than the server's patch-pinned toolchain).
+Requires Go 1.24+ (the `go.mod` floor, matching supported releases rather than server's patch-pinned toolchain).
 
 ## Import
 
@@ -28,9 +28,7 @@ Requires Go 1.24 or later (the module's `go.mod` floor — deliberately a suppor
 import wavehouse "github.com/Wave-RF/WaveHouse/clients/go"
 ```
 
-The package name is `wavehouse`; aliasing the import isn't required, but
-keeps call sites short (`wavehouse.NewClient(...)`, `wavehouse.OpEq`, ...) —
-every example on these pages assumes it.
+Aliasing `wavehouse` is optional but keeps call sites short; all examples here assume it.
 
 ## Quick Start
 
@@ -65,7 +63,7 @@ func main() {
 }
 ```
 
-See the [README](https://github.com/Wave-RF/WaveHouse/blob/main/clients/go/README.md) for more quick-start examples.
+Find more examples in the [README](https://github.com/Wave-RF/WaveHouse/blob/main/clients/go/README.md).
 
 ## Creating a Client
 
@@ -85,42 +83,28 @@ wh := wavehouse.NewClient(wavehouse.Config{
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `BaseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required). A trailing `/` is trimmed; every request path is appended to it on both transports, so a WaveHouse served under `https://app.example.com/wavehouse` works as-is. |
-| `Auth` | `func(context.Context) (string, error)` | `nil` | Token provider, called before each request. `nil` means unauthenticated access |
-| `Options` | `*ClientOptions` | `nil` | Transport tuning (see below) |
-| `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports (see caution below) |
+| `BaseURL` | `string` | — | Required WaveHouse server URL, optionally with a path prefix. A trailing `/` is trimmed and every request path is appended on both transports, so a server under `https://app.example.com/wavehouse` works as-is. |
+| `Auth` | `func(context.Context) (string, error)` | `nil` | Token provider called before each request. `nil` means unauthenticated access. |
+| `Options` | `*ClientOptions` | `nil` | Transport tuning (see below). |
+| `HTTPClient` | `*http.Client` | fresh `&http.Client{}` | Override for custom TLS, proxies, or test transports. |
 
 :::caution[Timeouts: use contexts, not `http.Client.Timeout`]
-The default client sets no `Timeout` — a `context.Context` deadline is the
-only bound on a request, so pass one for anything that mustn't hang on a
-stalled server. If you supply your own `HTTPClient`, leave `Timeout` unset:
-it covers body reads too, so it would kill every long-lived SSE stream at
-the timeout and force a reconnect loop. Use `Transport`-level dial /
-TLS / response-header timeouts instead.
+The default client has no `Timeout`; use a `context.Context` deadline to prevent hangs. If supplying your own `HTTPClient`, leave `Timeout` unset, as it would kill long-lived SSE streams and force reconnect loops. Use `Transport`-level dial/TLS/response-header timeouts instead.
 :::
 
 ### `ClientOptions`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures) |
+| `MaxRetries` | `int` | `2` | Retry attempts for retryable errors (5xx, 429, network failures). |
 
-A `*Client` is safe for concurrent use by multiple goroutines — client state
-is immutable after `NewClient`, and every builder chain copies. Supply a
-concurrency-safe `Auth` func (it's called from any goroutine that issues a
-request).
+`*Client` is safe for concurrent use; state is immutable after `NewClient` and builder chains copy. Ensure your `Auth` function is concurrency-safe.
 
 :::caution[`Options` opts you out of the default, not just in]
-The default of 2 retries only applies when `Config.Options` is `nil`. If you
-set `Options` to configure anything else in the future, an unset
-`MaxRetries` field is Go's int zero value — `0` — which is a **valid,
-explicit** "no retries" setting, not "use the default." Today `MaxRetries`
-is the struct's only field, so this mostly matters if you pass
-`&wavehouse.ClientOptions{}` and expect retry-by-default: you won't get it.
+The 2-retry default only applies if `Config.Options` is `nil`. If `Options` is provided, an unset `MaxRetries` field defaults to Go's int zero value (`0`), which explicitly disables retries. Passing `&wavehouse.ClientOptions{}` removes the default retry behavior.
 :::
 
-For a static token that never rotates, use `wavehouse.StaticToken(token)`
-instead of writing the closure yourself:
+For static tokens, use `wavehouse.StaticToken(token)`:
 
 ```go
 wh := wavehouse.NewClient(wavehouse.Config{
@@ -130,24 +114,16 @@ wh := wavehouse.NewClient(wavehouse.Config{
 ```
 
 :::note[How the token is transmitted]
-Unlike a browser's `EventSource`, Go's `net/http` client can set arbitrary
-headers on any request — so the Go SDK sends `Authorization: Bearer <token>`
-on **every** request, including SSE streams. There's no `?token=` query
-parameter fallback to worry about (that's a TypeScript-SDK-in-the-browser
-concern only; see its [equivalent note](/sdk#creating-a-client)).
+Unlike a browser's `EventSource`, Go's `net/http` client sets arbitrary headers on any request, so the Go SDK sends `Authorization: Bearer <token>` on every request, including SSE streams. No `?token=` query fallback (a TypeScript-in-the-browser concern; see its [equivalent note](/sdk#creating-a-client)).
 :::
 
 :::caution[Use HTTPS for authenticated non-local servers]
-The SDK doesn't forbid `http://` base URLs — local development and
-private-network deployments rely on them — but a bearer token sent over
-plaintext HTTP is readable by anything on the path. Point authenticated
-clients at `https://` endpoints outside a trusted network.
+While the SDK allows `http://` for local development or private networks, bearer tokens over plaintext HTTP are insecure. Use `https://` for endpoints outside trusted networks.
 :::
 
 ## Typed Rows (Generics)
 
-Pass a row type as a type parameter to get results decoded straight into
-your struct, instead of `map[string]any`:
+Pass a row type parameter to decode results into your struct instead of `map[string]any`:
 
 ```go
 type ClickRow struct {
@@ -162,19 +138,13 @@ page, err := wavehouse.FetchTyped[ClickRow](ctx,
 // page.Data is []ClickRow
 ```
 
-Generate row structs from a running server with the
-[codegen CLI](/sdk/go/reference#codegen-cli).
+Use the [codegen CLI](/sdk/go/reference#codegen-cli) to generate row structs from a running server.
 
-`FetchTyped` is a package-level generic function, not a method — Go doesn't
-support generic methods, so this (and `Fetch[Row]` for pipes, and
-`SQL[Row]` for raw SQL) are top-level functions that take the client or
-builder as an argument. Untyped equivalents (`.FetchUntyped(ctx)`, decoding
-into `map[string]any`) are ordinary methods, since they need no type
-parameter.
+`FetchTyped`, `Fetch[Row]` (pipes), and `SQL[Row]` (raw SQL) are package-level generic functions because Go lacks generic methods. Untyped equivalents (`.FetchUntyped(ctx)`) are ordinary methods.
 
 ## Error Handling
 
-Every request-response operation (queries, ingest, pipes, admin) returns `(T, error)` — or a bare `error` for operations with no result body (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). Errors originating from the HTTP exchange are `*wavehouse.Error`; unwrap with `errors.As`. Client-side failures before a request goes out (an `Auth` provider error, a request-body marshal failure) are plain wrapped errors, so handle the `errors.As == false` case too. (Streaming lifecycle methods — `Stream`, `Subscribe`, `Close`, `Connected` — deliver errors through callbacks or plain errors instead; see [Streaming](/sdk/go/streaming).)
+Request-response operations (queries, ingest, pipes, admin) return `(T, error)` or just `error` if no body exists (`Pipes.Set`/`Delete`, `Policy.Set`, `Schema.Refresh`, `Sys.Health`). HTTP exchange errors are `*wavehouse.Error`; unwrap via `errors.As`. Client-side failures (e.g., `Auth` provider, marshal errors) are plain wrapped errors; handle the `errors.As == false` case. Streaming methods (`Stream`, `Subscribe`, `Close`, `Connected`) use callbacks or plain errors; see [Streaming](/sdk/go/streaming).
 
 ```go
 page, err := wh.From("clicks").Fetch(ctx)
@@ -193,40 +163,19 @@ See [Reference → Error Handling](/sdk/go/reference#error-handling) for retry b
 
 ## Differences from the TypeScript SDK
 
-The two SDKs share a wire format and mirror each other's feature set closely
-(a shared `wire_cases.json` conformance fixture is replayed by a test runner
-per SDK — both run in CI — asserting each produces the expected HTTP request
-for equivalent builder calls), but the
-languages pull the API shape in different directions:
+Both SDKs share a wire format and feature set, verified by a shared `wire_cases.json` fixture in CI to ensure equivalent HTTP requests for builder calls. However, API shapes differ:
 
-- **No `Result<T>` union.** Go returns `(T, error)`; nothing is wrapped in
-  an `{ok, data, error}` object, and there's no `error: null` sentinel to
-  check — a non-nil `error` is the only signal.
-- **`context.Context` instead of `AbortSignal`.** Every non-streaming call
-  takes a `ctx context.Context` as its first argument; cancel it (timeout or
-  `cancel()`) instead of building an `AbortController`. See
-  [Reference → Context Cancellation](/sdk/go/reference#context-cancellation).
-- **Streams are closed explicitly, not via `ctx`.** `TableRef.Stream` /
-  `QueryBuilder.Stream` don't take a `context.Context` — the returned
-  `*StreamController` manages its own background goroutine and connection,
-  torn down by calling `.Close()` (deferred `stream.Close()` is the usual
-  pattern). See [Streaming](/sdk/go/streaming).
-- **Generics live on package-level functions, not methods** (`FetchTyped[Row]`,
-  `Fetch[Row]`, `SQL[Row]`), because Go doesn't support type parameters on
-  methods.
-- **No implicit "await."** A `QueryBuilder` isn't `PromiseLike` — call
-  `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)`
-  explicitly; there's no bare `await builder` shortcut.
-- **Any slice batches, not just `[]map[string]any`.** Go detects slice-ness
-  via reflection, so `[]ClickRow{...}` takes the same NDJSON batch path as
-  `[]map[string]any` (the TS SDK's `insert` likewise accepts arrays of typed
-  rows — this bullet is about the Go mechanics, not a TS gap) — see
-  [Queries → Insert](/sdk/go/queries#insertctx-data).
+- **No `Result<T>` union.** Go returns `(T, error)`. A non-nil `error` is the only failure signal; no `{ok, data, error}` objects or `error: null` sentinels are used.
+- **`context.Context` instead of `AbortSignal`.** Non-streaming calls take `ctx context.Context` as the first argument. Use timeout or `cancel()` instead of `AbortController`. See [Reference → Context Cancellation](/sdk/go/reference#context-cancellation).
+- **Streams closed explicitly.** `TableRef.Stream` and `QueryBuilder.Stream` omit `context.Context`. The returned `*StreamController` manages its own goroutine and connection, torn down by `.Close()` (deferred `stream.Close()` is usual). See [Streaming](/sdk/go/streaming).
+- **Generics on package functions.** Go lacks type parameters on methods; use `FetchTyped[Row]`, `Fetch[Row]`, or `SQL[Row]`.
+- **No implicit "await."** Call `.FetchUntyped(ctx)` or `wavehouse.FetchTyped[Row](ctx, builder)` explicitly; `QueryBuilder` is not `PromiseLike`.
+- **Any slice batches.** Reflection allows `[]ClickRow{...}` to use the same NDJSON batch path as `[]map[string]any`. See [Queries → Insert](/sdk/go/queries#insertctx-data).
 
 ## Explore the Go SDK
 
-- [Queries](/sdk/go/queries) — Tables, the chainable query builder, pagination, and raw SQL.
-- [Streaming & Live Queries](/sdk/go/streaming) — Real-time SSE streams, client-side filtering, and backfill-then-live queries.
-- [Pipes](/sdk/go/pipes) — Execute and manage named query pipes.
+- [Queries](/sdk/go/queries) — Tables, chainable query builder, pagination, and raw SQL.
+- [Streaming & Live Queries](/sdk/go/streaming) — SSE streams, client-side filtering, and backfill-then-live queries.
+- [Pipes](/sdk/go/pipes) — Manage named query pipes.
 - [Admin & System](/sdk/go/admin) — Schema introspection, access-control policy, DLQ stats, and health checks.
-- [Reference & CLI](/sdk/go/reference) — Error codes, context cancellation, the full API tree, and the codegen CLI.
+- [Reference & CLI](/sdk/go/reference) — Error codes, context cancellation, API tree, and codegen CLI.
