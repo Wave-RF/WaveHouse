@@ -23,8 +23,16 @@ const { data } = await wh.pipe('top_pages', { start_date: '2026-01-01', limit: 5
 
 Execute and return results. Takes `PipeRequestOptions` — `{ signal }` only,
 narrower than the `.fetch(opts?)` on a [query builder](/sdk/queries), which also
-accepts `limit`. Passing a `limit` is a compile error, including via a shared
-`RequestOptions` value, rather than being silently dropped.
+accepts `limit`. Passing a `limit` is a compile error rather than a silent
+no-op.
+
+`limit` is typed `never` rather than left out, so the rejection also catches a
+value passed in a variable — leaving it out would only reject an inline object.
+That cuts both ways: a value *declared* as `RequestOptions` is rejected whether
+or not it actually carries a limit, since the type permits one. If you share one
+options object across calls, type it as `PipeRequestOptions` — the table and
+query-builder `.fetch()` accept that too — or inline `{ signal }` at the pipe
+call.
 
 There is no per-call row cap here: the endpoint binds your `params` as the
 pipe's parameters, so a limit has to be declared in the pipe's SQL as
