@@ -11,7 +11,12 @@ import type { FetchLike } from "./types.js";
 let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
-  fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+  // A fresh Response per call: a Response body can only be read once, so a
+  // shared instance makes the second request fail and retry, and a test
+  // asserting on `mock.calls[1]` would silently be reading that retry.
+  fetchSpy = vi
+    .fn()
+    .mockImplementation(() => Promise.resolve(new Response(JSON.stringify([]), { status: 200 })));
   vi.stubGlobal("fetch", fetchSpy);
 });
 
@@ -113,6 +118,17 @@ describe("WaveHouseClient.pipe()", () => {
     const client = createClient({ baseURL: "http://localhost:8080" });
     const pipe = client.pipe("top_pages", { limit: 10 });
     expect(typeof pipe.then).toBe("function");
+  });
+
+  it("rejects a per-call limit, which the pipes endpoint cannot honour", async () => {
+    const client = createClient({ baseURL: "http://localhost:8080" });
+    // Compile-time assertion: accepting `limit` here would silently drop it,
+    // since the endpoint binds the body as the pipe's parameters. A row cap
+    // belongs in the pipe's own SQL, supplied via `wh.pipe(name, { limit })`.
+    // @ts-expect-error — `limit` is not part of PipeRef.fetch's options
+    await client.pipe("top_pages").fetch({ limit: 10 });
+    // `signal` is accepted.
+    await client.pipe("top_pages").fetch({ signal: AbortSignal.timeout(1000) });
   });
 });
 
@@ -222,6 +238,8 @@ describe("options.headers", () => {
     await client.from("clicks").select("*").limit(1);
     await client.from("clicks").select("*").limit(1);
 
+    // Exactly two — proves call 1 is a second request, not a retry of the first.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     for (const call of [0, 1]) {
       expect(headersOf(call)).toMatchObject({
         "CF-Access-Client-Id": "abc.access",

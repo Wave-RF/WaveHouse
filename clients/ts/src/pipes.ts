@@ -24,8 +24,15 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
     this._createStream = createStream;
   }
 
-  /** Execute the pipe and return results. */
-  async fetch(opts?: RequestOptions): Promise<Result<Row[]>> {
+  /**
+   * Execute the pipe and return results.
+   *
+   * Takes only `signal` — deliberately narrower than the `RequestOptions` the
+   * query builder accepts. The pipes endpoint binds the body as the pipe's
+   * parameters, so there is no row cap to forward; bound a pipe with a
+   * `{{limit}}` parameter in its SQL and pass it via `wh.pipe(name, { limit })`.
+   */
+  async fetch(opts?: Pick<RequestOptions, "signal">): Promise<Result<Row[]>> {
     const { data, error } = await request<Row[]>(this._ctx, {
       method: "POST",
       path: `/v1/pipes/${encodeURIComponent(this._name)}`,
