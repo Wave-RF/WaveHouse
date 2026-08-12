@@ -378,7 +378,7 @@ The orchestrator always provisions its own stack — a fresh ClickHouse testcont
 WH_CONFIG=tests/e2e/fixtures/config.yaml go run ./cmd/wavehouse
 ```
 
-The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory.
+The fixture matters: the suite signs its tokens with its `sdk-dev-secret` and depends on its dedupe, DLQ, and 5s schema-refresh settings. Point the suite at a default `make dev` server (`jwt_secret: change-me-in-production`) and setup's schema calls are rejected, then global setup dies 30s later on a misleading `schema not refreshed within 30s`. The repo root matters too — the fixture's `policy.file_path` is relative to the working directory. The fixture pins no ClickHouse address, so the server looks for one on `localhost:9000`; point it elsewhere with `WH_CH_ADDR` / `WH_CH_HTTP_PORT` if yours isn't there.
 
 Prefixing the variable to `make dev` does **not** work: that recipe pins `WH_CONFIG=.config.local.yaml` inline, which overrides anything inherited from the environment.
 
