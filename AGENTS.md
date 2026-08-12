@@ -314,7 +314,7 @@ Every code change should update the corresponding docs in the same PR. A code ch
 
 Source-of-truth pairs that must agree:
 
-- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.mdx`, `config.yaml`, compose env blocks
+- Config struct tags in `internal/config/config.go` ↔ `docs/src/content/docs/configuration.mdx`, `config.yaml`, compose env blocks, `docs/src/content/docs/deployment.md`
 - `EventMessage` JSON tags ↔ `docs/src/content/docs/api.md` event format, SSE examples, ClickHouse INSERT columns
 - Route registrations in `router.go` ↔ `docs/src/content/docs/api.md` endpoint list
 - Handler error responses ↔ `docs/src/content/docs/api.md` error tables
