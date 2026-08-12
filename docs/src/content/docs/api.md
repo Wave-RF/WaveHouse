@@ -214,7 +214,7 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 - Type mismatches are rejected (e.g., sending a JSON object for a `Float64` column).
 - Missing required columns (non-nullable without a default) are rejected.
 - Null values for non-nullable columns are rejected.
-- Type compatibility: `Int*`/`Float*`/`Decimal*` accept JSON numbers **or numeric strings** — the string form exists so 64-bit IDs survive JavaScript's `Number` precision loss; `String`/`FixedString`/`UUID` accept strings, numbers, or booleans (coerced); `Date*`/`DateTime*`, `Enum8/16`, and `IPv4`/`IPv6` accept strings or numbers; `Bool` accepts booleans, numbers (`0`/`1`), or strings (`"true"`/`"false"`); `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts arrays or objects. A ClickHouse type outside this matrix accepts any value and defers validation to ClickHouse.
+- Type compatibility: `Int*`/`Float*`/`Decimal*` accept JSON numbers **or strings** — the string form exists so 64-bit IDs survive JavaScript's `Number` precision loss; `String`/`FixedString`/`UUID` accept strings, numbers, or booleans (coerced); `Date*`/`DateTime*`, `Enum8/16`, and `IPv4`/`IPv6` accept strings or numbers; `Bool` accepts booleans, numbers, or strings; `Array` accepts JSON arrays; `Map` accepts JSON objects; `Tuple` accepts arrays or objects. A ClickHouse type outside this matrix accepts any value and defers validation to ClickHouse. This matrix checks JSON *shape* only, never string contents — `"abc"` on an `Int64` column is accepted here and fails at the ClickHouse insert, where the row lands in the [DLQ](#dead-letter-queue-dlq).
 - `Nullable()` and `LowCardinality()` wrappers are handled transparently.
 
 **Response (accepted):**
