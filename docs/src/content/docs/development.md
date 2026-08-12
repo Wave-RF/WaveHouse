@@ -448,16 +448,20 @@ WaveHouse/
 │   ├── pipes/              # Named query pipes (NATS KV + .sql bootstrap)
 │   ├── policy/             # Access control policies (evaluation + NATS KV store)
 │   ├── query/              # Structured query AST + SQL builder
+│   ├── stream/             # SSE fan-out: Hub, Subscriber queue, Bucket, keepalive wheel
 │   └── testutil/           # Shared test helpers and mocks
 ├── tests/                  # Integration & E2E tests
 │   ├── integration/        # Go integration tests (//go:build integration)
 │   └── e2e/                # E2E suite (orchestrator + ClickHouse testcontainer)
 │       ├── fixtures/       # ClickHouse DDL + config/policy fixtures
 │       └── sdk/            # E2E specs driven through the TypeScript SDK (Vitest)
+├── clients/                # Client SDKs
+│   └── ts/                 # TypeScript SDK (@wavehouse/sdk, pnpm workspace)
 ├── deployments/
 │   ├── compose/            # Docker Compose files (standalone.yaml, dependencies.yaml)
 │   ├── Dockerfile          # Runtime image
 │   └── Dockerfile.goreleaser  # Release image (built by GoReleaser)
+├── scripts/                # E2E orchestrator, cov tool, CI/hook helpers
 ├── docs/                   # Documentation
 ├── config.yaml             # Default configuration file
 ├── Makefile                # Build, test, lint, deploy targets

@@ -339,6 +339,11 @@ func transformRow(row map[string]any) map[string]any {
 			row[k] = uuid.UUID(val).String()
 		case time.Time:
 			row[k] = val.UTC().Format(time.RFC3339Nano)
+		case *time.Time:
+			// Nullable(DateTime…) scans as a pointer; NULL stays nil (JSON null).
+			if val != nil {
+				row[k] = val.UTC().Format(time.RFC3339Nano)
+			}
 		}
 	}
 	return row

@@ -15,20 +15,24 @@ goroutine / channel / timer interplay is subtle.
 
 | File | Contents |
 | --- | --- |
-| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, the per-table `tableBatcher`/`tableLoop`, `flushTable`, `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ` |
+| `worker.go` | `StartIngestWorker`, the `dispatchLoop`, the per-table `tableBatcher`/`tableLoop`, `flushTable` (bulk insert with a row-by-row poison-isolation fallback), `insertToClickHouse`, `handleSuccess` (cache invalidation + acks), `sendToDLQ` |
 | `sweeper.go` | The **Active Sweeper** — purges stream messages that are both written to ClickHouse and past the SSE gap window |
 | `types.go` | `EventMessage` wire format and the `BufferConsumerName` constant |
 
 The pipeline is **insert-only**. The wire format carries
-`{table_name, received_timestamp, data}` and nothing else; the worker
-validates and bulk-`INSERT`s. Non-insert mutations go through a different admin path.
+`{table_name, received_timestamp, data}` and nothing else; the worker parses
+the envelope and bulk-`INSERT`s — schema validation already happened at the
+HTTP ingest handler, before publish. Non-insert mutations go through a
+different admin path.
 
 ## High-level shape
 
 One process consumes a single durable JetStream consumer and fans events out to
 a goroutine per table. Each table batches independently and POSTs to ClickHouse
-over the HTTP interface (`JSONEachRow`). Failed rows go to a dead-letter stream;
-a separate sweeper reclaims stream storage.
+over the HTTP interface (`JSONEachRow`). On a bulk-insert failure the batch is
+re-inserted row by row, so a single poison row can't sink it: clean rows ack,
+and only the rows that fail again go to the dead-letter stream. A separate
+sweeper reclaims stream storage.
 
 ```mermaid
 flowchart LR
@@ -62,6 +66,26 @@ Note the stream is **dual-use**: it is both the durable buffer feeding the
 worker and the replay buffer that SSE clients gap-fill from. That is why a
 custom sweeper exists instead of plain work-queue auto-deletion (see
 [Scaling out](#scaling-to-multiple-instances)).
+
+:::note[ClickHouse timestamp parsing]
+Inserts pin `date_time_input_format=best_effort` — the server default since
+ClickHouse 26.5, but on older servers the `basic` default rejects the canonical
+RFC 3339 form's `Z` suffix ([#372](https://github.com/Wave-RF/WaveHouse/issues/372)).
+The ordinary spellings (zone-less date-times, 9–10-digit Unix-seconds strings)
+parse identically under both settings, so pre-canonical messages still in the
+stream replay unchanged. Bare digit-strings of other lengths are the exception:
+`best_effort` reads them as ClickHouse's calendar/epoch shapes, where `basic`
+read a plain `DateTime` column's digit string of five or more digits as Unix
+seconds (shorter runs it rejected outright, where `best_effort` reads `"2026"`
+as a year): under `best_effort` `"20260711"` stores 2026-07-11, where `basic`
+stored 1970-08-23. `DateTime64` columns diverge the same way on calendar-shaped
+runs, and additionally whenever an epoch run's unit doesn't match the column
+scale (under `basic`, runs longer than 10 digits are ticks at the column's
+own scale; `best_effort` unit-detects 13/16/19-digit runs as ms/µs/ns). A
+producer relying on the old `basic` reading changes meaning as soon as this
+WaveHouse version is deployed — the pin, not a ClickHouse upgrade, is what
+flips the parse.
+:::
 
 ## The journey of one event
 

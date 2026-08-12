@@ -359,7 +359,7 @@ WaveHouse discovers this schema on startup and refreshes it every `schema.refres
 
 ## Dead Letter Queue (DLQ)
 
-When `dlq.enabled` is `true` (default), failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
+When `dlq.enabled` is `true` (default), a failed batch insert is retried row by row and the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream under subjects `dlq.{table}`. This prevents infinite retry loops. Monitor DLQ depth via `GET /v1/dlq/stats`.
 
 ## Observability
 

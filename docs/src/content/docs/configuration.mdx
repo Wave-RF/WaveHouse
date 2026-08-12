@@ -162,7 +162,7 @@ See [API — Authentication](/api#authentication).
 
 | YAML Key | Env Var | Default | Description |
 | --- | --- | ------- | ----------- |
-| `dlq.enabled` | `WH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. Failed batch inserts are published to the `WAVEHOUSE_DLQ` NATS stream instead of blocking retries. |
+| `dlq.enabled` | `WH_DLQ_ENABLED` | `true` | Enable the Dead Letter Queue. A failed batch insert is retried row by row; the rows that fail again are published to the `WAVEHOUSE_DLQ` NATS stream instead of blocking retries. |
 
 ### Access Control Policy
 

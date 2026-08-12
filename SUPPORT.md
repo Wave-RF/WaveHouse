@@ -23,7 +23,7 @@ WaveHouse is in **alpha**. We're a small team building publicly while shipping t
 
 - Bug reports against the latest tagged release or `main` HEAD.
 - Reproducible regressions vs. the previous tag.
-- Documentation gaps or wrong examples (especially `getting-started.md`, `api.md`, `configuration.md`).
+- Documentation gaps or wrong examples (especially `getting-started.md`, `api.md`, `configuration.mdx`).
 - Configuration questions where the docs disagree with reality.
 
 ## Out of scope during alpha
