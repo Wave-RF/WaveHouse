@@ -63,7 +63,7 @@ createClient<DB>(config) → WaveHouseClient
 │   ├── .schema() → Promise<Result<TableSchema>>
 │   └── .stream(opts?) → StreamController
 ├── .pipe(name, params?) → PipeRef (PromiseLike)
-│   ├── .fetch(opts?) → Promise<Result<Row[]>>
+│   ├── .fetch(opts?) → Promise<Result<Row[]>>   // { signal } only — no limit
 │   └── .stream(opts?) → StreamController
 ├── .pipes (admin)
 │   ├── .list() → Promise<Result<Pipe[]>>

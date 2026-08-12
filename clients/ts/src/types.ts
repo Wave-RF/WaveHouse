@@ -80,9 +80,84 @@ export interface ClientConfig<_DB extends Database = Database> {
   options?: ClientOptions;
 }
 
+/**
+ * A `fetch`-compatible function.
+ *
+ * Spelled out rather than written `typeof fetch`, which resolves differently
+ * depending on whether the consumer's TypeScript `lib` includes DOM — the same
+ * signature either way, but stable across configurations.
+ *
+ * In practice the SDK only ever calls it with a string URL, and reads `.ok` and
+ * `.headers` always, `.text()` on success, and `.status`, `.statusText` plus
+ * `.json()` when the response is not `ok`. A rejection becomes a
+ * `NETWORK_ERROR` result and is retried with backoff — except a `DOMException`
+ * named `AbortError` (what the platform `fetch` and undici throw on abort),
+ * which becomes `ABORTED` and is not retried. Implementations that reject with
+ * some other abort error, such as `node-fetch`, are retried instead.
+ *
+ * Implementations shipping their own request/response declarations (undici,
+ * `node-fetch`) need casts on the URL, the init and the return value, since
+ * those types are separate from the ones behind your global `fetch`; the
+ * narrow runtime contract above is what makes them safe.
+ */
+export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface ClientOptions {
   /** Maximum retry attempts for failed requests. Default: 2. */
   maxRetries?: number;
+  /**
+   * HTTP implementation used for every REST request (SSE streams excluded).
+   * Defaults to the global `fetch`.
+   *
+   * Provide one to route through a proxy, attach client certificates, add
+   * middleware (logging, tracing, circuit breaking), or bypass a transport bug
+   * in the runtime's bundled HTTP stack by routing through an implementation
+   * you install yourself — e.g. an undici new enough to be free of
+   * {@link https://github.com/nodejs/undici/issues/5600 | undici #5600}:
+   *
+   * ```ts
+   * import { Agent, fetch as undiciFetch } from "undici"; // npm install undici — 8.10.0+
+   * // Pass the dispatcher explicitly: undici's pool lives on a shared
+   * // globalThis symbol claimed by whichever copy loaded first, so an implied
+   * // dispatcher can still be the runtime's affected one.
+   * const dispatcher = new Agent();
+   * createClient({
+   *   baseURL,
+   *   options: {
+   *     fetch: (url, init) =>
+   *       undiciFetch(url as string, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+   *   },
+   * });
+   * ```
+   *
+   * Only the SSE transport is exempt: the live connection behind `.stream()`
+   * and `.liveQuery()` uses `EventSource`, which this does not replace.
+   * `.liveQuery()`'s initial backfill is an ordinary request and does go
+   * through your function.
+   */
+  fetch?: FetchLike;
+  /**
+   * Headers added to every REST request (SSE streams excluded) — for a
+   * header-gated proxy in front of WaveHouse, such as a Cloudflare Access
+   * service token.
+   *
+   * Matched case-insensitively, as HTTP headers are. Applied underneath the
+   * SDK's own headers: `auth` still owns `Authorization`, and the
+   * `Content-Type` and `Accept` a given request needs are not overridable
+   * here — a global `Content-Type` that outranked the request's own is a
+   * documented way to break uploads.
+   */
+  headers?: Record<string, string>;
+  /**
+   * Extra `RequestInit` fields merged into every REST request — `credentials`
+   * for a cookie-authenticated origin, `mode`, `cache`, `keepalive`, or a
+   * runtime-specific extension such as Next.js's `next: { tags }`.
+   *
+   * Fields the SDK controls (`method`, `headers`, `body`, `signal`) always
+   * win, so this cannot corrupt the request itself. Non-standard fields may
+   * need a cast, since `RequestInit` only declares the standard ones.
+   */
+  fetchOptions?: RequestInit;
 }
 
 // --- Structured query AST (matches backend wire format) ---
@@ -256,11 +331,34 @@ export interface ValidationResult {
   valid: boolean;
 }
 
-// --- Fetch options ---
+// --- Per-call request options ---
 
-export interface FetchOptions {
+/**
+ * Options for a single call, passed to `.fetch()`.
+ *
+ * Note that `await`ing a builder directly (`await wh.from("t").select("*")`)
+ * takes no options — use the explicit `.fetch({ … })` form for those.
+ */
+export interface RequestOptions {
   signal?: AbortSignal;
   limit?: number;
+}
+
+/**
+ * Options for a single `PipeRef.fetch()` call.
+ *
+ * `limit` is declared `never` rather than simply left out. Omitting it would
+ * still admit a `RequestOptions` value that carries one — excess-property
+ * checking only rejects fresh object literals, so a variable would pass and the
+ * limit would be silently dropped, which is the whole defect this prevents.
+ *
+ * A pipe's row cap belongs in its SQL as a `{{limit}}` parameter, supplied via
+ * `wh.pipe(name, { limit })`.
+ */
+export interface PipeRequestOptions {
+  signal?: AbortSignal;
+  /** Not supported on pipes — pass `limit` as a pipe parameter instead. */
+  limit?: never;
 }
 
 // --- Stream options ---
@@ -276,5 +374,11 @@ export interface StreamOptions {
 export interface HttpContext {
   baseURL: string;
   auth?: () => Promise<string> | string;
-  options: { maxRetries: number };
+  // `fetch` stays optional rather than defaulted here, to keep the global late-bound.
+  options: {
+    maxRetries: number;
+    fetch?: FetchLike;
+    headers?: Record<string, string>;
+    fetchOptions?: RequestInit;
+  };
 }
