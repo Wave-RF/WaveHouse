@@ -190,6 +190,20 @@ func aggregationExpr(a Aggregation) string {
 	return expr
 }
 
+// spliceKeywordRe matches a SQL clause keyword surrounded by whitespace. The two
+// caller-controlled free-text identifiers — an aggregation alias and an ORDER BY
+// alias-reference — are backtick-quoted, so they cannot inject SQL into ClickHouse.
+// But InjectPermissionFilters splices the policy WHERE predicate into finished SQL
+// by first-substring match on " WHERE " (and locates the insert point via
+// " GROUP BY "/" ORDER BY "/" LIMIT "), so an identifier carrying one of those
+// keywords can capture the splice. A fail-closed row filter renders as "1 = 0" —
+// the one predicate the engine emits with no backtick — so it survives as valid
+// SQL inside a quoted alias like `e WHERE (1 = 0) AND z`, silently deleting the
+// filter and returning the whole table. Refuse such identifiers until the splice
+// is replaced by structural predicate emission (#322; the fail-closed predicate
+// this protects is #385/#457).
+var spliceKeywordRe = regexp.MustCompile(`(?i)\s(where|group\s+by|order\s+by|limit)\s`)
+
 // validateAndAuthorizeColumns checks, in a single pass, that every column the
 // query references (1) exists in the schema — so only real, discovered columns
 // reach the SQL — and (2) is permitted by the role's column allow/deny lists —
@@ -235,9 +249,15 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 			return &ForbiddenAggregationError{Fn: a.Fn}
 		}
 		// The alias is backtick-quoted by aggregationExpr, so any legal ClickHouse
-		// name is safe. Only a '?' is refused — it would break value binding.
+		// name is safe against injection. Two identifiers are still refused: a '?'
+		// (would break value binding) and one carrying a SQL clause keyword (would
+		// hijack the InjectPermissionFilters WHERE splice and drop the row filter —
+		// see spliceKeywordRe).
 		if chsql.BindUnsafe(a.Alias) {
 			return fmt.Errorf("unsupported aggregation alias (contains '?'): %s", a.Alias)
+		}
+		if spliceKeywordRe.MatchString(a.Alias) {
+			return fmt.Errorf("unsupported aggregation alias (contains a SQL clause keyword): %s", a.Alias)
 		}
 	}
 	for _, f := range q.Filters {
@@ -255,9 +275,13 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 			// Not a schema column — allow it as an aggregation-alias reference
 			// (ORDER BY an aggregation's AS name). Aliases carry no column policy;
 			// the aggregation that defines them was authorized above. The name is
-			// backtick-quoted when emitted, so any content is safe except a '?'.
+			// backtick-quoted when emitted, so any content is safe except a '?' or a
+			// SQL clause keyword that would hijack the WHERE splice (as for aliases).
 			if chsql.BindUnsafe(o.Column) {
 				return fmt.Errorf("unsupported order column (contains '?'): %s", o.Column)
+			}
+			if spliceKeywordRe.MatchString(o.Column) {
+				return fmt.Errorf("unsupported order column (contains a SQL clause keyword): %s", o.Column)
 			}
 			continue
 		}

@@ -109,6 +109,25 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	}
 }
 
+// TestProject_FailsClosedOnUndecodedPayload is the #323 regression guard: with a
+// policy configured (filter=true), a payload that did not decode to an
+// EventMessage — so there is no table to evaluate policy against — must be
+// dropped, never passed through unfiltered. Only the no-policy legacy passthrough
+// (filter=false) may forward it, and invalid JSON is dropped either way.
+func TestProject_FailsClosedOnUndecodedPayload(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"not":"an-event"}`) // valid JSON, but not a decoded EventMessage
+
+	_, ok := project(nil, true, "viewer", nil, raw, false)
+	assert.False(t, ok, "undecoded payload must be dropped when policy filtering is on")
+
+	_, ok = project(nil, false, "viewer", nil, raw, false)
+	assert.True(t, ok, "with no policy store wired, the legacy passthrough still forwards valid JSON")
+
+	_, ok = project(nil, false, "viewer", nil, []byte("not json"), false)
+	assert.False(t, ok, "invalid JSON is never forwarded")
+}
+
 func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{

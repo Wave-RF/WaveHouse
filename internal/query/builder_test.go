@@ -793,6 +793,41 @@ func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported aggregation alias")
 }
 
+// TestBuild_RejectsSpliceKeywordAlias pins the guard that keeps a crafted
+// aggregation alias from hijacking the InjectPermissionFilters WHERE splice. A
+// fail-closed row filter emits "1 = 0" (no backtick), which would otherwise
+// survive inside a quoted alias like `e WHERE (1 = 0) AND z` — deleting the filter
+// and exposing the whole table exactly when the filter fails closed (#322,
+// #385/#457). Unlike the injection-shaped aliases in
+// TestBuild_AggregationAliasQuotedAndContained (which stay permissive), a SQL
+// clause keyword is refused because it collides with the textual splice.
+func TestBuild_RejectsSpliceKeywordAlias(t *testing.T) {
+	t.Parallel()
+	for _, alias := range []string{"e WHERE z", "e GROUP BY z", "e ORDER BY z", "x LIMIT 1"} {
+		t.Run(alias, func(t *testing.T) {
+			t.Parallel()
+			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: alias}}}
+			_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "SQL clause keyword")
+		})
+	}
+}
+
+// TestBuild_RejectsSpliceKeywordOrderRef is the ORDER BY alias-reference variant of
+// the same guard: a non-schema ORDER BY reference carrying a clause keyword reaches
+// the same textual splice and is refused.
+func TestBuild_RejectsSpliceKeywordOrderRef(t *testing.T) {
+	t.Parallel()
+	sq := &StructuredQuery{
+		Columns: []string{"page"},
+		OrderBy: []OrderClause{{Column: "n WHERE 1 = 1", Dir: "asc"}},
+	}
+	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SQL clause keyword")
+}
+
 // ─── Permissive identifier handling (ClickHouse allows arbitrary quoted names) ─
 //
 // ClickHouse identifiers — table names, column names, AND aliases — may contain

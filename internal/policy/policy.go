@@ -202,11 +202,8 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		for col, f := range perms.Check {
 			switch {
 			case f.Eq != nil:
-				// The check path keeps the resolved scalar even when a claim is
-				// unresolvable — the write-path required value / auto-inject semantics
-				// are unchanged here (#385 fixed the read-path row filters; check
-				// operators are governed by #371 and validateRolePerms). Pinned by
-				// TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString.
+				// Deliberate asymmetry with the read path: an unresolvable check claim
+				// still resolves to "" and is auto-injected as the required value (#463).
 				resolved.CheckClauses[col], _ = resolveTemplate(*f.Eq, claims)
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
@@ -274,6 +271,8 @@ func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
 		sub := claimTemplateRe.FindStringSubmatch(match)
 		if len(sub) < 2 {
+			// Unreachable: claimTemplateRe has exactly one capture group, so a match
+			// always yields group 1. Kept as a fail-closed guard.
 			ok = false
 			return ""
 		}
@@ -494,6 +493,43 @@ func Validate(p *Policy) error {
 	return nil
 }
 
+// malformedTemplate reports the first `{{ … }}` fragment of v that resolveTemplate
+// would NOT recognize as a claim template — a path outside the [a-zA-Z0-9_.]
+// grammar (a hyphen, a namespaced OIDC URL), a wrong or absent `jwt.` prefix,
+// indexing, or an unterminated `{{`. resolveTemplate binds such a fragment as
+// literal text, which is a fail-open on the filter path (`_neq`/`_lt` match ~every
+// row) and silent row corruption on the check path, so validateRolePerms rejects
+// it at config load. A well-formed template — with or without surrounding literal
+// text, e.g. "acct-{{ jwt.org_id }}" — returns ("", false).
+func malformedTemplate(v string) (string, bool) {
+	// Strip every well-formed template; any surviving "{{" is one the resolver
+	// would leave as a literal instead of interpolating.
+	stripped := claimTemplateRe.ReplaceAllString(v, "")
+	i := strings.Index(stripped, "{{")
+	if i < 0 {
+		return "", false
+	}
+	frag := stripped[i:]
+	if end := strings.Index(frag, "}}"); end >= 0 {
+		frag = frag[:end+2]
+	}
+	return frag, true
+}
+
+// rejectMalformedTemplates fails a policy at config load if any operator value in
+// f carries a claim template the resolver would not interpolate (malformedTemplate).
+func rejectMalformedTemplates(table, op, role, kind, col string, f Filter) error {
+	for _, v := range []*string{f.Eq, f.Neq, f.Gt, f.Lt, f.In} {
+		if v == nil {
+			continue
+		}
+		if frag, bad := malformedTemplate(*v); bad {
+			return fmt.Errorf("table %q, op %q, role %q: %s column %q references an unrecognized claim template %q — claim paths may contain only letters, digits, '_' and '.'; flatten hyphenated or namespaced (OIDC URL) claims at the identity provider", table, op, role, kind, col, frag)
+		}
+	}
+	return nil
+}
+
 func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if strings.TrimSpace(role) == "" {
 		return fmt.Errorf("table %q, op %q: empty role name is not allowed", table, op)
@@ -514,12 +550,16 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	// query time, so a '?' in one would shift clickhouse-go's positional value
 	// binding. Refuse such a policy at write time, mirroring the query builder's
 	// chsql.BindUnsafe guard on caller-supplied columns.
-	for col := range perms.Filter {
+	for col, f := range perms.Filter {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
 		}
-		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so none is
-		// rejected here — only the bind-unsafe column name above.
+		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so no
+		// operator is rejected here. A malformed claim template IS rejected: the
+		// resolver would bind it as a literal, a fail-open for _neq/_lt (#385/#457).
+		if err := rejectMalformedTemplates(table, op, role, "filter", col, f); err != nil {
+			return err
+		}
 	}
 	for col, f := range perms.Check {
 		if chsql.BindUnsafe(col) {
@@ -538,6 +578,12 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		// gap #224 closes).
 		if f.Eq != nil && f.In != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q sets both _eq and _in; use exactly one", table, op, role, col)
+		}
+		// A malformed claim template on the check path is rejected too: the resolver
+		// would bind the literal `{{…}}` text as the required value and stamp it into
+		// every auto-injected row (#385/#457; the required-value question is #463).
+		if err := rejectMalformedTemplates(table, op, role, "check", col, f); err != nil {
+			return err
 		}
 	}
 	return nil

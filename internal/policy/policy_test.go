@@ -722,12 +722,28 @@ func TestResolveFilters_InEmptyStringClaim_Binds(t *testing.T) {
 	assert.Equal(t, []any{""}, params)
 }
 
+// TestResolveFilters_InTemplateWithText_Binds: the resolvable half of the _in
+// surrounding-text branch — a template with literal text AND a claim the token
+// carries binds the rendered one-element set `IN (?)`. Its fail-closed twin
+// (unresolvable claim → 1 = 0) is TestResolveFilters_UnresolvableClaim_FailsClosed;
+// this guards against a regression to an unconditional nil, which would deny every
+// row for a policy of this shape while the whole suite still passed.
+func TestResolveFilters_InTemplateWithText_Binds(t *testing.T) {
+	t.Parallel()
+	in := "t-{{ jwt.tenant_id }}"
+	claims := map[string]any{"tenant_id": "x"}
+	clauses, params := resolveFilters(map[string]Filter{"tenant_id": {In: &in}}, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?)", clauses[0])
+	assert.Equal(t, []any{"t-x"}, params)
+}
+
 // TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString: the deliberate
 // read/write asymmetry of #385 — a check _eq keeps the resolved scalar even
 // when the claim is unresolvable, so an omitted column auto-injects the empty
-// string and any other supplied value is rejected at ingest. Write-path
-// fail-closed semantics are #371's scope; this pins today's behavior so
-// neither path drifts silently.
+// string and any other supplied value is rejected at ingest. Whether the write
+// path should instead reject the insert is tracked in #463; this pins today's
+// behavior so neither path drifts silently.
 func TestEvaluate_CheckUnresolvableClaim_ResolvesEmptyString(t *testing.T) {
 	t.Parallel()
 	eq := "{{ jwt.org_id }}"
@@ -774,6 +790,67 @@ func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 	err := Validate(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contains '?'")
+}
+
+// TestValidate_RejectsMalformedClaimTemplate: a filter or check value whose
+// {{ … }} claim path is outside the grammar (hyphenated, a namespaced OIDC URL, a
+// wrong-case prefix, indexing, or unterminated) is bound as literal text by
+// resolveTemplate — a fail-open on the filter path (`_neq`/`_lt` match ~every row)
+// and silent row corruption on the check path — so it is refused at config load
+// (#385/#457), on both the select/filter and insert/check sides.
+func TestValidate_RejectsMalformedClaimTemplate(t *testing.T) {
+	t.Parallel()
+	for _, tmpl := range []string{
+		"{{ jwt.tenant-id }}",                         // hyphen
+		"{{ jwt.https://app.example.com/tenant_id }}", // namespaced OIDC claim
+		"{{ JWT.tenant_id }}",                         // wrong-case prefix
+		"{{ jwt.tenant_id[0] }}",                      // indexing
+		"{{ jwt. }}",                                  // empty path
+		"{{ jwt.tenant_id",                            // unterminated
+	} {
+		t.Run(tmpl, func(t *testing.T) {
+			t.Parallel()
+			val := tmpl
+			filterPolicy := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Select: map[string]RolePermissions{
+					"viewer": {Filter: map[string]Filter{"tenant_id": {Neq: &val}}},
+				}},
+			}}
+			require.Error(t, Validate(filterPolicy), "malformed template must be rejected on the filter path")
+
+			checkPolicy := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Insert: map[string]RolePermissions{
+					"writer": {Check: map[string]Filter{"tenant_id": {Eq: &val}}},
+				}},
+			}}
+			require.Error(t, Validate(checkPolicy), "malformed template must be rejected on the check path")
+		})
+	}
+}
+
+// TestValidate_AcceptsWellFormedTemplates: the boundary of the config-load guard —
+// a bare template, a nested template, a template with surrounding literal text, a
+// plain literal, and an empty literal all remain valid.
+func TestValidate_AcceptsWellFormedTemplates(t *testing.T) {
+	t.Parallel()
+	for _, tmpl := range []string{
+		"{{ jwt.tenant_id }}",
+		"{{ jwt.app_metadata.tenant_id }}",
+		"acct-{{ jwt.org_id }}",
+		"literal-value",
+		"",
+	} {
+		t.Run(tmpl, func(t *testing.T) {
+			t.Parallel()
+			val := tmpl
+			p := &Policy{Tables: map[string]TablePolicy{
+				"clicks": {Select: map[string]RolePermissions{
+					"viewer": {Filter: map[string]Filter{"tenant_id": {Eq: &val}}},
+				}},
+			}}
+			require.NoError(t, Validate(p))
+		})
+	}
 }
 
 // TestResolveFilters_InArrayClaim: the headline #224 fix — an _in filter whose
