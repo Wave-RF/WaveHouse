@@ -157,8 +157,29 @@ export function testId(): string {
 
 // ── ClickHouse Direct Query ───────────────────────────────────────────────────
 
-/** Per-request ceiling for a direct ClickHouse call. */
-const CH_QUERY_TIMEOUT_MS = Number(process.env.E2E_CH_QUERY_TIMEOUT_MS ?? 10_000);
+/**
+ * Per-request ceiling for a direct ClickHouse call.
+ *
+ * Validated here rather than handed to `AbortSignal.timeout` raw: an unset-but-
+ * exported `E2E_CH_QUERY_TIMEOUT_MS=` would become `0` and abort every query on
+ * the next tick, and a typo'd value would become `NaN`, which throws a
+ * `RangeError` naming neither the variable nor the value. Both are exactly the
+ * kind of opaque failure this file exists to eliminate.
+ */
+const CH_QUERY_TIMEOUT_MS = ((): number => {
+  const raw = process.env.E2E_CH_QUERY_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return 10_000;
+  const parsed = Number(raw);
+  // AbortSignal.timeout's accepted domain: a non-negative integer inside the
+  // 32-bit timer range. It rejects fractions and anything outside it.
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 2_147_483_647) {
+    throw new Error(
+      `E2E_CH_QUERY_TIMEOUT_MS must be a whole number of milliseconds between 1 and ` +
+        `2147483647; got ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
+})();
 
 /** Single-line, length-capped SQL for error messages. */
 const brief = (sql: string) => {
@@ -212,10 +233,18 @@ export async function chQuery<T = Record<string, unknown>>(
       .split("\n")
       .map((line) => JSON.parse(line));
   } catch (err) {
-    if (ceiling.aborted) {
+    // Reclassify only genuine aborts. `ceiling` keeps running after fetch
+    // settles, so a `!res.ok` throw or a JSON.parse failure on a slow-but-
+    // successful response can reach here with `ceiling.aborted` already true —
+    // rewriting those as a timeout would discard ClickHouse's own error text,
+    // the opposite of what this is for. fetch rejects with TimeoutError for an
+    // AbortSignal.timeout and AbortError for a controller abort.
+    const isAbort =
+      err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    if (isAbort && ceiling.aborted) {
       throw new Error(`ClickHouse query timed out after ${CH_QUERY_TIMEOUT_MS}ms: ${brief(sql)}`);
     }
-    if (signal?.aborted) {
+    if (isAbort && signal?.aborted) {
       throw new Error(`ClickHouse query aborted by caller: ${brief(sql)}`);
     }
     throw err;
