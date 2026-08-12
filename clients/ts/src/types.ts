@@ -83,25 +83,23 @@ export interface ClientConfig<_DB extends Database = Database> {
 /**
  * A `fetch`-compatible function.
  *
- * Deliberately narrower than `typeof fetch`: the SDK only ever calls it with a
- * string URL, so this is what it actually requires. The global `fetch` still
- * assigns to it, and so does middleware you declare as
- * `(url: string, init?: RequestInit) => Promise<Response>` — which `typeof
- * fetch` would reject, since a parameter accepting only `string` is not
- * assignable to one accepting `RequestInfo | URL`.
+ * Spelled out rather than written `typeof fetch`, which resolves differently
+ * depending on whether the consumer's TypeScript `lib` includes DOM — the same
+ * signature either way, but stable across configurations.
  *
- * The response is read for `.ok` and `.headers` always, `.text()` on success,
- * and `.status`, `.statusText` plus `.json()` when it is not `ok`. A rejection
- * becomes a `NETWORK_ERROR` result and is retried with backoff — except a
- * `DOMException` named `AbortError` (what the platform `fetch` and undici throw
- * on abort), which becomes `ABORTED` and is not retried. Implementations that
- * reject with some other abort error, such as `node-fetch`, are retried instead.
+ * In practice the SDK only ever calls it with a string URL, and reads `.ok` and
+ * `.headers` always, `.text()` on success, and `.status`, `.statusText` plus
+ * `.json()` when the response is not `ok`. A rejection becomes a
+ * `NETWORK_ERROR` result and is retried with backoff — except a `DOMException`
+ * named `AbortError` (what the platform `fetch` and undici throw on abort),
+ * which becomes `ABORTED` and is not retried. Implementations that reject with
+ * some other abort error, such as `node-fetch`, are retried instead.
  *
  * Implementations shipping their own request/response declarations (undici,
- * `node-fetch`) still need a cast, since those types are separate from the ones
+ * `node-fetch`) need a cast, since those types are separate from the ones
  * behind your global `fetch`; the narrow contract above is what makes it safe.
  */
-export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export interface ClientOptions {
   /** Maximum retry attempts for failed requests. Default: 2. */
@@ -132,6 +130,28 @@ export interface ClientOptions {
    * through your function.
    */
   fetch?: FetchLike;
+  /**
+   * Headers added to every REST request (SSE streams excluded) — for a
+   * header-gated proxy in front of WaveHouse, such as a Cloudflare Access
+   * service token.
+   *
+   * Matched case-insensitively, as HTTP headers are. Applied underneath the
+   * SDK's own headers: `auth` still owns `Authorization`, and the
+   * `Content-Type` and `Accept` a given request needs are not overridable
+   * here — a global `Content-Type` that outranked the request's own is a
+   * documented way to break uploads.
+   */
+  headers?: Record<string, string>;
+  /**
+   * Extra `RequestInit` fields merged into every REST request — `credentials`
+   * for a cookie-authenticated origin, `mode`, `cache`, `keepalive`, or a
+   * runtime-specific extension such as Next.js's `next: { tags }`.
+   *
+   * Fields the SDK controls (`method`, `headers`, `body`, `signal`) always
+   * win, so this cannot corrupt the request itself. Non-standard fields may
+   * need a cast, since `RequestInit` only declares the standard ones.
+   */
+  fetchOptions?: RequestInit;
 }
 
 // --- Structured query AST (matches backend wire format) ---
@@ -305,9 +325,15 @@ export interface ValidationResult {
   valid: boolean;
 }
 
-// --- Fetch options ---
+// --- Per-call request options ---
 
-export interface FetchOptions {
+/**
+ * Options for a single call, passed to `.fetch()`.
+ *
+ * Note that `await`ing a builder directly (`await wh.from("t").select("*")`)
+ * takes no options — use the explicit `.fetch({ … })` form for those.
+ */
+export interface RequestOptions {
   signal?: AbortSignal;
   limit?: number;
 }
@@ -325,6 +351,11 @@ export interface StreamOptions {
 export interface HttpContext {
   baseURL: string;
   auth?: () => Promise<string> | string;
-  // Stays optional rather than defaulted here, to keep the global late-bound.
-  options: { maxRetries: number; fetch?: FetchLike };
+  // `fetch` stays optional rather than defaulted here, to keep the global late-bound.
+  options: {
+    maxRetries: number;
+    fetch?: FetchLike;
+    headers?: Record<string, string>;
+    fetchOptions?: RequestInit;
+  };
 }

@@ -30,7 +30,6 @@ export type {
   DLQStats,
   // HTTP
   FetchLike,
-  FetchOptions,
   // Query
   FilterOp,
   // Ingest
@@ -44,6 +43,7 @@ export type {
   Policy,
   PolicyFilter,
   QueryFilter,
+  RequestOptions,
   Result,
   RolePermissions,
   Schemas,

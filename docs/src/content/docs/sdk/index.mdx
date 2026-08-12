@@ -327,7 +327,13 @@ const wh = createClient<Database>({
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
-| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every REST request; SSE streams excluded ([details](#supplying-your-own-fetch)) |
+| `options.headers` | `Record<string, string>` | — | Headers added to every REST request ([details](#custom-headers)) |
+| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every REST request ([details](#extra-requestinit-fields)) |
+| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every REST request ([details](#supplying-your-own-fetch)) |
+
+:::caution[These three apply to REST only]
+`headers`, `fetchOptions`, and `fetch` do **not** reach the streaming transport. `.stream()` and `.liveQuery()`'s live connection go through `EventSource`, which accepts neither custom headers nor a `fetch` — which is why the token rides in `?token=` there. If WaveHouse sits behind a header-gated proxy, REST works and streaming does not; follow [#203](https://github.com/Wave-RF/WaveHouse/issues/203) for that. (`.liveQuery()`'s initial backfill is an ordinary REST call and *is* covered.)
+:::
 
 :::note[How the token is transmitted]
 The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.
@@ -348,6 +354,66 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/warehouse' });
 Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``.
 
 The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
+
+### Custom headers
+
+`options.headers` adds headers to every REST request — the usual reason being a
+header-gated proxy in front of WaveHouse, such as a Cloudflare Access service
+token:
+
+```ts
+const wh = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: {
+    headers: {
+      'CF-Access-Client-Id': process.env.CF_ACCESS_CLIENT_ID!,
+      'CF-Access-Client-Secret': process.env.CF_ACCESS_CLIENT_SECRET!,
+    },
+  },
+});
+```
+
+Header names are matched **case-insensitively**, as HTTP requires, so
+`authorization` and `Authorization` are the same header rather than two.
+
+Your headers are applied *underneath* the SDK's own, and a collision means yours
+is dropped rather than merged:
+
+- **`auth` keeps `Authorization`.** Setting it here won't displace your token
+  provider. Use `auth` for credentials.
+- **`Content-Type` and `Accept` belong to the request.** The SDK knows what it's
+  sending; a global `Content-Type` that outranked it would break requests whose
+  body isn't JSON.
+
+Values replace, never append — a header joined rather than replaced is how you
+end up sending `Content-Type: application/json, image/png`.
+
+Headers are static. For a credential that rotates per request, wrap the
+transport with [`options.fetch`](#supplying-your-own-fetch); a callback form is
+tracked in [#459](https://github.com/Wave-RF/WaveHouse/issues/459).
+
+### Extra `RequestInit` fields
+
+`options.fetchOptions` is merged into the `RequestInit` of every REST request —
+for settings that aren't headers and don't warrant replacing the whole
+transport. The common case is a cookie-authenticated origin, where the default
+`credentials: 'same-origin'` means a cross-origin browser request sends no
+cookie at all:
+
+```ts
+const wh = createClient({
+  baseURL: 'https://wavehouse.example.com',
+  options: { fetchOptions: { credentials: 'include' } },
+});
+```
+
+It also carries `mode`, `cache`, `keepalive`, and runtime-specific extensions
+such as Next.js's `next: { tags }` — those aren't declared on the standard
+`RequestInit`, so they may need a cast.
+
+The fields the SDK controls — `method`, `headers`, `body`, and `signal` — always
+win, so this can't corrupt the request itself. In particular `headers` here is
+ignored; use `options.headers`, which merges properly.
 
 ### Supplying your own `fetch`
 
@@ -383,10 +449,11 @@ platform `fetch` and undici throw on abort — which becomes `ABORTED` and is no
 retried. An implementation that signals abort some other way (`node-fetch`
 throws its own `AbortError` class) gets retried instead.
 
-The option's type is exported as `FetchLike`, and is deliberately narrower than
-`typeof fetch` — it takes a `string` URL, so your own
-`(url: string, init?: RequestInit) => Promise<Response>` middleware assigns to it
-without a cast.
+The option's type is exported as `FetchLike`. It matches the standard `fetch`
+signature — written out rather than as `typeof fetch`, which resolves
+differently depending on whether your TypeScript `lib` includes DOM. Let
+TypeScript infer your parameters (`(url, init) => …`) and it fits without
+annotation.
 
 Only the SSE transport is exempt: the live connection behind `.stream()` and
 `.liveQuery()` uses `EventSource`, which this does not replace. `.liveQuery()`'s

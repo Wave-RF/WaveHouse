@@ -208,3 +208,108 @@ describe("options.fetch", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("options.headers", () => {
+  const headersOf = (call: number) =>
+    fetchSpy.mock.calls[call][1].headers as Record<string, string>;
+
+  it("adds configured headers to every request", async () => {
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { headers: { "CF-Access-Client-Id": "abc.access", "X-Tenant": "acme" } },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+    await client.from("clicks").select("*").limit(1);
+
+    for (const call of [0, 1]) {
+      expect(headersOf(call)).toMatchObject({
+        "CF-Access-Client-Id": "abc.access",
+        "X-Tenant": "acme",
+      });
+    }
+  });
+
+  it("cannot override the Content-Type a request needs", async () => {
+    // A global Content-Type outranking the request's own is a documented way to
+    // break uploads — it must lose, not merge.
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { headers: { "Content-Type": "text/plain" } },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    expect(headersOf(0)["Content-Type"]).toBe("application/json");
+    expect(Object.values(headersOf(0))).not.toContain("text/plain");
+  });
+
+  it("cannot displace the auth token, even under different casing", async () => {
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      auth: () => "real-token",
+      options: { headers: { authorization: "Bearer impostor" } },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    const sent = headersOf(0);
+    expect(sent.Authorization).toBe("Bearer real-token");
+    // The lowercase spelling must not ride along beside the canonical one.
+    expect(sent.authorization).toBeUndefined();
+  });
+
+  it("still applies when no auth is configured", async () => {
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { headers: { "X-Tenant": "acme" } },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    expect(headersOf(0)["X-Tenant"]).toBe("acme");
+    expect(headersOf(0).Authorization).toBeUndefined();
+  });
+});
+
+describe("options.fetchOptions", () => {
+  it("merges configured RequestInit fields into every request", async () => {
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      options: { fetchOptions: { credentials: "include", cache: "no-store" } },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    const init = fetchSpy.mock.calls[0][1];
+    expect(init.credentials).toBe("include");
+    expect(init.cache).toBe("no-store");
+  });
+
+  it("cannot corrupt the fields the SDK controls", async () => {
+    const client = createClient({
+      baseURL: "http://localhost:8080",
+      auth: () => "test-token",
+      options: {
+        headers: { "X-Tenant": "acme" },
+        fetchOptions: {
+          method: "DELETE",
+          body: "hijacked",
+          headers: { "X-Tenant": "overridden", Authorization: "Bearer impostor" },
+        } as RequestInit,
+      },
+    });
+
+    await client.from("clicks").select("*").limit(1);
+
+    const init = fetchSpy.mock.calls[0][1];
+    expect(init.method).toBe("POST");
+    expect(init.body).not.toBe("hijacked");
+    // options.headers is the header channel; fetchOptions.headers is discarded
+    // wholesale rather than merged, so it can't smuggle an Authorization past auth.
+    expect(init.headers).toMatchObject({
+      "X-Tenant": "acme",
+      Authorization: "Bearer test-token",
+    });
+  });
+});

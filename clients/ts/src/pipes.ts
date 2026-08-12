@@ -1,7 +1,7 @@
 import { err, ok } from "./errors.js";
 import { request } from "./http.js";
 import type { StreamController } from "./stream/controller.js";
-import type { FetchOptions, HttpContext, Pipe, Result, StreamOptions } from "./types.js";
+import type { HttpContext, Pipe, RequestOptions, Result, StreamOptions } from "./types.js";
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
 
@@ -25,7 +25,7 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
   }
 
   /** Execute the pipe and return results. */
-  async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
+  async fetch(opts?: RequestOptions): Promise<Result<Row[]>> {
     const { data, error } = await request<Row[]>(this._ctx, {
       method: "POST",
       path: `/v1/pipes/${encodeURIComponent(this._name)}`,
