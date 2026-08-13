@@ -126,6 +126,11 @@ auth gateway, a proxy) turned the request away. See
 [Error Handling](/sdk/reference#error-handling) for every code a stream can
 report and which ones re-dial.
 
+Streams go through `options.fetch`, `options.headers`, and
+`options.fetchOptions` like every other request — which is what lets a stream
+reach a header-gated origin. A custom `fetch` carries two extra requirements on
+this path; see [Supplying your own fetch](/sdk#supplying-your-own-fetch).
+
 ### Client-Side Stream Filtering
 
 When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:

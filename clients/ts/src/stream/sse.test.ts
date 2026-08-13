@@ -705,6 +705,12 @@ describe("SSETransport lifecycle", () => {
     });
     const seen = collect(t);
     t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    // A bearer token alone must make the request credentialed. Asserting only
+    // the resulting error would not pin this: the scripted fetch returns its
+    // 302 regardless of `init.redirect`, so the error fires either way.
+    expect(f.attempts[0].init.redirect).toBe("manual");
     await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
 
     expect(seen.errors[0].code).toBe("SSE_REDIRECT");
