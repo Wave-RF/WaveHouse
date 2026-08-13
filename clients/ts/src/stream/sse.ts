@@ -24,8 +24,10 @@ const SSE_WARN_THRESHOLD = 5;
  * against unbounded growth from a malformed or hostile stream. The parser
  * defaults to unbounded, so this has to be set explicitly. 16 MiB is generous
  * headroom over the ~1 MiB NATS payload ceiling a single event can carry.
+ *
+ * @internal Exported only so the overflow test can hit the cap exactly; not
+ * re-exported from `index.ts`, so it stays off the public surface.
  */
-/** @internal Exported so the overflow test can hit the cap exactly. */
 export const MAX_BUFFER_CHARS = 16 * 1024 * 1024;
 
 /** Ceiling for reconnect backoff. */

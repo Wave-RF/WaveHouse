@@ -511,12 +511,19 @@ describe("SSETransport reconnect and resumption", () => {
     // terminates itself; feeding it again throws and would surface as a second,
     // misleading SSE_READ_ERROR blaming the read for a cause already reported.
     first.push(`data: ${"x".repeat(MAX_BUFFER_CHARS)}`);
+    // Enqueued before the first read completes, because the early return makes
+    // `_pump`'s finally cancel the reader — a later push would throw on a
+    // closed stream. Without the fix the loop feeds this to the terminated
+    // parser, which throws and adds a second, misleading SSE_READ_ERROR.
+    first.push("data: {}\n\n");
     await vi.waitFor(() => expect(seen.errors.length).toBeGreaterThan(0));
-
-    expect(seen.errors.map((e) => e.code)).toEqual(["SSE_PARSE_ERROR"]);
 
     await vi.advanceTimersByTimeAsync(2000);
     await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
+
+    // Asserted only after the reconnect, so a second error would have had
+    // every chance to land. Checked before the reconnect this cannot fail.
+    expect(seen.errors.map((e) => e.code)).toEqual(["SSE_PARSE_ERROR"]);
 
     t.disconnect();
   });

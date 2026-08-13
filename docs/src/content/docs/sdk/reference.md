@@ -47,18 +47,20 @@ The SDK **never throws** for anything the server returns — all API errors come
 | *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — usually a gateway's login page |
 | *(response status)* | `HTTP_4xx` / `HTTP_5xx` | Per status | The stream request was rejected — same codes as REST |
 
-The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Both transports act on `retryable`; what differs is when the error reaches you. All four cases:
+The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Both transports act on `retryable`; what differs is when the error reaches you. The four combinations — two of which carry an exception, noted under the table:
 
 | | Retryable | Not retryable |
 |---|---|---|
 | **REST** | retried up to `maxRetries`, then returned — the flag records what was already tried | returned on the first attempt, no backoff (every `4xx`) |
 | **Stream** | reported *before* the transport re-dials, which it does indefinitely | reported once; the stream closes and stays closed |
 
+Two cells have an exception. On REST, `ABORTED` is non-retryable but can be raised *during* a retry sleep, so it is the one non-retryable error that may reach you after a backoff. On a stream, `SSE_PARSE_ERROR` is flagged retryable but neither re-dials nor closes — it is skipped in place, as described below.
+
 On a stream, a retryable failure is re-dialed on a jittered exponential backoff (capped at 30s, and reset only once a connection has held for a few seconds — so a server that accepts and instantly closes still backs off), with the `status` callback moving `reconnecting` → `live`.
 
 Rejected requests surface the real status and message rather than an opaque connection failure, and any `4xx` ends the stream, since repeating the request won't usually talk whatever rejected it round — the exception being a `429` or `408` from a fronting rate limiter, which is transient even though the stream still ends, so catch it and open a new one after a delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). Note that **WaveHouse never rejects a stream for authentication**: `/v1/stream` is ungated, so an expired or missing token resolves to `default_role` and you get a `200` with a filtered view, not a `401`. The one 4xx it raises itself is `400` for a missing or empty `table`; any other 4xx comes from something in front — an auth gateway, a proxy. That silent-downgrade behavior is exactly why `auth` is re-read on every connection attempt, and [#239](https://github.com/Wave-RF/WaveHouse/issues/239) tracks enforcing expiry server-side. `SSE_CONNECT_ERROR` and `SSE_NO_STREAM_BODY` are configuration faults, so fix the cause and start a new stream.
 
-`SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. Its `retryable: true` is therefore vestigial; there is nothing to re-dial. Two things it does **not** cover: a frame whose `data` isn't valid JSON is logged with `console.warn` and dropped, never reaching your `error` callback; and the parser's 16 MiB buffer cap, which is reported here and *does* end the connection — the parser is terminated by an overflow, so the transport stops reading and reconnects rather than feeding it again.
+`SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. Its `retryable: true` is therefore vestigial; there is nothing to re-dial. Two exceptions to that skipped-in-place rule. A frame whose `data` isn't valid JSON never reaches your `error` callback at all — it is logged with `console.warn` and dropped. And the parser's 16 MiB buffer cap *is* reported under this code but **does** end the connection: an overflow terminates the parser, so the transport stops reading and reconnects rather than feeding it again.
 
 `SSE_AUTH_ERROR` is the exception that proves the rule: because `auth` is now invoked on every connection attempt rather than once per stream, a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 
