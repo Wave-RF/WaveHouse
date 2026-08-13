@@ -809,6 +809,34 @@ describe("SSETransport lifecycle", () => {
     expect(seen.statuses[seen.statuses.length - 1]).toBe("closed");
   });
 
+  it("strands no timer when closed from inside the reconnecting handler", async () => {
+    vi.useFakeTimers();
+    // A server that accepts and immediately closes, so the loop reaches its
+    // backoff and emits "reconnecting".
+    const impl: FetchLike = async () => {
+      const conn = streamingResponse();
+      conn.push(": connected\n\n");
+      conn.close();
+      return conn.res;
+    };
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: impl });
+    const seen = collect(t);
+    t.onStatus = (st) => {
+      seen.statuses.push(st);
+      // `_wake` is still null at this instant — the timer does not exist yet —
+      // so a naive implementation installs one nothing can cancel.
+      if (st === "reconnecting") t.disconnect();
+    };
+    t.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("reconnecting"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(seen.statuses).toContain("closed");
+    vi.useRealTimers();
+  });
+
   it("stops delivering when a subscriber closes from inside its own handler", async () => {
     const f = makeFetch();
     const conn = streamingResponse();

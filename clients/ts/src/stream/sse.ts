@@ -508,6 +508,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
 
   /** Wait out a reconnect gap, cut short by `disconnect()`. */
   private _sleep(ms: number): Promise<void> {
+    // `_wake` only cuts a gap short once the timer exists. A `disconnect()`
+    // raised synchronously from the "reconnecting" status callback runs a line
+    // earlier than that, so without this the loop would install a timer nobody
+    // can cancel and hold the event loop open for the whole backoff — the one
+    // hole in the `_wake` machinery.
+    if (this._closed) return Promise.resolve();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this._wake = null;

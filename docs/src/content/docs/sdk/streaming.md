@@ -116,20 +116,24 @@ A dropped stream reconnects on a jittered exponential backoff, capped at 30s, an
 resumes with `Last-Event-ID` so the server gap-fills what was missed. The
 schedule resets only after a connection has *held* for a few seconds, so a
 server accepting and immediately closing — slow-consumer eviction, a half-broken
-upstream — can't pin the client at sub-second retries.
+upstream — can't pin the client at sub-second retries. Reconnection is
+**unbounded**: a stream keeps re-dialing until it hits a terminal error or you
+`close()` it. `options.maxRetries` bounds REST requests only and is never
+consulted here.
 
 A `4xx` is terminal and surfaces through `error` with the real status code
-rather than an opaque connection failure — though it won't come from WaveHouse,
-which leaves `/v1/stream` ungated and answers an expired token with a filtered
-view rather than a rejection. A `4xx` here means something in front of it (an
-auth gateway, a proxy) turned the request away. See
+rather than an opaque connection failure. It won't be an *authentication*
+rejection from WaveHouse, which leaves `/v1/stream` ungated and answers an
+expired token with a filtered view rather than a `401`; the only 4xx it raises
+itself is `400` for a missing or empty table name. Anything else means something
+in front of it (an auth gateway, a proxy) turned the request away. See
 [Error Handling](/sdk/reference#error-handling) for every code a stream can
 report and which ones re-dial.
 
 Streams go through `options.fetch`, `options.headers`, and
 `options.fetchOptions` like every other request — which is what lets a stream
-reach a header-gated origin. A custom `fetch` carries two extra requirements on
-this path; see [Supplying your own fetch](/sdk#supplying-your-own-fetch).
+reach a header-gated origin. A custom `fetch` is asked more of on this
+path; see [Supplying your own fetch](/sdk#supplying-your-own-fetch).
 
 ### Client-Side Stream Filtering
 

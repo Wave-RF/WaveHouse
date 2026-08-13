@@ -316,7 +316,7 @@ const wh = createClient<Database>({
 |-------|------|---------|-------------|
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
-| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
+| `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx **REST** requests; stream reconnects are unbounded ([details](/sdk/streaming#transport-behavior)) |
 | `options.headers` | `Record<string, string>` | — | Headers added to every request ([details](#custom-headers)) |
 | `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#extra-requestinit-fields)) |
 | `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every request ([details](#supplying-your-own-fetch)) |
