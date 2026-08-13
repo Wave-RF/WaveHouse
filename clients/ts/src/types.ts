@@ -97,10 +97,11 @@ export interface ClientConfig<_DB extends Database = Database> {
  * On REST the SDK reads `.ok` and `.headers` always, `.text()` on success, and
  * `.status`, `.statusText` plus `.json()` when the response is not `ok`. A
  * rejection becomes a `NETWORK_ERROR` result and is retried with backoff —
- * except a `DOMException` named `AbortError` (what the platform `fetch` and
- * undici throw on abort), which becomes `ABORTED` and is not retried.
- * Implementations that reject with some other abort error, such as
- * `node-fetch`, are retried instead.
+ * unless the `AbortSignal` you passed has been aborted, in which case the
+ * result is `ABORTED` and nothing is retried. That is decided from the signal
+ * rather than the rejection's type, so an implementation that throws something
+ * other than a `DOMException` named `AbortError` — `AbortSignal.timeout()`,
+ * `node-fetch` — is reported the same way.
  *
  * **Streaming needs more.** `.stream()` and `.liveQuery()` read the response as
  * it arrives, via `.body.getReader()`, so an implementation used with them must

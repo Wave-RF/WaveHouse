@@ -473,10 +473,12 @@ response, which goes through the same error parsing as REST. `.text()` is never
 called on a stream.
 
 **On REST**, if your function rejects, the request becomes a `NETWORK_ERROR`
-result and is retried with backoff; the one exception is a `DOMException` named
-`AbortError` — what the platform `fetch` and undici throw on abort — which
-becomes `ABORTED` and is not retried. An implementation that signals abort some
-other way (`node-fetch` throws its own `AbortError` class) gets retried instead.
+result and is retried with backoff — unless the `AbortSignal` you passed has
+been aborted, in which case the result is `ABORTED` and nothing is retried.
+That's decided from the signal rather than from what your function threw, so an
+implementation that signals abort some other way — `AbortSignal.timeout()`
+raises a `TimeoutError`, `node-fetch` its own `AbortError` class — is reported
+the same way.
 On a stream the same rejection is reported to the subscriber as
 `SSE_NETWORK_ERROR` and re-dialed, while an `AbortError` is treated as an
 ordinary teardown rather than an error — see

@@ -190,6 +190,29 @@ describe("request", () => {
     expect(result.error?.retryable).toBe(false);
   });
 
+  it.each([0, 2])(
+    "reports ABORTED regardless of the rejection type, at maxRetries=%i",
+    async (maxRetries) => {
+      // AbortSignal.timeout() rejects with a TimeoutError, and node-fetch with
+      // its own AbortError class — neither is a DOMException named AbortError.
+      // Keying the check off the error alone made the answer depend on whether
+      // a retry remained for the backoff sleep to notice the signal.
+      const ac = new AbortController();
+      fetchSpy.mockImplementation(async () => {
+        ac.abort();
+        throw new TypeError("fetch failed");
+      });
+
+      const result = await request(makeCtx({ options: { maxRetries } }), {
+        method: "GET",
+        path: "/health",
+        signal: ac.signal,
+      });
+
+      expect(result.error?.code).toBe("ABORTED");
+    },
+  );
+
   it("appends query params to URL", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 

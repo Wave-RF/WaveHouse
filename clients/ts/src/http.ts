@@ -147,8 +147,13 @@ export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<H
 
       return { data: null, error, headers: res.headers };
     } catch (e) {
-      // AbortError — return immediately, no retry
-      if (e instanceof DOMException && e.name === "AbortError") {
+      // Classified on the *signal*, not the rejection's type. Keying off the
+      // error alone made the outcome depend on `maxRetries`: an implementation
+      // that rejects with something other than a `DOMException` named
+      // `AbortError` — `AbortSignal.timeout()`, `node-fetch` — fell through to
+      // NETWORK_ERROR here, and was then reclassified as ABORTED only if a
+      // retry remained for the backoff `sleep` to notice the signal.
+      if (opts.signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) {
         return abortedResult<T>();
       }
 

@@ -62,7 +62,7 @@ Rejected requests surface the real status and message rather than an opaque conn
 
 `SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. For an ordinary bad frame its `retryable: true` is therefore vestigial — nothing is re-dialed. Two exceptions, one to each half of that reported-and-skipped rule. A frame whose `data` isn't valid JSON is skipped but never *reported* — `console.warn` and dropped, with no `error` callback. The parser's 16 MiB buffer cap is reported but not *skipped*: an overflow terminates the parser, so the transport stops reading and reconnects rather than feeding it again.
 
-`SSE_AUTH_ERROR` is the exception that proves the rule: because `auth` is now invoked on every connection attempt rather than once per stream, a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
+`SSE_AUTH_ERROR` is the one caller-side failure that isn't terminal. A rejecting `auth` callback propagates out of a REST call, but on a stream — where `auth` is invoked on every connection attempt rather than once per stream — a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 
 ---
 
