@@ -418,8 +418,8 @@ preference — `credentials` stays yours, honored in a browser and dropped
 elsewhere because some runtimes throw if it is set at all. See
 [Supplying your own fetch](#supplying-your-own-fetch) for what each is set to
 and why. Everything else here reaches streams normally. The example above is a
-REST-path illustration: on a stream, `cache` is already `no-store` and
-`keepalive` is meaningless for a connection meant to stay open.
+REST-path illustration: on a stream `cache` is already `no-store`, and a field
+like `keepalive` is meaningless for a connection meant to stay open.
 :::
 
 :::note[`credentials: 'include'` needs a proxy that owns CORS]
@@ -466,13 +466,20 @@ always, `.text()` on success, and `.status`, `.statusText` plus `.json()` when
 the response is not `ok` — so a hand-rolled response object needs all six there.
 A stub used with `.stream()` or `.liveQuery()` needs a different set: `.ok`,
 `.status`, `.type` (checked for `opaqueredirect`), `.headers` carrying
-`content-type: text/event-stream`, and a live, unread `.body`. `.text()` is
-never called on a stream. If your function
-rejects, the request becomes a `NETWORK_ERROR` result and is retried with
-backoff; the one exception is a `DOMException` named `AbortError` — what the
-platform `fetch` and undici throw on abort — which becomes `ABORTED` and is not
-retried. An implementation that signals abort some other way (`node-fetch`
-throws its own `AbortError` class) gets retried instead.
+`content-type: text/event-stream`, and a live, unread `.body` — plus
+`.statusText` and `.json()` if your stub ever answers a stream with a non-`ok`
+response, which goes through the same error parsing as REST. `.text()` is never
+called on a stream.
+
+**On REST**, if your function rejects, the request becomes a `NETWORK_ERROR`
+result and is retried with backoff; the one exception is a `DOMException` named
+`AbortError` — what the platform `fetch` and undici throw on abort — which
+becomes `ABORTED` and is not retried. An implementation that signals abort some
+other way (`node-fetch` throws its own `AbortError` class) gets retried instead.
+On a stream the same rejection is reported to the subscriber as
+`SSE_NETWORK_ERROR` and re-dialed, while an `AbortError` is treated as an
+ordinary teardown rather than an error — see
+[Error Handling](/sdk/reference#error-handling).
 
 The option's type is exported as `FetchLike`. It is written out rather than as
 `typeof fetch`, which resolves differently depending on whether your TypeScript
@@ -485,7 +492,7 @@ fits without annotation.
 
 Streaming goes through your function too. That comes with the extra requirement
 described above — the response must carry a live streaming body — and the
-streaming transport keeps ownership of three `RequestInit` fields where the
+streaming transport keeps ownership of two `RequestInit` fields where the
 value is load-bearing rather than a preference: `cache` (as an init field; a
 `Cache-Control` header would fail cross-origin preflight) and `redirect`. It
 constrains one more without owning it: `credentials` stays yours, forwarded in a
