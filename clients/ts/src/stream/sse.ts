@@ -173,7 +173,13 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         this._counted = false;
       }
     }
-    this.onStatus?.("closed");
+    // Same isolation as `_emitStatus`, which this deliberately bypasses so the
+    // terminal "closed" always gets through.
+    try {
+      this.onStatus?.("closed");
+    } catch (e) {
+      console.error("[wavehouse] SSE status handler threw:", e);
+    }
   }
 
   /** Connect/read/reconnect until the stream is closed or hits a terminal error. */
@@ -511,7 +517,19 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   /** Suppress callbacks that race a `disconnect()`. */
   private _emitError(error: WaveHouseError): void {
     if (this._closed) return;
-    this.onError?.(error);
+    // Guarded like `_dispatch`: a subscriber that throws must not take the
+    // transport with it. Unguarded, the throw unwinds `_run` into `connect()`'s
+    // terminal handler, which reports a spurious SSE_CONNECT_ERROR and then
+    // calls `disconnect()` — whose own `onStatus("closed")` throws again, this
+    // time out of the `.catch()`, as a process-fatal unhandled rejection.
+    // `EventSource` isolated a throwing handler and kept streaming. Note this
+    // protects the transport, not the fan-out: StreamController still stops
+    // delivering to later subscribers when an earlier one throws (#473).
+    try {
+      this.onError?.(error);
+    } catch (e) {
+      console.error("[wavehouse] SSE error handler threw:", e);
+    }
   }
 
   /**
@@ -524,7 +542,11 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
    */
   private _emitStatus(status: StreamStatus): void {
     if (this._closed) return;
-    this.onStatus?.(status);
+    try {
+      this.onStatus?.(status);
+    } catch (e) {
+      console.error("[wavehouse] SSE status handler threw:", e);
+    }
   }
 
   /** Wait out a reconnect gap, cut short by `disconnect()`. */

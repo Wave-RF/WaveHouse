@@ -1018,6 +1018,65 @@ describe("SSETransport lifecycle", () => {
     expect(seen.events[0].data).toEqual({ n: 1 });
   });
 
+  it("survives a subscriber whose status handler throws", async () => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rejections: unknown[] = [];
+    const onRejection = (r: unknown) => rejections.push(r);
+    process.on("unhandledRejection", onRejection);
+
+    try {
+      const f = makeFetch();
+      const conn = streamingResponse();
+      f.queue.push(() => conn.res);
+
+      const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+      const seen = collect(t);
+      // Unguarded, this unwinds _run into connect()'s terminal handler, which
+      // emits a spurious SSE_CONNECT_ERROR and then calls disconnect() — whose
+      // own onStatus("closed") throws again, out of the .catch(), fatally.
+      t.onStatus = (st) => {
+        seen.statuses.push(st);
+        throw new Error("subscriber blew up");
+      };
+      t.connect();
+      await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+      conn.push(frame("id-1", { table_name: "clicks", received_timestamp: "t", data: { n: 1 } }));
+      await vi.waitFor(() => expect(seen.events).toHaveLength(1));
+
+      // The stream is still delivering, and nothing spurious was reported.
+      expect(seen.errors).toHaveLength(0);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(rejections).toEqual([]);
+
+      t.disconnect();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      warn.mockRestore();
+    }
+  });
+
+  it("survives a subscriber whose error handler throws", async () => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = makeFetch();
+    f.queue.push(() => new Response(JSON.stringify({ error: "nope" }), { status: 401 }));
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.onError = (e) => {
+      seen.errors.push(e);
+      throw new Error("subscriber blew up");
+    };
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    // A throwing handler must not turn a clean terminal 401 into something else.
+    expect(seen.errors[0].status).toBe(401);
+    await flush();
+    expect(seen.errors).toHaveLength(1);
+    warn.mockRestore();
+  });
+
   it("connect() twice does not start a second reconnect loop", async () => {
     const f = makeFetch();
     const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
