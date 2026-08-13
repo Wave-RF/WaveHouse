@@ -241,6 +241,21 @@ func TestMiddleware_ExpiredToken_FallsBackWithExpiredError(t *testing.T) {
 	assert.Equal(t, "token expired", c.authErr.Error())
 }
 
+// TestMiddleware_ExpZeroClaim_TokenExpired pins the deliberate validation
+// shift that rides along with jwt.WithJSONNumber: float64 decoding
+// special-cased a literal exp of 0 as "no expiry claim" (the token never
+// expired); as a json.Number it reads as the epoch, so the token is expired.
+// A jwt/v5 upgrade or a dropped parser option that silently restored
+// never-expiring exp:0 tokens must fail here.
+func TestMiddleware_ExpZeroClaim_TokenExpired(t *testing.T) {
+	t.Parallel()
+	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer", "exp": 0})
+	c := run(t, cfg(), bearer(tok))
+	assert.Empty(t, c.role)
+	require.Error(t, c.authErr)
+	assert.True(t, errors.Is(c.authErr, errTokenExpired), "exp: 0 must read as the epoch (expired), not as no-expiry")
+}
+
 func TestMiddleware_QueryParamToken_StrippedFromURL(t *testing.T) {
 	t.Parallel()
 	tok := testutil.MakeJWT(t, map[string]any{"role": "viewer"})

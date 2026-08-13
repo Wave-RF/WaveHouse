@@ -476,6 +476,30 @@ func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 	testutil.AssertJSONErrorResponse(t, w)
 }
 
+// TestIngest_Policy_CheckIn_NullValue_FailsClosed: an explicit null passes
+// schema validation for a defaulted column, but it has no canonical scalar
+// form — so it is a member of NO set, even one carrying the empty string ""
+// (the regression shape: an unguarded canonicalization would render null as
+// "" and match an empty-string member).
+func TestIngest_Policy_CheckIn_NullValue_FailsClosed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", ""}})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestIngest_Policy_CheckIn_Absent_FailsClosed(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
