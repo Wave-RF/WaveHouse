@@ -467,7 +467,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`internal/policy/`** package: Policy types, evaluation engine, and NATS KV store.
 - **`internal/pipes/`** package: Named query types and NATS KV store with `.sql` file bootstrap.
 - **`internal/query/`** package: Structured query AST types, SQL builder with schema validation, permission injection, and timestamp bucketing.
-- **TypeScript SDK** (`clients/ts/`): `@wavehouse/sdk` — zero-dependency client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates (incrementable/decomposable/poll), and codegen CLI for generating typed interfaces from ClickHouse schemas.
+- **TypeScript SDK** (`clients/ts/`): `@wavehouse/sdk` — client with type-safe query builder, real-time SSE streaming, live queries with smart aggregation updates (incrementable/decomposable/poll), and codegen CLI for generating typed interfaces from ClickHouse schemas.
 - **Schema discovery**: New `internal/discovery/` package introspects ClickHouse `system.columns` to build a live schema registry. Schemas are cached and auto-refreshed on a configurable interval (`schema.refresh_interval` / `WH_SCHEMA_REFRESH_INTERVAL`).
 - **Schema validation**: Ingest payloads are validated against discovered ClickHouse schemas — unknown fields, type mismatches, and non-nullable violations are rejected with descriptive 400 errors.
 - **Schema API endpoints**: `GET /v1/schema` (list all tables), `GET /v1/schema/{table}` (single table), `POST /v1/schema/refresh` (force refresh).

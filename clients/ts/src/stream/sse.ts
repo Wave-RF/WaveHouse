@@ -92,6 +92,16 @@ interface AttemptResult {
 export class SSETransport<T = Record<string, unknown>> implements StreamTransport<T> {
   private _opts: SSEOptions;
   private _abort: AbortController | null = null;
+  /**
+   * Set by `disconnect()` before it calls `abort()` — both synchronously — so
+   * a rejection caused by our own abort always observes this as `true`. That
+   * makes it a complete and precise test for "did we cause this?", which is
+   * why the catch blocks read it directly instead of matching on the error
+   * type: an `AbortError` we *didn't* raise (a custom `fetch` enforcing a
+   * per-attempt deadline, an `auth()` call cancelled by its own controller) is
+   * a transient failure to re-dial, exactly as on the REST path. Treating one
+   * as a teardown killed the stream permanently, and silently.
+   */
   private _closed = false;
   private _started = false;
   private _counted = false;
@@ -226,7 +236,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     try {
       init = await this._init(ac.signal);
     } catch (e) {
-      if (this._isAbort(e)) return { liveMs: 0, terminal: true };
+      if (this._closed) return { liveMs: 0, terminal: true };
       this._emitError({
         status: 0,
         code: "SSE_AUTH_ERROR",
@@ -241,7 +251,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       const doFetch = this._opts.fetch;
       res = doFetch ? await doFetch(target, init) : await fetch(target, init);
     } catch (e) {
-      if (this._isAbort(e)) return { liveMs: 0, terminal: true };
+      if (this._closed) return { liveMs: 0, terminal: true };
       this._emitError({
         status: 0,
         code: "SSE_NETWORK_ERROR",
@@ -455,7 +465,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         if (overflowed) return;
       }
     } catch (e) {
-      if (this._isAbort(e)) return;
+      if (this._closed) return;
       this._emitError({
         status: 0,
         code: "SSE_READ_ERROR",
@@ -515,10 +525,6 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   private _emitStatus(status: StreamStatus): void {
     if (this._closed) return;
     this.onStatus?.(status);
-  }
-
-  private _isAbort(e: unknown): boolean {
-    return (e instanceof DOMException && e.name === "AbortError") || this._closed;
   }
 
   /** Wait out a reconnect gap, cut short by `disconnect()`. */

@@ -480,9 +480,9 @@ implementation that signals abort some other way — `AbortSignal.timeout()`
 raises a `TimeoutError`, `node-fetch` its own `AbortError` class — is reported
 the same way.
 On a stream the same rejection is reported to the subscriber as
-`SSE_NETWORK_ERROR` and re-dialed, while an `AbortError` is treated as an
-ordinary teardown rather than an error — see
-[Error Handling](/sdk/reference#error-handling).
+`SSE_NETWORK_ERROR` and re-dialed — including an `AbortError`, since the stream
+transport applies the same rule: only an abort *it* raised, via `.close()`,
+ends the stream. See [Error Handling](/sdk/reference#error-handling).
 
 The option's type is exported as `FetchLike`. It is written out rather than as
 `typeof fetch`, which resolves differently depending on whether your TypeScript

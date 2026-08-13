@@ -735,6 +735,35 @@ describe("SSETransport lifecycle", () => {
     expect(f.attempts).toHaveLength(0);
   });
 
+  it("retries an AbortError from the token provider that the SDK did not raise", async () => {
+    vi.useFakeTimers();
+    const f = makeFetch();
+    let calls = 0;
+    const t = new SSETransport({
+      baseURL: BASE,
+      table: "clicks",
+      auth: () => {
+        calls++;
+        // A refresh call cancelled by its own controller. The SDK never asked
+        // to cancel, so this is transient — matching on the error type instead
+        // of `_closed` ended the stream terminally, and emitted nothing.
+        if (calls === 1) throw new DOMException("Aborted", "AbortError");
+        return "recovered";
+      },
+      fetch: f.impl,
+    });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_AUTH_ERROR");
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+    expect(headersOf(f.attempts[0]).Authorization).toBe("Bearer recovered");
+
+    t.disconnect();
+  });
+
   it("keeps retrying when the token provider throws", async () => {
     vi.useFakeTimers();
     const f = makeFetch();

@@ -130,7 +130,7 @@ The [TypeScript SDK](/sdk) wraps the whole surface — typed inserts, a chainabl
  </TabItem>
  <TabItem label="Live updates">
   ```ts
-  // Historical backfill + real-time stream, deduplicated at the seam.
+  // Historical backfill, then the live stream.
   const lq = wh.from('clicks')
     .selectAll()
     .where('page', '=', '/home')

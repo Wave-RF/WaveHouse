@@ -142,8 +142,10 @@ consulted here.
 Delivery across a reconnect is **at-least-once**. The `Last-Event-ID` the client
 sends is the last event's `received_timestamp`, and the server replays from that
 instant *inclusively* — so the last event you already saw, and anything sharing
-its timestamp, arrives again. The SDK does not deduplicate live frames (only
-`liveQuery()` does, once, at the backfill seam), so key on `timestamp` plus your
+its timestamp, arrives again. The SDK does not deduplicate live frames —
+`liveQuery()` makes one pass at the backfill seam, and only under an ascending
+order ([#449](https://github.com/Wave-RF/WaveHouse/issues/449)) — so key on
+`timestamp` plus your
 own row identity if duplicates matter.
 
 Replay is also bounded by the server's
@@ -227,7 +229,7 @@ interface StreamSubscriber<T> {
 
 1. Opens the stream **immediately** and buffers incoming events.
 2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result.
-3. Deduplicates buffered events by comparing timestamps against the latest historical timestamp.
+3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so the boundary is the oldest timestamp and this step filters nothing; a projection that omits `received_timestamp` skips it entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
 4. Flushes remaining buffered events and switches to live mode.
 
 This "stream-first" approach ensures no events are lost between the fetch and stream start.
