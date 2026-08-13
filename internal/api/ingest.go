@@ -387,7 +387,12 @@ func (h *IngestHandler) processRecord(
 				continue
 			}
 			if actual, ok := data[col]; ok {
-				if fmt.Sprint(actual) != fmt.Sprint(requiredVal) {
+				// The payload side canonicalizes exactly as the claim side did
+				// (policy.CanonicalScalar), so a numeric insert value matches a
+				// numeric claim by value, not by spelling (payload 1.0 vs claim 1);
+				// a value with no canonical form (object/array/null) matches nothing.
+				actualStr, comparable := policy.CanonicalScalar(actual)
+				if !comparable || actualStr != fmt.Sprint(requiredVal) {
 					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
 					return false, &recordReject{
 						Status:  http.StatusForbidden,
@@ -463,11 +468,16 @@ func (h *IngestHandler) processRecord(
 	return false, nil, nil
 }
 
-// valueInSet reports whether v matches any member of set, comparing by string
-// form to mirror the scalar check's fmt.Sprint equality — so a JSON number in
-// the insert body matches a stringified claim value the same way _eq does.
+// valueInSet reports whether v matches any member of set, comparing by
+// canonical string form (policy.CanonicalScalar) to mirror the scalar check's
+// equality — so a JSON number in the insert body matches a claim-derived value
+// by value, not spelling, the same way _eq does. A v with no canonical form
+// (object/array/null) is a member of no set.
 func valueInSet(v any, set []any) bool {
-	vs := fmt.Sprint(v)
+	vs, ok := policy.CanonicalScalar(v)
+	if !ok {
+		return false
+	}
 	for _, s := range set {
 		if fmt.Sprint(s) == vs {
 			return true

@@ -135,6 +135,43 @@ func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
 	assert.Equal(t, []any{"1234567890123456789"}, perms.WhereParams)
 }
 
+// TestMiddleware_NumericClaimSpelling_BindsCanonically: json.Number keeps the
+// token's literal spelling, so without normalization the bound filter value
+// would depend on how the IdP spelled the number — and a numeric ClickHouse
+// column rejects '1.0'/'1e3' as a TYPE_MISMATCH error on every query for that
+// role. The claims ride a real signed token (a json.Number claim value
+// marshals verbatim into the payload) so the exact parser configuration is
+// what's under test, per the note on the large-integer test above.
+func TestMiddleware_NumericClaimSpelling_BindsCanonically(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		literal string
+		want    string
+	}{
+		{"integer spelling stays exact", "1234567890123456789", "1234567890123456789"},
+		{"float spelling of an integer", "1.0", "1"},
+		{"exponent spelling", "1e3", "1000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := run(t, cfg(), bearer(testutil.MakeJWT(t, map[string]any{"role": "viewer", "tenant_id": json.Number(tt.literal)})))
+			require.True(t, c.hasClaims)
+
+			eq := "{{ jwt.tenant_id }}"
+			p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+				"clicks": {Select: map[string]policy.RolePermissions{
+					"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}},
+				}},
+			}}
+			perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
+			require.True(t, perms.Allowed)
+			assert.Equal(t, []any{tt.want}, perms.WhereParams)
+		})
+	}
+}
+
 func TestMiddleware_BearerScheme_CaseInsensitive(t *testing.T) {
 	t.Parallel()
 	// RFC 7235 auth-schemes are case-insensitive; a lowercase / mixed-case

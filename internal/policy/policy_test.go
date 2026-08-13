@@ -399,6 +399,9 @@ func TestResolveTemplate(t *testing.T) {
 		"tids":     []any{"a", "b"},
 		"is_admin": true,
 		"big":      json.Number("12345678901234567890"),
+		"price":    json.Number("1.0"),
+		"exp3":     json.Number("1e3"),
+		"huge":     json.Number("1e400"),
 	}
 	tests := []struct {
 		name   string
@@ -426,6 +429,13 @@ func TestResolveTemplate(t *testing.T) {
 		// keeps every digit (the >2^53 case float64 would silently round).
 		{"boolean claim binds", "{{ jwt.is_admin }}", "true", true},
 		{"large integer claim binds exactly", "{{ jwt.big }}", "12345678901234567890", true},
+		// Numeric claims bind in canonical decimal form, not the token's
+		// spelling — "1.0"/"1e3" error as TYPE_MISMATCH against a numeric
+		// column if bound verbatim. A magnitude only JSON can hold fails
+		// closed like any other unresolvable claim.
+		{"float spelling binds canonically", "{{ jwt.price }}", "1", true},
+		{"exponent spelling binds canonically", "{{ jwt.exp3 }}", "1000", true},
+		{"beyond-float64 number fails closed", "{{ jwt.huge }}", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -450,6 +460,49 @@ func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 	result, ok := resolveTemplate("{{ jwt.a }}-{{ jwt.b }}", claims)
 	assert.Equal(t, "1-2", result)
 	assert.True(t, ok)
+}
+
+// TestCanonicalScalar pins the one rule every bound value flows through — claim
+// templates, _in elements, and the ingest check comparison alike. Notable: the
+// integer path is width-unbounded (big.Int, never float64 rounding), non-integer
+// spellings round-trip through float64 exactly as ClickHouse would read them,
+// and an underflowing magnitude collapses to "0" (ParseFloat returns 0 without
+// error there — only overflow has no canonical form).
+func TestCanonicalScalar(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		v    any
+		want string
+		ok   bool
+	}{
+		{"string passes through", "org-123", "org-123", true},
+		{"empty string passes through", "", "", true},
+		{"boolean", true, "true", true},
+		{"go int from a hand-built claims map", 42, "42", true},
+		{"integer literal", json.Number("7"), "7", true},
+		{"negative integer literal", json.Number("-7"), "-7", true},
+		{"large integer exact at any width", json.Number("12345678901234567890"), "12345678901234567890", true},
+		{"float spelling of an integer", json.Number("1.0"), "1", true},
+		{"exponent spelling", json.Number("1e3"), "1000", true},
+		{"uppercase exponent spelling", json.Number("1E3"), "1000", true},
+		{"fraction kept", json.Number("1.5"), "1.5", true},
+		{"negative zero folds to zero", json.Number("-0.0"), "0", true},
+		{"underflowing magnitude collapses to zero", json.Number("1e-400"), "0", true},
+		{"overflow has no canonical form", json.Number("1e400"), "", false},
+		{"negative overflow has no canonical form", json.Number("-1e400"), "", false},
+		{"null has no canonical form", nil, "", false},
+		{"object has no canonical form", map[string]any{"id": 1}, "", false},
+		{"array has no canonical form", []any{"a"}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := CanonicalScalar(tt.v)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.ok, ok)
+		})
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -935,12 +988,58 @@ func TestResolveFilters_InScalarClaim(t *testing.T) {
 	assert.Equal(t, []any{"solo"}, params)
 }
 
+// TestResolveFilters_InNonScalarElement_FailsClosed: the structured-claim rule
+// (TestResolveFilters_StructuredClaim_FailsClosed) extends INSIDE a bare-claim
+// _in array — one object, null, nested-array, or canonical-form-less numeric
+// element fails the WHOLE set closed. Binding such an element's
+// "map[…]"/"<nil>" rendering would bind a value no row legitimately carries,
+// and binding only the clean remainder would silently shrink the set the
+// policy author declared.
+func TestResolveFilters_InNonScalarElement_FailsClosed(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	tests := []struct {
+		name    string
+		tenants []any
+	}{
+		{"object element", []any{map[string]any{"id": 1}, map[string]any{"id": 2}}},
+		{"null element", []any{"a", nil}},
+		{"nested array element", []any{[]any{"1", "2"}, []any{"3"}}},
+		{"beyond-float64 numeric element", []any{"a", json.Number("1e400")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(filters, map[string]any{"tenants": tt.tenants})
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
+// TestResolveFilters_InNumericElements_BindCanonically: scalar elements of a
+// bare-claim _in array bind through the same CanonicalScalar rule as every
+// other operator — numeric spellings canonicalize, large integers keep exact
+// digits, strings pass through.
+func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
+	t.Parallel()
+	in := "{{ jwt.tenants }}"
+	filters := map[string]Filter{"tenant_id": {In: &in}}
+	claims := map[string]any{"tenants": []any{json.Number("1.0"), json.Number("12345678901234567890"), "b"}}
+	clauses, params := resolveFilters(filters, claims)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
+	assert.Equal(t, []any{"1", "12345678901234567890", "b"}, params)
+}
+
 // TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
 // match no rows (a constant-false predicate) rather than widen to all rows — the
 // fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
-// resolveInValues reach this: an absent claim (navigateClaims returns nil → the
-// `case nil` branch) and a present-but-empty array (the `case []any` branch with
-// zero elements). Both must fail closed.
+// resolveInValues reach this: an absent claim (navigateClaims returns nil, which
+// CanonicalScalar rejects in the `default` branch) and a present-but-empty array
+// (the `case []any` branch with zero elements). Both must fail closed.
 func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"

@@ -300,11 +300,17 @@ func TestBuild_PolicyMaxRows(t *testing.T) {
 
 func TestIsValidAggFn(t *testing.T) {
 	t.Parallel()
-	for _, fn := range []string{"count", "sum", "avg", "min", "max", "uniq", "median"} {
+	for _, fn := range []string{"count", "sum", "avg", "min", "max", "uniq", "median", "COUNT", "Min"} {
 		assert.True(t, isValidAggFn(fn), fn)
 	}
 	assert.False(t, isValidAggFn("drop_table"))
 	assert.False(t, isValidAggFn(""))
+	// Unicode case folding must not stand in for the ASCII-exact match:
+	// strings.ToLower maps İ (U+0130) to 'i', so "mİn" would otherwise pass the
+	// allowlist and be emitted verbatim — ClickHouse then answers "unknown
+	// function" (a 500) where this rejection's 400 belongs.
+	assert.False(t, isValidAggFn("mİn"))
+	assert.False(t, isValidAggFn("unİq"))
 }
 
 func TestBuild_DefaultMaxRows_Applied(t *testing.T) {

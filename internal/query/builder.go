@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -477,6 +478,15 @@ func validateColumn(col string, validCols map[string]bool) error {
 }
 
 func isValidAggFn(fn string) bool {
+	// ASCII-only before folding: strings.ToLower's Unicode fold maps İ (U+0130)
+	// to 'i', so "mİn" would pass the allowlist yet reach ClickHouse verbatim as
+	// an unknown function — a 500 where a 400 belongs. Every allowlisted name is
+	// ASCII, so any non-ASCII byte disqualifies outright.
+	for i := 0; i < len(fn); i++ {
+		if fn[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
 	switch strings.ToLower(fn) {
 	case "count", "sum", "avg", "min", "max",
 		"countdistinct", "uniq", "uniqexact",

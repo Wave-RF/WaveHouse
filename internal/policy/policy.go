@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
@@ -262,12 +265,12 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
-// If a claim path cannot be resolved — absent/null, or resolving to a structured
-// value (JSON object or array) rather than a scalar — the placeholder is
-// replaced with an empty string (never "<nil>") and ok is false, so filter
-// callers can fail the predicate closed instead of binding a value the token
-// never carried (#385). A template with no placeholders — including a literal
-// "" — is always ok.
+// If a claim path cannot be resolved — absent/null, a structured value (JSON
+// object or array) rather than a scalar, or a numeric literal with no canonical
+// form (see CanonicalScalar) — the placeholder is replaced with an empty string
+// (never "<nil>") and ok is false, so filter callers can fail the predicate
+// closed instead of binding a value the token never carried (#385). A template
+// with no placeholders — including a literal "" — is always ok.
 func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 	ok := true
 	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
@@ -278,23 +281,11 @@ func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 			ok = false
 			return ""
 		}
-		parts := strings.Split(sub[1], ".")
-		switch val := navigateClaims(claims, parts).(type) {
-		case nil:
+		s, bindable := CanonicalScalar(navigateClaims(claims, strings.Split(sub[1], ".")))
+		if !bindable {
 			ok = false
-			return ""
-		case map[string]any, []any:
-			// A structured claim value (a JSON object or array) is never a sensible
-			// scalar comparison value — it usually means a path segment was dropped
-			// ({{ jwt.app_metadata }} for {{ jwt.app_metadata.tenant_id }}), and
-			// binding fmt.Sprint's "map[…]"/"[…]" rendering would let _neq/_lt match
-			// essentially every row. Fail closed. Array-valued _in claims never reach
-			// here: resolveInValues handles the bare-claim array case first.
-			ok = false
-			return ""
-		default:
-			return fmt.Sprint(val)
 		}
+		return s
 	})
 	return resolved, ok
 }
@@ -304,27 +295,33 @@ func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 // reference and that claim is a JSON array, every element becomes one value —
 // the multi-tenant case, where a token's tenant_ids list scopes the predicate.
 // A scalar claim (or any template with surrounding text) yields a single value,
-// matching resolveTemplate. Elements are stringified like the other operators so
-// policy filters stay uniformly string-valued. Returns nil when the claim is
-// absent (or a JSON object) so the caller can fail the predicate closed.
+// matching resolveTemplate. Every bound value routes through CanonicalScalar,
+// so elements follow the same rule as the top-level claim: one structured,
+// null, or canonical-form-less element fails the WHOLE set closed (nil) rather
+// than binding a "map[…]"/"<nil>" rendering no row legitimately matches.
+// Returns nil likewise when the claim itself is absent, a JSON object, or has
+// no canonical form, so the caller can fail the predicate closed.
 func resolveInValues(tmpl string, claims map[string]any) []any {
 	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
 		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
-		case nil:
-			return nil
 		case []any:
 			out := make([]any, 0, len(v))
 			for _, e := range v {
-				out = append(out, fmt.Sprint(e))
+				s, ok := CanonicalScalar(e)
+				if !ok {
+					return nil
+				}
+				out = append(out, s)
 			}
 			return out
-		case map[string]any:
-			// A JSON-object claim is never a membership set; matching
-			// resolveTemplate, fail closed rather than bind its "map[…]" rendering
-			// as a one-element set.
-			return nil
 		default:
-			return []any{fmt.Sprint(v)}
+			// Everything CanonicalScalar rejects — an absent/null claim, a
+			// JSON-object claim (never a membership set), a number with no
+			// canonical form — fails closed rather than bind as a one-element set.
+			if s, ok := CanonicalScalar(v); ok {
+				return []any{s}
+			}
+			return nil
 		}
 	}
 	if v, ok := resolveTemplate(tmpl, claims); ok {
@@ -334,6 +331,46 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 	// nil (not a one-element set containing the partial literal), so it fails
 	// closed like the bare-claim case above (#385).
 	return nil
+}
+
+// CanonicalScalar renders a decoded JSON value as the canonical string the
+// policy layer binds and compares, reporting ok=false for values with no such
+// form: null, objects, and arrays. A structured value is never a sensible
+// scalar comparison value — it usually means a dropped path segment
+// ({{ jwt.app_metadata }} for {{ jwt.app_metadata.tenant_id }}), and binding
+// fmt.Sprint's "map[…]"/"[…]" rendering would let _neq/_lt match essentially
+// every row; the one legitimate structured shape, a bare-claim _in array, is
+// unpacked by resolveInValues before its elements reach here. A json.Number
+// (jwt.WithJSONNumber on claims, UseNumber on ingest payloads) binds in
+// canonical decimal form, not the token's spelling: "1", "1.0", and "1e3" are
+// one JSON value, and a numeric ClickHouse column rejects '1.0'/'1e3' as a
+// per-query TYPE_MISMATCH error. Integer literals keep exact digits at any
+// width (the >2^53 case float64 rounds); anything else round-trips through
+// float64 ("1e3" → "1000"); a magnitude only JSON can hold (1e400) has no
+// canonical form and fails closed. Claim resolution and the insert-check
+// payload comparison (internal/api) both route through this one function, so
+// what a read filter binds and what a write check accepts can't drift.
+func CanonicalScalar(v any) (string, bool) {
+	switch val := v.(type) {
+	case nil, map[string]any, []any:
+		return "", false
+	case json.Number:
+		if i, ok := new(big.Int).SetString(val.String(), 10); ok {
+			return i.String(), true
+		}
+		f, err := strconv.ParseFloat(val.String(), 64)
+		if err != nil {
+			return "", false
+		}
+		if f == 0 {
+			// "-0.0" would otherwise format as "-0", which a numeric column
+			// can't parse; ±0 is one value, bound as "0".
+			return "0", true
+		}
+		return strconv.FormatFloat(f, 'f', -1, 64), true
+	default:
+		return fmt.Sprint(val), true
+	}
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.

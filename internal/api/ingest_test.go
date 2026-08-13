@@ -348,6 +348,43 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	assert.NotNil(t, pub.LastMessage(), "should have published")
 }
 
+// TestIngest_Policy_CheckClause_NumericSpellingMatch: the check comparison is
+// canonical on both sides (policy.CanonicalScalar), so a numeric claim and a
+// numeric insert value match by value even when their JSON spellings differ —
+// a claim spelled 1.0 accepts an inserted 1. The former string-form comparison
+// ("1.0" != "1") rejected exactly this insert.
+func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	countTemplate := "{{ jwt.max_count }}"
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {
+						Check: map[string]policy.Filter{
+							"count": {Eq: &countTemplate},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
+	claims := jwt.MapClaims{"max_count": json.Number("1.0")}
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "should have published")
+}
+
 func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
