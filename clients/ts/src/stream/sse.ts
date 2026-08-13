@@ -297,9 +297,18 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     return { liveMs: Date.now() - openedAt, terminal: false };
   }
 
-  /** Resolve the stream URL. Throws on a `baseURL` that isn't absolute. */
+  /** Resolve the stream URL. Throws on a `baseURL` that isn't a usable http(s) origin. */
   private _url(): string {
     const url = resolveURL(this._opts.baseURL, "/v1/stream");
+    // Caught here rather than at `fetch`, which reports an unusable scheme as a
+    // generic failure the loop would then retry forever. `baseURL` must be
+    // absolute, so a bare host throws out of `resolveURL` above; this catches
+    // the absolute-but-wrong case, `ws://` being the tempting one for streams.
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error(
+        `baseURL must use http or https, got "${url.protocol}". Streaming is plain HTTP — there is no WebSocket endpoint.`,
+      );
+    }
     url.searchParams.set("table", this._opts.table);
     if (this._opts.since) {
       url.searchParams.set("since", this._opts.since);

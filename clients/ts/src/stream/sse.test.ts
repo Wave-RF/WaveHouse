@@ -485,6 +485,22 @@ describe("SSETransport lifecycle", () => {
     vi.useRealTimers();
   });
 
+  it("ends the stream on a non-http baseURL scheme", async () => {
+    vi.useFakeTimers();
+    const f = makeFetch();
+    const t = new SSETransport({ baseURL: "ws://localhost:8080", table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_CONNECT_ERROR");
+    expect(seen.errors[0].message).toContain("http or https");
+    // `fetch` would reject with an opaque failure the loop reads as transient.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.attempts).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
   it("keeps retrying when the token provider throws", async () => {
     vi.useFakeTimers();
     const f = makeFetch();
