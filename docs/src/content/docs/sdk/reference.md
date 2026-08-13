@@ -62,7 +62,13 @@ Rejected requests surface the real status and message rather than an opaque conn
 
 `SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. For an ordinary bad frame its `retryable: true` is therefore vestigial — nothing is re-dialed. Two exceptions, one to each half of that reported-and-skipped rule. A frame whose `data` isn't valid JSON is skipped but never *reported* — `console.warn` and dropped, with no `error` callback. The parser's 16 MiB buffer cap is reported but not *skipped*: an overflow terminates the parser, so the transport stops reading and reconnects rather than feeding it again.
 
-**If your own callback throws.** A `next`, `status`, or `error` handler that throws never ends the stream — the transport isolates all three and logs the exception, matching what `EventSource` did. It is not routed to your `error` callback, so a handler that swallows its own failures will fail silently. One caveat: delivery to *other* subscribers on the same stream stops at the one that threw, which is order-dependent and invisible ([#473](https://github.com/Wave-RF/WaveHouse/issues/473)).
+**If your own callback throws.** For anything delivered *through the transport* — `next`, `status`, or `error` — a throw never ends the stream: it is isolated and logged to the console, matching what `EventSource` did, and never routed to your `error` callback, so a handler that swallows its own failures fails silently.
+
+Three paths sit outside that guard, all tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473):
+
+- **`.subscribe()`'s first `status` call.** It fires synchronously with the current state before the transport is involved, and is unguarded — a throw propagates back out of `.subscribe()` unlogged, with your subscriber already registered and no unsubscribe function returned to you. Since that call always happens, it is the *first* thing a throwing `status` handler does.
+- **Delivery to other consumers stops at the one that threw** — later subscribers and a concurrent `for await`, which is starved because the subscriber fan-out runs before the iterator is resolved. Order-dependent and invisible.
+- **Inside `liveQuery()`**, a throw from `initial()`, or from `next()` during the backfill flush, is absorbed by the backfill's own error path — which then discards the rest of the buffered events, with no log and no signal. Only events after the flush behave as described above.
 
 `SSE_AUTH_ERROR` is the one caller-side failure that isn't terminal. A rejecting `auth` callback propagates out of a REST call, but on a stream — where `auth` is invoked on every connection attempt rather than once per stream — a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 
