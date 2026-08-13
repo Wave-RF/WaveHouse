@@ -333,6 +333,14 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 	return nil
 }
 
+// maxCanonicalDigits bounds both a numeric literal and its exact decimal
+// expansion. Big-integer parsing is superlinear in digit count and the ingest
+// check path hands CanonicalScalar client-controlled literals (CWE-400), and
+// a short exponent literal can hide a wide expansion ("1e-150" is six
+// characters with a 152-character exact form). 100 digits is far past any
+// real id — uint256 is 78.
+const maxCanonicalDigits = 100
+
 // CanonicalScalar renders a decoded JSON value as the canonical string the
 // policy layer binds and compares, reporting ok=false for values with no such
 // form: null, objects, and arrays. A structured value is never a sensible
@@ -344,44 +352,101 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 // (jwt.WithJSONNumber on claims, UseNumber on ingest payloads) binds in
 // canonical decimal form, not the token's spelling: "1", "1.0", and "1e3" are
 // one JSON value, and a numeric ClickHouse column rejects '1.0'/'1e3' as a
-// per-query TYPE_MISMATCH error. Integer literals keep exact digits up to a
-// 100-digit bound (the >2^53 case float64 rounds); anything else round-trips
-// through float64 ("1e3" → "1000"); a literal past the bound or a magnitude
-// only JSON can hold (1e400) has no canonical form and fails closed. Claim resolution and the insert-check
-// payload comparison (internal/api) both route through this one function, so
-// what a read filter binds and what a write check accepts can't drift.
+// per-query TYPE_MISMATCH error. The canonical form is exact at every width
+// and precision — integer literals via big.Int, fractions and exponents via
+// canonicalDecimal, never a float64 round-trip that could bind a value the
+// token doesn't carry ("1e-400" fails closed rather than collapsing to "0").
+// A literal, or an exact form, past maxCanonicalDigits likewise has no
+// canonical form and fails closed (1e400, 1e-400). Claim resolution and the
+// insert-check payload comparison (internal/api) both route through this one
+// function, so what a read filter binds and what a write check accepts can't
+// drift.
 func CanonicalScalar(v any) (string, bool) {
 	switch val := v.(type) {
 	case nil, map[string]any, []any:
 		return "", false
 	case json.Number:
-		// Bound the literal before the exact-integer path: big.Int.SetString +
-		// String() are superlinear in digit count, and on the ingest check path
-		// the literal is client-controlled — one 16 MiB batch of million-digit
-		// literals would burn minutes of CPU (CWE-400). 100 digits is far past
-		// any real id (uint256 is 78); a longer literal has no canonical form
-		// and fails closed, the same rule as 1e400 — never a float64 rounding
-		// that could collide two distinct wide ids.
-		const maxCanonicalDigits = 100
+		// The length bound guards the superlinear big.Int parse on the
+		// client-controlled ingest path; canonicalDecimal re-checks its own
+		// exact-form length, where a short literal can hide a wide expansion.
 		if len(val) > maxCanonicalDigits {
 			return "", false
 		}
 		if i, ok := new(big.Int).SetString(val.String(), 10); ok {
 			return i.String(), true
 		}
-		f, err := strconv.ParseFloat(val.String(), 64)
-		if err != nil {
-			return "", false
-		}
-		if f == 0 {
-			// "-0.0" would otherwise format as "-0", which a numeric column
-			// can't parse; ±0 is one value, bound as "0".
-			return "0", true
-		}
-		return strconv.FormatFloat(f, 'f', -1, 64), true
+		return canonicalDecimal(val.String())
 	default:
 		return fmt.Sprint(val), true
 	}
+}
+
+// canonicalDecimal renders a non-integer JSON number literal (one carrying a
+// fraction or exponent) as its exact canonical decimal string: "1.0" → "1",
+// "2.50" → "2.5", "1e3" → "1000", "25e-4" → "0.0025", every digit preserved
+// at any precision. ok=false for anything that is not a JSON number and for
+// any literal whose exact decimal form would exceed maxCanonicalDigits.
+// Exactness is the point: rounding through float64 would collapse "1e-400"
+// to "0" and land wide decimals on their neighbors, either way binding a
+// value the token doesn't carry.
+func canonicalDecimal(lit string) (string, bool) {
+	mant, expStr, hasExp := strings.Cut(lit, "e")
+	if !hasExp {
+		mant, expStr, hasExp = strings.Cut(lit, "E")
+	}
+	exp := 0
+	if hasExp {
+		var err error
+		// Atoi rejects an empty or non-numeric exponent; the magnitude bound
+		// keeps the decimal-point shift, and with it the exact form, small.
+		if exp, err = strconv.Atoi(expStr); err != nil || exp > 2*maxCanonicalDigits || exp < -2*maxCanonicalDigits {
+			return "", false
+		}
+	}
+	sign := ""
+	if strings.HasPrefix(mant, "-") {
+		sign, mant = "-", mant[1:]
+	}
+	intPart, fracPart, _ := strings.Cut(mant, ".")
+	digits := intPart + fracPart
+	if digits == "" {
+		return "", false
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", false
+		}
+	}
+	// point is where the decimal point sits in digits once the exponent is
+	// applied: digits[:point] to its left, digits[point:] to its right.
+	point := len(intPart) + exp
+	for len(digits) > 0 && digits[0] == '0' {
+		digits = digits[1:]
+		point--
+	}
+	for len(digits) > 0 && len(digits) > point && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+	}
+	if digits == "" {
+		// Every spelling of zero ("0.0", "-0e9") is the one value 0 —
+		// signless, since a numeric column can't parse "-0".
+		return "0", true
+	}
+	var out string
+	switch {
+	case point <= 0:
+		out = "0." + strings.Repeat("0", -point) + digits
+	case point >= len(digits):
+		out = digits + strings.Repeat("0", point-len(digits))
+	default:
+		out = digits[:point] + "." + digits[point:]
+	}
+	// The exact form is what must stay small (the "0." prefix rides free):
+	// "1e-150" is a six-character literal with a 152-character expansion.
+	if len(out) > maxCanonicalDigits+2 {
+		return "", false
+	}
+	return sign + out, true
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.

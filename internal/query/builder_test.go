@@ -300,17 +300,35 @@ func TestBuild_PolicyMaxRows(t *testing.T) {
 
 func TestIsValidAggFn(t *testing.T) {
 	t.Parallel()
-	for _, fn := range []string{"count", "sum", "avg", "min", "max", "uniq", "median", "COUNT", "Min"} {
-		assert.True(t, isValidAggFn(fn), fn)
+	tests := []struct {
+		name string
+		fn   string
+		want bool
+	}{
+		{"count", "count", true},
+		{"sum", "sum", true},
+		{"avg", "avg", true},
+		{"min", "min", true},
+		{"max", "max", true},
+		{"uniq", "uniq", true},
+		{"median", "median", true},
+		{"uppercase COUNT", "COUNT", true},
+		{"mixed-case Min", "Min", true},
+		{"unknown function", "drop_table", false},
+		{"empty name", "", false},
+		// Unicode case folding must not stand in for the ASCII-exact match:
+		// strings.ToLower maps İ (U+0130) to 'i', so "mİn" would otherwise
+		// pass the allowlist and be emitted verbatim — ClickHouse then answers
+		// "unknown function" (a 500) where this rejection's 400 belongs.
+		{"unicode lookalike of min", "mİn", false},
+		{"unicode lookalike of uniq", "unİq", false},
 	}
-	assert.False(t, isValidAggFn("drop_table"))
-	assert.False(t, isValidAggFn(""))
-	// Unicode case folding must not stand in for the ASCII-exact match:
-	// strings.ToLower maps İ (U+0130) to 'i', so "mİn" would otherwise pass the
-	// allowlist and be emitted verbatim — ClickHouse then answers "unknown
-	// function" (a 500) where this rejection's 400 belongs.
-	assert.False(t, isValidAggFn("mİn"))
-	assert.False(t, isValidAggFn("unİq"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, isValidAggFn(tt.fn))
+		})
+	}
 }
 
 func TestBuild_DefaultMaxRows_Applied(t *testing.T) {

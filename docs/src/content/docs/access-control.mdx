@@ -415,7 +415,7 @@ NATS KV is the **source of truth** for the live policy. A file is only ever a *s
 
 - `policy.file_path` (config) points at a YAML or JSON policy file. On startup, **if and only if the KV store is empty**, the file is loaded, validated, and written to KV. On every subsequent boot the file is ignored — KV already has the authoritative copy, and runtime edits flow through `PUT /v1/admin/policy`.
 - **When `policy.file_path` is set, the file must exist, parse, and pass policy validation**, or WaveHouse refuses to boot. That turns a typo, a missing mount, or a policy invalid under a newly-tightened rule — such as the [malformed-template rejection](#jwt-claim-templating) above — into a loud failure instead of a silent fail-closed deployment that denies everything.
-- **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every request is denied (logged loudly) until you seed one via `PUT /v1/admin/policy`.
+- **When `policy.file_path` is empty and KV is empty**, the store comes up with no policy — every **token-based** request is denied (logged loudly, admin included). Seed one via `PUT /v1/admin/policy` using the [operator key](#operator-key), the deliberate break-glass that works under a `nil` policy — or set `policy.file_path` and reboot.
 
 :::caution
 Validation guards only the **seed** path. A policy already in KV is not re-validated when a node loads it ([#461](https://github.com/Wave-RF/WaveHouse/issues/461)), so upgrading WaveHouse never re-checks the stored policy — after an upgrade that tightens validation (like the [claim-template rules](#jwt-claim-templating) above), re-`PUT` your policy once; until you do, a policy the new rules would reject keeps its old runtime behavior.

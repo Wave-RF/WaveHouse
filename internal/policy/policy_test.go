@@ -464,11 +464,12 @@ func TestResolveTemplate_MultipleTemplates(t *testing.T) {
 }
 
 // TestCanonicalScalar pins the one rule every bound value flows through — claim
-// templates, _in elements, and the ingest check comparison alike. Notable: the
-// integer path is width-unbounded (big.Int, never float64 rounding), non-integer
-// spellings round-trip through float64 exactly as ClickHouse would read them,
-// and an underflowing magnitude collapses to "0" (ParseFloat returns 0 without
-// error there — only overflow has no canonical form).
+// templates, _in elements, and the ingest check comparison alike. The canonical
+// form is exact at every width and precision (integers via big.Int, fractions
+// and exponents via canonicalDecimal — never a float64 round-trip, which would
+// collapse "1e-400" to "0" and round wide decimals onto their neighbors), and
+// a literal or exact form past the 100-digit bound fails closed in both
+// directions.
 func TestCanonicalScalar(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -488,10 +489,15 @@ func TestCanonicalScalar(t *testing.T) {
 		{"exponent spelling", json.Number("1e3"), "1000", true},
 		{"uppercase exponent spelling", json.Number("1E3"), "1000", true},
 		{"fraction kept", json.Number("1.5"), "1.5", true},
+		{"trailing fraction zeros trim", json.Number("2.50"), "2.5", true},
+		{"negative exponent expands exactly", json.Number("25e-4"), "0.0025", true},
+		{"high-precision fraction stays exact", json.Number("0.1000000000000000000001"), "0.1000000000000000000001", true},
+		{"wide decimal stays exact", json.Number("12345678901234567890.5"), "12345678901234567890.5", true},
 		{"negative zero folds to zero", json.Number("-0.0"), "0", true},
-		{"underflowing magnitude collapses to zero", json.Number("1e-400"), "0", true},
+		{"underflow has no canonical form", json.Number("1e-400"), "", false},
 		{"overflow has no canonical form", json.Number("1e400"), "", false},
 		{"negative overflow has no canonical form", json.Number("-1e400"), "", false},
+		{"wide finite magnitude has no canonical form", json.Number("1.5e200"), "", false},
 		// The 100-digit literal bound: big.Int work is superlinear in digit
 		// count and the ingest path hands this function client-controlled
 		// literals, so anything longer fails closed before any parsing.
