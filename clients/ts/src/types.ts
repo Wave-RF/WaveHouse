@@ -181,8 +181,9 @@ export interface ClientOptions {
    * values are load-bearing rather than preference: a `Cache-Control` header
    * would fail cross-origin preflight, and following a redirect would strip the
    * `Authorization` header on a cross-origin hop and silently downgrade the
-   * stream to the default role instead of failing. `credentials` is honored in
-   * browsers and dropped elsewhere, since some runtimes throw if it is set.
+   * stream to the default role instead of failing, so redirects are refused
+   * (`SSE_REDIRECT`). `credentials` is honored in browsers and dropped
+   * elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;
 }

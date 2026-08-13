@@ -119,7 +119,9 @@ describe("SSETransport request construction", () => {
     expect(init.cache).toBe("no-store");
     expect(headersOf(f.attempts[0])["Cache-Control"]).toBeUndefined();
     // Fail closed rather than follow a redirect that strips Authorization.
-    expect(init.redirect).toBe("error");
+    // `manual` over `error` so the redirect is inspectable instead of an
+    // ambiguous TypeError the reconnect loop would retry forever.
+    expect(init.redirect).toBe("manual");
 
     t.disconnect();
   });
@@ -387,8 +389,15 @@ describe("SSETransport reconnect and resumption", () => {
 describe("SSETransport lifecycle", () => {
   it("rejects a fetch that cannot stream instead of hanging", async () => {
     const f = makeFetch();
-    // Exactly what a wrapper that buffers or logs the body hands back.
-    f.queue.push(() => new Response(null, { status: 200 }));
+    // Exactly what a wrapper that buffers or logs the body hands back: the
+    // server's headers intact, the stream itself already consumed.
+    f.queue.push(
+      () =>
+        new Response(null, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+    );
 
     const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
     const seen = collect(t);
@@ -450,6 +459,57 @@ describe("SSETransport lifecycle", () => {
     vi.useRealTimers();
   });
 
+  it("refuses a redirect instead of retrying it forever", async () => {
+    vi.useFakeTimers();
+    const f = makeFetch();
+    // What Node hands back under `redirect: "manual"`; a browser would give an
+    // opaque status-0 response, handled by the same branch.
+    f.queue.push(
+      () => new Response(null, { status: 302, headers: { Location: "https://elsewhere/" } }),
+    );
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_REDIRECT");
+    expect(seen.errors[0].retryable).toBe(false);
+    expect(seen.statuses).toContain("closed");
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.attempts).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("rejects a 200 that is not an event stream", async () => {
+    vi.useFakeTimers();
+    const f = makeFetch();
+    // An auth gateway answering with its login page: 200, streaming, and
+    // entirely devoid of SSE frames.
+    f.queue.push(
+      () =>
+        new Response("<html>sign in</html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        }),
+    );
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_BAD_CONTENT_TYPE");
+    expect(seen.errors[0].message).toContain("text/html");
+    expect(seen.statuses).toContain("closed");
+    expect(seen.statuses).not.toContain("live");
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.attempts).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
   it("aborts the in-flight request on disconnect", async () => {
     const f = makeFetch();
     const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
@@ -482,6 +542,18 @@ describe("SSETransport lifecycle", () => {
 
     expect(f.attempts).toHaveLength(1);
     vi.useRealTimers();
+  });
+
+  it("connect() twice does not start a second reconnect loop", async () => {
+    const f = makeFetch();
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    t.connect();
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+    await flush();
+
+    expect(f.attempts).toHaveLength(1);
+    t.disconnect();
   });
 
   it("connect() after disconnect() is inert", async () => {

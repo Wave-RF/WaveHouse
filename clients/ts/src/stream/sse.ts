@@ -64,6 +64,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   private _opts: SSEOptions;
   private _abort: AbortController | null = null;
   private _closed = false;
+  private _started = false;
   private _counted = false;
   /**
    * Most recent non-empty event id, replayed as `Last-Event-ID` on reconnect.
@@ -88,7 +89,10 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   }
 
   connect(): void {
-    if (this._closed) return;
+    // Idempotent: a second call would leave two reconnect loops racing over one
+    // transport, each re-dialing the other's dropped connection.
+    if (this._closed || this._started) return;
+    this._started = true;
 
     if (!this._opts.fetch && typeof fetch === "undefined") {
       throw new Error(
@@ -209,12 +213,46 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       return { live: false, terminal: false };
     }
 
+    // Redirects are refused, not followed — see `_init`. Surfaced explicitly
+    // because both shapes are otherwise misleading: a browser reports an
+    // opaque status-0 response, and Node hands back the raw 3xx.
+    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+      this._emitError({
+        status: res.status,
+        code: "SSE_REDIRECT",
+        message:
+          "The stream endpoint redirected, which is refused rather than followed: a " +
+          "cross-origin redirect strips the Authorization header, and this endpoint answers " +
+          "an unauthenticated caller with a reduced view instead of an error. Point `baseURL` " +
+          "at the final URL — most often this is an http→https upgrade or a canonical-host " +
+          "redirect at a proxy.",
+        retryable: false,
+      });
+      return { live: false, terminal: true };
+    }
+
     if (!res.ok) {
       const error = await parseErrorResponse(res);
       this._emitError(error);
       // 4xx is terminal: reconnecting can't fix a rejected token or a table
       // that doesn't exist, and native EventSource likewise stops on non-200.
       return { live: false, terminal: !error.retryable };
+    }
+
+    // A 200 that isn't an event stream is an intermediary answering for the
+    // server — an auth gateway serving its login page is the common one. Left
+    // unchecked the parser would chew HTML, find no frames, and leave the
+    // stream "live" and permanently silent, indistinguishable from a quiet
+    // table. `EventSource` fails the connection here too.
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().split(";")[0].trim().startsWith("text/event-stream")) {
+      this._emitError({
+        status: res.status,
+        code: "SSE_BAD_CONTENT_TYPE",
+        message: `Expected \`text/event-stream\`, got \`${contentType || "(none)"}\`. Something between the client and WaveHouse answered this request — an auth gateway's login page is the usual cause.`,
+        retryable: false,
+      });
+      return { live: false, terminal: true };
     }
 
     // `options.fetch` only has to stream on this path — every REST call reads
@@ -280,13 +318,17 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       //   cache    — as an init field, not a `Cache-Control` header. The header
       //              form is not in the server's Access-Control-Allow-Headers,
       //              so it would fail every cross-origin preflight.
-      //   redirect — `error` over `follow`. Platforms strip `Authorization` on a
+      //   redirect — never followed. Platforms strip `Authorization` on a
       //              cross-origin redirect (whatwg/fetch#1544), and this endpoint
       //              never rejects an unauthenticated caller — it serves them the
       //              default role. Following a redirect would therefore turn a
       //              misdirected stream into a silently downgraded one.
+      //              `manual` over `error` so the outcome is inspectable: `error`
+      //              rejects with a bare TypeError indistinguishable from a
+      //              connection failure, which the caller above would retry
+      //              forever against a redirect that will never stop happening.
       cache: "no-store",
-      redirect: "error",
+      redirect: "manual",
     };
 
     // Only browsers get `credentials`: some runtimes (Cloudflare Workers) throw

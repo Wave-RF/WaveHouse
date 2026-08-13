@@ -472,11 +472,14 @@ Streaming goes through your function too. That comes with the extra requirement
 described above — the response must carry a live streaming body — and the
 streaming transport keeps ownership of three `RequestInit` fields where the
 value is load-bearing rather than a preference: `cache` (as an init field; a
-`Cache-Control` header would fail cross-origin preflight), `redirect: "error"`
-(following a cross-origin redirect strips `Authorization`, which this endpoint
-answers with a silently reduced view rather than an error), and `credentials`,
-which is honored in browsers and omitted elsewhere because some runtimes throw
-if it is set at all.
+`Cache-Control` header would fail cross-origin preflight), `redirect: "manual"`
+(a redirect is refused rather than followed — a cross-origin hop strips
+`Authorization`, which this endpoint answers with a silently reduced view rather
+than an error — and reported as `SSE_REDIRECT`), and `credentials`, which is
+honored in browsers and omitted elsewhere because some runtimes throw if it is
+set at all. A `200` that isn't `text/event-stream` is refused too
+(`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead
+of leaving the stream connected and permanently silent.
 
 #### Swapping in undici
 

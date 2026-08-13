@@ -127,12 +127,14 @@ describe("Streaming", () => {
       }
     });
 
-    it("receives events after insert (authenticated via ?token=)", async () => {
+    it("receives events after insert (authenticated via Authorization header)", async () => {
       const whAuth = dataClient();
       const receivedEvents: any[] = [];
       const id = testId();
 
-      // The SDK should automatically append the JWT as ?token= here
+      // The SDK sends the JWT as `Authorization: Bearer` on the stream request
+      // (#203). It used to append it as `?token=`; the server still accepts
+      // that, but the SDK no longer puts a credential in the URL.
       const stream = whAuth.from(T.clicks).stream();
 
       let unsub: (() => void) | undefined;

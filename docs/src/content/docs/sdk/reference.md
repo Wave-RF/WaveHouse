@@ -43,6 +43,8 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 0 | `SSE_READ_ERROR` | Yes | Stream was interrupted mid-read |
 | 0 | `SSE_PARSE_ERROR` | Yes | Malformed frame, or the parser's buffer cap was exceeded |
 | *(response status)* | `SSE_NO_STREAM_BODY` | No | A configured `options.fetch` returned a response with no readable body |
+| *(response status)* | `SSE_REDIRECT` | No | The stream endpoint redirected; point `baseURL` at the final URL |
+| *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — usually a gateway's login page |
 | *(response status)* | `HTTP_4xx` / `HTTP_5xx` | Per status | The stream request was rejected — same codes as REST |
 
 The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Unlike the REST codes, `retryable` here is not advisory — the transport acts on it. A retryable failure is reported and then re-dialed on a jittered exponential backoff (capped at 30s, reset once a connection goes live), with the `status` callback moving `reconnecting` → `live`. A non-retryable one is terminal: the stream reports the error, goes `closed`, and stays closed.
