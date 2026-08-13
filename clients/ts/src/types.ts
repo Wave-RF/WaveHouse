@@ -185,9 +185,12 @@ export interface ClientOptions {
    * values are load-bearing rather than preference: a `Cache-Control` header
    * would fail cross-origin preflight, and following a redirect would strip the
    * `Authorization` header on a cross-origin hop and silently downgrade the
-   * stream to the default role instead of failing, so redirects are refused
-   * (`SSE_REDIRECT`). `credentials` is honored in browsers and dropped
-   * elsewhere, since some runtimes throw if it is set.
+   * stream to the default role instead of failing. So a request carrying a
+   * credential — an `auth` token, or configured `headers` that may hold a proxy
+   * secret — refuses redirects (`SSE_REDIRECT`); with no credential there is
+   * nothing to protect, and they are followed, so CDN canonicalization and an
+   * http→https upgrade still work. `credentials` is honored in browsers and
+   * dropped elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;
 }
