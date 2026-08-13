@@ -509,11 +509,15 @@ endpoint answers with a silently reduced view rather than an error) while
 forwarding your other headers to wherever the redirect points. Without either,
 redirects are followed normally, so CDN canonicalization, geo/LB indirection,
 and an http→https upgrade all work. The test is that concrete pair rather than
-"is this request authenticated", and **cookies are not part of it** — a
-cookie-authenticated stream, whether via `credentials: "include"` or the
-same-origin default, follows the redirect and arrives unauthenticated, which
-this endpoint answers with a reduced view rather than an error
-([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). If
+"is this request authenticated", and **cookies are not part of it**. A cookie
+isn't stripped the way `Authorization` is — it is origin-scoped, so it survives
+a same-origin redirect and the stream stays authenticated. The gap is a redirect
+that leaves the cookie's scope, in practice a cross-origin hop under the default
+`same-origin` credentials mode: the stream arrives with no cookie, and this
+endpoint answers that with a reduced view rather than an error
+([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). Going cross-origin
+with `credentials: "include"` fails earlier and louder instead — WaveHouse never
+sends `Access-Control-Allow-Credentials`, so the browser blocks the response. If
 you need to follow a credentialed redirect anyway, supply an `options.fetch`
 that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too
 (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead
