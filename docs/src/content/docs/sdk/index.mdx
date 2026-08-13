@@ -1,11 +1,11 @@
 ---
 title: "TypeScript SDK"
-description: "Zero-dependency client SDK — query builder, real-time streaming, codegen."
+description: "Client SDK — query builder, real-time streaming, codegen."
 ---
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
-`@wavehouse/sdk` — Zero-dependency TypeScript client for WaveHouse.
+`@wavehouse/sdk` — TypeScript client for WaveHouse. One runtime dependency: `eventsource-parser` (~2 KB, itself dependency-free), which frames the SSE stream.
 
 ## Installation
 
@@ -349,7 +349,7 @@ The proxy in front must **strip** the prefix before forwarding, since WaveHouse 
 
 ### Custom headers
 
-`options.headers` adds headers to every REST request — the usual reason being a
+`options.headers` adds headers to every request, streaming included — the usual reason being a
 header-gated proxy in front of WaveHouse, such as a Cloudflare Access service
 token:
 
@@ -394,7 +394,7 @@ tracked in [#459](https://github.com/Wave-RF/WaveHouse/issues/459).
 
 ### Extra `RequestInit` fields
 
-`options.fetchOptions` is merged into the `RequestInit` of every REST request —
+`options.fetchOptions` is merged into the `RequestInit` of every request, streaming included —
 for settings that aren't headers and don't warrant replacing the whole
 transport:
 
@@ -410,6 +410,16 @@ It carries any `RequestInit` field — `mode`, `cache`, `keepalive`,
 `next: { tags }`, which tags the cached response for on-demand revalidation. Only those runtime
 extensions need a cast; the standard fields are declared on `RequestInit`
 already.
+
+:::caution[Three of those fields don't apply to streams]
+On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache`,
+`redirect`, and `credentials` for itself, because there they're correctness
+rather than preference — see
+[Supplying your own fetch](#supplying-your-own-fetch) for what each is set to
+and why. Everything else here reaches streams normally. The example above is a
+REST-path illustration: on a stream, `cache` is already `no-store` and
+`keepalive` is meaningless for a connection meant to stay open.
+:::
 
 :::note[`credentials: 'include'` needs a proxy that owns CORS]
 Sending cookies cross-origin is a common reason to reach for this, but it can't
@@ -472,12 +482,19 @@ Streaming goes through your function too. That comes with the extra requirement
 described above — the response must carry a live streaming body — and the
 streaming transport keeps ownership of three `RequestInit` fields where the
 value is load-bearing rather than a preference: `cache` (as an init field; a
-`Cache-Control` header would fail cross-origin preflight), `redirect: "manual"`
-(a redirect is refused rather than followed — a cross-origin hop strips
-`Authorization`, which this endpoint answers with a silently reduced view rather
-than an error — and reported as `SSE_REDIRECT`), and `credentials`, which is
-honored in browsers and omitted elsewhere because some runtimes throw if it is
-set at all. A `200` that isn't `text/event-stream` is refused too
+`Cache-Control` header would fail cross-origin preflight), `redirect`, and
+`credentials` — the last honored in browsers and omitted elsewhere, because some
+runtimes throw if it is set at all.
+
+`redirect` depends on whether the request carries a credential. With one — an
+`auth` token or configured `headers` — a redirect is refused and reported as
+`SSE_REDIRECT`, because a cross-origin hop strips `Authorization` (which this
+endpoint answers with a silently reduced view rather than an error) while
+forwarding your other headers to wherever the redirect points. With no
+credential there is nothing to protect, so redirects are followed normally and
+CDN canonicalization, geo/LB indirection, and an http→https upgrade all work. If
+you need to follow a credentialed redirect anyway, supply an `options.fetch`
+that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too
 (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead
 of leaving the stream connected and permanently silent.
 
@@ -508,7 +525,7 @@ const wh = createClient({
   baseURL: 'https://wavehouse.example.com',
   options: {
     fetch: (url, init) =>
-      undiciFetch(url as string, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+      undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
   },
 });
 ```
@@ -539,17 +556,16 @@ symbol at all. An explicit `setGlobalDispatcher` call (below) wins the other
 way round — it overwrites the symbol after the first copy claimed it.
 :::
 
-All three casts are load-bearing, for one underlying reason: undici declares its
-own request/response types, separate from the ones behind your global `fetch`,
-so the two aren't structurally assignable. `url as string` is needed because
-`FetchLike` accepts the full `fetch` input union while undici's `RequestInfo`
-names its *own* `Request`; `{ ...init, dispatcher } as never` covers the same
-split on `RequestInit`, which differs on `body` and `headers` (`never` is
-assignable to either spelling, so one snippet compiles whether or not your `lib`
-includes DOM); and the return cast handles the `Response` mismatch. They're safe because
-of the narrow runtime contract above — a string URL and a plain `RequestInit`
-in, six members read back. `undici` is a dependency you add; the SDK itself
-stays dependency-free.
+Both casts are load-bearing, for one underlying reason: undici declares its own
+request/response types, separate from the ones behind your global `fetch`, so
+the two aren't structurally assignable. `{ ...init, dispatcher } as never`
+covers the split on `RequestInit`, which differs on `body` and `headers`
+(`never` is assignable to either spelling, so one snippet compiles whether or
+not your `lib` includes DOM); and the return cast handles the `Response`
+mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which
+undici's `RequestInfo` accepts. They're safe because of the narrow runtime
+contract above — a string URL and a plain `RequestInit` in, six members read
+back. `undici` is a dependency you add on top of the SDK's single ~2 KB one.
 
 If you're genuinely pinned to an affected undici, the same snippet fixes it —
 your pinned version, with a dispatcher that never reuses a keep-alive socket:

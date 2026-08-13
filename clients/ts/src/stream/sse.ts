@@ -31,6 +31,14 @@ const MAX_BUFFER_CHARS = 16 * 1024 * 1024;
 const MAX_BACKOFF_MS = 30_000;
 
 /**
+ * How long a connection must stay live before it counts as healthy enough to
+ * reset the backoff. Roughly the fixed delay native `EventSource` used, so a
+ * server that accepts and instantly closes can't be hammered faster than the
+ * transport this replaces.
+ */
+const STABLE_CONNECTION_MS = 3_000;
+
+/**
  * Delay before reconnect attempt `attempt` (0-based), jittered.
  *
  * Unlike the REST backoff in `http.ts`, this one is randomized: REST retries
@@ -46,8 +54,8 @@ function backoff(attempt: number, retryFloorMs: number): number {
 
 /** Outcome of one connection attempt, driving the reconnect decision. */
 interface AttemptResult {
-  /** The attempt reached a readable stream — resets the backoff. */
-  live: boolean;
+  /** Milliseconds the connection stayed readable; 0 if it never opened. */
+  liveMs: number;
   /** Stop for good: a bad token or missing table can't be fixed by retrying. */
   terminal: boolean;
 }
@@ -139,10 +147,17 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
 
   /** Connect/read/reconnect until the stream is closed or hits a terminal error. */
   private async _run(): Promise<void> {
+    // Yield before the first attempt so a failure that is detectable
+    // synchronously — an unresolvable `baseURL` — still reaches a subscriber.
+    // `connect()` runs inside the StreamController constructor, so anything
+    // emitted before this point fires before `.stream()` has returned and
+    // nobody is listening yet.
+    await Promise.resolve();
+
     let attempt = 0;
 
     while (!this._closed) {
-      const { live, terminal } = await this._attempt();
+      const { liveMs, terminal } = await this._attempt();
 
       if (this._closed) return;
       if (terminal) {
@@ -150,10 +165,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         return;
       }
 
-      // A connection that produced a readable stream resets the schedule, so a
-      // long-lived subscription doesn't inherit a maxed-out delay on its first
-      // drop after hours of health.
-      if (live) attempt = 0;
+      // Only a connection that *held* resets the schedule. Resetting on any
+      // connection that merely opened lets a server accepting and immediately
+      // closing (slow-consumer eviction, a half-broken upstream) pin the client
+      // at sub-second retries forever — more aggressive than the ~3s fixed
+      // delay EventSource used, against a server already in trouble.
+      if (liveMs >= STABLE_CONNECTION_MS) attempt = 0;
 
       this.onStatus?.("reconnecting");
       await this._sleep(backoff(attempt, this._retryFloorMs));
@@ -178,7 +195,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         message: e instanceof Error ? e.message : String(e),
         retryable: false,
       });
-      return { live: false, terminal: true };
+      return { liveMs: 0, terminal: true };
     }
 
     // A token provider that throws is treated as transient, unlike the URL
@@ -188,14 +205,14 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     try {
       init = await this._init(ac.signal);
     } catch (e) {
-      if (this._isAbort(e)) return { live: false, terminal: true };
+      if (this._isAbort(e)) return { liveMs: 0, terminal: true };
       this._emitError({
         status: 0,
         code: "SSE_AUTH_ERROR",
         message: e instanceof Error ? e.message : String(e),
         retryable: true,
       });
-      return { live: false, terminal: false };
+      return { liveMs: 0, terminal: false };
     }
 
     let res: Response;
@@ -203,14 +220,14 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       const doFetch = this._opts.fetch;
       res = doFetch ? await doFetch(target, init) : await fetch(target, init);
     } catch (e) {
-      if (this._isAbort(e)) return { live: false, terminal: true };
+      if (this._isAbort(e)) return { liveMs: 0, terminal: true };
       this._emitError({
         status: 0,
         code: "SSE_NETWORK_ERROR",
         message: e instanceof Error ? e.message : String(e),
         retryable: true,
       });
-      return { live: false, terminal: false };
+      return { liveMs: 0, terminal: false };
     }
 
     // Redirects are refused, not followed — see `_init`. Surfaced explicitly
@@ -221,14 +238,16 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         status: res.status,
         code: "SSE_REDIRECT",
         message:
-          "The stream endpoint redirected, which is refused rather than followed: a " +
-          "cross-origin redirect strips the Authorization header, and this endpoint answers " +
-          "an unauthenticated caller with a reduced view instead of an error. Point `baseURL` " +
-          "at the final URL — most often this is an http→https upgrade or a canonical-host " +
-          "redirect at a proxy.",
+          "The stream endpoint redirected. Because this request carries a credential, the " +
+          "redirect is refused rather than followed: a cross-origin hop strips the " +
+          "Authorization header — and this endpoint answers an unauthenticated caller with a " +
+          "reduced view instead of an error — while forwarding any configured headers to " +
+          "wherever the redirect points. Set `baseURL` to the final URL; most often this is " +
+          "an http→https upgrade or a canonical-host redirect at a proxy. To follow it " +
+          "anyway, supply an `options.fetch` that overrides `redirect`.",
         retryable: false,
       });
-      return { live: false, terminal: true };
+      return { liveMs: 0, terminal: true };
     }
 
     if (!res.ok) {
@@ -236,7 +255,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       this._emitError(error);
       // 4xx is terminal: reconnecting can't fix a rejected token or a table
       // that doesn't exist, and native EventSource likewise stops on non-200.
-      return { live: false, terminal: !error.retryable };
+      return { liveMs: 0, terminal: !error.retryable };
     }
 
     // A 200 that isn't an event stream is an intermediary answering for the
@@ -252,7 +271,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         message: `Expected \`text/event-stream\`, got \`${contentType || "(none)"}\`. Something between the client and WaveHouse answered this request — an auth gateway's login page is the usual cause.`,
         retryable: false,
       });
-      return { live: false, terminal: true };
+      return { liveMs: 0, terminal: true };
     }
 
     // `options.fetch` only has to stream on this path — every REST call reads
@@ -269,12 +288,13 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
           "cannot be used for `.stream()` or `.liveQuery()`.",
         retryable: false,
       });
-      return { live: false, terminal: true };
+      return { liveMs: 0, terminal: true };
     }
 
     this.onStatus?.("live");
+    const openedAt = Date.now();
     await this._pump(body);
-    return { live: true, terminal: false };
+    return { liveMs: Date.now() - openedAt, terminal: false };
   }
 
   /** Resolve the stream URL. Throws on a `baseURL` that isn't absolute. */
@@ -307,6 +327,11 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       base["Last-Event-ID"] = this._lastEventId;
     }
 
+    // Anything a redirect target must not be handed: the bearer token, or the
+    // configured headers that carry proxy service-token secrets.
+    const credentialed =
+      base.Authorization !== undefined || Object.keys(this._opts.headers ?? {}).length > 0;
+
     const init: RequestInit = {
       ...this._opts.fetchOptions,
       method: "GET",
@@ -318,17 +343,27 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       //   cache    — as an init field, not a `Cache-Control` header. The header
       //              form is not in the server's Access-Control-Allow-Headers,
       //              so it would fail every cross-origin preflight.
-      //   redirect — never followed. Platforms strip `Authorization` on a
-      //              cross-origin redirect (whatwg/fetch#1544), and this endpoint
-      //              never rejects an unauthenticated caller — it serves them the
-      //              default role. Following a redirect would therefore turn a
-      //              misdirected stream into a silently downgraded one.
-      //              `manual` over `error` so the outcome is inspectable: `error`
-      //              rejects with a bare TypeError indistinguishable from a
-      //              connection failure, which the caller above would retry
-      //              forever against a redirect that will never stop happening.
+      //   redirect — followed only when this request carries no credential.
+      //              Platforms strip `Authorization` on a cross-origin redirect
+      //              (whatwg/fetch#1544) and forward other headers intact, so a
+      //              credentialed hop either silently downgrades the stream to
+      //              the default role — this endpoint answers an unauthenticated
+      //              caller rather than rejecting them — or delivers a configured
+      //              secret to whatever the redirect names. Neither is worth a
+      //              convenience. Without a credential there is nothing to
+      //              protect, so CDN canonicalization, geo/LB indirection, and an
+      //              http→https upgrade all just work.
+      //              `manual` over `error` for the credentialed case so the
+      //              outcome stays inspectable: `error` rejects with a bare
+      //              TypeError indistinguishable from a connection failure, which
+      //              the loop above would retry forever against a redirect that
+      //              is never going to stop happening.
       cache: "no-store",
-      redirect: "manual",
+      redirect: credentialed ? "manual" : "follow",
+      // Neutralized like the REST path does, and for a sharper reason here: a
+      // body on a GET makes `fetch` throw, which reads as a network failure and
+      // would be retried forever against a request that can never be built.
+      body: undefined,
     };
 
     // Only browsers get `credentials`: some runtimes (Cloudflare Workers) throw

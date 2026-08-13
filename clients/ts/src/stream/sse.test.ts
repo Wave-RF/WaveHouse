@@ -118,11 +118,43 @@ describe("SSETransport request construction", () => {
     // in the server's Access-Control-Allow-Headers and would fail preflight.
     expect(init.cache).toBe("no-store");
     expect(headersOf(f.attempts[0])["Cache-Control"]).toBeUndefined();
-    // Fail closed rather than follow a redirect that strips Authorization.
-    // `manual` over `error` so the redirect is inspectable instead of an
-    // ambiguous TypeError the reconnect loop would retry forever.
-    expect(init.redirect).toBe("manual");
+    // No credential on this request, so a redirect costs nothing to follow.
+    expect(init.redirect).toBe("follow");
 
+    t.disconnect();
+  });
+
+  it("refuses redirects once a credential is attached", async () => {
+    const f = makeFetch();
+    const t = new SSETransport({
+      baseURL: BASE,
+      table: "clicks",
+      headers: { "CF-Access-Client-Secret": "shh" },
+      fetch: f.impl,
+    });
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    // Configured headers are forwarded across a cross-origin hop even though
+    // Authorization is stripped, so a secret would land wherever it points.
+    expect(f.attempts[0].init.redirect).toBe("manual");
+    t.disconnect();
+  });
+
+  it("neutralizes a body from fetchOptions", async () => {
+    const f = makeFetch();
+    const t = new SSETransport({
+      baseURL: BASE,
+      table: "clicks",
+      fetch: f.impl,
+      fetchOptions: { body: "leaked" },
+    });
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    // A body on a GET makes the real fetch throw, which would read as a network
+    // failure and be retried against a request that can never be built.
+    expect(f.attempts[0].init.body).toBeUndefined();
     t.disconnect();
   });
 
@@ -334,6 +366,32 @@ describe("SSETransport reconnect and resumption", () => {
     t.disconnect();
   });
 
+  it("escalates backoff against a server that accepts and instantly closes", async () => {
+    const attempts: number[] = [];
+    // Slow-consumer eviction looks exactly like this: a clean 200 that closes
+    // immediately. Resetting the schedule on any connection that merely opened
+    // would pin the client at sub-second retries forever.
+    const impl: FetchLike = async () => {
+      attempts.push(Date.now());
+      const conn = streamingResponse();
+      conn.push(": connected\n\n");
+      conn.close();
+      return conn.res;
+    };
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: impl });
+    collect(t);
+    t.connect();
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    // Escalating, the cheapest possible schedule is 0.5 + 1 + 2 + 4s, so six
+    // seconds buys at most four attempts. Flat sub-second retries gave eight.
+    expect(attempts.length).toBeGreaterThan(1);
+    expect(attempts.length).toBeLessThanOrEqual(5);
+
+    t.disconnect();
+  });
+
   it("stops for good on a 401 rather than retrying a rejected token", async () => {
     const f = makeFetch();
     f.queue.push(() => new Response(JSON.stringify({ error: "invalid token" }), { status: 401 }));
@@ -468,7 +526,12 @@ describe("SSETransport lifecycle", () => {
       () => new Response(null, { status: 302, headers: { Location: "https://elsewhere/" } }),
     );
 
-    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const t = new SSETransport({
+      baseURL: BASE,
+      table: "clicks",
+      auth: () => "jwt",
+      fetch: f.impl,
+    });
     const seen = collect(t);
     t.connect();
     await vi.waitFor(() => expect(seen.errors).toHaveLength(1));

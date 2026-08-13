@@ -105,12 +105,14 @@ string is read as UTC, an ECMAScript quirk
 <!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
 :::note[SSE connection limit]
-The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
+The SDK warns above 5 concurrent SSE connections — just under the browser's 6-per-domain limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.
 :::
 
-A dropped stream reconnects on a jittered exponential backoff, capped at 30s and
-reset once a connection goes live, and resumes with `Last-Event-ID` so the server
-gap-fills what was missed. The `auth` token is re-read on every attempt, so a
+A dropped stream reconnects on a jittered exponential backoff, capped at 30s, and
+resumes with `Last-Event-ID` so the server gap-fills what was missed. The
+schedule resets only after a connection has *held* for a few seconds, so a
+server accepting and immediately closing — slow-consumer eviction, a half-broken
+upstream — can't pin the client at sub-second retries. The `auth` token is re-read on every attempt, so a
 stream that outlives its token picks up a fresh one. A `4xx` is terminal — a
 rejected token or a missing table can't be fixed by retrying — and surfaces
 through `error` with the real status code rather than an opaque connection

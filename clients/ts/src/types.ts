@@ -12,7 +12,8 @@ export type Database = Record<string, Record<string, unknown>>;
 /**
  * Discriminated union for all async SDK operations. Never throws for anything
  * the server returns — caller and environment errors (a non-absolute `baseURL`,
- * a missing `EventSource`, a rejecting `auth` callback) do throw.
+ * no global `fetch` and no `options.fetch`, a rejecting `auth` callback) do
+ * throw.
  *
  * Discriminated on `ok`: `if (result.ok)` narrows to the success arm (and tells
  * the compiler `data` is present), while `error` is always available for
