@@ -5,11 +5,11 @@ import { StreamController } from "./stream/controller.js";
 import { LiveQuery } from "./stream/live-query.js";
 import type {
   Aggregation,
-  FetchOptions,
   FilterOp,
   HttpContext,
   OrderClause,
   QueryFilter,
+  RequestOptions,
   Result,
   StreamOptions,
   StreamSubscriber,
@@ -137,7 +137,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
   /** Default row limit when none is specified — deliberately tighter than the backend's DefaultMaxRows (10000) safety cap. */
   static readonly DEFAULT_LIMIT = 1000;
 
-  async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
+  async fetch(opts?: RequestOptions): Promise<Result<Row[]>> {
     const effectiveLimit = opts?.limit ?? this._state.limit ?? QueryBuilder.DEFAULT_LIMIT;
     const ast = this._buildAST(effectiveLimit);
 
@@ -239,7 +239,7 @@ export class QueryBuilder<Row = Record<string, unknown>> implements PromiseLike<
   private async _fetchNext(
     prevRows: Row[],
     _limit: number,
-    opts?: FetchOptions,
+    opts?: RequestOptions,
   ): Promise<Result<Row[]>> {
     // No explicit order → no keyset cursor to build; nothing to page by.
     const cursor = this._state.orderBy[0];

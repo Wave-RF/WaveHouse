@@ -2,7 +2,7 @@ import { networkError, parseErrorResponse } from "./errors.js";
 import type { HttpContext, WaveHouseError } from "./types.js";
 import { resolveURL } from "./url.js";
 
-interface RequestOptions {
+interface RequestSpec {
   method: string;
   path: string;
   body?: unknown;
@@ -26,10 +26,40 @@ export interface HttpResult<T> {
 }
 
 /**
+ * Merge configured headers underneath the SDK's own, matching names
+ * case-insensitively so a caller's `authorization` can't sit alongside our
+ * `Authorization` and let the server pick. Canonical casing wins, and values
+ * replace rather than append — a header joined instead of replaced is a known
+ * way to produce `Content-Type: application/json, image/png`.
+ */
+function mergeHeaders(
+  base: Record<string, string>,
+  extra: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!extra) return base;
+  const sdkNames = new Set(Object.keys(base).map((k) => k.toLowerCase()));
+  const merged = { ...base };
+  // Spelling each configured name was last stored under, so two entries
+  // differing only in case replace each other here rather than surviving as
+  // separate keys for `Headers` to comma-join at fetch time.
+  const configured = new Map<string, string>();
+  for (const [name, value] of Object.entries(extra)) {
+    const lower = name.toLowerCase();
+    // Skip rather than overwrite: `base` is the SDK's own, which outranks.
+    if (sdkNames.has(lower)) continue;
+    const prior = configured.get(lower);
+    if (prior !== undefined) delete merged[prior];
+    merged[name] = value;
+    configured.set(lower, name);
+  }
+  return merged;
+}
+
+/**
  * Internal fetch wrapper with auth injection, retry, backoff, and Retry-After.
  * @internal
  */
-export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promise<HttpResult<T>> {
+export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<HttpResult<T>> {
   const url = resolveURL(ctx.baseURL, opts.path, opts.params).toString();
   const headers: Record<string, string> = {
     "Content-Type": opts.contentType ?? "application/json",
@@ -51,17 +81,29 @@ export async function request<T>(ctx: HttpContext, opts: RequestOptions): Promis
     }
   }
 
+  // After auth, so `auth` keeps ownership of Authorization, and after the
+  // Content-Type/Accept this request needs.
+  const finalHeaders = mergeHeaders(headers, ctx.options.headers);
+
   let lastError: WaveHouseError | null = null;
   const maxAttempts = ctx.options.maxRetries + 1;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const res = await fetch(url, {
+      // Configured RequestInit first, so the fields the SDK controls overwrite
+      // it — a supplied `method` or `body` would otherwise corrupt the request.
+      const init: RequestInit = {
+        ...ctx.options.fetchOptions,
         method: opts.method,
-        headers,
+        headers: finalHeaders,
         body: requestBody,
         signal: opts.signal,
-      });
+      };
+      // Call the global directly when no override is configured, rather than
+      // capturing it — a detached `fetch` reference is not universally safe to
+      // invoke, and late binding is what lets tests swap `globalThis.fetch`.
+      const doFetch = ctx.options.fetch;
+      const res = doFetch ? await doFetch(url, init) : await fetch(url, init);
 
       if (res.ok) {
         const text = await res.text();
