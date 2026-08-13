@@ -109,6 +109,32 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	}
 }
 
+// TestProject_FailsClosedOnUndecodedPayload is the #323 regression guard: with a
+// policy configured (filter=true), a payload that did not decode to an
+// EventMessage — so there is no table to evaluate policy against — must be
+// dropped, never passed through unfiltered. Only the no-policy legacy passthrough
+// (filter=false) may forward it, and invalid JSON is dropped either way.
+func TestProject_FailsClosedOnUndecodedPayload(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		filter bool
+		raw    []byte
+		wantOK bool
+	}{
+		{"filtered valid JSON is dropped", true, []byte(`{"not":"an-event"}`), false},
+		{"unfiltered valid JSON is forwarded (legacy passthrough)", false, []byte(`{"not":"an-event"}`), true},
+		{"unfiltered invalid JSON is dropped", false, []byte("not json"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, ok := project(nil, tt.filter, "viewer", nil, tt.raw, false)
+			assert.Equal(t, tt.wantOK, ok)
+		})
+	}
+}
+
 func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
@@ -279,15 +305,24 @@ func TestHub_ReplayFrame(t *testing.T) {
 	tests := []struct {
 		name string
 		role string
+		raw  []byte
 		want bool // whether a frame is produced (vs. skipped)
 	}{
-		{"allowed role projects with column filter", "viewer", true},
-		{"role without table access is skipped", "stranger", false},
+		{"allowed role projects with column filter", "viewer", raw, true},
+		{"role without table access is skipped", "stranger", raw, false},
+		// The empty-table_name half of #323, pinned on the fail-closed side:
+		// {"table_name":"", …} decodes into an EventMessage but names no table to
+		// evaluate policy against, so with a policy wired it must be dropped —
+		// same conjunct as the non-EventMessage case at hub.go's decoded flag.
+		{
+			"empty table_name is dropped when policy is wired", "viewer",
+			[]byte(`{"table_name":"","data":{"page":"/home"}}`), false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f, ok := hub.ReplayFrame(tt.role, raw)
+			f, ok := hub.ReplayFrame(tt.role, tt.raw)
 			require.Equal(t, tt.want, ok)
 			if !tt.want {
 				return

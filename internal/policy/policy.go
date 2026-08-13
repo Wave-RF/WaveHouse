@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
@@ -202,7 +205,17 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 		for col, f := range perms.Check {
 			switch {
 			case f.Eq != nil:
-				resolved.CheckClauses[col] = resolveTemplate(*f.Eq, claims)
+				// Deliberate asymmetry with the read path: an unresolvable check claim
+				// still resolves to "" and is auto-injected as the required value (#463).
+				// A placeholder-free value is marked LiteralValue so the check
+				// comparison can accept its numeric reading; a claim-derived value
+				// stays a plain string and keeps strict canonical equality.
+				v, _ := resolveTemplate(*f.Eq, claims)
+				if !claimTemplateRe.MatchString(*f.Eq) {
+					resolved.CheckClauses[col] = LiteralValue(v)
+				} else {
+					resolved.CheckClauses[col] = v
+				}
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -223,25 +236,24 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 		// caller columns, so a row-filter on a weird-but-legal column name (dots,
 		// spaces, keywords) is emitted safely.
 		qcol := chsql.QuoteIdent(col)
-		if f.Eq != nil {
-			val := resolveTemplate(*f.Eq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s = ?", qcol))
-			params = append(params, val)
-		}
-		if f.Neq != nil {
-			val := resolveTemplate(*f.Neq, claims)
-			clauses = append(clauses, fmt.Sprintf("%s != ?", qcol))
-			params = append(params, val)
-		}
-		if f.Gt != nil {
-			val := resolveTemplate(*f.Gt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s > ?", qcol))
-			params = append(params, val)
-		}
-		if f.Lt != nil {
-			val := resolveTemplate(*f.Lt, claims)
-			clauses = append(clauses, fmt.Sprintf("%s < ?", qcol))
-			params = append(params, val)
+		for _, c := range []struct {
+			op  string
+			val *string
+		}{{"=", f.Eq}, {"!=", f.Neq}, {">", f.Gt}, {"<", f.Lt}} {
+			if c.val == nil {
+				continue
+			}
+			if val, ok := resolveTemplate(*c.val, claims); ok {
+				clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, c.op))
+				params = append(params, val)
+			} else {
+				// An unresolvable claim fails closed: binding the '' it renders to
+				// would emit a real predicate against the empty string — `col != ''`
+				// or `col > ''` matches essentially every row, erasing the
+				// restriction (#385). Matching the _in branch below, a filter scoped
+				// to a claim the token doesn't carry matches no rows.
+				clauses = append(clauses, "1 = 0")
+			}
 		}
 		if f.In != nil {
 			vals := resolveInValues(*f.In, claims)
@@ -261,21 +273,34 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
-// If a claim path cannot be resolved, the template placeholder is replaced with
-// an empty string to prevent "<nil>" from leaking into SQL filters.
-func resolveTemplate(tmpl string, claims map[string]any) string {
-	return claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
+// If a claim path cannot be resolved — absent/null, a structured value (JSON
+// object or array) rather than a scalar, or a numeric literal with no canonical
+// form (see CanonicalScalar) — the placeholder is replaced with an empty string
+// (never "<nil>") and ok is false, so filter callers can fail the predicate
+// closed instead of binding a value the token never carried (#385). A template
+// with no placeholders — including a literal "" — is always ok, and binds
+// exactly as written: canonicalizing a numeric-spelled literal here would
+// silently move read filters on String columns (`_neq: "1.0"` on a version
+// column is a different predicate than `_neq: "1"`); the insert-check
+// comparison instead accepts a literal's numeric reading at compare time
+// (CanonicalNumericLiteral).
+func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
+	ok := true
+	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
 		sub := claimTemplateRe.FindStringSubmatch(match)
 		if len(sub) < 2 {
+			// Unreachable: claimTemplateRe has exactly one capture group, so a match
+			// always yields group 1. Kept as a fail-closed guard.
+			ok = false
 			return ""
 		}
-		parts := strings.Split(sub[1], ".")
-		val := navigateClaims(claims, parts)
-		if val == nil {
-			return ""
+		s, bindable := CanonicalScalar(navigateClaims(claims, strings.Split(sub[1], ".")))
+		if !bindable {
+			ok = false
 		}
-		return fmt.Sprint(val)
+		return s
 	})
+	return resolved, ok
 }
 
 // resolveInValues resolves a templated _in value into the set of bound values
@@ -283,25 +308,198 @@ func resolveTemplate(tmpl string, claims map[string]any) string {
 // reference and that claim is a JSON array, every element becomes one value —
 // the multi-tenant case, where a token's tenant_ids list scopes the predicate.
 // A scalar claim (or any template with surrounding text) yields a single value,
-// matching resolveTemplate. Elements are stringified like the other operators so
-// policy filters stay uniformly string-valued. Returns nil when the claim is
-// absent so the caller can fail the predicate closed.
+// matching resolveTemplate. Every bound value routes through CanonicalScalar,
+// so elements follow the same rule as the top-level claim: one structured,
+// null, or canonical-form-less element fails the WHOLE set closed (nil) rather
+// than binding a "map[…]"/"<nil>" rendering no row legitimately matches.
+// Returns nil likewise when the claim itself is absent, a JSON object, or has
+// no canonical form, so the caller can fail the predicate closed.
 func resolveInValues(tmpl string, claims map[string]any) []any {
 	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
 		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
-		case nil:
-			return nil
 		case []any:
 			out := make([]any, 0, len(v))
 			for _, e := range v {
-				out = append(out, fmt.Sprint(e))
+				s, ok := CanonicalScalar(e)
+				if !ok {
+					return nil
+				}
+				out = append(out, s)
 			}
 			return out
 		default:
-			return []any{fmt.Sprint(v)}
+			// Everything CanonicalScalar rejects — an absent/null claim, a
+			// JSON-object claim (never a membership set), a number with no
+			// canonical form — fails closed rather than bind as a one-element set.
+			if s, ok := CanonicalScalar(v); ok {
+				return []any{s}
+			}
+			return nil
 		}
 	}
-	return []any{resolveTemplate(tmpl, claims)}
+	if v, ok := resolveTemplate(tmpl, claims); ok {
+		return []any{v}
+	}
+	// A template with surrounding text whose claim is unresolvable also yields
+	// nil (not a one-element set containing the partial literal), so it fails
+	// closed like the bare-claim case above (#385).
+	return nil
+}
+
+// maxCanonicalDigits bounds both a numeric literal's digit count and its
+// exact decimal expansion. Big-integer parsing is superlinear in digit count
+// and the ingest check path hands CanonicalScalar client-controlled literals
+// (CWE-400), and a short exponent literal can hide a wide expansion ("1e-150"
+// is six characters with a 152-character exact form). 100 digits is far past
+// any real id — uint256 is 78.
+const maxCanonicalDigits = 100
+
+// CanonicalScalar renders a decoded JSON value as the canonical string the
+// policy layer binds and compares, reporting ok=false for values with no such
+// form: null, objects, and arrays. A structured value is never a sensible
+// scalar comparison value — it usually means a dropped path segment
+// ({{ jwt.app_metadata }} for {{ jwt.app_metadata.tenant_id }}), and binding
+// fmt.Sprint's "map[…]"/"[…]" rendering would let _neq/_lt match essentially
+// every row; the one legitimate structured shape, a bare-claim _in array, is
+// unpacked by resolveInValues before its elements reach here. A json.Number
+// (jwt.WithJSONNumber on claims, UseNumber on ingest payloads) binds in
+// canonical decimal form, not the token's spelling: "1", "1.0", and "1e3" are
+// one JSON value, and a numeric ClickHouse column rejects '1.0'/'1e3' as a
+// per-query TYPE_MISMATCH error. The canonical form is exact at every width
+// and precision — integer literals via big.Int, fractions and exponents via
+// canonicalDecimal, never a float64 round-trip that could bind a value the
+// token doesn't carry ("1e-400" fails closed rather than collapsing to "0").
+// A literal, or an exact form, past maxCanonicalDigits likewise has no
+// canonical form and fails closed (1e400, 1e-400). Claim resolution and the
+// insert-check comparison's two sides (internal/api) all route through this
+// one function, so what a read filter binds and what a write check accepts
+// can't drift.
+func CanonicalScalar(v any) (string, bool) {
+	switch val := v.(type) {
+	case nil, map[string]any, []any:
+		return "", false
+	case json.Number:
+		// The digit bound guards the superlinear big.Int parse on the
+		// client-controlled ingest path. It counts digits, not bytes — a sign,
+		// point, or exponent marker doesn't feed the big parse — so "-1e99"
+		// binds exactly like its written-out form, matching the "one JSON
+		// value" contract below (only at the bound's very edge can the exact-form
+		// gate's slack separate two spellings). canonicalDecimal re-checks its
+		// own exact-form length, where a short literal can hide a wide expansion.
+		digits := 0
+		for i := 0; i < len(val); i++ {
+			if val[i] >= '0' && val[i] <= '9' {
+				digits++
+			}
+		}
+		if digits > maxCanonicalDigits {
+			return "", false
+		}
+		if i, ok := new(big.Int).SetString(val.String(), 10); ok {
+			return i.String(), true
+		}
+		return canonicalDecimal(val.String())
+	default:
+		return fmt.Sprint(val), true
+	}
+}
+
+// LiteralValue marks an insert-check required value the policy author wrote
+// as a placeholder-free literal (Evaluate). A literal carries no JSON type —
+// "1.0" means the number 1 to a numeric column and the three-character text
+// to a String column — so the check comparison (internal/api) accepts its
+// numeric reading as well as its spelling. The type is the gate: a
+// claim-derived value is never wrapped, so a string-typed claim keeps strict
+// canonical equality and can't gain a numeric reading it didn't have. Only
+// CheckClauses carries this type; read filters bind plain strings.
+type LiteralValue string
+
+// CanonicalNumericLiteral renders a policy-authored literal that spells a
+// JSON number in canonical decimal form ("1.0" → "1"), reporting ok=false for
+// everything else. The json.Valid gate keeps this to spellings JSON itself
+// can produce: big.Int would also take "+5" or "007", readings no decoded
+// claim or payload value ever has. It canonicalizes nothing at resolve time —
+// the literal still binds and auto-injects exactly as written; only the check
+// comparison consults this second reading.
+func CanonicalNumericLiteral(s string) (string, bool) {
+	if !json.Valid([]byte(s)) {
+		return "", false
+	}
+	return CanonicalScalar(json.Number(s))
+}
+
+// canonicalDecimal renders a non-integer JSON number literal (one carrying a
+// fraction or exponent) as its exact canonical decimal string: "1.0" → "1",
+// "2.50" → "2.5", "1e3" → "1000", "25e-4" → "0.0025", every digit preserved
+// at any precision. ok=false for anything that is not a JSON number and for
+// any literal whose exact decimal form would exceed maxCanonicalDigits.
+// Exactness is the point: rounding through float64 would collapse "1e-400"
+// to "0" and land wide decimals on their neighbors, either way binding a
+// value the token doesn't carry.
+func canonicalDecimal(lit string) (string, bool) {
+	mant, expStr, hasExp := strings.Cut(lit, "e")
+	if !hasExp {
+		mant, expStr, hasExp = strings.Cut(lit, "E")
+	}
+	exp := 0
+	if hasExp {
+		var err error
+		// Atoi rejects an empty or non-numeric exponent. The magnitude bound is
+		// the allocation guard, not a redundancy: the exact-form length check at
+		// the bottom runs only after strings.Repeat has already built the
+		// string, so without this bound a 12-byte "1e1000000000" would allocate
+		// a ~1 GiB expansion before being rejected.
+		if exp, err = strconv.Atoi(expStr); err != nil || exp > 2*maxCanonicalDigits || exp < -2*maxCanonicalDigits {
+			return "", false
+		}
+	}
+	sign := ""
+	if strings.HasPrefix(mant, "-") {
+		sign, mant = "-", mant[1:]
+	}
+	intPart, fracPart, _ := strings.Cut(mant, ".")
+	digits := intPart + fracPart
+	if digits == "" {
+		return "", false
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", false
+		}
+	}
+	// point is where the decimal point sits in digits once the exponent is
+	// applied: digits[:point] to its left, digits[point:] to its right.
+	point := len(intPart) + exp
+	for len(digits) > 0 && digits[0] == '0' {
+		digits = digits[1:]
+		point--
+	}
+	for len(digits) > 0 && len(digits) > point && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+	}
+	if digits == "" {
+		// Every spelling of zero ("0.0", "-0e9") is the one value 0 —
+		// signless, since a numeric column can't parse "-0".
+		return "0", true
+	}
+	var out string
+	switch {
+	case point <= 0:
+		out = "0." + strings.Repeat("0", -point) + digits
+	case point >= len(digits):
+		out = digits + strings.Repeat("0", point-len(digits))
+	default:
+		out = digits[:point] + "." + digits[point:]
+	}
+	// The exact form is what must stay small: "1e-150" is a six-character
+	// literal with a 152-character expansion. The +2 slack exists for a "0."
+	// prefix, though any form may spend it (a 102-digit integer expansion
+	// passes). This runs after the Repeat above, so it bounds what callers
+	// see — the exponent bound is what keeps the allocation itself small.
+	if len(out) > maxCanonicalDigits+2 {
+		return "", false
+	}
+	return sign + out, true
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.
@@ -478,6 +676,48 @@ func Validate(p *Policy) error {
 	return nil
 }
 
+// malformedTemplate reports the first `{{ … }}` fragment of v that resolveTemplate
+// would NOT recognize as a claim template — a path outside the [a-zA-Z0-9_.]
+// grammar (a hyphen, a namespaced OIDC URL), a wrong or absent `jwt.` prefix,
+// indexing, or an unterminated `{{`. resolveTemplate binds such a fragment as
+// literal text, which is a fail-open on the filter path (`_neq`/`_lt` match ~every
+// row) and silent row corruption on the check path, so validateRolePerms rejects
+// it at write time — Store.Put, i.e. bootstrap-file adoption or an admin PUT; a
+// policy already in KV is not re-validated when a node loads it (#461). A
+// well-formed template — with or without surrounding literal
+// text, e.g. "acct-{{ jwt.org_id }}" — returns ("", false).
+func malformedTemplate(v string) (string, bool) {
+	// Strip every well-formed template; a surviving "{{" is one the resolver
+	// would leave as a literal instead of interpolating — except when stripping
+	// itself splices one from the fragments around a well-formed template
+	// ("{{{ jwt.a }}{" strips to "{{"), a rare over-rejection that errs
+	// fail-closed at write time, never at query time.
+	stripped := claimTemplateRe.ReplaceAllString(v, "")
+	i := strings.Index(stripped, "{{")
+	if i < 0 {
+		return "", false
+	}
+	frag := stripped[i:]
+	if end := strings.Index(frag, "}}"); end >= 0 {
+		frag = frag[:end+2]
+	}
+	return frag, true
+}
+
+// rejectMalformedTemplates fails a policy at write time if any operator value in
+// f carries a claim template the resolver would not interpolate (malformedTemplate).
+func rejectMalformedTemplates(table, op, role, kind, col string, f Filter) error {
+	for _, v := range []*string{f.Eq, f.Neq, f.Gt, f.Lt, f.In} {
+		if v == nil {
+			continue
+		}
+		if frag, bad := malformedTemplate(*v); bad {
+			return fmt.Errorf("table %q, op %q, role %q: %s column %q references an unrecognized claim template %q — claim paths may contain only letters, digits, '_' and '.'; flatten hyphenated or namespaced (OIDC URL) claims at the identity provider", table, op, role, kind, col, frag)
+		}
+	}
+	return nil
+}
+
 func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	if strings.TrimSpace(role) == "" {
 		return fmt.Errorf("table %q, op %q: empty role name is not allowed", table, op)
@@ -498,12 +738,16 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 	// query time, so a '?' in one would shift clickhouse-go's positional value
 	// binding. Refuse such a policy at write time, mirroring the query builder's
 	// chsql.BindUnsafe guard on caller-supplied columns.
-	for col := range perms.Filter {
+	for col, f := range perms.Filter {
 		if chsql.BindUnsafe(col) {
 			return fmt.Errorf("table %q, op %q, role %q: filter column %q contains '?' (unsupported)", table, op, role, col)
 		}
-		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so none is
-		// rejected here — only the bind-unsafe column name above.
+		// The filter path enforces every operator (_eq/_neq/_gt/_lt/_in), so no
+		// operator is rejected here. A malformed claim template IS rejected: the
+		// resolver would bind it as a literal, a fail-open for _neq/_lt (#385/#457).
+		if err := rejectMalformedTemplates(table, op, role, "filter", col, f); err != nil {
+			return err
+		}
 	}
 	for col, f := range perms.Check {
 		if chsql.BindUnsafe(col) {
@@ -511,17 +755,23 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		}
 		// The check/insert path honors only _eq (a required value) and _in (a
 		// required set); the comparison operators have no insert-time semantics and
-		// no auto-inject, so reject them loudly at config load (#224).
+		// no auto-inject, so reject them loudly at write time (#224).
 		if f.Neq != nil || f.Gt != nil || f.Lt != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q uses _neq/_gt/_lt, which check does not honor (use _eq or _in)", table, op, role, col)
 		}
 		// _eq and _in are both honored, but they carry different required-value
 		// semantics (a single value vs. set membership) and Evaluate resolves only
-		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at config
-		// load rather than enforce an arbitrary branch (the same accept-but-ignore
+		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at write
+		// time rather than enforce an arbitrary branch (the same accept-but-ignore
 		// gap #224 closes).
 		if f.Eq != nil && f.In != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q sets both _eq and _in; use exactly one", table, op, role, col)
+		}
+		// A malformed claim template on the check path is rejected too: the resolver
+		// would bind the literal `{{…}}` text as the required value and stamp it into
+		// every auto-injected row (#385/#457; the required-value question is #463).
+		if err := rejectMalformedTemplates(table, op, role, "check", col, f); err != nil {
+			return err
 		}
 	}
 	return nil

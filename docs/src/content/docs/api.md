@@ -239,6 +239,8 @@ The body is a **flat JSON object** whose keys must match column names in the tar
 | 400 | `{"error":"missing dedupe id field \"event_id\""}` | Only when dedupe is enabled with `dedupe.require_id: true` and the row lacks the configured `id_field`. With `require_id: false` (the default) the row is instead published un-deduped. Either way — reject or publish — the row is logged at `WARN` and counted by `wavehouse_ingest_dedupe_missing_id_total`. In a batch this is a per-record failure, not a whole-request error. |
 | 401 | `{"error":"invalid token"}` / `{"error":"token expired"}` | A present-but-invalid/expired token was supplied and denied (the gate surfaces the token reason rather than silently falling back to `default_role`) |
 | 403 | `{"error":"forbidden"}` (empty-role variant: `forbidden: request has no role and no public default_role is configured`) | The resolved role lacks `insert` on the table |
+| 403 | `{"error":"column \"x\" not allowed for insert"}` | The record names a column the role's `allow_columns`/`deny_columns` forbids ([Access control → Column permissions](/access-control#column-permissions)) |
+| 403 | `{"error":"check failed for column \"x\""}` | The record's value for a checked column doesn't satisfy the policy `check` (`_eq`/`_in`), or an `_in`-checked column is omitted ([Access control → Insert checks](/access-control#insert-checks)). On the batch path both this and the column error above are per-record failures reported in `results`, not whole-request rejections |
 | 404 | `{"error":"unknown table: ..."}` | Table not found in ClickHouse schema |
 | 413 | `{"error":"request body exceeded 16777216 bytes"}` | Request body over the 16 MiB cap |
 | 500 | `{"error":"dedupe failed"}` | Deduplication backend error |

@@ -119,7 +119,7 @@ Pipe execution is gated by `allowed_roles` — a plain allowlist, evaluated inde
 
 To make a pipe public, list the role that `default_role` resolves to. For example, with `default_role: viewer`, a pipe with `"allowed_roles": ["viewer"]` is reachable with no token at all.
 
-This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/admin/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** (or via a claim-templated predicate) rather than assuming policy column masking applies.
+This is the *only* authorization check on the execute path — pipes deliberately sit outside the `/v1/admin/*` gate so non-admin callers can run them. The pipe's SQL is not re-checked against the table policy's column or row rules, so **scope the data in the pipe's SQL itself** rather than assuming policy column masking applies. A pipe's `{{param}}` placeholders bind caller-supplied values, never token claims — a parameterized predicate is a convenience for the caller, not an authorization boundary.
 
 ## Creating and managing pipes
 
