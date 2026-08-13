@@ -260,13 +260,16 @@ total.
 The fetch-throws case is the one you cannot catch that way, because `initial()`
 is never called at all — the throw happens inside step 2, before the callback is
 reached, so there is no `Result` to inspect. A rejecting `auth` callback is the
-case to watch: the backfill vanishes while the stream, which treats the same
-rejection as transient, keeps re-dialing. If a later attempt succeeds you get
-live events with no snapshot and no signal that the backfill was what failed; if
-the provider stays down you get no events either, but the `SSE_AUTH_ERROR`
-repeating on every backoff at least names the cause. A relative `baseURL` throws
-there too, but it also ends the stream with a terminal `SSE_CONNECT_ERROR`, so
-that half announces itself immediately. Tracked in
+case to watch, and note that the backfill makes the *first* `auth()` call: a
+rejection there is never retried, while the stream treats the same rejection as
+transient and re-dials. So a callback that recovers by the next attempt gives you
+live events, no snapshot, and **no callback of any kind** — the failure is
+completely silent. A callback that keeps rejecting is the opposite, loud but
+empty: the stream never reaches `live`, so no events arrive at all, and `error`
+fires with a retryable `SSE_AUTH_ERROR` every attempt — which names auth, but
+never the backfill. A relative `baseURL` throws there too, but it also ends the
+stream with a terminal `SSE_CONNECT_ERROR`, so that half announces itself
+immediately. Tracked in
 [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
 
 A `status` handler that throws *on the first, synchronous call* is a separate
