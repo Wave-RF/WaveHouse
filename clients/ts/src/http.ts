@@ -60,6 +60,15 @@ export function mergeHeaders(
   return merged;
 }
 
+/** The documented shape for a cancelled request: a Result, never a throw. */
+function abortedResult<T>(): HttpResult<T> {
+  return {
+    data: null,
+    error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
+    headers: new Headers(),
+  };
+}
+
 /**
  * Internal fetch wrapper with auth injection, retry, backoff, and Retry-After.
  * @internal
@@ -140,16 +149,24 @@ export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<H
     } catch (e) {
       // AbortError — return immediately, no retry
       if (e instanceof DOMException && e.name === "AbortError") {
-        return {
-          data: null,
-          error: { status: 0, code: "ABORTED", message: "Request aborted", retryable: false },
-          headers: new Headers(),
-        };
+        return abortedResult<T>();
       }
 
       lastError = networkError(e);
       if (attempt < maxAttempts - 1) {
-        await sleep(backoff(attempt), opts.signal);
+        // This sleep is the one that runs inside the catch, so unlike the two
+        // in the try above, an abort raised *by* the backoff would escape
+        // `request()` as a raw DOMException instead of the documented ABORTED
+        // result — and no caller wraps this, so it would reach the consumer as
+        // an unhandled rejection.
+        try {
+          await sleep(backoff(attempt), opts.signal);
+        } catch (abort) {
+          if (abort instanceof DOMException && abort.name === "AbortError") {
+            return abortedResult<T>();
+          }
+          throw abort;
+        }
       }
     }
   }

@@ -167,6 +167,29 @@ describe("request", () => {
     expect(result.error?.retryable).toBe(false);
   });
 
+  it("returns ABORTED when the abort lands during a retry backoff", async () => {
+    // The existing abort test rejects the *fetch*, which is caught by the
+    // branch at the top of the catch. This one aborts during the backoff that
+    // runs inside that same catch — the one sleep whose rejection had no
+    // handler, so it escaped `request()` as a raw DOMException and reached the
+    // caller as an unhandled rejection instead of the documented Result.
+    fetchSpy.mockRejectedValue(new TypeError("fetch failed"));
+
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 20);
+
+    // maxRetries must be > 0 or there is no backoff to abort during —
+    // the default fixture is 0, which returns NETWORK_ERROR on the first pass.
+    const result = await request(makeCtx({ options: { maxRetries: 1 } }), {
+      method: "GET",
+      path: "/health",
+      signal: ac.signal,
+    });
+
+    expect(result.error?.code).toBe("ABORTED");
+    expect(result.error?.retryable).toBe(false);
+  });
+
   it("appends query params to URL", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 
