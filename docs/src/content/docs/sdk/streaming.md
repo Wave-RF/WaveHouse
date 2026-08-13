@@ -71,6 +71,24 @@ stream.close();
 
 Current connection status: `'connecting' | 'live' | 'reconnecting' | 'closed'`.
 
+### `.connected(timeoutMs?)` → `Promise<void>`
+
+Resolves once the stream reaches `live`. Rejects if it is already `closed`, if
+it closes before connecting, or after `timeoutMs` (default `5000`). Useful when
+you need the subscription established before doing something that depends on it
+— inserting a row you expect to see come back, for instance.
+
+```ts
+const stream = wh.from('clicks').stream();
+const unsub = stream.subscribe({ next: (e) => console.log(e) });
+await stream.connected();          // wait until the transport is live
+await wh.from('clicks').insert({ page: '/home' });
+```
+
+A rejection does **not** stop the transport — reconnection is unbounded, so a
+timeout means "not live yet", not "given up". Call `.close()` if you want it to
+stop.
+
 ### `StreamOptions`
 
 | Field | Type | Description |
@@ -121,12 +139,29 @@ upstream — can't pin the client at sub-second retries. Reconnection is
 `close()` it. `options.maxRetries` bounds REST requests only and is never
 consulted here.
 
+:::caution[Resumption is at-least-once, and time-bounded]
+Delivery across a reconnect is **at-least-once**. The `Last-Event-ID` the client
+sends is the last event's `received_timestamp`, and the server replays from that
+instant *inclusively* — so the last event you already saw, and anything sharing
+its timestamp, arrives again. The SDK does not deduplicate live frames (only
+`liveQuery()` does, once, at the backfill seam), so key on `timestamp` plus your
+own row identity if duplicates matter.
+
+Replay is also bounded by the server's
+[`mq.gap_window_minutes`](/configuration#message-queue-nats) — 15 minutes by default.
+A drop longer than that resumes with a hole and no signal, because the purged
+messages are simply gone.
+:::
+
 A `4xx` is terminal and surfaces through `error` with the real status code
 rather than an opaque connection failure. It won't be an *authentication*
 rejection from WaveHouse, which leaves `/v1/stream` ungated and answers an
 expired token with a filtered view rather than a `401`; the only 4xx it raises
 itself is `400` for a missing or empty table name. Anything else means something
-in front of it (an auth gateway, a proxy) turned the request away. See
+in front of it (an auth gateway, a proxy) turned the request away — and note the
+exception to "retrying wouldn't help": a `429` or `408` from a rate limiter *is*
+transient, but the stream still ends, so catch it and open a new one after a
+delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). See
 [Error Handling](/sdk/reference#error-handling) for every code a stream can
 report and which ones re-dial.
 
