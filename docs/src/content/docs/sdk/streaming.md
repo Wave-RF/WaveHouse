@@ -50,8 +50,8 @@ unsub();
 
 A handler that throws *during delivery* doesn't end the stream; the exception is
 logged and the connection keeps running. But delivery of that event stops at the
-handler that threw — your other subscribers, and any concurrent `for await`, do
-not get it. The first `status` call, the synchronous one `.subscribe()` makes
+handler that threw — your *later* subscribers, and any concurrent `for await`,
+do not get it. The first `status` call, the synchronous one `.subscribe()` makes
 before returning, isn't caught at all and throws back out at you. Wrap your
 handler bodies in your own `try`/`catch`; see
 [Error Handling](/sdk/reference#error-handling) for all four carve-outs.
@@ -242,7 +242,7 @@ interface StreamSubscriber<T> {
 ### How it works
 
 1. Opens the stream **immediately** and buffers incoming events.
-2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result.
+2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result — unless the fetch itself throws, in which case neither happens (see below).
 3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way — replay lands in the same buffer, so replayed events at or older than that row are dropped before reaching `next()`. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
 4. Flushes remaining buffered events and switches to live mode.
 
@@ -255,8 +255,15 @@ no log and no `error` callback, if the backfill query returns an error `Result`,
 if the fetch itself throws, or if your `initial()` or `next()` throws during the
 flush — so a handler that throws mid-flush costs you the remaining buffered
 events. Check `result.error` inside `initial()`, and keep the flush handlers
-total. Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
+total.
 
-A `status` handler that throws is a separate and worse case — it escapes
-`liveQuery()` before you get a handle back. See
+The fetch-throws case is the one you cannot catch that way, because `initial()`
+is never called at all: a rejecting `auth` callback or a relative `baseURL`
+throws before step 2, so the whole backfill vanishes and the live stream runs on
+with no snapshot and no signal that one was missed. Tracked in
+[#473](https://github.com/Wave-RF/WaveHouse/issues/473).
+
+A `status` handler that throws *on the first, synchronous call* is a separate
+and worse case — it escapes `liveQuery()` before you get a handle back. Throwing
+on any later transition is isolated and logged like `next`. See
 [Error Handling](/sdk/reference#error-handling).
