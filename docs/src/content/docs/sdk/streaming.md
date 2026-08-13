@@ -85,9 +85,10 @@ await stream.connected();          // wait until the transport is live
 await wh.from('clicks').insert({ page: '/home' });
 ```
 
-A rejection does **not** stop the transport — reconnection is unbounded, so a
-timeout means "not live yet", not "given up". Call `.close()` if you want it to
-stop.
+A *timeout* rejection does **not** stop the transport — reconnection is
+unbounded, so it means "not live yet", not "given up"; call `.close()` if you
+want it to stop. A rejection because the stream closed is different: there the
+transport has already stopped.
 
 ### `StreamOptions`
 
@@ -123,8 +124,6 @@ string is read as UTC, an ECMAScript quirk
 | Transport | Reconnect | Protocol |
 | --------- | --------- | -------- |
 | SSE over `fetch` | Automatic, jittered backoff, resumes via `Last-Event-ID` | HTTP/2 recommended |
-<!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
-<!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
 :::note[SSE connection limit]
 The SDK warns above 5 concurrent SSE connections — just under the browser's 6-per-domain limit for HTTP/1.1. HTTP/2 multiplexes over one connection, so the limit doesn't apply there.

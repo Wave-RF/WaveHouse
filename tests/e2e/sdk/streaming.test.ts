@@ -163,13 +163,16 @@ describe("Streaming", () => {
         await authStream.connected(20_000);
         await anonStream.connected(20_000);
 
-        await whAuth.from(T.events).insert({
+        const inserted = await whAuth.from(T.events).insert({
           event_id: id,
           type: "sse-auth-test",
           user_id: "auth-user",
           payload: '{"secret":"viewer-only"}',
           source: "web",
         });
+        // Without this, a failed write shows up as two 10s timeouts blaming
+        // the stream for an event that was never published.
+        expect(inserted.error).toBeNull();
 
         await waitForCondition(() => authEvents.some((e) => e.data?.event_id === id), 10_000);
         await waitForCondition(() => anonEvents.some((e) => e.data?.event_id === id), 10_000);

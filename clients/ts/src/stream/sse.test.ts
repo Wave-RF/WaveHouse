@@ -8,9 +8,18 @@ interface Attempt {
   init: RequestInit;
 }
 
-/** Headers are always handed to fetch as a plain object by the transport. */
+/**
+ * Headers are always handed to fetch as a plain object by the transport.
+ *
+ * Asserted rather than assumed: a `Headers` instance or an entry array would
+ * cast to an object with no string keys, quietly turning every
+ * `expect(headers[x]).toBeUndefined()` below into a tautology.
+ */
 function headersOf(attempt: Attempt): Record<string, string> {
-  return (attempt.init.headers ?? {}) as Record<string, string>;
+  const h = attempt.init.headers ?? {};
+  expect(h).not.toBeInstanceOf(Headers);
+  expect(Array.isArray(h)).toBe(false);
+  return h as Record<string, string>;
 }
 
 /**
@@ -71,6 +80,15 @@ const BASE = "http://localhost:8080";
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const frame = (id: string, payload: unknown) => `id: ${id}\ndata: ${JSON.stringify(payload)}\n\n`;
+
+// A failed assertion aborts the test body, so cleanup cannot live at the end of
+// one: leaked fake timers stall every later test that awaits `flush()`, turning
+// a single real failure into a cascade of timeouts that buries it.
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("SSETransport request construction", () => {
   it("authenticates with a Bearer header and keeps the token out of the URL", async () => {
@@ -218,7 +236,6 @@ describe("SSETransport request construction", () => {
     t.connect();
     await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     t.disconnect();
-    vi.unstubAllGlobals();
   });
 });
 
@@ -310,17 +327,12 @@ describe("SSETransport framing", () => {
     expect(seen.events).toHaveLength(0);
     expect(seen.errors).toHaveLength(0);
     t.disconnect();
-    warn.mockRestore();
   });
 });
 
 describe("SSETransport reconnect and resumption", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it("resumes from the last non-empty id and re-mints the token", async () => {
@@ -390,6 +402,13 @@ describe("SSETransport reconnect and resumption", () => {
     // seconds buys at most four attempts. Flat sub-second retries gave eight.
     expect(attempts.length).toBeGreaterThan(1);
     expect(attempts.length).toBeLessThanOrEqual(5);
+    // The count alone would also pass on a flat ~1.2s schedule. Jitter spans
+    // [n/2, n) and n doubles, so consecutive gaps cannot overlap and each must
+    // strictly exceed the last.
+    const gaps = attempts.slice(1).map((at, i) => at - attempts[i]);
+    for (let i = 1; i < gaps.length; i++) {
+      expect(gaps[i]).toBeGreaterThan(gaps[i - 1]);
+    }
 
     t.disconnect();
   });
@@ -637,7 +656,6 @@ describe("SSETransport lifecycle", () => {
     // Deterministic failure — retrying would only reproduce it.
     await vi.advanceTimersByTimeAsync(60_000);
     expect(f.attempts).toHaveLength(0);
-    vi.useRealTimers();
   });
 
   it("ends the stream on a non-http baseURL scheme", async () => {
@@ -653,7 +671,6 @@ describe("SSETransport lifecycle", () => {
     // `fetch` would reject with an opaque failure the loop reads as transient.
     await vi.advanceTimersByTimeAsync(60_000);
     expect(f.attempts).toHaveLength(0);
-    vi.useRealTimers();
   });
 
   it("keeps retrying when the token provider throws", async () => {
@@ -685,7 +702,6 @@ describe("SSETransport lifecycle", () => {
     expect(headersOf(f.attempts[0]).Authorization).toBe("Bearer recovered");
 
     t.disconnect();
-    vi.useRealTimers();
   });
 
   it("refuses a redirect instead of retrying it forever", async () => {
@@ -719,7 +735,6 @@ describe("SSETransport lifecycle", () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(f.attempts).toHaveLength(1);
-    vi.useRealTimers();
   });
 
   it("rejects a 200 that is not an event stream", async () => {
@@ -747,7 +762,6 @@ describe("SSETransport lifecycle", () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(f.attempts).toHaveLength(1);
-    vi.useRealTimers();
   });
 
   it("aborts the in-flight request on disconnect", async () => {
@@ -781,7 +795,6 @@ describe("SSETransport lifecycle", () => {
     await vi.advanceTimersByTimeAsync(60_000);
 
     expect(f.attempts).toHaveLength(1);
-    vi.useRealTimers();
   });
 
   it("does not report live for a disconnect that lands mid-handshake", async () => {
@@ -834,7 +847,6 @@ describe("SSETransport lifecycle", () => {
 
     expect(vi.getTimerCount()).toBe(0);
     expect(seen.statuses).toContain("closed");
-    vi.useRealTimers();
   });
 
   it("stops delivering when a subscriber closes from inside its own handler", async () => {

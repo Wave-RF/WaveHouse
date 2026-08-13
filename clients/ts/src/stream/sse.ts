@@ -49,7 +49,12 @@ const STABLE_CONNECTION_MS = 3_000;
  */
 function backoff(attempt: number, retryFloorMs: number): number {
   const nominal = Math.max(retryFloorMs, Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS));
-  return nominal / 2 + Math.random() * (nominal / 2);
+  // Jitter spans [max(floor, nominal/2), nominal), so a server-requested
+  // `retry:` is honored as the lower bound the SSE spec makes it — jittering
+  // over the whole nominal range could re-dial at half what the server asked.
+  // With no `retry:` (the default) the floor is 0 and this is the full spread.
+  const low = Math.max(retryFloorMs, nominal / 2);
+  return low + Math.random() * (nominal - low);
 }
 
 /**
@@ -410,6 +415,9 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
 
   /** Decode and parse frames until the stream ends, aborts, or errors. */
   private async _pump(body: ReadableStream<Uint8Array>): Promise<void> {
+    // Set when the parser reports a buffer overflow: it is terminated at that
+    // point, so the read loop must stop rather than feed it again.
+    let overflowed = false;
     const parser = createParser({
       onEvent: (msg) => {
         if (msg.id) this._lastEventId = msg.id;
@@ -420,6 +428,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         this._retryFloorMs = Math.min(Math.max(ms, 0), MAX_BACKOFF_MS);
       },
       onError: (err) => {
+        if (err.type === "max-buffer-size-exceeded") overflowed = true;
         this._emitError({
           status: 0,
           code: "SSE_PARSE_ERROR",
@@ -438,6 +447,9 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         const { done, value } = await reader.read();
         if (done) return;
         parser.feed(decoder.decode(value, { stream: true }));
+        // End the connection on the overflow we just reported, instead of
+        // feeding a terminated parser and re-reporting it as a read failure.
+        if (overflowed) return;
       }
     } catch (e) {
       if (this._isAbort(e)) return;
