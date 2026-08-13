@@ -344,10 +344,10 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 // (jwt.WithJSONNumber on claims, UseNumber on ingest payloads) binds in
 // canonical decimal form, not the token's spelling: "1", "1.0", and "1e3" are
 // one JSON value, and a numeric ClickHouse column rejects '1.0'/'1e3' as a
-// per-query TYPE_MISMATCH error. Integer literals keep exact digits at any
-// width (the >2^53 case float64 rounds); anything else round-trips through
-// float64 ("1e3" → "1000"); a magnitude only JSON can hold (1e400) has no
-// canonical form and fails closed. Claim resolution and the insert-check
+// per-query TYPE_MISMATCH error. Integer literals keep exact digits up to a
+// 100-digit bound (the >2^53 case float64 rounds); anything else round-trips
+// through float64 ("1e3" → "1000"); a literal past the bound or a magnitude
+// only JSON can hold (1e400) has no canonical form and fails closed. Claim resolution and the insert-check
 // payload comparison (internal/api) both route through this one function, so
 // what a read filter binds and what a write check accepts can't drift.
 func CanonicalScalar(v any) (string, bool) {
@@ -355,6 +355,17 @@ func CanonicalScalar(v any) (string, bool) {
 	case nil, map[string]any, []any:
 		return "", false
 	case json.Number:
+		// Bound the literal before the exact-integer path: big.Int.SetString +
+		// String() are superlinear in digit count, and on the ingest check path
+		// the literal is client-controlled — one 16 MiB batch of million-digit
+		// literals would burn minutes of CPU (CWE-400). 100 digits is far past
+		// any real id (uint256 is 78); a longer literal has no canonical form
+		// and fails closed, the same rule as 1e400 — never a float64 rounding
+		// that could collide two distinct wide ids.
+		const maxCanonicalDigits = 100
+		if len(val) > maxCanonicalDigits {
+			return "", false
+		}
 		if i, ok := new(big.Int).SetString(val.String(), 10); ok {
 			return i.String(), true
 		}

@@ -3,6 +3,7 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -491,6 +492,11 @@ func TestCanonicalScalar(t *testing.T) {
 		{"underflowing magnitude collapses to zero", json.Number("1e-400"), "0", true},
 		{"overflow has no canonical form", json.Number("1e400"), "", false},
 		{"negative overflow has no canonical form", json.Number("-1e400"), "", false},
+		// The 100-digit literal bound: big.Int work is superlinear in digit
+		// count and the ingest path hands this function client-controlled
+		// literals, so anything longer fails closed before any parsing.
+		{"100-digit integer at the bound stays exact", json.Number(strings.Repeat("9", 100)), strings.Repeat("9", 100), true},
+		{"101-digit literal has no canonical form", json.Number(strings.Repeat("9", 101)), "", false},
 		{"null has no canonical form", nil, "", false},
 		{"object has no canonical form", map[string]any{"id": 1}, "", false},
 		{"array has no canonical form", []any{"a"}, "", false},
