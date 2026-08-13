@@ -139,7 +139,7 @@ The SDK streams over `fetch` and sends the JWT as an `Authorization` header, the
 - forwards the `Authorization` request header — check this first if streams authenticate from `curl` but not through the proxy;
 - forwards the query string (`since`, and `token` if any client still uses it) — most do by default;
 - forwards the `Last-Event-ID` request header so reconnects resume from the right point (it's already allow-listed in WaveHouse's CORS preflight);
-- does not redirect `/v1/stream`. The SDK's streaming transport refuses redirects rather than following them: a cross-origin hop strips `Authorization`, and this endpoint answers an unauthenticated caller with a reduced view rather than an error, so following one would silently downgrade the stream instead of failing;
+- does not redirect `/v1/stream` for authenticated clients. The SDK's streaming transport refuses a redirect on any stream carrying a credential (an `auth` token or `options.headers`), because a cross-origin hop strips `Authorization` — and this endpoint answers an unauthenticated caller with a reduced view rather than an error — while forwarding your other headers to wherever it points. An uncredentialed stream follows redirects normally;
 - does not log the full URL, for any client still sending `token` in it.
 
 ## Idle timeouts by provider
@@ -176,7 +176,7 @@ Linux's [`tcp_keepalive_time`](https://man7.org/linux/man-pages/man7/tcp.7.html)
 
 ### Absolute / total-duration caps — a keepalive does **not** help
 
-These limit the *whole* request regardless of traffic, so no keepalive extends them. You must raise the cap or have the client reconnect (browser `EventSource` does this automatically, resuming via `Last-Event-ID`).
+These limit the *whole* request regardless of traffic, so no keepalive extends them. You must raise the cap or have the client reconnect — the SDK's stream transport and browser `EventSource` both do this automatically, resuming via `Last-Event-ID`.
 
 | Layer | Cap | What to do | Source |
 | --- | --- | --- | --- |

@@ -328,7 +328,7 @@ The token is never placed in the URL. The server still accepts a `?token=` query
 :::
 
 :::caution[Streaming asks more of a custom `fetch`]
-`.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A wrapper that buffers the response — or clones it to log the body — works for every REST call and then stalls on a stream that never ends. The transport fails with `SSE_NO_STREAM_BODY` rather than hanging, but the requirement is yours to meet.
+`.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A response handed back with an absent or already-consumed body fails fast with `SSE_NO_STREAM_BODY`. What the SDK cannot rescue is a wrapper that *awaits* the body before returning — `await res.text()`, or the `res.clone().text()` a logging wrapper reaches for — because on a stream that never ends it never resolves and your function never returns. Both satisfy every REST call, which is what makes the trap easy to walk into.
 
 `options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set, so custom headers reach it cross-origin only when a proxy in front terminates the preflight — the deployment they exist for. Server-side callers never preflight.
 :::
@@ -343,7 +343,7 @@ const wh = createClient({ baseURL: 'https://app.example.com/api/warehouse' });
 // streams  → https://app.example.com/api/warehouse/v1/stream
 ```
 
-Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``.
+Trailing slashes on `baseURL` are optional, but it must be **absolute** — scheme and host included — and the scheme must be `http` or `https`. A same-origin relative path like `/api/warehouse` makes every REST call reject with a `TypeError` instead of returning a `Result`, and surfaces on a stream as an `SSE_CONNECT_ERROR` to the subscriber's `error` callback — so build an absolute one: `` `${location.origin}/api/warehouse` ``. A `ws://`/`wss://` base ends the stream with the same error: streaming is plain HTTP, and there is no WebSocket endpoint.
 
 The proxy in front must **strip** the prefix before forwarding, since WaveHouse itself always serves at `/v1/…` — see [Behind a reverse proxy → Path prefixes](/reverse-proxy#path-prefixes).
 
@@ -411,10 +411,11 @@ It carries any `RequestInit` field — `mode`, `cache`, `keepalive`,
 extensions need a cast; the standard fields are declared on `RequestInit`
 already.
 
-:::caution[Three of those fields don't apply to streams]
-On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache`,
-`redirect`, and `credentials` for itself, because there they're correctness
-rather than preference — see
+:::caution[Two of those fields don't apply to streams]
+On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache`
+and `redirect` for itself, because there they're correctness rather than
+preference — `credentials` stays yours, honored in a browser and dropped
+elsewhere because some runtimes throw if it is set at all. See
 [Supplying your own fetch](#supplying-your-own-fetch) for what each is set to
 and why. Everything else here reaches streams normally. The example above is a
 REST-path illustration: on a stream, `cache` is already `no-store` and

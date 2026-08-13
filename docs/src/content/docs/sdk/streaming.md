@@ -113,10 +113,11 @@ resumes with `Last-Event-ID` so the server gap-fills what was missed. The
 schedule resets only after a connection has *held* for a few seconds, so a
 server accepting and immediately closing — slow-consumer eviction, a half-broken
 upstream — can't pin the client at sub-second retries. The `auth` token is re-read on every attempt, so a
-stream that outlives its token picks up a fresh one. A `4xx` is terminal — a
-rejected token or a missing table can't be fixed by retrying — and surfaces
-through `error` with the real status code rather than an opaque connection
-failure.
+stream that outlives its token picks up a fresh one. A `4xx` is terminal and surfaces through `error` with the real status code
+rather than an opaque connection failure — though it won't come from WaveHouse,
+which leaves `/v1/stream` ungated and answers an expired token with a filtered
+view rather than a rejection. A `4xx` here means something in front of it (an
+auth gateway, a proxy) turned the request away.
 
 ### Client-Side Stream Filtering
 

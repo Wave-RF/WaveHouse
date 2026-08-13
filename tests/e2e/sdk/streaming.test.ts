@@ -23,9 +23,14 @@ describe("Streaming", () => {
       ...(publicPolicy.tables[T.clicks].select || {}),
       anon: { allow_columns: ["*"] },
     };
+    // `anon` deliberately cannot see `payload` here, which is what makes the
+    // Authorization-header test below discriminating: `viewer` keeps the
+    // baseline `["*"]`, so the two roles observe different frames. Role
+    // matching is exact (internal/policy: no "*" any-role wildcard), so this
+    // entry is the only thing `anon` gets on this table.
     publicPolicy.tables[T.events].select = {
       ...(publicPolicy.tables[T.events].select || {}),
-      anon: { allow_columns: ["*"] },
+      anon: { allow_columns: ["event_id", "type", "user_id", "source", "received_timestamp"] },
     };
 
     await admin.policy.set(publicPolicy);
@@ -127,44 +132,64 @@ describe("Streaming", () => {
       }
     });
 
-    it("receives events after insert (authenticated via Authorization header)", async () => {
+    it("streams a column the public role cannot see (Authorization header)", async () => {
+      // The end-to-end proof that the credential move works. It has to be a
+      // column `anon` is denied: `/v1/stream` never rejects a bad or missing
+      // token, it answers with whatever `default_role` may see — so a test
+      // against a table both roles can read fully would pass just as happily
+      // with the header dropped, which is exactly what it is meant to catch.
       const whAuth = dataClient();
-      const receivedEvents: any[] = [];
+      const whPublic = publicClient();
       const id = testId();
 
-      // The SDK sends the JWT as `Authorization: Bearer` on the stream request
-      // (#203). It used to append it as `?token=`; the server still accepts
-      // that, but the SDK no longer puts a credential in the URL.
-      const stream = whAuth.from(T.clicks).stream();
+      const authEvents: any[] = [];
+      const anonEvents: any[] = [];
 
-      let unsub: (() => void) | undefined;
+      const authStream = whAuth.from(T.events).stream();
+      const anonStream = whPublic.from(T.events).stream();
+      let unsubAuth: (() => void) | undefined;
+      let unsubAnon: (() => void) | undefined;
+
       try {
-        unsub = stream.subscribe({
-          // initial: (result) => console.log("Initial SSE result:", result),
-          next: (event) => receivedEvents.push(event),
-          // status: (status) => console.log("SSE status:", status),
-          error: (err) => console.error("SSE error:", err),
+        unsubAuth = authStream.subscribe({
+          next: (event) => authEvents.push(event),
+          error: (err) => console.error("authed SSE error:", err),
+        });
+        unsubAnon = anonStream.subscribe({
+          next: (event) => anonEvents.push(event),
+          error: (err) => console.error("anon SSE error:", err),
         });
 
-        await stream.connected(20_000);
+        await authStream.connected(20_000);
+        await anonStream.connected(20_000);
 
-        await whAuth.from(T.clicks).insert({
+        await whAuth.from(T.events).insert({
           event_id: id,
-          page: "/sse-auth-test",
+          type: "sse-auth-test",
           user_id: "auth-user",
-          session_id: "sse-sess",
-          country: "US",
-          duration_ms: 99,
+          payload: '{"secret":"viewer-only"}',
+          source: "web",
         });
 
-        await waitForCondition(() => receivedEvents.some((e) => e.data?.event_id === id), 10_000);
+        await waitForCondition(() => authEvents.some((e) => e.data?.event_id === id), 10_000);
+        await waitForCondition(() => anonEvents.some((e) => e.data?.event_id === id), 10_000);
 
-        const matchedEvent = receivedEvents.find((e) => e.data?.event_id === id);
-        expect(matchedEvent).toBeDefined();
-        expect(matchedEvent?.data.user_id).toBe("auth-user");
+        const authed = authEvents.find((e) => e.data?.event_id === id);
+        const anon = anonEvents.find((e) => e.data?.event_id === id);
+
+        // Authenticated as `viewer` via the header: the restricted column is present.
+        expect(authed?.data.payload).toBe('{"secret":"viewer-only"}');
+        // Same table, same event, no credential: the server projected it away.
+        // If the SDK stopped sending Authorization, the first assertion would
+        // see this frame instead.
+        expect(anon).toBeDefined();
+        expect(anon?.data.payload).toBeUndefined();
+        expect(anon?.data.event_id).toBe(id);
       } finally {
-        if (unsub) unsub();
-        stream.close();
+        if (unsubAuth) unsubAuth();
+        if (unsubAnon) unsubAnon();
+        authStream.close();
+        anonStream.close();
       }
     });
   });

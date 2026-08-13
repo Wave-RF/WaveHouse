@@ -105,11 +105,13 @@ export interface ClientConfig<_DB extends Database = Database> {
  * **Streaming needs more.** `.stream()` and `.liveQuery()` read the response as
  * it arrives, via `.body.getReader()`, so an implementation used with them must
  * return a response carrying a live `ReadableStream` — something the type cannot
- * enforce, since `Response.body` is legitimately nullable. An implementation
- * that buffers the response, or clones it to log the body, satisfies every REST
- * call and then hangs forever on a stream that never ends. The transport checks
- * for a readable body and fails with `SSE_NO_STREAM_BODY` rather than stalling,
- * but the requirement is on you to meet.
+ * enforce, since `Response.body` is legitimately nullable. A response handed
+ * back with an absent or already-consumed body fails fast with
+ * `SSE_NO_STREAM_BODY`. What the SDK *cannot* rescue is an implementation that
+ * awaits the body before returning — `await res.text()`, or the
+ * `res.clone().text()` a logging wrapper reaches for — because on a stream that
+ * never ends, that never resolves and your function never returns. Both satisfy
+ * every REST call, which is what makes the trap easy to walk into.
  *
  * Implementations shipping their own request/response declarations (undici,
  * `node-fetch`) need casts on the init and the return value, since those types
@@ -141,7 +143,7 @@ export interface ClientOptions {
    *   baseURL,
    *   options: {
    *     fetch: (url, init) =>
-   *       undiciFetch(url as string, { ...init, dispatcher } as never) as unknown as Promise<Response>,
+   *       undiciFetch(url, { ...init, dispatcher } as never) as unknown as Promise<Response>,
    *   },
    * });
    * ```

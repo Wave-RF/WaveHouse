@@ -623,6 +623,31 @@ describe("SSETransport lifecycle", () => {
     vi.useRealTimers();
   });
 
+  it("does not report live for a disconnect that lands mid-handshake", async () => {
+    let settle: ((r: Response) => void) | undefined;
+    const impl: FetchLike = () =>
+      new Promise<Response>((resolve) => {
+        settle = resolve;
+      });
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(settle).toBeTypeOf("function"));
+
+    // Aborting doesn't retract a Response that is already on its way back, so
+    // the happy-path continuation still runs. Left unguarded it flips a closed
+    // controller to "live" and strands it there — the loop exits without
+    // emitting anything further.
+    t.disconnect();
+    settle?.(streamingResponse().res);
+    await flush();
+
+    expect(seen.statuses).toContain("closed");
+    expect(seen.statuses).not.toContain("live");
+    expect(seen.statuses[seen.statuses.length - 1]).toBe("closed");
+  });
+
   it("connect() twice does not start a second reconnect loop", async () => {
     const f = makeFetch();
     const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });

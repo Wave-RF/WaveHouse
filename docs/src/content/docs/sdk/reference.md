@@ -41,7 +41,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 0 | `SSE_AUTH_ERROR` | Yes | The `auth` callback threw while minting a token for an attempt |
 | 0 | `SSE_NETWORK_ERROR` | Yes | Stream request failed to reach the server |
 | 0 | `SSE_READ_ERROR` | Yes | Stream was interrupted mid-read |
-| 0 | `SSE_PARSE_ERROR` | — | Malformed frame; reported, and the connection continues |
+| 0 | `SSE_PARSE_ERROR` | Yes (nothing to re-dial) | Unparseable frame, or the buffer cap; the connection continues |
 | *(response status)* | `SSE_NO_STREAM_BODY` | No | A configured `options.fetch` returned a response with no readable body |
 | *(response status)* | `SSE_REDIRECT` | No | The stream endpoint redirected; point `baseURL` at the final URL |
 | *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — usually a gateway's login page |
@@ -49,9 +49,9 @@ The SDK **never throws** for anything the server returns — all API errors come
 
 The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Unlike the REST codes, `retryable` here is not advisory — the transport acts on it. A retryable failure is reported and then re-dialed on a jittered exponential backoff (capped at 30s, and reset only once a connection has held for a few seconds — so a server that accepts and instantly closes still backs off), with the `status` callback moving `reconnecting` → `live`. A non-retryable one is terminal: the stream reports the error, goes `closed`, and stays closed.
 
-Rejected requests surface the server's real status — a `401` from an expired token arrives as `HTTP_401` with the server's message, not an opaque connection failure — and any `4xx` ends the stream, since retrying can't fix a bad token or a missing table. `SSE_CONNECT_ERROR` and `SSE_NO_STREAM_BODY` are configuration faults, so fix the cause and start a new stream.
+Rejected requests surface the real status and message rather than an opaque connection failure, and any `4xx` ends the stream, since repeating the request won't talk whatever rejected it round. Note that **WaveHouse itself does not reject a stream**: `/v1/stream` is ungated, so an expired or missing token resolves to `default_role` and you get a `200` with a filtered view, not a `401`. A `4xx` here comes from something in front — an auth gateway, a proxy. That silent-downgrade behavior is exactly why `auth` is re-read on every connection attempt, and [#239](https://github.com/Wave-RF/WaveHouse/issues/239) tracks enforcing expiry server-side. `SSE_CONNECT_ERROR` and `SSE_NO_STREAM_BODY` are configuration faults, so fix the cause and start a new stream.
 
-`SSE_PARSE_ERROR` is the one code that isn't a connection outcome: a malformed frame is reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. The exception is the parser's 16 MiB buffer cap, which terminates the parser and surfaces as `SSE_READ_ERROR`, reconnecting.
+`SSE_PARSE_ERROR` is the one code that isn't a connection outcome: it's reported and *skipped*, and the connection keeps reading — one bad frame shouldn't cost you the stream. Its `retryable: true` is therefore vestigial; there is nothing to re-dial. Two things it does **not** cover: a frame whose `data` isn't valid JSON is logged with `console.warn` and dropped, never reaching your `error` callback; and the parser's 16 MiB buffer cap is reported here first, after which the now-terminated parser fails the next read as `SSE_READ_ERROR`, which does reconnect.
 
 `SSE_AUTH_ERROR` is the exception that proves the rule: because `auth` is now invoked on every connection attempt rather than once per stream, a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 

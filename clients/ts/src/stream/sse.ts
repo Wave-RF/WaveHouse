@@ -172,7 +172,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       // delay EventSource used, against a server already in trouble.
       if (liveMs >= STABLE_CONNECTION_MS) attempt = 0;
 
-      this.onStatus?.("reconnecting");
+      this._emitStatus("reconnecting");
       await this._sleep(backoff(attempt, this._retryFloorMs));
       attempt++;
     }
@@ -247,14 +247,19 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
           "anyway, supply an `options.fetch` that overrides `redirect`.",
         retryable: false,
       });
+      void res.body?.cancel();
       return { liveMs: 0, terminal: true };
     }
 
     if (!res.ok) {
       const error = await parseErrorResponse(res);
       this._emitError(error);
-      // 4xx is terminal: reconnecting can't fix a rejected token or a table
-      // that doesn't exist, and native EventSource likewise stops on non-200.
+      // 4xx is terminal: whatever rejected this won't be talked round by
+      // repeating the request, and native EventSource likewise stops on
+      // non-200. Note WaveHouse itself doesn't reject here — the endpoint is
+      // ungated and answers a bad token with a reduced view, which is why
+      // `auth` is re-read per attempt (#239 tracks enforcing expiry). A 4xx on
+      // this path comes from something in front: a gateway, or a proxy.
       return { liveMs: 0, terminal: !error.retryable };
     }
 
@@ -288,10 +293,11 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
           "cannot be used for `.stream()` or `.liveQuery()`.",
         retryable: false,
       });
+      void res.body?.cancel();
       return { liveMs: 0, terminal: true };
     }
 
-    this.onStatus?.("live");
+    this._emitStatus("live");
     const openedAt = Date.now();
     await this._pump(body);
     return { liveMs: Date.now() - openedAt, terminal: false };
@@ -455,6 +461,19 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
   private _emitError(error: WaveHouseError): void {
     if (this._closed) return;
     this.onError?.(error);
+  }
+
+  /**
+   * Same guard for status. Aborting does not retract an already-resolved
+   * `Response`, so a `disconnect()` landing between the fetch settling and the
+   * "live" below would otherwise flip a closed controller back to live — and it
+   * stays there, since the loop then exits without emitting anything further.
+   * `disconnect()` calls `onStatus` directly; that terminal "closed" is the one
+   * status that must always get through.
+   */
+  private _emitStatus(status: StreamStatus): void {
+    if (this._closed) return;
+    this.onStatus?.(status);
   }
 
   private _isAbort(e: unknown): boolean {
