@@ -581,7 +581,7 @@ Row values of top-level `DateTime`/`DateTime64` columns inside `data` arrive in 
 
 **Note:** When access control policies are active, streamed events are filtered per the caller's role — denied columns are removed and tables without select permission are skipped.
 
-**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint, so a browser `EventSource` from an allowed origin connects normally. `Last-Event-ID` is allow-listed in the CORS preflight so fetch-based clients can resume cross-origin.
+**CORS:** `/v1/stream` honors the `server.cors_allowed_origins` allowlist like every endpoint. Note that a **header-authenticated stream preflights before it connects** — `Authorization` is not CORS-safelisted — where a bare `EventSource` only preflighted on reconnect, via `Last-Event-ID`. Both headers are allow-listed, so an allowed origin connects *and* resumes cross-origin.
 
 :::caution[Behind a proxy: disable response buffering]
 SSE needs one bit of proxy configuration: disable response buffering, or the proxy holds events until a buffer fills and clients receive nothing in real time. Idle timeouts are handled for you — the `:` keepalive comment above keeps a quiet stream alive under typical proxy/tunnel idle windows ([#226](https://github.com/Wave-RF/WaveHouse/issues/226)), so raising the idle/read timeout is now optional. The TypeScript SDK's stream transport and browser `EventSource` both auto-reconnect (resuming via `Last-Event-ID`) if a connection drops. See [Behind a reverse proxy → Server-Sent Events](/reverse-proxy#server-sent-events-sse) for nginx/Caddy/Cloudflare specifics.

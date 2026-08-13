@@ -58,7 +58,11 @@ function backoff(attempt: number, retryFloorMs: number): number {
  * body was never ours to release anyway.
  */
 function releaseBody(res: Response): void {
-  if (res.body && !res.body.locked) void res.body.cancel();
+  // `.catch` is load-bearing, not defensive: cancelling an *errored* stream
+  // returns a rejected promise, and an unhandled rejection takes the host
+  // process down under Node's default `--unhandled-rejections=throw`. A
+  // connection reset between the headers arriving and this call is enough.
+  if (res.body && !res.body.locked) res.body.cancel().catch(() => {});
 }
 
 /** Outcome of one connection attempt, driving the reconnect decision. */

@@ -33,7 +33,7 @@ importers:
   clients/ts:
     dependencies:
       eventsource-parser:
-        specifier: 3.1.0
+        specifier: ^3.1.0
         version: 3.1.0
     devDependencies:
       '@types/node':

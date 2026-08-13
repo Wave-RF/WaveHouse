@@ -401,7 +401,7 @@ transport:
 ```ts
 const wh = createClient({
   baseURL: 'https://wavehouse.example.com',
-  options: { fetchOptions: { cache: 'no-store', keepalive: true } },
+  options: { fetchOptions: { cache: 'no-store', mode: 'cors' } },
 });
 ```
 
@@ -488,8 +488,8 @@ described above — the response must carry a live streaming body — and the
 streaming transport keeps ownership of three `RequestInit` fields where the
 value is load-bearing rather than a preference: `cache` (as an init field; a
 `Cache-Control` header would fail cross-origin preflight) and `redirect`. It
-constrains a third rather than owning it: `credentials` stays yours, forwarded
-in a browser and dropped elsewhere, because some runtimes throw if it is set at
+constrains one more without owning it: `credentials` stays yours, forwarded in a
+browser and dropped elsewhere, because some runtimes throw if it is set at
 all.
 
 `redirect` depends on whether the request carries a credential. With one — an
@@ -570,8 +570,8 @@ covers the split on `RequestInit`, which differs on `body` and `headers`
 not your `lib` includes DOM); and the return cast handles the `Response`
 mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which
 undici's `RequestInfo` accepts. They're safe because of the narrow runtime
-contract above — a string URL and a plain `RequestInit` in, six members read
-back. `undici` is a dependency you add on top of the SDK's single ~2 KB one.
+contract above — a string URL and a plain `RequestInit` in, and only the
+response members enumerated above read back. `undici` is a dependency you add on top of the SDK's single ~2 KB one.
 
 If you're genuinely pinned to an affected undici, the same snippet fixes it —
 your pinned version, with a dispatcher that never reuses a keep-alive socket:

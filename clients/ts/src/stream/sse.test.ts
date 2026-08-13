@@ -394,6 +394,59 @@ describe("SSETransport reconnect and resumption", () => {
     t.disconnect();
   });
 
+  it("honors a server `retry:` as a backoff floor, clamped to the ceiling", async () => {
+    const f = makeFetch();
+    const first = streamingResponse();
+    f.queue.push(() => first.res);
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    // Server-controlled input into client timing, so the clamp matters: an
+    // hour would otherwise strand the stream far past the 30s ceiling.
+    first.push("retry: 3600000\n\n");
+    await vi.advanceTimersByTimeAsync(1);
+    first.close();
+
+    // Well past the un-clamped floor's first attempt, still inside an hour.
+    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
+
+    t.disconnect();
+  });
+
+  it("reports an unparseable frame without dropping the connection", async () => {
+    const f = makeFetch();
+    const first = streamingResponse();
+    f.queue.push(() => first.res);
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    first.push("bogus: x\n\n");
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+    expect(seen.errors[0].code).toBe("SSE_PARSE_ERROR");
+
+    // Documented as reported-and-skipped: one bad frame must not cost the
+    // stream, so the same connection keeps delivering.
+    expect(seen.statuses).not.toContain("reconnecting");
+    first.push(
+      frame("2026-08-01T00:00:11Z", {
+        table_name: "clicks",
+        received_timestamp: "2026-08-01T00:00:11Z",
+        data: { ok: true },
+      }),
+    );
+    await vi.waitFor(() => expect(seen.events).toHaveLength(1));
+    expect(f.attempts).toHaveLength(1);
+
+    t.disconnect();
+  });
+
   it("reconnects after the body errors mid-read, resuming from the last id", async () => {
     const f = makeFetch();
     const first = streamingResponse();
@@ -486,6 +539,43 @@ describe("SSETransport reconnect and resumption", () => {
 });
 
 describe("SSETransport lifecycle", () => {
+  it("does not leave an unhandled rejection when releasing an errored body", async () => {
+    // Cancelling an errored stream returns a *rejected* promise. Unhandled,
+    // that takes the host process down under Node's default
+    // `--unhandled-rejections=throw` — so a connection reset arriving between
+    // the headers and a terminal branch would kill the consumer's app.
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+
+    try {
+      const f = makeFetch();
+      f.queue.push(() => {
+        const conn = streamingResponse();
+        // Wrong content type, so this takes a terminal branch that releases
+        // the body rather than reading it...
+        const res = new Response(conn.res.body, {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        });
+        conn.fail(new Error("ECONNRESET")); // ...and the body is already errored.
+        return res;
+      });
+
+      const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+      const seen = collect(t);
+      t.connect();
+      await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+      expect(seen.errors[0].code).toBe("SSE_BAD_CONTENT_TYPE");
+
+      // Unhandled rejections surface a turn after the microtask queue drains.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
   it("rejects a response whose body was already consumed", async () => {
     const f = makeFetch();
     f.queue.push(() => {

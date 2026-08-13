@@ -41,7 +41,7 @@
     "codegen": "tsx src/cli/codegen.ts"
   },
   "dependencies": {
-    "eventsource-parser": "3.1.0"
+    "eventsource-parser": "^3.1.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",
