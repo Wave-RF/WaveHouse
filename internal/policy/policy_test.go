@@ -675,18 +675,21 @@ func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
 	tmpl := "{{ jwt.tenant_id }}"
 	partial := "t-{{ jwt.tenant_id }}"
 	claims := map[string]any{"role": "user"} // validly-signed token, no tenant_id
-	cases := map[string]Filter{
-		"_eq":               {Eq: &tmpl},
-		"_neq":              {Neq: &tmpl},
-		"_gt":               {Gt: &tmpl},
-		"_lt":               {Lt: &tmpl},
-		"_eq partial":       {Eq: &partial},
-		"_in template text": {In: &partial},
+	tests := []struct {
+		name   string
+		filter Filter
+	}{
+		{"_eq", Filter{Eq: &tmpl}},
+		{"_neq", Filter{Neq: &tmpl}},
+		{"_gt", Filter{Gt: &tmpl}},
+		{"_lt", Filter{Lt: &tmpl}},
+		{"_eq partial", Filter{Eq: &partial}},
+		{"_in template text", Filter{In: &partial}},
 	}
-	for name, f := range cases {
-		t.Run(name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := resolveFilters(map[string]Filter{"tenant_id": f}, claims)
+			clauses, params := resolveFilters(map[string]Filter{"tenant_id": tt.filter}, claims)
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -710,17 +713,20 @@ func TestResolveFilters_StructuredClaim_FailsClosed(t *testing.T) {
 		"meta": map[string]any{"tenant_id": "acme"},
 		"tids": []any{"a", "b"},
 	}
-	cases := map[string]Filter{
-		"_eq object":          {Eq: &obj},
-		"_neq object":         {Neq: &obj},
-		"_gt array":           {Gt: &arr},
-		"_in object":          {In: &obj},
-		"_in array with text": {In: &arrText},
+	tests := []struct {
+		name   string
+		filter Filter
+	}{
+		{"_eq object", Filter{Eq: &obj}},
+		{"_neq object", Filter{Neq: &obj}},
+		{"_gt array", Filter{Gt: &arr}},
+		{"_in object", Filter{In: &obj}},
+		{"_in array with text", Filter{In: &arrText}},
 	}
-	for name, f := range cases {
-		t.Run(name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clauses, params := resolveFilters(map[string]Filter{"tenant_id": f}, claims)
+			clauses, params := resolveFilters(map[string]Filter{"tenant_id": tt.filter}, claims)
 			require.Len(t, clauses, 1)
 			assert.Equal(t, "1 = 0", clauses[0])
 			assert.Empty(t, params)
@@ -876,7 +882,7 @@ func TestValidate_RejectsMalformedClaimTemplate(t *testing.T) {
 	}
 }
 
-// TestValidate_AcceptsWellFormedTemplates: the boundary of the config-load guard —
+// TestValidate_AcceptsWellFormedTemplates: the boundary of the write-time guard —
 // a bare template, a nested template, a template with surrounding literal text, a
 // plain literal, and an empty literal all remain valid.
 func TestValidate_AcceptsWellFormedTemplates(t *testing.T) {
@@ -1005,7 +1011,7 @@ func TestValidate_AllowsFilterIn(t *testing.T) {
 
 // TestValidate_RejectsComparisonCheckOps: check honors only _eq and _in; the
 // comparison operators have no insert-time semantics, so each stays a loud
-// config-load error (#224). _in and _eq are accepted (covered elsewhere).
+// write-time error (#224). _in and _eq are accepted (covered elsewhere).
 func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
 	t.Parallel()
 	v := "{{ jwt.sub }}"
