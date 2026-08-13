@@ -803,6 +803,34 @@ describe("SSETransport lifecycle", () => {
     expect(seen.statuses[seen.statuses.length - 1]).toBe("closed");
   });
 
+  it("stops delivering when a subscriber closes from inside its own handler", async () => {
+    const f = makeFetch();
+    const conn = streamingResponse();
+    f.queue.push(() => conn.res);
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    // "Read until I see my event, then stop" — the ordinary pattern, and what
+    // EventSource honored: close() inside a handler ended delivery.
+    t.onEvent = (e) => {
+      seen.events.push(e);
+      t.disconnect();
+    };
+    t.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    // Both frames arrive in one chunk, as gap-fill replay delivers them, and
+    // the parser dispatches every complete frame in a chunk synchronously.
+    const two =
+      frame("a", { table_name: "clicks", received_timestamp: "a", data: { n: 1 } }) +
+      frame("b", { table_name: "clicks", received_timestamp: "b", data: { n: 2 } });
+    conn.push(two);
+    await flush();
+
+    expect(seen.events).toHaveLength(1);
+    expect(seen.events[0].data).toEqual({ n: 1 });
+  });
+
   it("connect() twice does not start a second reconnect loop", async () => {
     const f = makeFetch();
     const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });

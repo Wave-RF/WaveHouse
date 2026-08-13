@@ -454,8 +454,18 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     }
   }
 
-  /** Turn one frame's `data` into a StreamEvent. */
+  /**
+   * Turn one frame's `data` into a StreamEvent.
+   *
+   * Guarded like `_emitError` and `_emitStatus`: `parser.feed()` dispatches
+   * every complete frame in a chunk synchronously, so a subscriber that closes
+   * from inside its own `next` — "read until I see my event, then stop" —
+   * would otherwise keep receiving the rest of that chunk. `EventSource` ended
+   * delivery on `close()`, and gap-fill replay routinely lands many frames in
+   * one chunk.
+   */
   private _dispatch(data: string): void {
+    if (this._closed) return;
     try {
       const msg = JSON.parse(data) as {
         table_name: string;

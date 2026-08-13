@@ -414,12 +414,13 @@ already.
 :::caution[Two of those fields don't apply to streams]
 On `.stream()` and `.liveQuery()`'s live connection the transport keeps `cache`
 and `redirect` for itself, because there they're correctness rather than
-preference — `credentials` stays yours, honored in a browser and dropped
-elsewhere because some runtimes throw if it is set at all. See
-[Supplying your own fetch](#supplying-your-own-fetch) for what each is set to
-and why. Everything else here reaches streams normally. The example above is a
-REST-path illustration: on a stream `cache` is already `no-store`, and a field
-like `keepalive` is meaningless for a connection meant to stay open.
+preference. It constrains one more without owning it: `credentials` stays yours,
+forwarded in a browser and dropped elsewhere because some runtimes throw if it
+is set at all. See [Supplying your own fetch](#supplying-your-own-fetch) for
+what each is set to and why.
+
+Everything else reaches streams normally — including `mode` from the example
+above. Only `cache` is different there: on a stream it is already `no-store`.
 :::
 
 :::note[`credentials: 'include'` needs a proxy that owns CORS]

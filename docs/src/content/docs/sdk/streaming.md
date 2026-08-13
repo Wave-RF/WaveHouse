@@ -11,7 +11,11 @@ Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 
 ## Streaming
 
-Streams use SSE (Server-Sent Events) for both unauthenticated connections and for authenticated ones.
+Streams are Server-Sent Events over `fetch`. The `auth` token rides in an
+`Authorization: Bearer` header — the same as every other request, on browsers
+and servers alike — and is re-read on each connection attempt, so a stream that
+outlives its token picks up a fresh one. Unauthenticated streams work the same
+way, minus the header.
 
 ### `StreamController`
 
@@ -112,12 +116,15 @@ A dropped stream reconnects on a jittered exponential backoff, capped at 30s, an
 resumes with `Last-Event-ID` so the server gap-fills what was missed. The
 schedule resets only after a connection has *held* for a few seconds, so a
 server accepting and immediately closing — slow-consumer eviction, a half-broken
-upstream — can't pin the client at sub-second retries. The `auth` token is re-read on every attempt, so a
-stream that outlives its token picks up a fresh one. A `4xx` is terminal and surfaces through `error` with the real status code
+upstream — can't pin the client at sub-second retries.
+
+A `4xx` is terminal and surfaces through `error` with the real status code
 rather than an opaque connection failure — though it won't come from WaveHouse,
 which leaves `/v1/stream` ungated and answers an expired token with a filtered
 view rather than a rejection. A `4xx` here means something in front of it (an
-auth gateway, a proxy) turned the request away.
+auth gateway, a proxy) turned the request away. See
+[Error Handling](/sdk/reference#error-handling) for every code a stream can
+report and which ones re-dial.
 
 ### Client-Side Stream Filtering
 
@@ -168,7 +175,7 @@ lq.close();
 interface StreamSubscriber<T> {
   initial?: (result: Result<T[]>) => void; // Historical backfill result
   next: (event: StreamEvent<T>) => void;    // Live events
-  status?: (state: string) => void;         // Connection state changes
+  status?: (state: StreamStatus) => void;   // Connection state changes
   error?: (err: WaveHouseError) => void;    // Errors
 }
 ```
