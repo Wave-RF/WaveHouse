@@ -61,11 +61,12 @@ export class LiveQuery<T = Record<string, unknown>> {
       }
 
       // Step 4: Deduplicate buffered events against fetched rows.
-      // The boundary is the `received_timestamp` of the *last row returned*,
-      // which is the newest only when the query orders ascending — under a
-      // `desc` order it is the oldest, and the pass filters nothing. An absent
-      // `received_timestamp` (a projection that omits it) disables it entirely.
-      // Tracked in #449; changing it needs a decision on both cases.
+      // The boundary is the `received_timestamp` of the *last row returned* —
+      // not the newest, unless the query happens to order ascending. The ways
+      // that misbehaves (and there are three) are enumerated once, in the SDK
+      // docs under Live Queries → How it works; #449 tracks the fix. Stated
+      // there rather than restated here, because this claim has already drifted
+      // out of sync three times across the docs and this comment.
       const rows = result.data;
       let lastTimestamp: string | undefined;
       if (rows.length > 0) {
