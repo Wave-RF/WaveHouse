@@ -213,6 +213,24 @@ describe("request", () => {
     },
   );
 
+  it("retries a middleware's own AbortError when the caller did not cancel", async () => {
+    // An `options.fetch` enforcing a per-attempt deadline aborts an internal
+    // controller and rejects with a real AbortError, while the caller's signal
+    // is untouched. Nobody asked to cancel, so this is transient — matching on
+    // the error type instead of the signal would end the call as ABORTED.
+    fetchSpy
+      .mockRejectedValueOnce(new DOMException("Aborted", "AbortError"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const result = await request<{ ok: boolean }>(makeCtx({ options: { maxRetries: 1 } }), {
+      method: "GET",
+      path: "/health",
+    });
+
+    expect(result.error).toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("appends query params to URL", async () => {
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 

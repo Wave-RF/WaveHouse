@@ -147,13 +147,19 @@ export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<H
 
       return { data: null, error, headers: res.headers };
     } catch (e) {
-      // Classified on the *signal*, not the rejection's type. Keying off the
-      // error alone made the outcome depend on `maxRetries`: an implementation
-      // that rejects with something other than a `DOMException` named
-      // `AbortError` — `AbortSignal.timeout()`, `node-fetch` — fell through to
-      // NETWORK_ERROR here, and was then reclassified as ABORTED only if a
-      // retry remained for the backoff `sleep` to notice the signal.
-      if (opts.signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) {
+      // Classified on the *signal*, never the rejection's type. Keying off the
+      // error made the outcome depend on `maxRetries` — an implementation that
+      // throws something other than a `DOMException` named `AbortError`
+      // (`AbortSignal.timeout()` raises a `TimeoutError`, `node-fetch` its own
+      // class) fell through to NETWORK_ERROR here and was reclassified only if
+      // a retry remained for the backoff to notice the signal.
+      //
+      // Matching on the error would also misread middleware: an `options.fetch`
+      // enforcing its own per-attempt deadline aborts an internal controller
+      // and rejects with a real `AbortError` while the caller's signal is
+      // untouched. Nobody asked to cancel, so that is a transient failure to
+      // retry, not a terminal `ABORTED`.
+      if (opts.signal?.aborted) {
         return abortedResult<T>();
       }
 
@@ -167,7 +173,9 @@ export async function request<T>(ctx: HttpContext, opts: RequestSpec): Promise<H
         try {
           await sleep(backoff(attempt), opts.signal);
         } catch (abort) {
-          if (abort instanceof DOMException && abort.name === "AbortError") {
+          // Same rule as above, so the two classifications can't drift apart.
+          // `sleep` only rejects when the signal fires, so this always holds.
+          if (opts.signal?.aborted) {
             return abortedResult<T>();
           }
           throw abort;
