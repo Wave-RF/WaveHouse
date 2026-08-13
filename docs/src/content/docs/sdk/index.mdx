@@ -506,9 +506,14 @@ all.
 `auth` token or configured `headers` — a redirect is refused and reported as
 `SSE_REDIRECT`, because a cross-origin hop strips `Authorization` (which this
 endpoint answers with a silently reduced view rather than an error) while
-forwarding your other headers to wherever the redirect points. With no
-credential there is nothing to protect, so redirects are followed normally and
-CDN canonicalization, geo/LB indirection, and an http→https upgrade all work. If
+forwarding your other headers to wherever the redirect points. Without either,
+redirects are followed normally, so CDN canonicalization, geo/LB indirection,
+and an http→https upgrade all work. The test is that concrete pair rather than
+"is this request authenticated", and **cookies are not part of it** — a
+cookie-authenticated stream, whether via `credentials: "include"` or the
+same-origin default, follows the redirect and arrives unauthenticated, which
+this endpoint answers with a reduced view rather than an error
+([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). If
 you need to follow a credentialed redirect anyway, supply an `options.fetch`
 that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too
 (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead

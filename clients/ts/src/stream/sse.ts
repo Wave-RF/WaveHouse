@@ -405,9 +405,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       //              the default role — this endpoint answers an unauthenticated
       //              caller rather than rejecting them — or delivers a configured
       //              secret to whatever the redirect names. Neither is worth a
-      //              convenience. Without a credential there is nothing to
-      //              protect, so CDN canonicalization, geo/LB indirection, and an
-      //              http→https upgrade all just work.
+      //              convenience. Without either, redirects are followed, so CDN
+      //              canonicalization, geo/LB indirection, and an http→https
+      //              upgrade all just work. The test is deliberately that
+      //              concrete pair and not "is this authenticated": cookies do
+      //              not appear in it, so a cookie-authed stream follows the
+      //              redirect and downgrades silently — see #478.
       //              `manual` over `error` for the credentialed case so the
       //              outcome stays inspectable: `error` rejects with a bare
       //              TypeError indistinguishable from a connection failure, which

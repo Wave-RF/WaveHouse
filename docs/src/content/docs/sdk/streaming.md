@@ -248,28 +248,39 @@ interface StreamSubscriber<T> {
 
 This "stream-first" approach is what closes the window between the fetch and the
 stream starting — events arriving during the fetch are buffered rather than
-missed.
+missed. It holds only when the backfill completes cleanly.
 
-It holds only when the backfill completes cleanly. The buffer is discarded, with
-no log and no `error` callback, if the backfill query returns an error `Result`,
-if the fetch itself throws, or if your `initial()` or `next()` throws during the
-flush — so a handler that throws mid-flush costs you the remaining buffered
-events. Check `result.error` inside `initial()`, and keep the flush handlers
-total.
+#### When the backfill doesn't complete
 
-The fetch-throws case is the one you cannot catch that way, because `initial()`
-is never called at all — the throw happens inside step 2, before the callback is
-reached, so there is no `Result` to inspect. A rejecting `auth` callback is the
-case to watch, and note that the backfill makes the *first* `auth()` call: a
-rejection there is never retried, while the stream treats the same rejection as
-transient and re-dials. So a callback that recovers by the next attempt gives you
-live events, no snapshot, and **no callback of any kind** — the failure is
-completely silent. A callback that keeps rejecting is the opposite, loud but
-empty: the stream never reaches `live`, so no events arrive at all, and `error`
-fires with a retryable `SSE_AUTH_ERROR` every attempt — which names auth, but
-never the backfill. A relative `baseURL` throws there too, but it also ends the
-stream with a terminal `SSE_CONNECT_ERROR`, so that half announces itself
-immediately. Tracked in
+Six ways it doesn't, and what each one looks like from your subscriber. "Buffered
+events" means the ones that arrived during the fetch window, which step 4 would
+otherwise have flushed.
+
+| What happened | `initial()` | Live events | `error` | Buffered events |
+|---|---|---|---|---|
+| Backfill returns an error `Result` | fires, `result.error` set | delivered | — | never delivered |
+| Your `initial()` or `next()` throws during the flush | fires, then throws | delivered, after the flush | — | remainder discarded |
+| `auth` rejects, the stream connects anyway | never fires | delivered | — | discarded |
+| `auth` rejects for a few attempts, then recovers | never fires | delivered once it recovers | `SSE_AUTH_ERROR` per failed attempt | discarded |
+| `auth` keeps rejecting | never fires | none — never reaches `live` | `SSE_AUTH_ERROR` per attempt | discarded |
+| Relative `baseURL` | never fires | none — the stream is terminated too | terminal `SSE_CONNECT_ERROR` | discarded |
+
+Two things the table can't carry.
+
+**Why `auth` splits the way it does.** The backfill makes the *first* `auth()`
+call, and it gets exactly one shot — the token is minted above the REST retry
+loop, so a rejection there is never retried and the whole backfill is gone. The
+stream then calls `auth()` again on every connection attempt and treats the same
+rejection as transient. That asymmetry is the entire reason a live query can end
+up running normally with no snapshot behind it. In the top `auth` row nothing
+reports the failure at all: your `status` and `next` handlers fire exactly as
+they would on a healthy stream, `error` never fires, and the only trace is that
+`initial()` didn't. That is the case worth guarding against, because it is the
+one that looks like success.
+
+**What to do about it.** Check `result.error` inside `initial()`, keep the flush
+handlers total, and — if a missing backfill matters — treat `initial()` never
+firing as its own failure, since no callback will tell you. Tracked in
 [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
 
 A `status` handler that throws *on the first, synchronous call* is a separate
