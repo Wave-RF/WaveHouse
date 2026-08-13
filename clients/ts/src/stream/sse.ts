@@ -52,6 +52,15 @@ function backoff(attempt: number, retryFloorMs: number): number {
   return nominal / 2 + Math.random() * (nominal / 2);
 }
 
+/**
+ * Hand a response body back to the connection pool on a path that won't read
+ * it. Skipped when locked — `cancel()` throws on a locked stream, and a locked
+ * body was never ours to release anyway.
+ */
+function releaseBody(res: Response): void {
+  if (res.body && !res.body.locked) void res.body.cancel();
+}
+
 /** Outcome of one connection attempt, driving the reconnect decision. */
 interface AttemptResult {
   /** Milliseconds the connection stayed readable; 0 if it never opened. */
@@ -247,7 +256,7 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
           "anyway, supply an `options.fetch` that overrides `redirect`.",
         retryable: false,
       });
-      void res.body?.cancel();
+      releaseBody(res);
       return { liveMs: 0, terminal: true };
     }
 
@@ -276,24 +285,27 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         message: `Expected \`text/event-stream\`, got \`${contentType || "(none)"}\`. Something between the client and WaveHouse answered this request — an auth gateway's login page is the usual cause.`,
         retryable: false,
       });
+      releaseBody(res);
       return { liveMs: 0, terminal: true };
     }
 
     // `options.fetch` only has to stream on this path — every REST call reads
     // the body with `.text()`. A wrapper that buffers, or clones and logs the
     // body, satisfies REST and then hangs here forever, so say so instead.
+    // `locked` and `bodyUsed` both matter and neither implies the other: after
+    // `.text()` both are set, but after a bare `getReader()` only `locked` is.
     const body = res.body;
-    if (!body || typeof body.getReader !== "function") {
+    if (!body || typeof body.getReader !== "function" || body.locked || res.bodyUsed) {
       this._emitError({
         status: res.status,
         code: "SSE_NO_STREAM_BODY",
         message:
           "Streaming requires a response with a readable body. The configured `options.fetch` " +
-          "returned one without `body` — an implementation that buffers or reads the response " +
-          "cannot be used for `.stream()` or `.liveQuery()`.",
+          "returned one whose body is absent or already read — an implementation that buffers " +
+          "or consumes the response cannot be used for `.stream()` or `.liveQuery()`.",
         retryable: false,
       });
-      void res.body?.cancel();
+      releaseBody(res);
       return { liveMs: 0, terminal: true };
     }
 

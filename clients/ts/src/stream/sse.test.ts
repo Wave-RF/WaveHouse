@@ -21,6 +21,7 @@ function streamingResponse(): {
   res: Response;
   push: (chunk: string) => void;
   close: () => void;
+  fail: (reason: Error) => void;
 } {
   const encoder = new TextEncoder();
   let ctrl!: ReadableStreamDefaultController<Uint8Array>;
@@ -36,6 +37,7 @@ function streamingResponse(): {
     }),
     push: (chunk) => ctrl.enqueue(encoder.encode(chunk)),
     close: () => ctrl.close(),
+    fail: (reason: Error) => ctrl.error(reason),
   };
 }
 
@@ -392,6 +394,45 @@ describe("SSETransport reconnect and resumption", () => {
     t.disconnect();
   });
 
+  it("reconnects after the body errors mid-read, resuming from the last id", async () => {
+    const f = makeFetch();
+    const first = streamingResponse();
+    const second = streamingResponse();
+    f.queue.push(
+      () => first.res,
+      () => second.res,
+    );
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    first.push(
+      frame("2026-08-01T00:00:09Z", {
+        table_name: "clicks",
+        received_timestamp: "2026-08-01T00:00:09Z",
+        data: { n: 1 },
+      }),
+    );
+    await vi.waitFor(() => expect(seen.events).toHaveLength(1));
+
+    // A reset connection, not a clean close — the read rejects rather than
+    // reporting done, which is the branch that has to tell a genuine failure
+    // apart from an abort before deciding to re-dial.
+    first.fail(new Error("ECONNRESET"));
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_READ_ERROR");
+    expect(seen.errors[0].retryable).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
+    expect(headersOf(f.attempts[1])["Last-Event-ID"]).toBe("2026-08-01T00:00:09Z");
+
+    t.disconnect();
+  });
+
   it("stops for good on a 401 rather than retrying a rejected token", async () => {
     const f = makeFetch();
     f.queue.push(() => new Response(JSON.stringify({ error: "invalid token" }), { status: 401 }));
@@ -445,6 +486,30 @@ describe("SSETransport reconnect and resumption", () => {
 });
 
 describe("SSETransport lifecycle", () => {
+  it("rejects a response whose body was already consumed", async () => {
+    const f = makeFetch();
+    f.queue.push(() => {
+      const res = new Response("id: x\ndata: {}\n\n", {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+      // What a wrapper that read the body before returning hands back. The
+      // body is still non-null — merely locked — so an `if (!body)` guard
+      // sails past it, reports "live", and then throws out of the read loop.
+      res.body?.getReader();
+      return res;
+    });
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_NO_STREAM_BODY");
+    expect(seen.statuses).not.toContain("live");
+    expect(seen.statuses).toContain("closed");
+  });
+
   it("rejects a fetch that cannot stream instead of hanging", async () => {
     const f = makeFetch();
     // Exactly what a wrapper that buffers or logs the body hands back: the

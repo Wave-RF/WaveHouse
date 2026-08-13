@@ -41,7 +41,7 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 0 | `SSE_AUTH_ERROR` | Yes | The `auth` callback threw while minting a token for an attempt |
 | 0 | `SSE_NETWORK_ERROR` | Yes | Stream request failed to reach the server |
 | 0 | `SSE_READ_ERROR` | Yes | Stream was interrupted mid-read |
-| 0 | `SSE_PARSE_ERROR` | Yes (nothing to re-dial) | Unparseable frame, or the buffer cap; the connection continues |
+| 0 | `SSE_PARSE_ERROR` | Yes (usually nothing to re-dial) | Unparseable frame — reported and skipped, the connection continues. The buffer cap reports here too, then ends the connection (see below) |
 | *(response status)* | `SSE_NO_STREAM_BODY` | No | A configured `options.fetch` returned a response with no readable body |
 | *(response status)* | `SSE_REDIRECT` | No | The stream endpoint redirected; point `baseURL` at the final URL |
 | *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — usually a gateway's login page |

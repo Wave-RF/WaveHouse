@@ -461,9 +461,13 @@ const wh = createClient({
 Retries go through the same function, so middleware sees every attempt.
 
 The SDK always calls your function with a **string** URL and a plain
-`RequestInit`. Off the response it reads `.ok` and `.headers` always, `.text()`
-on success, and `.status`, `.statusText` plus `.json()` when the response is not
-`ok` — so a hand-rolled response object needs all six. If your function
+`RequestInit`. Off the response the **REST path** reads `.ok` and `.headers`
+always, `.text()` on success, and `.status`, `.statusText` plus `.json()` when
+the response is not `ok` — so a hand-rolled response object needs all six there.
+A stub used with `.stream()` or `.liveQuery()` needs a different set: `.ok`,
+`.status`, `.type` (checked for `opaqueredirect`), `.headers` carrying
+`content-type: text/event-stream`, and a live, unread `.body`. `.text()` is
+never called on a stream. If your function
 rejects, the request becomes a `NETWORK_ERROR` result and is retried with
 backoff; the one exception is a `DOMException` named `AbortError` — what the
 platform `fetch` and undici throw on abort — which becomes `ABORTED` and is not
@@ -483,9 +487,10 @@ Streaming goes through your function too. That comes with the extra requirement
 described above — the response must carry a live streaming body — and the
 streaming transport keeps ownership of three `RequestInit` fields where the
 value is load-bearing rather than a preference: `cache` (as an init field; a
-`Cache-Control` header would fail cross-origin preflight), `redirect`, and
-`credentials` — the last honored in browsers and omitted elsewhere, because some
-runtimes throw if it is set at all.
+`Cache-Control` header would fail cross-origin preflight) and `redirect`. It
+constrains a third rather than owning it: `credentials` stays yours, forwarded
+in a browser and dropped elsewhere, because some runtimes throw if it is set at
+all.
 
 `redirect` depends on whether the request carries a credential. With one — an
 `auth` token or configured `headers` — a redirect is refused and reported as
