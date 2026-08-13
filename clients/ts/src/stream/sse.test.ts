@@ -528,6 +528,56 @@ describe("SSETransport reconnect and resumption", () => {
     t.disconnect();
   });
 
+  it("retries an AbortError from a custom fetch that the SDK did not raise", async () => {
+    const f = makeFetch();
+    // The motivating case: an `options.fetch` enforcing its own per-attempt
+    // deadline aborts an internal controller. The caller never cancelled, so
+    // this is transient — matching on the error type ended the stream
+    // terminally and emitted nothing at all.
+    f.queue.push(() => {
+      throw new DOMException("Aborted", "AbortError");
+    });
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_NETWORK_ERROR");
+    expect(seen.errors[0].retryable).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
+
+    t.disconnect();
+  });
+
+  it("reports an AbortError raised mid-read instead of swallowing it", async () => {
+    const f = makeFetch();
+    const first = streamingResponse();
+    const second = streamingResponse();
+    f.queue.push(
+      () => first.res,
+      () => second.res,
+    );
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    // Same rule on the read path: an abort we did not raise is a dropped
+    // connection to report and re-dial, not a silent teardown.
+    first.fail(new DOMException("Aborted", "AbortError"));
+    await vi.waitFor(() => expect(seen.errors).toHaveLength(1));
+
+    expect(seen.errors[0].code).toBe("SSE_READ_ERROR");
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
+
+    t.disconnect();
+  });
+
   it("reconnects after the body errors mid-read, resuming from the last id", async () => {
     const f = makeFetch();
     const first = streamingResponse();

@@ -61,8 +61,11 @@ export class LiveQuery<T = Record<string, unknown>> {
       }
 
       // Step 4: Deduplicate buffered events against fetched rows.
-      // Use received_timestamp as the dedup boundary: only flush events
-      // that are newer than the latest row in the fetch result.
+      // The boundary is the `received_timestamp` of the *last row returned*,
+      // which is the newest only when the query orders ascending — under a
+      // `desc` order it is the oldest, and the pass filters nothing. An absent
+      // `received_timestamp` (a projection that omits it) disables it entirely.
+      // Tracked in #449; changing it needs a decision on both cases.
       const rows = result.data;
       let lastTimestamp: string | undefined;
       if (rows.length > 0) {
@@ -70,7 +73,7 @@ export class LiveQuery<T = Record<string, unknown>> {
         lastTimestamp = lastRow?.received_timestamp as string | undefined;
       }
 
-      // Step 5: Flush buffered events that are newer than the fetch.
+      // Step 5: Flush buffered events newer than that boundary.
       this._buffering = false;
       for (const event of this._buffer) {
         if (this._closed) break;

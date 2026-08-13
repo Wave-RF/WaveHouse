@@ -229,7 +229,7 @@ interface StreamSubscriber<T> {
 
 1. Opens the stream **immediately** and buffers incoming events.
 2. Runs the `.fetch()` query for historical data, calls `subscriber.initial()` with the result.
-3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so the boundary is the oldest timestamp and this step filters nothing; a projection that omits `received_timestamp` skips it entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
+3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way — replay lands in the same buffer, so replayed events older than that row are dropped before reaching `next()`. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
 4. Flushes remaining buffered events and switches to live mode.
 
 This "stream-first" approach ensures no events are lost between the fetch and stream start.
