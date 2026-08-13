@@ -25,7 +25,7 @@ if (error?.code === 'ABORTED') {
 
 ## Error Handling
 
-The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no `EventSource` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
+The SDK **never throws** for anything the server returns — all API errors come back in `Result.error`. It does throw on caller and environment errors: a non-absolute `baseURL` (REST calls reject with a `TypeError`; streams report `SSE_CONNECT_ERROR` to the subscriber's `error` callback — see [Serving under a path prefix](/sdk#serving-under-a-path-prefix)), `.stream()` / `.liveQuery()` in a runtime with no global `fetch` and no `options.fetch` (see [Runtime support](/sdk#runtime-support)), and an `auth` callback that rejects — a token-refresh failure propagates out of the REST call, and surfaces on a stream as `SSE_CONNECT_ERROR`.
 
 | Status | Code | Retryable | Description |
 |--------|------|-----------|-------------|
@@ -37,10 +37,19 @@ The SDK **never throws** for anything the server returns — all API errors come
 | 503 | `HTTP_503` | Yes | Service unavailable (auto-retries with `Retry-After`) |
 | 0 | `NETWORK_ERROR` | Yes | Network failure (retried with exponential backoff) |
 | 0 | `ABORTED` | No | Request canceled via `AbortSignal` |
-| 0 | `SSE_CONNECT_ERROR` | Yes | Stream failed to connect (e.g. a non-absolute `baseURL`) |
-| 0 | `SSE_ERROR` | Yes | Stream connection error |
+| 0 | `SSE_CONNECT_ERROR` | No | Stream could not be started (e.g. a non-absolute `baseURL`) |
+| 0 | `SSE_AUTH_ERROR` | Yes | The `auth` callback threw while minting a token for an attempt |
+| 0 | `SSE_NETWORK_ERROR` | Yes | Stream request failed to reach the server |
+| 0 | `SSE_READ_ERROR` | Yes | Stream was interrupted mid-read |
+| 0 | `SSE_PARSE_ERROR` | Yes | Malformed frame, or the parser's buffer cap was exceeded |
+| *(response status)* | `SSE_NO_STREAM_BODY` | No | A configured `options.fetch` returned a response with no readable body |
+| *(response status)* | `HTTP_4xx` / `HTTP_5xx` | Per status | The stream request was rejected — same codes as REST |
 
-The two `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Their `retryable: true` is advisory: unlike the REST codes above, the SDK never re-dials a stream itself. After the connection is open, drops surface through the `status` callback (`reconnecting` → `live`, or `closed`) while the native `EventSource` re-dials on its own; `SSE_ERROR` is a defensive fallback for a transport left in an unexpected state. A failure *before* the `EventSource` is constructed — a non-absolute `baseURL`, a rejecting `auth` callback — is terminal (`SSE_CONNECT_ERROR`), so fix the cause and start a new stream.
+The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Unlike the REST codes, `retryable` here is not advisory — the transport acts on it. A retryable failure is reported and then re-dialed on a jittered exponential backoff (capped at 30s, reset once a connection goes live), with the `status` callback moving `reconnecting` → `live`. A non-retryable one is terminal: the stream reports the error, goes `closed`, and stays closed.
+
+Rejected requests surface the server's real status — a `401` from an expired token arrives as `HTTP_401` with the server's message, not an opaque connection failure — and any `4xx` ends the stream, since retrying can't fix a bad token or a missing table. `SSE_CONNECT_ERROR` and `SSE_NO_STREAM_BODY` are configuration faults, so fix the cause and start a new stream.
+
+`SSE_AUTH_ERROR` is the exception that proves the rule: because `auth` is now invoked on every connection attempt rather than once per stream, a token endpoint having a bad minute is treated as transient and retried, rather than tearing down a stream that is otherwise healthy.
 
 ---
 

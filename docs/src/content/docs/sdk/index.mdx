@@ -54,8 +54,8 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
     pages that can't use ES modules, the bundled IIFE build at
     `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global
     (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag.
-    Streaming uses the browser's native `EventSource`, so it needs no polyfill
-    either way. A bare CDN URL tracks the latest published release; use a
+    Streaming runs on `fetch`, so it needs no polyfill either way. A bare CDN
+    URL tracks the latest published release; use a
     range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag
     for unreleased builds from `main` (see
     [Releasing the SDK](/development#releasing-the-sdk)).
@@ -142,25 +142,15 @@ fields in `package.json`:
 ### Runtime support
 
 **Browsers** — all SDK features work natively. `fetch`, `AbortController`,
-and `EventSource` are built into every modern browser; no polyfills are
+and `ReadableStream` are built into every modern browser; no polyfills are
 required.
 
-**Node.js** — non-streaming features (`wh.from().fetch()`, `.insert()`,
-`.sql()`, pipes, admin) work in Node 22 and later (the package's minimum,
-per `engines.node`). 22 is the only line we test against, and older
-releases are past end-of-life upstream. Streaming (`.stream()`,
-`.liveQuery()`) uses `EventSource`, which is **not** a default global in
-Node. The SDK feature-detects with `typeof EventSource === "undefined"`
-and throws a descriptive error if it is absent. To use streaming in Node
-you must polyfill before calling any stream method:
-
-```js
-import { EventSource } from 'eventsource'; // npm install eventsource
-globalThis.EventSource = EventSource;
-```
-
-`--experimental-eventsource` (available in recent Node releases) also
-satisfies the check when passed on the command line.
+**Node.js** — every feature, streaming included, works in Node 22 and later
+(the package's minimum, per `engines.node`). 22 is the only line we test
+against, and older releases are past end-of-life upstream. Streaming runs on
+the same `fetch` and `ReadableStream` globals as the rest of the SDK, so it
+needs **no `EventSource` polyfill** — earlier versions did, and that
+requirement is gone.
 
 ## Quick Start
 
@@ -327,18 +317,20 @@ const wh = createClient<Database>({
 | `baseURL` | `string` | — | WaveHouse server URL, optionally including a path prefix (required) |
 | `auth` | `() => Promise<string> \| string` | — | Token provider. Omit for public access |
 | `options.maxRetries` | `number` | `2` | Retry attempts for failed/5xx requests |
-| `options.headers` | `Record<string, string>` | — | Headers added to every REST request ([details](#custom-headers)) |
-| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every REST request ([details](#extra-requestinit-fields)) |
-| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every REST request ([details](#supplying-your-own-fetch)) |
-
-:::caution[These three apply to REST only]
-`headers`, `fetchOptions`, and `fetch` do **not** reach the streaming transport. `.stream()` and `.liveQuery()`'s live connection go through `EventSource`, which accepts neither custom headers nor a `fetch` — which is why the token rides in `?token=` there. If WaveHouse sits behind a header-gated proxy, REST works and streaming does not; follow [#203](https://github.com/Wave-RF/WaveHouse/issues/203) for that. (`.liveQuery()`'s initial backfill is an ordinary REST call and *is* covered.)
-:::
+| `options.headers` | `Record<string, string>` | — | Headers added to every request ([details](#custom-headers)) |
+| `options.fetchOptions` | `RequestInit` | — | Extra `RequestInit` fields merged into every request ([details](#extra-requestinit-fields)) |
+| `options.fetch` | `FetchLike` | global `fetch` | HTTP implementation for every request ([details](#supplying-your-own-fetch)) |
 
 :::note[How the token is transmitted]
-The SDK attaches your `auth` token as an `Authorization: Bearer` header on REST calls, and — because the browser `EventSource` API can't set headers — as a `?token=` query parameter on streaming connections. When both are present the server prefers the header, and it strips `?token=` from the request URL either way — so an unused credential can't survive into a later handler's log line, and the token stays out of **WaveHouse's own** logs.
+The SDK attaches your `auth` token as an `Authorization: Bearer` header on every request, streaming included. It is re-read on each connection attempt, so a stream that outlives its token reconnects with a fresh one instead of replaying an expired credential.
 
-That strip can't reach anything upstream, though: the token is in the request URI on the wire, so any proxy, CDN, or load balancer in front of WaveHouse records it in access logs unless you redact query strings there.
+The token is never placed in the URL. The server still accepts a `?token=` query parameter for clients that cannot set headers — see [API Reference — Authentication](/api#authentication) — but the SDK does not use it, so it never reaches a proxy or CDN access log.
+:::
+
+:::caution[Streaming asks more of a custom `fetch`]
+`.stream()` and `.liveQuery()` read the response as it arrives, so an `options.fetch` used with them must return a response with a live streaming body. A wrapper that buffers the response — or clones it to log the body — works for every REST call and then stalls on a stream that never ends. The transport fails with `SSE_NO_STREAM_BODY` rather than hanging, but the requirement is yours to meet.
+
+`options.headers` is also subject to CORS in a browser: a header outside the safelist joins the preflight, which the origin has to allow. WaveHouse advertises a fixed set, so custom headers reach it cross-origin only when a proxy in front terminates the preflight — the deployment they exist for. Server-side callers never preflight.
 :::
 
 #### Serving under a path prefix
@@ -467,16 +459,24 @@ platform `fetch` and undici throw on abort — which becomes `ABORTED` and is no
 retried. An implementation that signals abort some other way (`node-fetch`
 throws its own `AbortError` class) gets retried instead.
 
-The option's type is exported as `FetchLike`. It matches the standard `fetch`
-signature — written out rather than as `typeof fetch`, which resolves
-differently depending on whether your TypeScript `lib` includes DOM. Let
-TypeScript infer your parameters (`(url, init) => …`) and it fits without
-annotation.
+The option's type is exported as `FetchLike`. It is written out rather than as
+`typeof fetch`, which resolves differently depending on whether your TypeScript
+`lib` includes DOM. Its URL parameter is `string` — all the SDK ever passes —
+which, because function parameters are contravariant, accepts *more*
+implementations than the wider spelling would: the global `fetch` fits, and so
+does hand-written `(url: string, init?: RequestInit) => Promise<Response>`
+middleware. Let TypeScript infer your parameters (`(url, init) => …`) and it
+fits without annotation.
 
-Only the SSE transport is exempt: the live connection behind `.stream()` and
-`.liveQuery()` uses `EventSource`, which this does not replace. `.liveQuery()`'s
-[initial backfill](/sdk/streaming#live-queries) is an ordinary request and *does*
-go through your function.
+Streaming goes through your function too. That comes with the extra requirement
+described above — the response must carry a live streaming body — and the
+streaming transport keeps ownership of three `RequestInit` fields where the
+value is load-bearing rather than a preference: `cache` (as an init field; a
+`Cache-Control` header would fail cross-origin preflight), `redirect: "error"`
+(following a cross-origin redirect strips `Authorization`, which this endpoint
+answers with a silently reduced view rather than an error), and `credentials`,
+which is honored in browsers and omitted elsewhere because some runtimes throw
+if it is set at all.
 
 #### Swapping in undici
 

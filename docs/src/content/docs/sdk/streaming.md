@@ -100,13 +100,21 @@ string is read as UTC, an ECMAScript quirk
 
 | Transport | Reconnect | Protocol |
 | --------- | --------- | -------- |
-| SSE | Automatic (native `EventSource` with `Last-Event-ID`) | HTTP/2 recommended |
+| SSE over `fetch` | Automatic, jittered backoff, resumes via `Last-Event-ID` | HTTP/2 recommended |
 <!-- | TBD | Automatic (retries?) | HTTP/2 recommended | -->
 <!-- TODO: Fill in above ^ for SSE fallback, likely polling? -->
 
 :::note[SSE connection limit]
 The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
 :::
+
+A dropped stream reconnects on a jittered exponential backoff, capped at 30s and
+reset once a connection goes live, and resumes with `Last-Event-ID` so the server
+gap-fills what was missed. The `auth` token is re-read on every attempt, so a
+stream that outlives its token picks up a fresh one. A `4xx` is terminal — a
+rejected token or a missing table can't be fixed by retrying — and surfaces
+through `error` with the real status code rather than an opaque connection
+failure.
 
 ### Client-Side Stream Filtering
 

@@ -31,8 +31,13 @@ export interface HttpResult<T> {
  * `Authorization` and let the server pick. Canonical casing wins, and values
  * replace rather than append — a header joined instead of replaced is a known
  * way to produce `Content-Type: application/json, image/png`.
+ *
+ * Shared with the SSE transport so both paths resolve `headers` the same way,
+ * rather than growing a second precedence story.
+ *
+ * @internal
  */
-function mergeHeaders(
+export function mergeHeaders(
   base: Record<string, string>,
   extra: Record<string, string> | undefined,
 ): Record<string, string> {

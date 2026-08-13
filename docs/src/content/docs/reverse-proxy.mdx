@@ -134,11 +134,13 @@ Raising the proxy's read/idle timeout for `/v1/stream` is therefore no longer re
 
 ### 3. Forward the token, `since`, and `Last-Event-ID`
 
-A browser `EventSource` can't set request headers, so the JWT can be passed as a query parameter: `GET /v1/stream?token=<jwt>` (it's stripped after extraction — whichever credential wins — so it stays out of WaveHouse's own logs, but it has already crossed your proxy in the URI, hence the third bullet below; an `Authorization` header still takes precedence). Make sure your proxy:
+The SDK streams over `fetch` and sends the JWT as an `Authorization` header, the same as on every other request. A client that can't set headers — a hand-rolled browser `EventSource`, say — can still pass it as `GET /v1/stream?token=<jwt>` (it's stripped after extraction, whichever credential wins, so it stays out of WaveHouse's own logs; an `Authorization` header always takes precedence). Make sure your proxy:
 
-- forwards the query string (`token`, `since`) — most do by default;
+- forwards the `Authorization` request header — check this first if streams authenticate from `curl` but not through the proxy;
+- forwards the query string (`since`, and `token` if any client still uses it) — most do by default;
 - forwards the `Last-Event-ID` request header so reconnects resume from the right point (it's already allow-listed in WaveHouse's CORS preflight);
-- does not log the full URL with `token` in it.
+- does not redirect `/v1/stream`. The SDK's streaming transport refuses redirects rather than following them: a cross-origin hop strips `Authorization`, and this endpoint answers an unauthenticated caller with a reduced view rather than an error, so following one would silently downgrade the stream instead of failing;
+- does not log the full URL, for any client still sending `token` in it.
 
 ## Idle timeouts by provider
 

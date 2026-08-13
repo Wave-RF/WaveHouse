@@ -87,26 +87,41 @@ export interface ClientConfig<_DB extends Database = Database> {
  * depending on whether the consumer's TypeScript `lib` includes DOM — the same
  * signature either way, but stable across configurations.
  *
- * In practice the SDK only ever calls it with a string URL, and reads `.ok` and
- * `.headers` always, `.text()` on success, and `.status`, `.statusText` plus
- * `.json()` when the response is not `ok`. A rejection becomes a
- * `NETWORK_ERROR` result and is retried with backoff — except a `DOMException`
- * named `AbortError` (what the platform `fetch` and undici throw on abort),
- * which becomes `ABORTED` and is not retried. Implementations that reject with
- * some other abort error, such as `node-fetch`, are retried instead.
+ * The parameter is `string` rather than `typeof fetch`'s wider union because a
+ * string URL is all the SDK ever passes. Since parameters are contravariant,
+ * narrowing it *widens* what can be assigned: the global `fetch` still fits, and
+ * so does hand-written `(url: string, init?: RequestInit) => Promise<Response>`
+ * middleware, which the wider spelling rejects at compile time.
+ *
+ * On REST the SDK reads `.ok` and `.headers` always, `.text()` on success, and
+ * `.status`, `.statusText` plus `.json()` when the response is not `ok`. A
+ * rejection becomes a `NETWORK_ERROR` result and is retried with backoff —
+ * except a `DOMException` named `AbortError` (what the platform `fetch` and
+ * undici throw on abort), which becomes `ABORTED` and is not retried.
+ * Implementations that reject with some other abort error, such as
+ * `node-fetch`, are retried instead.
+ *
+ * **Streaming needs more.** `.stream()` and `.liveQuery()` read the response as
+ * it arrives, via `.body.getReader()`, so an implementation used with them must
+ * return a response carrying a live `ReadableStream` — something the type cannot
+ * enforce, since `Response.body` is legitimately nullable. An implementation
+ * that buffers the response, or clones it to log the body, satisfies every REST
+ * call and then hangs forever on a stream that never ends. The transport checks
+ * for a readable body and fails with `SSE_NO_STREAM_BODY` rather than stalling,
+ * but the requirement is on you to meet.
  *
  * Implementations shipping their own request/response declarations (undici,
- * `node-fetch`) need casts on the URL, the init and the return value, since
- * those types are separate from the ones behind your global `fetch`; the
- * narrow runtime contract above is what makes them safe.
+ * `node-fetch`) need casts on the init and the return value, since those types
+ * are separate from the ones behind your global `fetch`; the narrow runtime
+ * contract above is what makes them safe.
  */
-export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export interface ClientOptions {
   /** Maximum retry attempts for failed requests. Default: 2. */
   maxRetries?: number;
   /**
-   * HTTP implementation used for every REST request (SSE streams excluded).
+   * HTTP implementation used for every request, REST and streaming alike.
    * Defaults to the global `fetch`.
    *
    * Provide one to route through a proxy, attach client certificates, add
@@ -130,14 +145,13 @@ export interface ClientOptions {
    * });
    * ```
    *
-   * Only the SSE transport is exempt: the live connection behind `.stream()`
-   * and `.liveQuery()` uses `EventSource`, which this does not replace.
-   * `.liveQuery()`'s initial backfill is an ordinary request and does go
-   * through your function.
+   * `.stream()` and `.liveQuery()` go through it too, which imposes the extra
+   * streaming requirement described on {@link FetchLike} — read that before
+   * supplying a wrapper that touches the response body.
    */
   fetch?: FetchLike;
   /**
-   * Headers added to every REST request (SSE streams excluded) — for a
+   * Headers added to every request, REST and streaming alike — for a
    * header-gated proxy in front of WaveHouse, such as a Cloudflare Access
    * service token.
    *
@@ -146,16 +160,29 @@ export interface ClientOptions {
    * `Content-Type` and `Accept` a given request needs are not overridable
    * here — a global `Content-Type` that outranked the request's own is a
    * documented way to break uploads.
+   *
+   * In a browser these are subject to CORS: a header outside the safelist adds
+   * it to the preflight, which the origin must allow. WaveHouse's own CORS
+   * advertises a fixed set, so custom headers reach it cross-origin only when
+   * a proxy in front terminates the preflight — which is the deployment they
+   * exist for. Server-side callers never preflight.
    */
   headers?: Record<string, string>;
   /**
-   * Extra `RequestInit` fields merged into every REST request — `credentials`
-   * for a cookie-authenticated origin, `mode`, `cache`, `keepalive`, or a
+   * Extra `RequestInit` fields merged into every request — `credentials` for a
+   * cookie-authenticated origin, `mode`, `cache`, `keepalive`, or a
    * runtime-specific extension such as Next.js's `next: { tags }`.
    *
    * Fields the SDK controls (`method`, `headers`, `body`, `signal`) always
    * win, so this cannot corrupt the request itself. Non-standard fields may
    * need a cast, since `RequestInit` only declares the standard ones.
+   *
+   * The streaming transport additionally owns `cache` and `redirect`, where the
+   * values are load-bearing rather than preference: a `Cache-Control` header
+   * would fail cross-origin preflight, and following a redirect would strip the
+   * `Authorization` header on a cross-origin hop and silently downgrade the
+   * stream to the default role instead of failing. `credentials` is honored in
+   * browsers and dropped elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;
 }
