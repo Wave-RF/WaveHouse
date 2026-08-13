@@ -49,10 +49,12 @@ unsub();
 ```
 
 A handler that throws *during delivery* doesn't end the stream; the exception is
-logged and delivery continues. The first `status` call — the synchronous one
-`.subscribe()` makes before returning — is the exception, and throws back out at
-you. See [Error Handling](/sdk/reference#error-handling) for that and the other
-carve-outs.
+logged and the connection keeps running. But delivery of that event stops at the
+handler that threw — your other subscribers, and any concurrent `for await`, do
+not get it. The first `status` call, the synchronous one `.subscribe()` makes
+before returning, isn't caught at all and throws back out at you. Wrap your
+handler bodies in your own `try`/`catch`; see
+[Error Handling](/sdk/reference#error-handling) for all four carve-outs.
 
 ### Async Iterator
 
@@ -95,6 +97,12 @@ A *timeout* rejection does **not** stop the transport — reconnection is
 unbounded, so it means "not live yet", not "given up"; call `.close()` if you
 want it to stop. A rejection because the stream closed is different: there the
 transport has already stopped.
+
+One way this rejects against a perfectly healthy stream: if a subscriber you
+registered *before* calling `.connected()` has a `status` handler that throws,
+the throw aborts the fan-out before `connected()`'s internal watcher sees `live`,
+so it times out while `.status` already reads `live`. See
+[Error Handling](/sdk/reference#error-handling).
 
 ### `StreamOptions`
 
@@ -238,4 +246,17 @@ interface StreamSubscriber<T> {
 3. Deduplicates buffered events against the **last row** of the backfill result — which is the newest only when the query orders ascending. A `desc` query (like the example above) puts the oldest row last, so for live frames the boundary is the oldest timestamp and this step filters nothing. With a `since` gap-fill in flight it works the other way — replay lands in the same buffer, so replayed events at or older than that row are dropped before reaching `next()`. A projection that omits `received_timestamp` skips the pass entirely. Tracked in [#449](https://github.com/Wave-RF/WaveHouse/issues/449).
 4. Flushes remaining buffered events and switches to live mode.
 
-This "stream-first" approach ensures no events are lost between the fetch and stream start.
+This "stream-first" approach is what closes the window between the fetch and the
+stream starting — events arriving during the fetch are buffered rather than
+missed.
+
+It holds only when the backfill completes cleanly. The buffer is discarded, with
+no log and no `error` callback, if the backfill query returns an error `Result`,
+if the fetch itself throws, or if your `initial()` or `next()` throws during the
+flush — so a handler that throws mid-flush costs you the remaining buffered
+events. Check `result.error` inside `initial()`, and keep the flush handlers
+total. Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
+
+A `status` handler that throws is a separate and worse case — it escapes
+`liveQuery()` before you get a handle back. See
+[Error Handling](/sdk/reference#error-handling).
