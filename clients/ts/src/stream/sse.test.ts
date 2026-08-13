@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FetchLike, StreamEvent, StreamStatus, WaveHouseError } from "../types.js";
-import { SSETransport } from "./sse.js";
+import { MAX_BUFFER_CHARS, SSETransport } from "./sse.js";
 
 /** One recorded call into the injected fetch. */
 interface Attempt {
@@ -462,6 +462,61 @@ describe("SSETransport reconnect and resumption", () => {
     );
     await vi.waitFor(() => expect(seen.events).toHaveLength(1));
     expect(f.attempts).toHaveLength(1);
+
+    t.disconnect();
+  });
+
+  it("honors a `retry:` floor exactly, without jittering below it", async () => {
+    // Deterministic: with random() pinned to 0 the pre-fix code drew the
+    // bottom of [nominal/2, nominal) — half the floor the server asked for.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const f = makeFetch();
+    const first = streamingResponse();
+    f.queue.push(() => first.res);
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    first.push("retry: 20000\n\n");
+    await vi.advanceTimersByTimeAsync(1);
+    first.close();
+
+    // Pre-fix this re-dialed at 10s; the floor says 20s.
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(f.attempts).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(2);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
+
+    t.disconnect();
+  });
+
+  it("ends the connection on a buffer overflow, with no second error", async () => {
+    const f = makeFetch();
+    const first = streamingResponse();
+    const second = streamingResponse();
+    f.queue.push(
+      () => first.res,
+      () => second.res,
+    );
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.connect();
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
+
+    // One unterminated line past the cap. The parser reports the overflow and
+    // terminates itself; feeding it again throws and would surface as a second,
+    // misleading SSE_READ_ERROR blaming the read for a cause already reported.
+    first.push(`data: ${"x".repeat(MAX_BUFFER_CHARS)}`);
+    await vi.waitFor(() => expect(seen.errors.length).toBeGreaterThan(0));
+
+    expect(seen.errors.map((e) => e.code)).toEqual(["SSE_PARSE_ERROR"]);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(f.attempts).toHaveLength(2));
 
     t.disconnect();
   });

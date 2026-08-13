@@ -47,7 +47,14 @@ The SDK **never throws** for anything the server returns — all API errors come
 | *(response status)* | `SSE_BAD_CONTENT_TYPE` | No | A `200` that wasn't `text/event-stream` — usually a gateway's login page |
 | *(response status)* | `HTTP_4xx` / `HTTP_5xx` | Per status | The stream request was rejected — same codes as REST |
 
-The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Both transports act on `retryable`; what differs is when you see it. A REST error reaches you only after the SDK has exhausted `maxRetries`, so the flag on it is a record of what was already tried. A stream error reaches you as it happens: a retryable one means the transport is *about to* re-dial, and re-dialing is unbounded. A retryable failure is reported and then re-dialed on a jittered exponential backoff (capped at 30s, and reset only once a connection has held for a few seconds — so a server that accepts and instantly closes still backs off), with the `status` callback moving `reconnecting` → `live`. A non-retryable one is terminal: the stream reports the error, goes `closed`, and stays closed.
+The `SSE_*` codes arrive on the subscriber's `error` callback rather than in a `Result.error`, since a stream has no single result to carry them. Both transports act on `retryable`; what differs is when the error reaches you. All four cases:
+
+| | Retryable | Not retryable |
+|---|---|---|
+| **REST** | retried up to `maxRetries`, then returned — the flag records what was already tried | returned on the first attempt, no backoff (every `4xx`) |
+| **Stream** | reported *before* the transport re-dials, which it does indefinitely | reported once; the stream closes and stays closed |
+
+On a stream, a retryable failure is re-dialed on a jittered exponential backoff (capped at 30s, and reset only once a connection has held for a few seconds — so a server that accepts and instantly closes still backs off), with the `status` callback moving `reconnecting` → `live`.
 
 Rejected requests surface the real status and message rather than an opaque connection failure, and any `4xx` ends the stream, since repeating the request won't usually talk whatever rejected it round — the exception being a `429` or `408` from a fronting rate limiter, which is transient even though the stream still ends, so catch it and open a new one after a delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). Note that **WaveHouse never rejects a stream for authentication**: `/v1/stream` is ungated, so an expired or missing token resolves to `default_role` and you get a `200` with a filtered view, not a `401`. The one 4xx it raises itself is `400` for a missing or empty `table`; any other 4xx comes from something in front — an auth gateway, a proxy. That silent-downgrade behavior is exactly why `auth` is re-read on every connection attempt, and [#239](https://github.com/Wave-RF/WaveHouse/issues/239) tracks enforcing expiry server-side. `SSE_CONNECT_ERROR` and `SSE_NO_STREAM_BODY` are configuration faults, so fix the cause and start a new stream.
 

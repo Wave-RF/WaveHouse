@@ -25,7 +25,8 @@ const SSE_WARN_THRESHOLD = 5;
  * defaults to unbounded, so this has to be set explicitly. 16 MiB is generous
  * headroom over the ~1 MiB NATS payload ceiling a single event can carry.
  */
-const MAX_BUFFER_CHARS = 16 * 1024 * 1024;
+/** @internal Exported so the overflow test can hit the cap exactly. */
+export const MAX_BUFFER_CHARS = 16 * 1024 * 1024;
 
 /** Ceiling for reconnect backoff. */
 const MAX_BACKOFF_MS = 30_000;
