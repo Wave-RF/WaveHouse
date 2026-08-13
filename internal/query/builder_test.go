@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,55 +178,124 @@ func TestBuild_TimeRange(t *testing.T) {
 	assert.Len(t, result.Params, 1)
 }
 
-func TestInjectPermissionFilters_WithWhere(t *testing.T) {
-	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks` WHERE page = ?", Params: []any{"/home"}}
-	InjectPermissionFilters(result, "org_id = ?", []any{"org-1"})
-	assert.Contains(t, result.SQL, "(org_id = ?)")
-	assert.Equal(t, []any{"org-1", "/home"}, result.Params)
+// permsWithFilter returns resolved permissions carrying a row-filter predicate,
+// shaped exactly as policy.Evaluate emits one (quoted column, positional '?').
+func permsWithFilter() *policy.ResolvedPermissions {
+	return &policy.ResolvedPermissions{
+		Allowed:     true,
+		WhereClause: "`org_id` = ?",
+		WhereParams: []any{"org-1"},
+	}
 }
 
-func TestInjectPermissionFilters_WithoutWhere(t *testing.T) {
+// TestBuild_PolicyPredicate pins the structural emission of the row-level-
+// security predicate (#322): Build places it first — in both the WHERE clause
+// and the positional params — ANDed ahead of the caller's own filters, and
+// before any ORDER BY / LIMIT, so a caller can narrow but never widen row
+// visibility.
+func TestBuild_PolicyPredicate(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks` ORDER BY page"}
-	InjectPermissionFilters(result, "org_id = ?", []any{"org-1"})
-	assert.Contains(t, result.SQL, "WHERE org_id = ?")
-	assert.Contains(t, result.SQL, "ORDER BY page")
+	tests := []struct {
+		name       string
+		sq         *StructuredQuery
+		wantSQL    string
+		wantParams []any
+	}{
+		{
+			"ANDed ahead of caller filters",
+			&StructuredQuery{Columns: []string{"page"}, Filters: []Filter{{Column: "page", Op: "eq", Value: "/home"}}},
+			"SELECT `page` FROM `clicks` WHERE (`org_id` = ?) AND `page` = ? LIMIT 10000",
+			[]any{"org-1", "/home"},
+		},
+		{
+			"emitted before ORDER BY and LIMIT when the caller has no filters",
+			&StructuredQuery{Columns: []string{"page"}, OrderBy: []OrderClause{{Column: "page", Dir: "asc"}}},
+			"SELECT `page` FROM `clicks` WHERE (`org_id` = ?) ORDER BY `page` ASC LIMIT 10000",
+			[]any{"org-1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result, err := Build("clicks", tt.sq, testSchema(), permsWithFilter(), 0, DefaultMaxRows)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSQL, result.SQL)
+			assert.Equal(t, tt.wantParams, result.Params)
+		})
+	}
 }
 
-func TestInjectPermissionFilters_Empty(t *testing.T) {
+// TestBuild_PolicyPredicate_SurvivesCraftedIdentifiers pins the row filter
+// against the identifier family that deleted it when the predicate was spliced
+// into rendered SQL (#322, found on #457): an alias or ORDER BY alias-reference
+// carrying a SQL clause keyword — including "lımıt", whose dotless ı (U+0131)
+// uppercases to ASCII I and slipped past the interim regex guard's (?i) simple
+// case folding — is accepted, stays contained in its backtick-quoted
+// identifier, and the predicate survives.
+func TestBuild_PolicyPredicate_SurvivesCraftedIdentifiers(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
-	InjectPermissionFilters(result, "", nil)
-	assert.Equal(t, "SELECT * FROM `clicks`", result.SQL)
+	tests := []struct {
+		name string
+		sq   *StructuredQuery
+	}{
+		{"WHERE in an alias", &StructuredQuery{
+			Aggregations: []Aggregation{{Fn: "groupArray", Column: "page", Alias: "e WHERE z"}},
+		}},
+		{"dotless-i lımıt in an alias", &StructuredQuery{
+			Aggregations: []Aggregation{{Fn: "groupArray", Column: "page", Alias: "e lımıt z"}},
+		}},
+		{"legitimate keyword-bearing alias", &StructuredQuery{
+			Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "Total order by region"}},
+		}},
+		{"keyword in an ORDER BY alias-reference", &StructuredQuery{
+			Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: "n WHERE 1 = 1"}},
+			OrderBy:      []OrderClause{{Column: "n WHERE 1 = 1", Dir: "desc"}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result, err := Build("clicks", tt.sq, testSchema(), permsWithFilter(), 0, DefaultMaxRows)
+			require.NoError(t, err)
+			assert.Contains(t, result.SQL, " WHERE (`org_id` = ?)", "row filter must survive the crafted identifier")
+			assert.Equal(t, []any{"org-1"}, result.Params)
+		})
+	}
 }
 
-func TestApplyMaxRows_NoLimit(t *testing.T) {
+// TestBuild_PolicyMaxRows pins the role's max_rows cap folded into Build's LIMIT
+// computation (#322): the emitted LIMIT is min(caller limit, default cap, policy
+// cap), with non-positive values meaning "no cap from that source". Includes a
+// schema whose column uppercases to a different byte length ("ıı"), which made
+// the deleted post-hoc ApplyMaxRows mis-index and silently drop the cap.
+func TestBuild_PolicyMaxRows(t *testing.T) {
 	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
-	ApplyMaxRows(result, 100)
-	assert.Contains(t, result.SQL, "LIMIT 100")
-}
-
-func TestApplyMaxRows_HigherExisting(t *testing.T) {
-	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks` LIMIT 500"}
-	ApplyMaxRows(result, 100)
-	assert.Contains(t, result.SQL, "LIMIT 100")
-}
-
-func TestApplyMaxRows_LowerExisting(t *testing.T) {
-	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks` LIMIT 50"}
-	ApplyMaxRows(result, 100)
-	assert.Contains(t, result.SQL, "LIMIT 50")
-}
-
-func TestApplyMaxRows_Zero(t *testing.T) {
-	t.Parallel()
-	result := &BuildResult{SQL: "SELECT * FROM `clicks`"}
-	ApplyMaxRows(result, 0)
-	assert.NotContains(t, result.SQL, "LIMIT")
+	tests := []struct {
+		name    string
+		column  string
+		maxRows int
+		limit   int
+		want    int
+	}{
+		{"policy cap below default", "page", 100, 0, 100},
+		{"caller limit below policy cap", "page", 100, 7, 7},
+		{"caller limit above policy cap", "page", 100, 500, 100},
+		{"policy cap above default is inert", "page", DefaultMaxRows + 500, 0, DefaultMaxRows},
+		{"no policy cap", "page", 0, 0, DefaultMaxRows},
+		{"cap survives a length-changing unicode column", "ıı", 100, 0, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			schema := &discovery.TableSchema{Name: "clicks", Columns: []discovery.Column{{Name: tt.column, Type: "String"}}}
+			perms := &policy.ResolvedPermissions{Allowed: true, MaxRows: tt.maxRows}
+			sq := &StructuredQuery{Columns: []string{tt.column}, Limit: tt.limit}
+			result, err := Build("clicks", sq, schema, perms, 0, DefaultMaxRows)
+			require.NoError(t, err)
+			assert.True(t, strings.HasSuffix(result.SQL, fmt.Sprintf(" LIMIT %d", tt.want)),
+				"want LIMIT %d, got %q", tt.want, result.SQL)
+		})
+	}
 }
 
 func TestIsValidAggFn(t *testing.T) {
@@ -398,25 +468,6 @@ func TestBucketTime_ZeroBucket(t *testing.T) {
 	ts, _ := time.Parse(time.RFC3339, "2024-01-01T12:34:56Z")
 	got := bucketTime(ts, 0)
 	assert.Equal(t, ts, got, "zero bucket should not truncate")
-}
-
-func TestFindInsertPoint(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		sql  string
-		want int
-	}{
-		{"SELECT * FROM t GROUP BY x", 15},
-		{"SELECT * FROM t ORDER BY x", 15},
-		{"SELECT * FROM t LIMIT 10", 15},
-		{"SELECT * FROM t", 15}, // len("SELECT * FROM t") == 15
-	}
-	for _, tt := range tests {
-		t.Run(tt.sql, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, findInsertPoint(tt.sql))
-		})
-	}
 }
 
 func TestCoerceFilterValue(t *testing.T) {
@@ -791,51 +842,6 @@ func TestBuild_RejectsBindUnsafeAlias(t *testing.T) {
 	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported aggregation alias")
-}
-
-// TestBuild_RejectsSpliceKeywordAlias pins the guard that keeps a crafted
-// aggregation alias from hijacking the InjectPermissionFilters WHERE splice. A
-// fail-closed row filter emits "1 = 0" (no backtick), which would otherwise
-// survive inside a quoted alias like `e WHERE (1 = 0) AND z` — deleting the filter
-// and exposing the whole table exactly when the filter fails closed (#322,
-// #385/#457). Unlike the injection-shaped aliases in
-// TestBuild_AggregationAliasQuotedAndContained (which stay permissive), a SQL
-// clause keyword is refused because it collides with the textual splice.
-func TestBuild_RejectsSpliceKeywordAlias(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		alias string
-	}{
-		{"where", "e WHERE z"},
-		{"lowercase where (matcher is case-insensitive)", "e where z"},
-		{"group by", "e GROUP BY z"},
-		{"order by", "e ORDER BY z"},
-		{"limit", "x LIMIT 1"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			sq := &StructuredQuery{Aggregations: []Aggregation{{Fn: "count", Column: "*", Alias: tt.alias}}}
-			_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "SQL clause keyword")
-		})
-	}
-}
-
-// TestBuild_RejectsSpliceKeywordOrderRef is the ORDER BY alias-reference variant of
-// the same guard: a non-schema ORDER BY reference carrying a clause keyword reaches
-// the same textual splice and is refused.
-func TestBuild_RejectsSpliceKeywordOrderRef(t *testing.T) {
-	t.Parallel()
-	sq := &StructuredQuery{
-		Columns: []string{"page"},
-		OrderBy: []OrderClause{{Column: "n WHERE 1 = 1", Dir: "asc"}},
-	}
-	_, err := Build("clicks", sq, testSchema(), nil, 0, DefaultMaxRows)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SQL clause keyword")
 }
 
 // ─── Permissive identifier handling (ClickHouse allows arbitrary quoted names) ─

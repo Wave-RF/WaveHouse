@@ -40,7 +40,7 @@ Fourteen internal packages under `internal/` (plus `internal/testutil/` for shar
 - **`observability/`** — OpenTelemetry pipeline: `InitProvider` wires trace/metric/log providers via OTLP gRPC (each signal independently gated). A top-level `Prometheus` config block drives an optional `/metrics` scrape endpoint that runs independently of OTLP push — standalone (Alloy/Mimir scrape, no collector), alongside OTLP, or off. `NewLogger` produces a slog handler that fans out to stdout AND OTLP (stdout always 100%, OTLP sample-rate-aware). `TraceHandler` injects trace_id/span_id from active spans. `tracer.go` provides W3C trace context propagation over NATS headers.
 - **`pipes/`** — Named query pipes: `NamedQuery` type + NATS KV store (`WAVEHOUSE_PIPES`) + `.sql` file bootstrap
 - **`policy/`** — Hasura-style access control: `Policy`/`TablePolicy`/`RolePermissions` types, `Evaluate()` engine with JWT claim templating, NATS KV store (`WAVEHOUSE_POLICY`)
-- **`query/`** — Structured query AST types + SQL builder with schema validation, permission injection, timestamp bucketing
+- **`query/`** — Structured query AST types + SQL builder with schema validation, structural policy predicate/limit emission, timestamp bucketing
 - **`stream/`** — SSE fan-out: the event `Hub` (registers subscribers by `(topic, role)`; `Broadcast` projects + serializes each event once per role, the #294 delivery hot path), `Subscriber` (per-connection outbound `Frame` queue, `Send`/`Frames`), the `Bucket` fan-out set (`subscriberSet`, one per `(topic, role)`), the `Heartbeater` keepalive wheel, and `Metrics` (the `wavehouse_sse_*` stream instruments)
 
 ## Key Design Decisions

@@ -305,15 +305,24 @@ func TestHub_ReplayFrame(t *testing.T) {
 	tests := []struct {
 		name string
 		role string
+		raw  []byte
 		want bool // whether a frame is produced (vs. skipped)
 	}{
-		{"allowed role projects with column filter", "viewer", true},
-		{"role without table access is skipped", "stranger", false},
+		{"allowed role projects with column filter", "viewer", raw, true},
+		{"role without table access is skipped", "stranger", raw, false},
+		// The empty-table_name half of #323, pinned on the fail-closed side:
+		// {"table_name":"", …} decodes into an EventMessage but names no table to
+		// evaluate policy against, so with a policy wired it must be dropped —
+		// same conjunct as the non-EventMessage case at hub.go's decoded flag.
+		{
+			"empty table_name is dropped when policy is wired", "viewer",
+			[]byte(`{"table_name":"","data":{"page":"/home"}}`), false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f, ok := hub.ReplayFrame(tt.role, raw)
+			f, ok := hub.ReplayFrame(tt.role, tt.raw)
 			require.Equal(t, tt.want, ok)
 			if !tt.want {
 				return

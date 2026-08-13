@@ -262,10 +262,12 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
-// If a claim path cannot be resolved, the placeholder is replaced with an empty
-// string (never "<nil>") and ok is false, so filter callers can fail the
-// predicate closed instead of binding a value the token never carried (#385).
-// A template with no placeholders — including a literal "" — is always ok.
+// If a claim path cannot be resolved — absent/null, or resolving to a structured
+// value (JSON object or array) rather than a scalar — the placeholder is
+// replaced with an empty string (never "<nil>") and ok is false, so filter
+// callers can fail the predicate closed instead of binding a value the token
+// never carried (#385). A template with no placeholders — including a literal
+// "" — is always ok.
 func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 	ok := true
 	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
@@ -277,12 +279,22 @@ func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 			return ""
 		}
 		parts := strings.Split(sub[1], ".")
-		val := navigateClaims(claims, parts)
-		if val == nil {
+		switch val := navigateClaims(claims, parts).(type) {
+		case nil:
 			ok = false
 			return ""
+		case map[string]any, []any:
+			// A structured claim value (a JSON object or array) is never a sensible
+			// scalar comparison value — it usually means a path segment was dropped
+			// ({{ jwt.app_metadata }} for {{ jwt.app_metadata.tenant_id }}), and
+			// binding fmt.Sprint's "map[…]"/"[…]" rendering would let _neq/_lt match
+			// essentially every row. Fail closed. Array-valued _in claims never reach
+			// here: resolveInValues handles the bare-claim array case first.
+			ok = false
+			return ""
+		default:
+			return fmt.Sprint(val)
 		}
-		return fmt.Sprint(val)
 	})
 	return resolved, ok
 }
@@ -294,7 +306,7 @@ func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 // A scalar claim (or any template with surrounding text) yields a single value,
 // matching resolveTemplate. Elements are stringified like the other operators so
 // policy filters stay uniformly string-valued. Returns nil when the claim is
-// absent so the caller can fail the predicate closed.
+// absent (or a JSON object) so the caller can fail the predicate closed.
 func resolveInValues(tmpl string, claims map[string]any) []any {
 	if m := wholeClaimRe.FindStringSubmatch(strings.TrimSpace(tmpl)); m != nil {
 		switch v := navigateClaims(claims, strings.Split(m[1], ".")).(type) {
@@ -306,6 +318,11 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 				out = append(out, fmt.Sprint(e))
 			}
 			return out
+		case map[string]any:
+			// A JSON-object claim is never a membership set; matching
+			// resolveTemplate, fail closed rather than bind its "map[…]" rendering
+			// as a one-element set.
+			return nil
 		default:
 			return []any{fmt.Sprint(v)}
 		}
@@ -499,7 +516,9 @@ func Validate(p *Policy) error {
 // indexing, or an unterminated `{{`. resolveTemplate binds such a fragment as
 // literal text, which is a fail-open on the filter path (`_neq`/`_lt` match ~every
 // row) and silent row corruption on the check path, so validateRolePerms rejects
-// it at config load. A well-formed template — with or without surrounding literal
+// it at write time — Store.Put, i.e. bootstrap-file adoption or an admin PUT; a
+// policy already in KV is not re-validated when a node loads it (#461). A
+// well-formed template — with or without surrounding literal
 // text, e.g. "acct-{{ jwt.org_id }}" — returns ("", false).
 func malformedTemplate(v string) (string, bool) {
 	// Strip every well-formed template; any surviving "{{" is one the resolver
@@ -516,7 +535,7 @@ func malformedTemplate(v string) (string, bool) {
 	return frag, true
 }
 
-// rejectMalformedTemplates fails a policy at config load if any operator value in
+// rejectMalformedTemplates fails a policy at write time if any operator value in
 // f carries a claim template the resolver would not interpolate (malformedTemplate).
 func rejectMalformedTemplates(table, op, role, kind, col string, f Filter) error {
 	for _, v := range []*string{f.Eq, f.Neq, f.Gt, f.Lt, f.In} {
@@ -567,7 +586,7 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		}
 		// The check/insert path honors only _eq (a required value) and _in (a
 		// required set); the comparison operators have no insert-time semantics and
-		// no auto-inject, so reject them loudly at config load (#224).
+		// no auto-inject, so reject them loudly at write time (#224).
 		if f.Neq != nil || f.Gt != nil || f.Lt != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q uses _neq/_gt/_lt, which check does not honor (use _eq or _in)", table, op, role, col)
 		}

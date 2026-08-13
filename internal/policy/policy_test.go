@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -393,8 +394,11 @@ func TestNavigateClaims(t *testing.T) {
 func TestResolveTemplate(t *testing.T) {
 	t.Parallel()
 	claims := map[string]any{
-		"org_id": "org-123",
-		"nested": map[string]any{"val": "deep"},
+		"org_id":   "org-123",
+		"nested":   map[string]any{"val": "deep"},
+		"tids":     []any{"a", "b"},
+		"is_admin": true,
+		"big":      json.Number("12345678901234567890"),
 	}
 	tests := []struct {
 		name   string
@@ -412,6 +416,16 @@ func TestResolveTemplate(t *testing.T) {
 		// One unresolvable claim poisons the whole template, even alongside a
 		// resolvable one or surrounding text.
 		{"mixed resolvable and missing", "{{ jwt.org_id }}-{{ jwt.missing }}", "org-123-", false},
+		// A structured claim value fails closed: an object usually means a
+		// dropped path segment ({{ jwt.nested }} for {{ jwt.nested.val }}), and
+		// its "map[…]"/"[…]" stringification is never a sensible bound value.
+		{"object claim fails closed", "{{ jwt.nested }}", "", false},
+		{"array claim fails closed", "{{ jwt.tids }}", "", false},
+		{"array claim with surrounding text fails closed", "t-{{ jwt.tids }}", "t-", false},
+		// Scalars stay bound as today — booleans stringify, and a json.Number
+		// keeps every digit (the >2^53 case float64 would silently round).
+		{"boolean claim binds", "{{ jwt.is_admin }}", "true", true},
+		{"large integer claim binds exactly", "{{ jwt.big }}", "12345678901234567890", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -680,6 +694,40 @@ func TestResolveFilters_UnresolvableClaim_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestResolveFilters_StructuredClaim_FailsClosed: a claim that resolves to a
+// JSON object or array — usually a policy typo that dropped the final path
+// segment ({{ jwt.meta }} for {{ jwt.meta.tenant_id }}) — fails closed on every
+// operator instead of binding its "map[…]"/"[…]" stringification, which _neq
+// would match against essentially every row. The one legitimate structured
+// shape is unaffected: a bare-claim _in against an ARRAY binds its elements
+// (TestResolveFilters_InArrayClaim).
+func TestResolveFilters_StructuredClaim_FailsClosed(t *testing.T) {
+	t.Parallel()
+	obj := "{{ jwt.meta }}"
+	arr := "{{ jwt.tids }}"
+	arrText := "t-{{ jwt.tids }}"
+	claims := map[string]any{
+		"meta": map[string]any{"tenant_id": "acme"},
+		"tids": []any{"a", "b"},
+	}
+	cases := map[string]Filter{
+		"_eq object":          {Eq: &obj},
+		"_neq object":         {Neq: &obj},
+		"_gt array":           {Gt: &arr},
+		"_in object":          {In: &obj},
+		"_in array with text": {In: &arrText},
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clauses, params := resolveFilters(map[string]Filter{"tenant_id": f}, claims)
+			require.Len(t, clauses, 1)
+			assert.Equal(t, "1 = 0", clauses[0])
+			assert.Empty(t, params)
+		})
+	}
+}
+
 // TestResolveFilters_LiteralEmptyValue_Binds: a template-free literal "" is the
 // policy author's chosen value, not a resolution failure — it must keep binding
 // an equality against the empty string rather than be mistaken for the #385
@@ -796,7 +844,7 @@ func TestValidate_RejectsBindUnsafeFilterColumn(t *testing.T) {
 // {{ … }} claim path is outside the grammar (hyphenated, a namespaced OIDC URL, a
 // wrong-case prefix, indexing, or unterminated) is bound as literal text by
 // resolveTemplate — a fail-open on the filter path (`_neq`/`_lt` match ~every row)
-// and silent row corruption on the check path — so it is refused at config load
+// and silent row corruption on the check path — so it is refused at write time
 // (#385/#457), on both the select/filter and insert/check sides.
 func TestValidate_RejectsMalformedClaimTemplate(t *testing.T) {
 	t.Parallel()
@@ -983,7 +1031,7 @@ func TestValidate_RejectsComparisonCheckOps(t *testing.T) {
 
 // TestValidate_RejectsMixedCheckOps: a check column may carry only one
 // required-value operator. Setting both _eq and _in is ambiguous — Evaluate's
-// switch honors _eq and silently drops _in — so it is rejected at config load
+// switch honors _eq and silently drops _in — so it is rejected at write time
 // rather than enforcing an arbitrary branch (the accept-but-ignore gap #224
 // closes).
 func TestValidate_RejectsMixedCheckOps(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -106,6 +107,32 @@ func TestMiddleware_ValidToken_FlatRole(t *testing.T) {
 	require.True(t, c.hasClaims)
 	assert.Equal(t, "editor", c.claims["role"])
 	assert.NoError(t, c.authErr)
+}
+
+// TestMiddleware_LargeIntegerClaim_ExactThroughPolicy pins jwt.WithJSONNumber
+// on the parser: a numeric claim above 2^53 must survive jwt.Parse exactly as
+// issued, not as a float64 — which rounds 1234567890123456789 to
+// 1234567890123456768, a *different* value a policy filter would silently bind.
+// The claim rides a real signed token because a hand-built claims map (or a
+// string-valued test claim) passes with or without the parser option; the tail
+// asserts the exact digits reach a resolved policy filter, the consumer the
+// precision exists for.
+func TestMiddleware_LargeIntegerClaim_ExactThroughPolicy(t *testing.T) {
+	t.Parallel()
+	c := run(t, cfg(), bearer(testutil.MakeJWT(t, map[string]any{"role": "viewer", "tenant_id": int64(1234567890123456789)})))
+	require.True(t, c.hasClaims)
+	assert.Equal(t, json.Number("1234567890123456789"), c.claims["tenant_id"])
+
+	eq := "{{ jwt.tenant_id }}"
+	p := &policy.Policy{Tables: map[string]policy.TablePolicy{
+		"clicks": {Select: map[string]policy.RolePermissions{
+			"viewer": {Filter: map[string]policy.Filter{"tenant_id": {Eq: &eq}}},
+		}},
+	}}
+	perms := policy.Evaluate(p, "viewer", "clicks", "select", c.claims)
+	require.True(t, perms.Allowed)
+	assert.Equal(t, "`tenant_id` = ?", perms.WhereClause)
+	assert.Equal(t, []any{"1234567890123456789"}, perms.WhereParams)
 }
 
 func TestMiddleware_BearerScheme_CaseInsensitive(t *testing.T) {

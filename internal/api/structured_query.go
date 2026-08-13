@@ -112,8 +112,9 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 	// allow/deny, aggregation policy, and the SELECT * → allowed-columns expansion
 	// that closes the omitted/"*" column bypass (#223) all live there, so no
 	// clause (columns, aggregations, filters, group_by, order_by, time_range) can
-	// skip the check. A policy denial returns a typed error we map to 403; a
-	// malformed query maps to 400.
+	// skip the check. The role's row-filter predicate and max_rows cap are emitted
+	// by Build too, structurally (#322). A policy denial returns a typed error we
+	// map to 403; a malformed query maps to 400.
 	result, err := query.Build(table, &sq, schema, perms, h.BucketSecs, h.defaultMaxRows)
 	if err != nil {
 		// A query that selects nothing — no columns, no aggregations, no
@@ -135,14 +136,6 @@ func (h *StructuredQueryHandler) Handle(w http.ResponseWriter, r *http.Request) 
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 		}
 		return
-	}
-
-	// Inject row-level security filters from policy.
-	query.InjectPermissionFilters(result, perms.WhereClause, perms.WhereParams)
-
-	// Apply resource limits.
-	if perms.MaxRows > 0 {
-		query.ApplyMaxRows(result, perms.MaxRows)
 	}
 
 	// Cache key.
