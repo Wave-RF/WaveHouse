@@ -1027,19 +1027,30 @@ describe("SSETransport lifecycle", () => {
 
     const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
     const seen = collect(t);
-    t.onEvent = () => {
-      throw new Error("consumer render blew up");
+    let first = true;
+    t.onEvent = (e) => {
+      if (first) {
+        first = false;
+        throw new Error("consumer render blew up");
+      }
+      seen.events.push(e);
     };
     t.connect();
     await vi.waitFor(() => expect(seen.statuses).toContain("live"));
 
-    conn.push(frame("id-1", { table_name: "clicks", received_timestamp: "t", data: {} }));
+    conn.push(frame("id-1", { table_name: "clicks", received_timestamp: "t1", data: { n: 1 } }));
     await vi.waitFor(() => expect(err).toHaveBeenCalled());
 
     // A shared catch reported this as "SSE received malformed message",
     // blaming the server for a well-formed frame the consumer choked on.
     expect(warn).not.toHaveBeenCalled();
     expect(err.mock.calls[0][0]).toContain("event handler threw");
+
+    // The property that actually matters: one bad handler call must not cost
+    // the stream. Asserting only the log message pins the symptom, not this.
+    conn.push(frame("id-2", { table_name: "clicks", received_timestamp: "t2", data: { n: 2 } }));
+    await vi.waitFor(() => expect(seen.events).toHaveLength(1));
+    expect(seen.events[0].data).toEqual({ n: 2 });
 
     t.disconnect();
     warn.mockRestore();
