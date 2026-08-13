@@ -387,12 +387,17 @@ func (h *IngestHandler) processRecord(
 				continue
 			}
 			if actual, ok := data[col]; ok {
-				// The payload side canonicalizes exactly as the claim side did
-				// (policy.CanonicalScalar), so a numeric insert value matches a
-				// numeric claim by value, not by spelling (payload 1.0 vs claim 1);
-				// a value with no canonical form (object/array/null) matches nothing.
-				actualStr, comparable := policy.CanonicalScalar(actual)
-				if !comparable || actualStr != fmt.Sprint(requiredVal) {
+				// Both sides canonicalize through policy.CanonicalScalar, so a
+				// numeric insert value matches a numeric claim by value, not by
+				// spelling (payload 1.0 vs claim 1), and a value with no canonical
+				// form (object/array/null) matches nothing. A policy.LiteralValue —
+				// a placeholder-free check value, which carries no JSON type —
+				// additionally matches by its numeric reading, so `_eq: "1.0"`
+				// accepts an inserted 1.0 as well as an inserted "1.0". The type is
+				// what scopes that second reading to author-written literals: a
+				// claim-derived value arrives as a plain string and never gains a
+				// reading the token's own JSON type didn't give it.
+				if !checkValueMatches(actual, requiredVal) {
 					h.logger.WarnContext(ctx, "check clause failed", "column", col, "expected", requiredVal, "actual", actual)
 					return false, &recordReject{
 						Status:  http.StatusForbidden,
@@ -400,8 +405,15 @@ func (h *IngestHandler) processRecord(
 					}, nil
 				}
 			} else {
-				// Auto-inject claim-derived value if not provided.
-				data[col] = requiredVal
+				// Auto-inject the required value if not provided — as a plain
+				// string: a LiteralValue must not leak its named type into the
+				// published payload, where downstream type switches (timestamp
+				// canonicalization's `case string`) would silently miss it.
+				if lit, isLit := requiredVal.(policy.LiteralValue); isLit {
+					data[col] = string(lit)
+				} else {
+					data[col] = requiredVal
+				}
 			}
 		}
 	}
@@ -468,18 +480,43 @@ func (h *IngestHandler) processRecord(
 	return false, nil, nil
 }
 
+// checkValueMatches decides insert-check equality: the payload value must
+// have a canonical scalar form (object/array/null match nothing) equal to the
+// required value's canonical form. A policy.LiteralValue — and only that type,
+// which Evaluate reserves for placeholder-free check values — also matches by
+// its canonical numeric reading (policy.CanonicalNumericLiteral), so a static
+// `_eq: "1.0"` accepts an inserted 1.0 and an inserted "1.0" alike.
+func checkValueMatches(actual, required any) bool {
+	actualStr, hasForm := policy.CanonicalScalar(actual)
+	if !hasForm {
+		return false
+	}
+	if lit, isLit := required.(policy.LiteralValue); isLit {
+		if actualStr == string(lit) {
+			return true
+		}
+		n, ok := policy.CanonicalNumericLiteral(string(lit))
+		return ok && actualStr == n
+	}
+	requiredStr, ok := policy.CanonicalScalar(required)
+	return ok && actualStr == requiredStr
+}
+
 // valueInSet reports whether v matches any member of set, comparing by
 // canonical string form (policy.CanonicalScalar) to mirror the scalar check's
-// equality — so a JSON number in the insert body matches a claim-derived value
-// by value, not spelling, the same way _eq does. A v with no canonical form
-// (object/array/null) is a member of no set.
+// claim-derived equality — a JSON number in the insert body matches a
+// claim-derived value by value, not spelling, and a v with no canonical form
+// (object/array/null) is a member of no set. _in members never take the
+// LiteralValue numeric reading: an _in set is claim-derived by design, and a
+// placeholder-free _in template is a degenerate one-element set that keeps
+// spelling equality.
 func valueInSet(v any, set []any) bool {
 	vs, ok := policy.CanonicalScalar(v)
 	if !ok {
 		return false
 	}
 	for _, s := range set {
-		if fmt.Sprint(s) == vs {
+		if ss, ok := policy.CanonicalScalar(s); ok && ss == vs {
 			return true
 		}
 	}

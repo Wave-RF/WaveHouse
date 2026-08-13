@@ -161,6 +161,32 @@ func TestEvaluate_CheckClauses(t *testing.T) {
 	assert.Equal(t, "org-456", perms.CheckClauses["org_id"])
 }
 
+// TestEvaluate_CheckClauses_StaticLiteralTyped: a placeholder-free check
+// value is wrapped as LiteralValue — the marker that lets the ingest
+// comparison accept its numeric reading — while a claim-derived value (above)
+// stays a plain string, so a string-typed claim can never gain that reading.
+func TestEvaluate_CheckClauses_StaticLiteralTyped(t *testing.T) {
+	t.Parallel()
+	eqVal := "1.0"
+	p := &Policy{
+		Tables: map[string]TablePolicy{
+			"clicks": {
+				Insert: map[string]RolePermissions{
+					"user": {
+						Check: map[string]Filter{
+							"count": {Eq: &eqVal},
+						},
+					},
+				},
+			},
+		},
+	}
+	perms := Evaluate(p, "user", "clicks", "insert", map[string]any{})
+	assert.True(t, perms.Allowed)
+	require.Contains(t, perms.CheckClauses, "count")
+	assert.Equal(t, LiteralValue("1.0"), perms.CheckClauses["count"])
+}
+
 func TestEvaluate_AggregationLimits(t *testing.T) {
 	t.Parallel()
 	p := &Policy{
@@ -437,6 +463,13 @@ func TestResolveTemplate(t *testing.T) {
 		{"float spelling binds canonically", "{{ jwt.price }}", "1", true},
 		{"exponent spelling binds canonically", "{{ jwt.exp3 }}", "1000", true},
 		{"beyond-float64 number fails closed", "{{ jwt.huge }}", "", false},
+		// A static literal binds exactly as written even when it spells a JSON
+		// number: canonicalizing it here would move read filters on String
+		// columns (`_neq: "1.0"` on a version column would stop excluding rows
+		// storing "1.0"). The insert-check comparison accepts the numeric
+		// reading at compare time instead (CanonicalNumericLiteral).
+		{"numeric-spelled literal binds as written", "1.0", "1.0", true},
+		{"exponent-spelled literal binds as written", "1e400", "1e400", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -490,7 +523,12 @@ func TestCanonicalScalar(t *testing.T) {
 		{"uppercase exponent spelling", json.Number("1E3"), "1000", true},
 		{"fraction kept", json.Number("1.5"), "1.5", true},
 		{"trailing fraction zeros trim", json.Number("2.50"), "2.5", true},
+		// The sign must survive the non-integer path: dropping it would bind a
+		// value on the other side of zero, so `_lt` against a claim of -1.5
+		// would match everything below 1.5 — this PR's whole bug class.
+		{"negative fraction keeps sign", json.Number("-2.50"), "-2.5", true},
 		{"negative exponent expands exactly", json.Number("25e-4"), "0.0025", true},
+		{"negative exponent keeps sign through the 0. prefix", json.Number("-25e-4"), "-0.0025", true},
 		{"high-precision fraction stays exact", json.Number("0.1000000000000000000001"), "0.1000000000000000000001", true},
 		{"wide decimal stays exact", json.Number("12345678901234567890.5"), "12345678901234567890.5", true},
 		{"negative zero folds to zero", json.Number("-0.0"), "0", true},
@@ -498,11 +536,20 @@ func TestCanonicalScalar(t *testing.T) {
 		{"overflow has no canonical form", json.Number("1e400"), "", false},
 		{"negative overflow has no canonical form", json.Number("-1e400"), "", false},
 		{"wide finite magnitude has no canonical form", json.Number("1.5e200"), "", false},
+		// A zero mantissa reaches the exponent bound before anything else can
+		// reject it — the exact-form length check can't (every spelling of zero
+		// is one character), and that bound is what stops a short literal from
+		// allocating a gigabyte-scale expansion before the length check runs.
+		{"zero mantissa with out-of-range exponent", json.Number("0e201"), "", false},
 		// The 100-digit literal bound: big.Int work is superlinear in digit
 		// count and the ingest path hands this function client-controlled
-		// literals, so anything longer fails closed before any parsing.
+		// literals, so anything longer fails closed before any parsing. The
+		// bound counts digits, not bytes — sign and exponent markers ride free —
+		// so two spellings of one value pass or fail together.
 		{"100-digit integer at the bound stays exact", json.Number(strings.Repeat("9", 100)), strings.Repeat("9", 100), true},
 		{"101-digit literal has no canonical form", json.Number(strings.Repeat("9", 101)), "", false},
+		{"digit bound ignores sign and exponent bytes", json.Number("-1e99"), "-1" + strings.Repeat("0", 99), true},
+		{"written-out spelling of -1e99 binds identically", json.Number("-1" + strings.Repeat("0", 99)), "-1" + strings.Repeat("0", 99), true},
 		{"null has no canonical form", nil, "", false},
 		{"object has no canonical form", map[string]any{"id": 1}, "", false},
 		{"array has no canonical form", []any{"a"}, "", false},
@@ -511,6 +558,41 @@ func TestCanonicalScalar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, ok := CanonicalScalar(tt.v)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.ok, ok)
+		})
+	}
+}
+
+// TestCanonicalNumericLiteral pins the numeric reading of a policy-authored
+// check literal: only spellings JSON itself can produce canonicalize — the
+// json.Valid gate rejects big.Int-acceptable forms like "+5" and "007" that
+// no decoded claim or payload value ever carries, so the check comparison's
+// second reading can't accept a spelling the first side can't produce.
+func TestCanonicalNumericLiteral(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		lit  string
+		want string
+		ok   bool
+	}{
+		{"float spelling of an integer", "1.0", "1", true},
+		{"exponent spelling", "25e-4", "0.0025", true},
+		{"negative fraction", "-2.50", "-2.5", true},
+		{"integer passes through", "7", "7", true},
+		{"leading plus is not JSON", "+5", "", false},
+		{"leading zero is not JSON", "007", "", false},
+		{"whitespace-padded number is not a bare literal", " 5", "", false},
+		{"non-numeric literal", "org-123", "", false},
+		{"boolean literal is valid JSON but not a number", "true", "", false},
+		{"empty literal", "", "", false},
+		{"no canonical form past the bound", "1e400", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := CanonicalNumericLiteral(tt.lit)
 			assert.Equal(t, tt.want, got)
 			assert.Equal(t, tt.ok, ok)
 		})
@@ -1050,8 +1132,9 @@ func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
 // match no rows (a constant-false predicate) rather than widen to all rows — the
 // fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
 // resolveInValues reach this: an absent claim (navigateClaims returns nil, which
-// CanonicalScalar rejects in the `default` branch) and a present-but-empty array
-// (the `case []any` branch with zero elements). Both must fail closed.
+// CanonicalScalar rejects in its nil/object/array case, so resolveInValues'
+// `default` branch fails the set closed) and a present-but-empty array (the
+// `case []any` branch with zero elements). Both must fail closed.
 func TestResolveFilters_InEmptyClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
 	in := "{{ jwt.tenants }}"

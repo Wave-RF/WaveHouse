@@ -207,7 +207,15 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 			case f.Eq != nil:
 				// Deliberate asymmetry with the read path: an unresolvable check claim
 				// still resolves to "" and is auto-injected as the required value (#463).
-				resolved.CheckClauses[col], _ = resolveTemplate(*f.Eq, claims)
+				// A placeholder-free value is marked LiteralValue so the check
+				// comparison can accept its numeric reading; a claim-derived value
+				// stays a plain string and keeps strict canonical equality.
+				v, _ := resolveTemplate(*f.Eq, claims)
+				if !claimTemplateRe.MatchString(*f.Eq) {
+					resolved.CheckClauses[col] = LiteralValue(v)
+				} else {
+					resolved.CheckClauses[col] = v
+				}
 			case f.In != nil:
 				// A []any value marks a set-membership check (vs a scalar required
 				// value); ingest enforces "inserted value must be one of these".
@@ -270,7 +278,12 @@ func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string,
 // form (see CanonicalScalar) — the placeholder is replaced with an empty string
 // (never "<nil>") and ok is false, so filter callers can fail the predicate
 // closed instead of binding a value the token never carried (#385). A template
-// with no placeholders — including a literal "" — is always ok.
+// with no placeholders — including a literal "" — is always ok, and binds
+// exactly as written: canonicalizing a numeric-spelled literal here would
+// silently move read filters on String columns (`_neq: "1.0"` on a version
+// column is a different predicate than `_neq: "1"`); the insert-check
+// comparison instead accepts a literal's numeric reading at compare time
+// (CanonicalNumericLiteral).
 func resolveTemplate(tmpl string, claims map[string]any) (string, bool) {
 	ok := true
 	resolved := claimTemplateRe.ReplaceAllStringFunc(tmpl, func(match string) string {
@@ -333,12 +346,12 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 	return nil
 }
 
-// maxCanonicalDigits bounds both a numeric literal and its exact decimal
-// expansion. Big-integer parsing is superlinear in digit count and the ingest
-// check path hands CanonicalScalar client-controlled literals (CWE-400), and
-// a short exponent literal can hide a wide expansion ("1e-150" is six
-// characters with a 152-character exact form). 100 digits is far past any
-// real id — uint256 is 78.
+// maxCanonicalDigits bounds both a numeric literal's digit count and its
+// exact decimal expansion. Big-integer parsing is superlinear in digit count
+// and the ingest check path hands CanonicalScalar client-controlled literals
+// (CWE-400), and a short exponent literal can hide a wide expansion ("1e-150"
+// is six characters with a 152-character exact form). 100 digits is far past
+// any real id — uint256 is 78.
 const maxCanonicalDigits = 100
 
 // CanonicalScalar renders a decoded JSON value as the canonical string the
@@ -358,18 +371,28 @@ const maxCanonicalDigits = 100
 // token doesn't carry ("1e-400" fails closed rather than collapsing to "0").
 // A literal, or an exact form, past maxCanonicalDigits likewise has no
 // canonical form and fails closed (1e400, 1e-400). Claim resolution and the
-// insert-check payload comparison (internal/api) both route through this one
-// function, so what a read filter binds and what a write check accepts can't
-// drift.
+// insert-check comparison's two sides (internal/api) all route through this
+// one function, so what a read filter binds and what a write check accepts
+// can't drift.
 func CanonicalScalar(v any) (string, bool) {
 	switch val := v.(type) {
 	case nil, map[string]any, []any:
 		return "", false
 	case json.Number:
-		// The length bound guards the superlinear big.Int parse on the
-		// client-controlled ingest path; canonicalDecimal re-checks its own
-		// exact-form length, where a short literal can hide a wide expansion.
-		if len(val) > maxCanonicalDigits {
+		// The digit bound guards the superlinear big.Int parse on the
+		// client-controlled ingest path. It counts digits, not bytes — a sign,
+		// point, or exponent marker doesn't feed the big parse — so "-1e99"
+		// binds exactly like its written-out form, matching the "one JSON
+		// value" contract below (only at the bound's very edge can the exact-form
+		// gate's slack separate two spellings). canonicalDecimal re-checks its
+		// own exact-form length, where a short literal can hide a wide expansion.
+		digits := 0
+		for i := 0; i < len(val); i++ {
+			if val[i] >= '0' && val[i] <= '9' {
+				digits++
+			}
+		}
+		if digits > maxCanonicalDigits {
 			return "", false
 		}
 		if i, ok := new(big.Int).SetString(val.String(), 10); ok {
@@ -379,6 +402,30 @@ func CanonicalScalar(v any) (string, bool) {
 	default:
 		return fmt.Sprint(val), true
 	}
+}
+
+// LiteralValue marks an insert-check required value the policy author wrote
+// as a placeholder-free literal (Evaluate). A literal carries no JSON type —
+// "1.0" means the number 1 to a numeric column and the three-character text
+// to a String column — so the check comparison (internal/api) accepts its
+// numeric reading as well as its spelling. The type is the gate: a
+// claim-derived value is never wrapped, so a string-typed claim keeps strict
+// canonical equality and can't gain a numeric reading it didn't have. Only
+// CheckClauses carries this type; read filters bind plain strings.
+type LiteralValue string
+
+// CanonicalNumericLiteral renders a policy-authored literal that spells a
+// JSON number in canonical decimal form ("1.0" → "1"), reporting ok=false for
+// everything else. The json.Valid gate keeps this to spellings JSON itself
+// can produce: big.Int would also take "+5" or "007", readings no decoded
+// claim or payload value ever has. It canonicalizes nothing at resolve time —
+// the literal still binds and auto-injects exactly as written; only the check
+// comparison consults this second reading.
+func CanonicalNumericLiteral(s string) (string, bool) {
+	if !json.Valid([]byte(s)) {
+		return "", false
+	}
+	return CanonicalScalar(json.Number(s))
 }
 
 // canonicalDecimal renders a non-integer JSON number literal (one carrying a
@@ -397,8 +444,11 @@ func canonicalDecimal(lit string) (string, bool) {
 	exp := 0
 	if hasExp {
 		var err error
-		// Atoi rejects an empty or non-numeric exponent; the magnitude bound
-		// keeps the decimal-point shift, and with it the exact form, small.
+		// Atoi rejects an empty or non-numeric exponent. The magnitude bound is
+		// the allocation guard, not a redundancy: the exact-form length check at
+		// the bottom runs only after strings.Repeat has already built the
+		// string, so without this bound a 12-byte "1e1000000000" would allocate
+		// a ~1 GiB expansion before being rejected.
 		if exp, err = strconv.Atoi(expStr); err != nil || exp > 2*maxCanonicalDigits || exp < -2*maxCanonicalDigits {
 			return "", false
 		}
@@ -441,8 +491,11 @@ func canonicalDecimal(lit string) (string, bool) {
 	default:
 		out = digits[:point] + "." + digits[point:]
 	}
-	// The exact form is what must stay small (the "0." prefix rides free):
-	// "1e-150" is a six-character literal with a 152-character expansion.
+	// The exact form is what must stay small: "1e-150" is a six-character
+	// literal with a 152-character expansion. The +2 slack exists for a "0."
+	// prefix, though any form may spend it (a 102-digit integer expansion
+	// passes). This runs after the Repeat above, so it bounds what callers
+	// see — the exponent bound is what keeps the allocation itself small.
 	if len(out) > maxCanonicalDigits+2 {
 		return "", false
 	}
@@ -634,8 +687,11 @@ func Validate(p *Policy) error {
 // well-formed template — with or without surrounding literal
 // text, e.g. "acct-{{ jwt.org_id }}" — returns ("", false).
 func malformedTemplate(v string) (string, bool) {
-	// Strip every well-formed template; any surviving "{{" is one the resolver
-	// would leave as a literal instead of interpolating.
+	// Strip every well-formed template; a surviving "{{" is one the resolver
+	// would leave as a literal instead of interpolating — except when stripping
+	// itself splices one from the fragments around a well-formed template
+	// ("{{{ jwt.a }}{" strips to "{{"), a rare over-rejection that errs
+	// fail-closed at write time, never at query time.
 	stripped := claimTemplateRe.ReplaceAllString(v, "")
 	i := strings.Index(stripped, "{{")
 	if i < 0 {
@@ -705,8 +761,8 @@ func validateRolePerms(table, op, role string, perms RolePermissions) error {
 		}
 		// _eq and _in are both honored, but they carry different required-value
 		// semantics (a single value vs. set membership) and Evaluate resolves only
-		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at config
-		// load rather than enforce an arbitrary branch (the same accept-but-ignore
+		// one — _eq wins, silently dropping _in. Reject the ambiguous pair at write
+		// time rather than enforce an arbitrary branch (the same accept-but-ignore
 		// gap #224 closes).
 		if f.Eq != nil && f.In != nil {
 			return fmt.Errorf("table %q, op %q, role %q: check column %q sets both _eq and _in; use exactly one", table, op, role, col)
