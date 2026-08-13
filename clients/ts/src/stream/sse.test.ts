@@ -1018,6 +1018,34 @@ describe("SSETransport lifecycle", () => {
     expect(seen.events[0].data).toEqual({ n: 1 });
   });
 
+  it("blames the handler, not the frame, when next() throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = makeFetch();
+    const conn = streamingResponse();
+    f.queue.push(() => conn.res);
+
+    const t = new SSETransport({ baseURL: BASE, table: "clicks", fetch: f.impl });
+    const seen = collect(t);
+    t.onEvent = () => {
+      throw new Error("consumer render blew up");
+    };
+    t.connect();
+    await vi.waitFor(() => expect(seen.statuses).toContain("live"));
+
+    conn.push(frame("id-1", { table_name: "clicks", received_timestamp: "t", data: {} }));
+    await vi.waitFor(() => expect(err).toHaveBeenCalled());
+
+    // A shared catch reported this as "SSE received malformed message",
+    // blaming the server for a well-formed frame the consumer choked on.
+    expect(warn).not.toHaveBeenCalled();
+    expect(err.mock.calls[0][0]).toContain("event handler threw");
+
+    t.disconnect();
+    warn.mockRestore();
+    err.mockRestore();
+  });
+
   it("survives a subscriber whose status handler throws", async () => {
     const warn = vi.spyOn(console, "error").mockImplementation(() => {});
     const rejections: unknown[] = [];

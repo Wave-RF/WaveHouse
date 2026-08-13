@@ -48,6 +48,11 @@ const unsub = stream.subscribe({
 unsub();
 ```
 
+A handler that throws doesn't end the stream; the exception is logged and
+delivery continues. See
+[Error Handling](/sdk/reference#error-handling) for the caveat about other
+subscribers.
+
 ### Async Iterator
 
 ```ts

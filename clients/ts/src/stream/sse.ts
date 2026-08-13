@@ -497,20 +497,27 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
    */
   private _dispatch(data: string): void {
     if (this._closed) return;
+
+    // Two failures with one culprit each, so they are caught separately: a
+    // shared catch blamed the server's frame for an exception thrown by the
+    // consumer's own handler, pointing a debugging reader at the wrong side.
+    let event: StreamEvent<T>;
     try {
       const msg = JSON.parse(data) as {
         table_name: string;
         received_timestamp: string;
         data: T;
       };
-      this.onEvent?.({
-        table: msg.table_name,
-        timestamp: msg.received_timestamp,
-        data: msg.data,
-      });
+      event = { table: msg.table_name, timestamp: msg.received_timestamp, data: msg.data };
     } catch {
       console.warn("[wavehouse] SSE received malformed message:", data);
-      // ignore malformed messages
+      return; // ignore malformed messages
+    }
+
+    try {
+      this.onEvent?.(event);
+    } catch (e) {
+      console.error("[wavehouse] SSE event handler threw:", e);
     }
   }
 
