@@ -1,7 +1,7 @@
 import { err, ok } from "./errors.js";
 import { request } from "./http.js";
 import type { StreamController } from "./stream/controller.js";
-import type { FetchOptions, HttpContext, Pipe, Result, StreamOptions } from "./types.js";
+import type { HttpContext, Pipe, PipeRequestOptions, Result, StreamOptions } from "./types.js";
 
 type CreateStreamFn<Row> = (table: string, opts?: StreamOptions) => StreamController<Row>;
 
@@ -24,8 +24,15 @@ export class PipeRef<Row = Record<string, unknown>> implements PromiseLike<Resul
     this._createStream = createStream;
   }
 
-  /** Execute the pipe and return results. */
-  async fetch(opts?: FetchOptions): Promise<Result<Row[]>> {
+  /**
+   * Execute the pipe and return results.
+   *
+   * Takes only `signal` — deliberately narrower than the `RequestOptions` the
+   * query builder accepts. The pipes endpoint binds the body as the pipe's
+   * parameters, so there is no row cap to forward; give the pipe a `{{limit}}`
+   * parameter in its SQL and pass it via `wh.pipe(name, { limit })`.
+   */
+  async fetch(opts?: PipeRequestOptions): Promise<Result<Row[]>> {
     const { data, error } = await request<Row[]>(this._ctx, {
       method: "POST",
       path: `/v1/pipes/${encodeURIComponent(this._name)}`,

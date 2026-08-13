@@ -2,6 +2,7 @@ package policy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,6 +175,23 @@ func TestRowVisible_NumericEquality_ExactBeyondFloat64(t *testing.T) {
 	assert.True(t, neq.RowVisible(map[string]any{"id": "9007199254740992"}, num), "the exact tie-break keeps distinct IDs unequal for !=")
 }
 
+// TestRowVisible_OverlongNumericOperand_FailsClosed: the numeric arm refuses
+// operands wider than maxComparableChars before parsing anything — the exact
+// tie-break's big.Rat parse is superlinear in digit count and the row operand
+// is client-controlled, so an over-long "number" engineered to float64-tie with
+// the constant would otherwise burn CPU once per subscriber per event on the
+// fan-out goroutine. Withheld, never parsed; real-width values are unaffected.
+func TestRowVisible_OverlongNumericOperand_FailsClosed(t *testing.T) {
+	t.Parallel()
+	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	perms := evalRowFilter(t, map[string]Filter{"amount": {Eq: new("100")}}, nil)
+
+	long := "100." + strings.Repeat("0", 200_000) + "1" // ties with 100 as float64
+	assert.False(t, perms.RowVisible(map[string]any{"amount": json.Number(long)}, num))
+	assert.False(t, perms.RowVisible(map[string]any{"amount": long}, num), "string-encoded operand is bounded too")
+	assert.True(t, perms.RowVisible(map[string]any{"amount": json.Number("100.0")}, num), "real-width values still compare")
+}
+
 // TestRowVisible_LossyFloatClaim_FailsClosed: a claim that arrives as a float64
 // at or past 2^53 has already collapsed onto its float neighbors — rendering
 // digits for it could name another tenant (the fail-open caught in #381 review:
@@ -268,4 +286,42 @@ func TestRowVisible_MultiplePredicates_AllMustPass(t *testing.T) {
 	assert.True(t, perms.RowVisible(map[string]any{"tenant_id": "acme", "amount": float64(250)}, num))
 	assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "acme", "amount": float64(9)}, num), "amount fails")
 	assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "globex", "amount": float64(250)}, num), "tenant fails")
+}
+
+// TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths pins the #457 fail-closed
+// rule on BOTH read surfaces at once: a filter template whose claim the token
+// doesn't carry renders the constant-false predicate on the query path AND
+// withholds every row in the stream's in-memory evaluation. One Evaluate
+// resolution drives both, so a claim-less token can never see zero rows on
+// /v1/query yet every row on /v1/stream. HasRowFilter must stay true for the
+// failed predicate — dropping it would put the role back on the unfiltered
+// once-per-role fast path, the exact fail-open this test exists to prevent.
+func TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths(t *testing.T) {
+	t.Parallel()
+	noTenant := map[string]any{"role": "user"} // validly signed token, no tenant claim
+	tests := []struct {
+		name   string
+		filter map[string]Filter
+		claims map[string]any
+	}{
+		{"_eq", map[string]Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_neq, the leak direction", map[string]Filter{"tenant_id": {Neq: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_gt", map[string]Filter{"tenant_id": {Gt: new("{{ jwt.tenant }}")}}, noTenant},
+		{"_in with surrounding text", map[string]Filter{"tenant_id": {In: new("t-{{ jwt.tenant }}")}}, noTenant},
+		{
+			"object claim in a scalar slot",
+			map[string]Filter{"tenant_id": {Eq: new("{{ jwt.meta }}")}},
+			map[string]any{"meta": map[string]any{"tenant": "acme"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			perms := evalRowFilter(t, tt.filter, tt.claims)
+			assert.Equal(t, "1 = 0", perms.WhereClause, "query path: constant-false predicate")
+			assert.Empty(t, perms.WhereParams)
+			assert.True(t, perms.HasRowFilter(), "failed predicate must keep the stream on the per-subscriber path")
+			assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "acme"}, nil), "stream path: every row withheld")
+		})
+	}
 }

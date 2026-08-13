@@ -223,12 +223,15 @@ if (hasMore && next) {
 }
 ```
 
-**Options:**
+**Options** — `RequestOptions`:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `signal` | `AbortSignal` | Cancel the request |
 | `limit` | `number` | Override builder limit for this fetch |
+
+A pipe's `.fetch()` takes the narrower `PipeRequestOptions` instead — see
+[Pipes](/sdk/pipes#fetchopts).
 
 ### `.stream(opts?)`
 

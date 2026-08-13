@@ -37,6 +37,9 @@ export class WaveHouseClient<DB extends Database = Database> {
       auth: config.auth,
       options: {
         maxRetries: config.options?.maxRetries ?? 2,
+        fetch: config.options?.fetch,
+        headers: config.options?.headers,
+        fetchOptions: config.options?.fetchOptions,
       },
     };
 

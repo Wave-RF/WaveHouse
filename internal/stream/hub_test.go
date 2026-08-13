@@ -25,10 +25,11 @@ import (
 
 // jwtClaims round-trips claims through a real signed token and the production
 // auth middleware, returning them exactly as a live connection would carry them
-// (numbers as json.Number, never float64 or a hand-typed string). Any test that
-// asserts a claims-derived guarantee must build its subscriber this way: a
-// hand-built claims map once used string tenants here and passed while the
-// production decode path failed open (#381 review).
+// (numbers as json.Number, never float64 or a hand-typed string). Tests whose
+// guarantee depends on the decoded TYPE of a claim — the numeric cases — must
+// build claims this way: a hand-built map once used string tenants here and
+// passed while the production decode path failed open (#381 review). String and
+// nested-object claims decode unchanged, so literal maps stay faithful there.
 func jwtClaims(t *testing.T, claims map[string]any) map[string]any {
 	t.Helper()
 	mw, err := auth.Middleware(auth.Config{JWTSecret: testutil.TestJWTSecret}, nil, nil)
@@ -149,6 +150,34 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	}
 }
 
+// TestProjectColumns_FailsClosedOnUndecodedPayload is the #323 regression guard
+// at the unit seam: with a policy configured (filter=true), a payload that did
+// not decode to an EventMessage — so there is no table to evaluate policy
+// against — must be dropped, never passed through unfiltered. Only the no-policy
+// legacy passthrough (filter=false) may forward it, and invalid JSON is dropped
+// either way. TestHub_PassthroughAndFailClosed drives the same rule end-to-end
+// through Broadcast.
+func TestProjectColumns_FailsClosedOnUndecodedPayload(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		filter bool
+		raw    []byte
+		wantOK bool
+	}{
+		{"filtered valid JSON is dropped", true, []byte(`{"not":"an-event"}`), false},
+		{"unfiltered valid JSON is forwarded (legacy passthrough)", false, []byte(`{"not":"an-event"}`), true},
+		{"unfiltered invalid JSON is dropped", false, []byte("not json"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, ok := projectColumns(nil, tt.filter, "viewer", nil, tt.raw, false)
+			assert.Equal(t, tt.wantOK, ok)
+		})
+	}
+}
+
 func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
@@ -210,16 +239,20 @@ func rowFilterPolicy() *policy.Policy {
 // TestHub_RowFilter_PerSubscriberIsolation is the #319 fix: two subscribers of the
 // SAME role but different tenant claims each receive only their own tenant's rows
 // over the live stream — the row-filter the query path applies is now applied here
-// too, per subscriber.
+// too, per subscriber. The third subscriber pins the #457 rule on this surface: a
+// validly-signed token that doesn't carry the templated claim yields NO rows here,
+// matching the constant-false predicate the query path binds for it.
 func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	acme := NewSubscriber(map[string]any{"tenant": "acme"})
-	globex := NewSubscriber(map[string]any{"tenant": "globex"})
+	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}))
+	globex := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "globex"}))
+	noTenant := NewSubscriber(jwtClaims(t, map[string]any{"role": "viewer"})) // valid token, no tenant claim
 	hub.Add(topic, "viewer", acme)
 	hub.Add(topic, "viewer", globex)
+	hub.Add(topic, "viewer", noTenant)
 
 	// An acme row reaches only the acme subscriber, projected to the allowed column.
 	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
@@ -229,12 +262,15 @@ func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	assert.NotContains(t, inner, "tenant_id", "the filtered column is not in viewer's projection")
 	assert.NotContains(t, inner, "secret", "denied column stripped")
 	assertNoFrame(t, globex)
+	// Unresolvable claim ⇒ no rows on the stream, matching the query path (#457).
+	assertNoFrame(t, noTenant)
 
 	// A globex row reaches only the globex subscriber.
 	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:01Z",
 		map[string]any{"tenant_id": "globex", "page": "/g"}))
 	assert.Equal(t, "/g", frameData(t, recvFrame(t, globex))["data"].(map[string]any)["page"])
 	assertNoFrame(t, acme)
+	assertNoFrame(t, noTenant)
 }
 
 // TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation: NewSubscriber deep-copies
@@ -369,6 +405,12 @@ func TestHub_TopicIsolation(t *testing.T) {
 	}
 }
 
+// TestHub_PassthroughAndFailClosed drives the #323 fail-closed rule end-to-end
+// through Broadcast: with a policy wired, a payload that did not decode to an
+// EventMessage (no table to evaluate policy against) must be dropped, never
+// passed through unfiltered; only the no-policy legacy passthrough may forward
+// it. The unit seam is TestProjectColumns_FailsClosedOnUndecodedPayload; the
+// empty-table_name half is pinned in TestHub_ReplayProjector.
 func TestHub_PassthroughAndFailClosed(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -483,15 +525,24 @@ func TestHub_ReplayProjector(t *testing.T) {
 	tests := []struct {
 		name string
 		role string
+		raw  []byte
 		want bool // whether a frame is produced (vs. skipped)
 	}{
-		{"allowed role projects with column filter", "viewer", true},
-		{"role without table access is skipped", "stranger", false},
+		{"allowed role projects with column filter", "viewer", raw, true},
+		{"role without table access is skipped", "stranger", raw, false},
+		// The empty-table_name half of #323, pinned on the fail-closed side:
+		// {"table_name":"", …} decodes into an EventMessage but names no table to
+		// evaluate policy against, so with a policy wired it must be dropped —
+		// same conjunct as the non-EventMessage case in decodeEvent.
+		{
+			"empty table_name is dropped when policy is wired", "viewer",
+			[]byte(`{"table_name":"","data":{"page":"/home"}}`), false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f, ok := hub.ReplayProjector(tt.role, nil)(raw)
+			f, ok := hub.ReplayProjector(tt.role, nil)(tt.raw)
 			require.Equal(t, tt.want, ok)
 			if !tt.want {
 				return

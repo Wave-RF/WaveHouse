@@ -18,6 +18,12 @@ func (p *ResolvedPermissions) HasRowFilter() bool {
 	return p != nil && len(p.rowFilter) > 0
 }
 
+// maxComparableChars bounds both operands of a numeric row-filter comparison,
+// checked before any parsing. Slack past maxCanonicalDigits covers a sign,
+// decimal point, and exponent on any value the claim side can bind (its exact
+// form is gated at maxCanonicalDigits+2 characters).
+const maxComparableChars = maxCanonicalDigits + 10
+
 // ColumnKind classifies a column's ClickHouse type for the in-memory row-filter
 // comparison. The zero value is ColumnOpaque, so a nil map, a column absent from
 // the map, and a column the schema doesn't know all land on the most conservative
@@ -178,6 +184,16 @@ func compareScalar(rowVal any, filterVal string, spec ColumnSpec) (int, bool) {
 	case ColumnNumeric:
 		s, ok := scalarString(rowVal)
 		if !ok {
+			return 0, false
+		}
+		// Bound both operands before any parsing: compareExact's big.Rat parse is
+		// superlinear in digit count and the row operand arrives client-controlled
+		// (ingest forwards payloads verbatim), so an over-long "number" would be a
+		// per-subscriber-per-event CPU sink on the fan-out goroutine — the same
+		// CWE-400 reason CanonicalScalar bounds the claim side. No real value is
+		// that wide (UInt256 is 78 digits; a resolved claim constant is already
+		// capped), so refuse the comparison and withhold the row.
+		if len(s) > maxComparableChars || len(filterVal) > maxComparableChars {
 			return 0, false
 		}
 		a, err1 := strconv.ParseFloat(s, 64)
