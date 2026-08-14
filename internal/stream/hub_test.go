@@ -388,6 +388,36 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	assertNoFrame(t, blind)
 }
 
+// TestHub_RowFilter_FloatNarrowing_SchemaInformed drives storage-domain
+// narrowing end-to-end through the registry: on a Float32 column, payload
+// 16777217 stores as 16777216, so a `_gt: "16777216"` filter must withhold the
+// event — the query path's WHERE over the stored row is false, and delivering
+// the pre-narrowing payload was the ordering fail-open raised in review. A
+// Float32-representable greater value still delivers.
+func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
+	t.Parallel()
+	reg := testutil.NewTestSchemaRegistry(t, []*discovery.TableSchema{
+		{Name: "clicks", Columns: []discovery.Column{{Name: "score", Type: "Float32"}}},
+	})
+	p := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {Select: map[string]policy.RolePermissions{
+				"viewer": {Filter: map[string]policy.Filter{"score": {Gt: new("16777216")}}},
+			}},
+		},
+	}
+	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
+	const topic = "ingest.clicks"
+	sub := NewSubscriber(nil)
+	hub.Add(topic, "viewer", sub)
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"score": json.Number("16777217")}))
+	assertNoFrame(t, sub) // stores as 16777216: not greater once both operands narrow
+
+	hub.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"score": json.Number("16777218")}))
+	assert.Equal(t, float64(16777218), frameData(t, recvFrame(t, sub))["data"].(map[string]any)["score"])
+}
+
 func TestHub_TopicIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)

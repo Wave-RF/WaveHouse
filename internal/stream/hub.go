@@ -206,7 +206,23 @@ func (h *Hub) columnSpecs(table string) map[string]policy.ColumnSpec {
 		}
 		switch {
 		case discovery.IsNumericType(c.Type):
-			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnNumeric}
+			// The storage model narrows both comparison operands the way
+			// ClickHouse narrows the stored value and the bound constant. A
+			// numeric type whose model can't be classified keeps the zero
+			// NumericSpec, which refuses every comparison — fail closed,
+			// never a comparison under guessed semantics.
+			spec := policy.ColumnSpec{Kind: policy.ColumnNumeric}
+			if st, ok := discovery.NumericStorageOf(c.Type); ok {
+				switch {
+				case st.Integer:
+					spec.Numeric = policy.NumericSpec{Family: policy.NumericInteger, Bits: st.IntBits, Unsigned: st.Unsigned}
+				case st.FloatBits != 0:
+					spec.Numeric = policy.NumericSpec{Family: policy.NumericFloat, Bits: st.FloatBits}
+				default:
+					spec.Numeric = policy.NumericSpec{Family: policy.NumericDecimal, Precision: st.Precision, Scale: st.Scale}
+				}
+			}
+			m[c.Name] = spec
 		case discovery.IsStringType(c.Type):
 			m[c.Name] = policy.ColumnSpec{Kind: policy.ColumnText}
 		}

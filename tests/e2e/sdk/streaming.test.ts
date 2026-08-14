@@ -37,6 +37,13 @@ describe("Streaming", () => {
         allow_columns: ["*"],
         filter: { country: { _eq: "{{ jwt.country }}" } },
       },
+      // 'metered' carries a numeric literal bound, so the SSE fan-out exercises
+      // the storage-domain numeric comparison (canonical decimal + integer range
+      // gate) end to end, not just String equality scoping.
+      metered: {
+        allow_columns: ["*"],
+        filter: { duration_ms: { _gt: "100" } },
+      },
     };
     publicPolicy.tables[T.events].select = {
       ...(publicPolicy.tables[T.events].select || {}),
@@ -246,6 +253,41 @@ describe("Streaming", () => {
         if (unsubCa) unsubCa();
         usStream.close();
         caStream.close();
+      }
+    });
+
+    it("evaluates a numeric row filter in the column's storage domain (UInt32 threshold)", async () => {
+      // 'metered' scopes delivery to duration_ms > 100 over a UInt32 column: the
+      // constant routes through the canonical-decimal reading and the integer
+      // range gate, and both operands compare in the column's storage domain —
+      // the #381 storage-domain path, pinned end to end on SSE.
+      const inserter = dataClient();
+      const client = authClient("metered");
+      const events: any[] = [];
+      const lowId = testId();
+      const highId = testId();
+
+      const stream = client.from(T.clicks).stream();
+      let unsub: (() => void) | undefined;
+      try {
+        unsub = stream.subscribe({
+          next: (e) => events.push(e),
+          error: (err) => console.error("metered SSE error:", err),
+        });
+        await stream.connected(20_000);
+
+        const base = { page: "/metered", user_id: "u", session_id: "s" };
+        // Below the bound first, above it second: frames on one connection are
+        // strictly ordered behind the same subject, so receiving the high row
+        // proves the low row was withheld, not merely late.
+        await inserter.from(T.clicks).insert({ ...base, event_id: lowId, duration_ms: 100 });
+        await inserter.from(T.clicks).insert({ ...base, event_id: highId, duration_ms: 250 });
+
+        await waitForCondition(() => events.some((e) => e.data?.event_id === highId), 10_000);
+        expect(events.some((e) => e.data?.event_id === lowId)).toBe(false);
+      } finally {
+        if (unsub) unsub();
+        stream.close();
       }
     });
   });

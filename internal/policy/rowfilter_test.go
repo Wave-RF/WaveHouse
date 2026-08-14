@@ -9,6 +9,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// intNumeric is the Int64 numeric spec most tests compare under — exact within
+// the width's range, the storage model of the default integer id column. Float
+// and Decimal narrowing, other widths, and range gating have dedicated tests.
+func intNumeric() ColumnSpec {
+	return ColumnSpec{Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericInteger, Bits: 64}}
+}
+
 // evalRowFilter builds a one-role/one-table policy carrying filter and returns the
 // permissions resolved against claims, so tests exercise the full
 // resolvePredicates → RowVisible path the stream fan-out uses.
@@ -67,7 +74,7 @@ func TestRowVisible_Neq(t *testing.T) {
 		"opaque column (e.g. UUID): a case difference is not proof of inequality — fail closed")
 
 	num := evalRowFilter(t, map[string]Filter{"amount": {Neq: new("100")}}, nil)
-	kinds := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	kinds := map[string]ColumnSpec{"amount": intNumeric()}
 	assert.True(t, num.RowVisible(map[string]any{"amount": float64(250)}, kinds), "numeric column: 250 ≠ 100 is provable")
 	assert.False(t, num.RowVisible(map[string]any{"amount": float64(100)}, kinds))
 }
@@ -85,14 +92,14 @@ func TestRowVisible_Ordering_SchemaInformed(t *testing.T) {
 	perms := evalRowFilter(t, map[string]Filter{"amount": {Gt: new("100")}}, nil)
 	small := map[string]any{"amount": float64(9)}
 	big := map[string]any{"amount": float64(250)}
-	numeric := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	numeric := map[string]ColumnSpec{"amount": intNumeric()}
 
 	assert.False(t, perms.RowVisible(small, numeric), "numeric: 9 is not > 100")
 	assert.True(t, perms.RowVisible(big, numeric))
 
 	assert.False(t, perms.RowVisible(small, nil), `no schema: fail closed — never the "9" > "100" text leak`)
 	assert.False(t, perms.RowVisible(big, nil), "no schema: fail closed even when the numbers would pass")
-	assert.False(t, perms.RowVisible(small, map[string]ColumnSpec{"other": {Kind: ColumnNumeric}}),
+	assert.False(t, perms.RowVisible(small, map[string]ColumnSpec{"other": intNumeric()}),
 		"column absent from a known schema: fail closed")
 	assert.False(t, perms.RowVisible(small, map[string]ColumnSpec{"amount": {Kind: ColumnOpaque}}),
 		"opaque type (Enum/Date/UUID/…): order is unprovable, fail closed")
@@ -110,7 +117,7 @@ func TestRowVisible_Ordering_SchemaInformed(t *testing.T) {
 func TestRowVisible_NumericEquality_FloatFormatting(t *testing.T) {
 	t.Parallel()
 	perms := evalRowFilter(t, map[string]Filter{"amount": {Eq: new("100")}}, nil)
-	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"amount": intNumeric()}
 	assert.True(t, perms.RowVisible(map[string]any{"amount": float64(100)}, num))
 	assert.False(t, perms.RowVisible(map[string]any{"amount": float64(101)}, num))
 }
@@ -121,7 +128,7 @@ func TestRowVisible_NumericEquality_FloatFormatting(t *testing.T) {
 // NaN must withhold the row instead.
 func TestRowVisible_NaN_FailsClosed(t *testing.T) {
 	t.Parallel()
-	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"amount": intNumeric()}
 
 	byRow := evalRowFilter(t, map[string]Filter{"amount": {Eq: new("100")}}, nil)
 	assert.False(t, byRow.RowVisible(map[string]any{"amount": "NaN"}, num), "NaN row value must not equal 100")
@@ -140,7 +147,7 @@ func TestRowVisible_NaN_FailsClosed(t *testing.T) {
 // to ±Inf must withhold the row instead.
 func TestRowVisible_Inf_FailsClosed(t *testing.T) {
 	t.Parallel()
-	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"amount": intNumeric()}
 
 	byClaim := evalRowFilter(t, map[string]Filter{"amount": {Gt: new("{{ jwt.min }}")}}, map[string]any{"min": "-Inf"})
 	assert.False(t, byClaim.RowVisible(map[string]any{"amount": float64(5)}, num), "-Inf lower bound must not admit finite rows")
@@ -157,7 +164,7 @@ func TestRowVisible_Inf_FailsClosed(t *testing.T) {
 // collapse distinct IDs that round to the same float64 (adjacent values past 2^53).
 func TestRowVisible_NumericEquality_ExactBeyondFloat64(t *testing.T) {
 	t.Parallel()
-	num := map[string]ColumnSpec{"id": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"id": intNumeric()}
 
 	perms := evalRowFilter(t, map[string]Filter{"id": {Eq: new("9007199254740993")}}, nil)
 	assert.False(t, perms.RowVisible(map[string]any{"id": "9007199254740992"}, num), "float64-equal neighbors are not equal")
@@ -172,21 +179,22 @@ func TestRowVisible_NumericEquality_ExactBeyondFloat64(t *testing.T) {
 	assert.True(t, perms.RowVisible(map[string]any{"id": json.Number("9007199254740993")}, num))
 
 	neq := evalRowFilter(t, map[string]Filter{"id": {Neq: new("9007199254740993")}}, nil)
-	assert.True(t, neq.RowVisible(map[string]any{"id": "9007199254740992"}, num), "the exact tie-break keeps distinct IDs unequal for !=")
+	assert.True(t, neq.RowVisible(map[string]any{"id": "9007199254740992"}, num), "the exact comparison keeps distinct IDs unequal for !=")
 }
 
-// TestRowVisible_OverlongNumericOperand_FailsClosed: the numeric arm refuses
-// operands wider than maxComparableChars before parsing anything — the exact
-// tie-break's big.Rat parse is superlinear in digit count and the row operand
-// is client-controlled, so an over-long "number" engineered to float64-tie with
-// the constant would otherwise burn CPU once per subscriber per event on the
-// fan-out goroutine. Withheld, never parsed; real-width values are unaffected.
+// TestRowVisible_OverlongNumericOperand_FailsClosed: an over-long operand is
+// refused by the O(1) length pre-gate (maxNumericOperandChars) before ANY scan
+// of its bytes — the row operand is client-controlled and the comparison runs
+// per subscriber per event on the fan-out goroutine, so even a linear
+// json.Valid pass over it is a cost an attacker controls. The gate is
+// verdict-preserving: anything longer already fails the canonical digit bound.
+// Withheld, never read; real-width values unaffected.
 func TestRowVisible_OverlongNumericOperand_FailsClosed(t *testing.T) {
 	t.Parallel()
-	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"amount": intNumeric()}
 	perms := evalRowFilter(t, map[string]Filter{"amount": {Eq: new("100")}}, nil)
 
-	long := "100." + strings.Repeat("0", 200_000) + "1" // ties with 100 as float64
+	long := "100." + strings.Repeat("0", 200_000) + "1" // far past the operand length gate
 	assert.False(t, perms.RowVisible(map[string]any{"amount": json.Number(long)}, num))
 	assert.False(t, perms.RowVisible(map[string]any{"amount": long}, num), "string-encoded operand is bounded too")
 	assert.True(t, perms.RowVisible(map[string]any{"amount": json.Number("100.0")}, num), "real-width values still compare")
@@ -195,13 +203,13 @@ func TestRowVisible_OverlongNumericOperand_FailsClosed(t *testing.T) {
 // TestRowVisible_LossyFloatClaim_FailsClosed: a claim that arrives as a float64
 // at or past 2^53 has already collapsed onto its float neighbors — rendering
 // digits for it could name another tenant (the fail-open caught in #381 review:
-// fmt.Sprint turned the claim into "1e+16", which compareExact then matched
-// against the neighbor's exact digits). The predicate must match NOTHING: not
-// the neighbor the float equals, and not even the row whose exact ID the claim
+// the claim rendered as "1e+16" and matched the neighbor's rows). CanonicalScalar
+// now refuses such a float64 outright, so the predicate matches NOTHING: not the
+// neighbor the float equals, and not even the row whose exact ID the claim
 // originally carried — availability, never confidentiality.
 func TestRowVisible_LossyFloatClaim_FailsClosed(t *testing.T) {
 	t.Parallel()
-	num := map[string]ColumnSpec{"tenant_id": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"tenant_id": intNumeric()}
 	filter := map[string]Filter{"tenant_id": {Eq: new("{{ jwt.tenant }}")}}
 
 	lossy := evalRowFilter(t, filter, map[string]any{"tenant": float64(10000000000000001)}) // already 1e16
@@ -258,6 +266,27 @@ func TestRowVisible_TimeColumn(t *testing.T) {
 		"ColumnTime without a parser refuses the comparison — never a text fallback")
 }
 
+// TestRowVisible_TimeColumn_OverlongOperand_Gated: the O(1) length gate refuses
+// an over-long timestamp operand — string OR json.Number (a Unix-epoch payload
+// shape) — BEFORE the parser scans it, so a client-controlled megabyte "value"
+// can't stall the per-subscriber fan-out. The parser here counts every call, so
+// a gated operand must produce zero calls.
+func TestRowVisible_TimeColumn_OverlongOperand_Gated(t *testing.T) {
+	t.Parallel()
+	var calls int
+	counting := ColumnSpec{Kind: ColumnTime, ParseTime: func(v any) (time.Time, bool) {
+		calls++
+		return time.Time{}, false
+	}}
+	cols := map[string]ColumnSpec{"created_at": counting}
+	perms := evalRowFilter(t, map[string]Filter{"created_at": {Eq: new("2026-06-21T04:00:00Z")}}, nil)
+
+	huge := strings.Repeat("9", maxTimeOperandChars+1)
+	assert.False(t, perms.RowVisible(map[string]any{"created_at": huge}, cols))
+	assert.False(t, perms.RowVisible(map[string]any{"created_at": json.Number(huge)}, cols))
+	assert.Zero(t, calls, "an over-long operand must be refused before the parser is called")
+}
+
 func TestRowVisible_NilReceiver_AllVisible(t *testing.T) {
 	t.Parallel()
 	var perms *ResolvedPermissions
@@ -282,7 +311,7 @@ func TestRowVisible_MultiplePredicates_AllMustPass(t *testing.T) {
 		"tenant_id": {Eq: new("{{ jwt.tenant }}")},
 		"amount":    {Gt: new("100")},
 	}, map[string]any{"tenant": "acme"})
-	num := map[string]ColumnSpec{"amount": {Kind: ColumnNumeric}}
+	num := map[string]ColumnSpec{"amount": intNumeric()}
 	assert.True(t, perms.RowVisible(map[string]any{"tenant_id": "acme", "amount": float64(250)}, num))
 	assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "acme", "amount": float64(9)}, num), "amount fails")
 	assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "globex", "amount": float64(250)}, num), "tenant fails")
@@ -324,4 +353,191 @@ func TestRowFilter_UnresolvableClaim_NoRowsOnBothPaths(t *testing.T) {
 			assert.False(t, perms.RowVisible(map[string]any{"tenant_id": "acme"}, nil), "stream path: every row withheld")
 		})
 	}
+}
+
+// TestRowVisible_FloatNarrowing: Float32/Float64 columns compare in the
+// column's float domain — BOTH operands narrowed, exactly as ClickHouse
+// narrows the stored value at insert and the bound constant at compare. The
+// Float32 case is the #381 review repro: payload 16777217 stores as 16777216,
+// so `_gt: "16777216"` must NOT admit the event (the SQL predicate over the
+// stored row is false), while equality against the same spelling matches on
+// both surfaces because the constant narrows too. The integer family, by
+// contrast, keeps such neighbors distinct.
+func TestRowVisible_FloatNarrowing(t *testing.T) {
+	t.Parallel()
+	f32 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericFloat, Bits: 32}}}
+	f64 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericFloat, Bits: 64}}}
+	intCol := map[string]ColumnSpec{"v": intNumeric()}
+
+	gt := evalRowFilter(t, map[string]Filter{"v": {Gt: new("16777216")}}, nil)
+	assert.False(t, gt.RowVisible(map[string]any{"v": json.Number("16777217")}, f32),
+		"stored Float32(16777217) is 16777216, not > 16777216 — the ordering fail-open, closed")
+	assert.True(t, gt.RowVisible(map[string]any{"v": json.Number("16777218")}, f32),
+		"16777218 is Float32-representable and greater on both surfaces")
+	assert.True(t, gt.RowVisible(map[string]any{"v": json.Number("16777217")}, intCol),
+		"an integer column stores 16777217 exactly, so the same event IS greater there")
+
+	eq := evalRowFilter(t, map[string]Filter{"v": {Eq: new("16777217")}}, nil)
+	assert.True(t, eq.RowVisible(map[string]any{"v": json.Number("16777217")}, f32),
+		"the constant narrows like the stored value — ClickHouse matches `= '16777217'` too")
+	assert.True(t, eq.RowVisible(map[string]any{"v": json.Number("16777216")}, f32),
+		"the Float32-equal neighbor matches on both surfaces — the column type gave that distinction away")
+	assert.False(t, eq.RowVisible(map[string]any{"v": json.Number("16777216")}, intCol),
+		"integer storage keeps the neighbors distinct")
+
+	eq64 := evalRowFilter(t, map[string]Filter{"v": {Eq: new("9007199254740993")}}, nil)
+	assert.True(t, eq64.RowVisible(map[string]any{"v": json.Number("9007199254740992")}, f64),
+		"Float64 column: 2^53 neighbors collapse in the storage domain, matching SQL")
+	assert.False(t, eq64.RowVisible(map[string]any{"v": json.Number("9007199254740992")}, intCol))
+
+	// A magnitude the float domain can't hold (ClickHouse would store ±Inf)
+	// refuses the comparison — withheld, never a guessed verdict.
+	overflow := evalRowFilter(t, map[string]Filter{"v": {Gt: new("0")}}, nil)
+	assert.False(t, overflow.RowVisible(map[string]any{"v": json.Number("1e39")}, f32),
+		"beyond Float32 range ⇒ withhold")
+}
+
+// TestRowVisible_DecimalScaleTruncation: Decimal columns compare after
+// truncating BOTH operands to the column's scale — ClickHouse's cast semantics
+// (1.005, 1.006 and 1.009 all store as 1.00 in a Decimal(10,2), and a bound
+// constant '1.005' truncates the same way, so `= '1.005'` matches a stored
+// 1.00 while `> '1.004'` matches nothing; verified on 25.5 and 26.6).
+func TestRowVisible_DecimalScaleTruncation(t *testing.T) {
+	t.Parallel()
+	dec2 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericDecimal, Precision: 10, Scale: 2}}}
+
+	gt := evalRowFilter(t, map[string]Filter{"v": {Gt: new("1.004")}}, nil)
+	assert.False(t, gt.RowVisible(map[string]any{"v": json.Number("1.005")}, dec2),
+		"stored 1.00 vs constant 1.00: not greater — the pre-narrowing payload must not leak through")
+	assert.True(t, gt.RowVisible(map[string]any{"v": json.Number("1.02")}, dec2))
+
+	eq := evalRowFilter(t, map[string]Filter{"v": {Eq: new("1.005")}}, nil)
+	assert.True(t, eq.RowVisible(map[string]any{"v": json.Number("1.006")}, dec2),
+		"both operands truncate to 1.00 — ClickHouse matches this pair too")
+	assert.False(t, eq.RowVisible(map[string]any{"v": json.Number("1.02")}, dec2))
+
+	lt := evalRowFilter(t, map[string]Filter{"v": {Lt: new("-1")}}, nil)
+	assert.False(t, lt.RowVisible(map[string]any{"v": json.Number("-1.005")}, dec2),
+		"truncation is toward zero: -1.005 stores as -1.00, which is not < -1")
+}
+
+// TestRowVisible_IntegerFractionalOperand_FailsClosed: an integer column
+// refuses fractional operands on either side — a fractional constant is a
+// per-query type error on the SQL path (the role reads no rows there), and a
+// fractional payload was never storable in the column — so the stream
+// withholds rather than inventing a verdict SQL cannot produce. An integral
+// value in fractional SPELLING is a different thing entirely: it
+// canonicalizes to its integer and compares normally.
+func TestRowVisible_IntegerFractionalOperand_FailsClosed(t *testing.T) {
+	t.Parallel()
+	num := map[string]ColumnSpec{"v": intNumeric()}
+
+	frac := evalRowFilter(t, map[string]Filter{"v": {Neq: new("1.5")}}, nil)
+	assert.False(t, frac.RowVisible(map[string]any{"v": json.Number("2")}, num),
+		"fractional constant: SQL errors the query, the stream withholds — neither returns rows")
+
+	pay := evalRowFilter(t, map[string]Filter{"v": {Gt: new("1")}}, nil)
+	assert.False(t, pay.RowVisible(map[string]any{"v": json.Number("2.5")}, num),
+		"fractional payload was never storable in an integer column")
+	assert.True(t, pay.RowVisible(map[string]any{"v": json.Number("2.0")}, num),
+		"integral value in fractional spelling canonicalizes to 2 and compares")
+}
+
+// TestRowVisible_ConstantSpellingFidelity: on an integer column a literal
+// constant that is not its own canonical form ("1e3", "1.5") refuses the
+// comparison — the SQL path binds the spelling as written and ClickHouse's
+// integer cast errors the query there, so the role reads no rows; admitting
+// the canonical reading here would deliver rows SQL never returns. Float and
+// Decimal casts accept every JSON-number spelling ('1e3' casts to
+// Decimal(10,2) as 1000 — verified against ClickHouse), so those families
+// compare such constants normally.
+func TestRowVisible_ConstantSpellingFidelity(t *testing.T) {
+	t.Parallel()
+	intCol := map[string]ColumnSpec{"v": intNumeric()}
+	dec2 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericDecimal, Precision: 10, Scale: 2}}}
+	f32 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericFloat, Bits: 32}}}
+
+	exp := evalRowFilter(t, map[string]Filter{"v": {Eq: new("1e3")}}, nil)
+	assert.False(t, exp.RowVisible(map[string]any{"v": json.Number("1000")}, intCol),
+		"integer column: SQL errors on '1e3', so the stream must not admit its canonical reading")
+	assert.True(t, exp.RowVisible(map[string]any{"v": json.Number("1000")}, f32),
+		"float column: ClickHouse casts '1e3' fine, so the stream compares it")
+	assert.True(t, exp.RowVisible(map[string]any{"v": json.Number("1000")}, dec2),
+		"Decimal column: ClickHouse casts '1e3' fine too, so the stream compares it")
+
+	trailing := evalRowFilter(t, map[string]Filter{"v": {Gt: new("1.50")}}, nil)
+	assert.True(t, trailing.RowVisible(map[string]any{"v": json.Number("2")}, dec2),
+		"a trailing-zero Decimal spelling casts on both surfaces and compares by value")
+}
+
+// TestRowVisible_OutOfRangeOperand_FailsClosed: an operand outside the
+// column's numeric range refuses the comparison on either side. ClickHouse's
+// reading of such a CONSTANT was measured to vary by pair on one release —
+// error (negative vs unsigned: the role reads no rows), mathematical promotion
+// ('256' vs UInt8), or a width-boundary wrap that compares against a DIFFERENT
+// value than written (2^63 vs Int64 reads as −2^63, where exact-precision
+// comparison would admit the −2^63 rows SQL hides under !=) — so no single
+// model is safe to reproduce, and refusal is. A PAYLOAD out of range was never
+// storable (the insert is rejected), so withholding matches the stored world.
+func TestRowVisible_OutOfRangeOperand_FailsClosed(t *testing.T) {
+	t.Parallel()
+	u64 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericInteger, Bits: 64, Unsigned: true}}}
+	u8 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericInteger, Bits: 8, Unsigned: true}}}
+	i8 := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericInteger, Bits: 8}}}
+	dec := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericDecimal, Precision: 10, Scale: 2}}}
+
+	neg := evalRowFilter(t, map[string]Filter{"v": {Gt: new("-5")}}, nil)
+	assert.False(t, neg.RowVisible(map[string]any{"v": json.Number("7")}, u64),
+		"negative constant on an unsigned column: SQL errors, the stream must not admit everything")
+
+	wrap := evalRowFilter(t, map[string]Filter{"v": {Neq: new("18446744073709551616")}}, nil)
+	assert.False(t, wrap.RowVisible(map[string]any{"v": json.Number("7")}, u64),
+		"a width-boundary constant may wrap on the SQL side — comparing it as written risks admitting rows SQL hides")
+
+	wide := evalRowFilter(t, map[string]Filter{"v": {Lt: new("99999999999999999999999")}}, nil)
+	assert.False(t, wide.RowVisible(map[string]any{"v": json.Number("7")}, u64),
+		"a constant past the width has no reliable SQL reading; the stream withholds")
+
+	over8 := evalRowFilter(t, map[string]Filter{"v": {Neq: new("256")}}, nil)
+	assert.False(t, over8.RowVisible(map[string]any{"v": json.Number("7")}, u8))
+	assert.False(t, over8.RowVisible(map[string]any{"v": json.Number("300")}, u8),
+		"an out-of-range payload was never storable — withheld")
+	ok8 := evalRowFilter(t, map[string]Filter{"v": {Neq: new("254")}}, nil)
+	assert.True(t, ok8.RowVisible(map[string]any{"v": json.Number("7")}, u8), "in-range operands still compare")
+
+	i8lo := evalRowFilter(t, map[string]Filter{"v": {Gt: new("-129")}}, nil)
+	assert.False(t, i8lo.RowVisible(map[string]any{"v": json.Number("0")}, i8))
+	i8ok := evalRowFilter(t, map[string]Filter{"v": {Gt: new("-128")}}, nil)
+	assert.True(t, i8ok.RowVisible(map[string]any{"v": json.Number("0")}, i8), "the signed minimum itself is in range")
+
+	prec := evalRowFilter(t, map[string]Filter{"v": {Eq: new("999999999")}}, nil)
+	assert.False(t, prec.RowVisible(map[string]any{"v": json.Number("5")}, dec),
+		"9 integer digits exceed Decimal(10,2)'s 8-digit budget: unmodelable on the SQL side, withheld here")
+	precOK := evalRowFilter(t, map[string]Filter{"v": {Eq: new("99999999")}}, nil)
+	assert.True(t, precOK.RowVisible(map[string]any{"v": json.Number("99999999")}, dec), "the budget's edge is in range")
+
+	// A hand-built spec with an incoherent Scale must degrade to refusal —
+	// never a panic on the fan-out goroutine (truncateScale slices by Scale).
+	badScale := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericDecimal, Precision: 10, Scale: -1}}}
+	assert.NotPanics(t, func() {
+		assert.False(t, precOK.RowVisible(map[string]any{"v": json.Number("1.5")}, badScale))
+	})
+}
+
+// TestRowVisible_NumericWithoutStorageModel_FailsClosed pins the NumericSpec
+// zero value: a ColumnNumeric spec carrying no storage model must refuse every
+// comparison, so a numeric type the classifier doesn't recognize (or a caller
+// that forgot to set the model) can never compare under guessed semantics.
+func TestRowVisible_NumericWithoutStorageModel_FailsClosed(t *testing.T) {
+	t.Parallel()
+	perms := evalRowFilter(t, map[string]Filter{"v": {Eq: new("1")}}, nil)
+
+	unmodeled := map[string]ColumnSpec{"v": {Kind: ColumnNumeric}}
+	assert.False(t, perms.RowVisible(map[string]any{"v": json.Number("1")}, unmodeled))
+
+	// A float family with no (or a bogus) bit width must refuse too:
+	// ParseFloat would silently treat any other bitSize as 64 and compare a
+	// Float32 column in the wider domain — the fail-open direction.
+	widthless := map[string]ColumnSpec{"v": {Kind: ColumnNumeric, Numeric: NumericSpec{Family: NumericFloat}}}
+	assert.False(t, perms.RowVisible(map[string]any{"v": json.Number("1")}, widthless))
 }

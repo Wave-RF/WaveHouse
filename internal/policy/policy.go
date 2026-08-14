@@ -589,6 +589,46 @@ func canonicalDecimal(lit string) (string, bool) {
 	return sign + out, true
 }
 
+// compareCanonicalDecimals orders two canonical decimal forms (CanonicalScalar
+// output) as numbers, by digit-string arithmetic alone — the comparison twin of
+// canonicalDecimal, sharing its invariants: an optional leading '-' (never on
+// zero), no leading integer zeros except a lone "0", no trailing fraction
+// zeros, no exponent. Those invariants are what make the string operations
+// sound: with no leading zeros a longer integer part IS the larger magnitude,
+// and with no trailing zeros a fraction that is a proper prefix of another IS
+// the smaller. Never a float round-trip, so 64-bit-plus IDs order exactly.
+func compareCanonicalDecimals(a, b string) int {
+	if a == b {
+		return 0
+	}
+	na, nb := strings.HasPrefix(a, "-"), strings.HasPrefix(b, "-")
+	switch {
+	case na && !nb:
+		return -1
+	case !na && nb:
+		return 1
+	case na && nb:
+		return -compareCanonicalMagnitudes(a[1:], b[1:])
+	}
+	return compareCanonicalMagnitudes(a, b)
+}
+
+// compareCanonicalMagnitudes orders two unsigned canonical forms.
+func compareCanonicalMagnitudes(a, b string) int {
+	ai, af, _ := strings.Cut(a, ".")
+	bi, bf, _ := strings.Cut(b, ".")
+	if len(ai) != len(bi) {
+		if len(ai) < len(bi) {
+			return -1
+		}
+		return 1
+	}
+	if c := strings.Compare(ai, bi); c != 0 {
+		return c
+	}
+	return strings.Compare(af, bf)
+}
+
 // navigateClaims traverses nested claim maps using dot-separated path parts.
 func navigateClaims(claims map[string]any, parts []string) any {
 	if len(parts) == 0 || claims == nil {

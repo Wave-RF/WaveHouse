@@ -1167,6 +1167,36 @@ func TestResolveFilters_NumericClaimBinding(t *testing.T) {
 	assert.Empty(t, params)
 }
 
+// TestCompareCanonicalDecimals pins the digit-string ordering over canonical
+// forms — the comparison twin of canonicalDecimal, exact at any width, never a
+// float round-trip. Each pair is asserted in both directions.
+func TestCompareCanonicalDecimals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"0", "0", 0},
+		{"1", "2", -1},
+		{"9", "100", -1},
+		{"-1", "1", -1},
+		{"-2", "-1", -1},
+		{"-100", "-9", -1},
+		{"1.5", "1.5", 0},
+		{"1.05", "1.5", -1},
+		{"0.5", "0.55", -1},
+		{"2", "2.5", -1},
+		{"-1.5", "-1", -1},
+		{"0.0025", "0.003", -1},
+		{"12345678901234567890", "12345678901234567891", -1},
+		{"9007199254740992", "9007199254740993", -1},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, compareCanonicalDecimals(tt.a, tt.b), "%s vs %s", tt.a, tt.b)
+		assert.Equal(t, -tt.want, compareCanonicalDecimals(tt.b, tt.a), "%s vs %s reversed", tt.b, tt.a)
+	}
+}
+
 // TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate
 // match no rows (a constant-false predicate) rather than widen to all rows — the
 // fail-closed direction. `IN ()` is invalid SQL. Two distinct branches of
