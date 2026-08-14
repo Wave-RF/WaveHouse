@@ -42,7 +42,7 @@ func TestHeartbeater_AddPlacesSubscriberInLastToFireBucket(t *testing.T) {
 	// A long period means the ticker never fires during the test, so bucket
 	// membership is deterministic.
 	hb := NewHeartbeater(time.Hour, 3)
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 	hb.Add(sub)
 
 	// hand starts at 0; buckets[0] fires next, so a new subscriber lands in
@@ -66,7 +66,7 @@ func TestHeartbeater_RotatesOneBucketPerTick(t *testing.T) {
 	// A roomy buffer means a (buggy) double-push would be observed, not dropped.
 	subs := make([]*Subscriber, buckets)
 	for i := range subs {
-		subs[i] = newSubscriber(4)
+		subs[i] = newSubscriber(4, nil)
 		hb.buckets[i].Add(subs[i])
 	}
 
@@ -101,7 +101,7 @@ func TestHeartbeater_PushesKeepaliveToIdleSubscriber(t *testing.T) {
 	hb := NewHeartbeater(5*time.Millisecond, 1)
 	go hb.Run(t.Context())
 
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 	hb.Add(sub)
 	defer hb.Remove(sub)
 
@@ -140,13 +140,13 @@ func TestHeartbeater_RemoveIdempotentAndWithoutAdd(t *testing.T) {
 	// Never added: sub.bucket is nil, so Remove is a no-op. The stream handler's
 	// deferred Remove must be safe even when Add was skipped (e.g. the wheel is
 	// wired but the request bailed before registering).
-	never := NewSubscriber(nil)
+	never := NewSubscriber(nil, nil)
 	assert.NotPanics(t, func() { hb.Remove(never) })
 	assert.Equal(t, 0, hb.Len())
 
 	// Added once, removed twice: the second Remove is a no-op, not a panic or a
 	// negative count.
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 	hb.Add(sub)
 	hb.Remove(sub)
 	assert.NotPanics(t, func() { hb.Remove(sub) })
@@ -173,7 +173,7 @@ func TestHeartbeater_ConcurrentAddRemovePush_Race(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range iterations {
-				sub := NewSubscriber(nil)
+				sub := NewSubscriber(nil, nil)
 				hb.Add(sub)
 				select { // drain whatever the wheel delivered, then leave
 				case <-sub.Frames():

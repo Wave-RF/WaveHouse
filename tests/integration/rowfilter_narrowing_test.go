@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
 	"github.com/Wave-RF/WaveHouse/internal/policy"
+	"github.com/Wave-RF/WaveHouse/internal/stream"
 )
 
 // TestRowFilterNumeric_DifferentialAgainstClickHouse pins the stream/query
@@ -170,21 +171,14 @@ func TestRowFilterNumeric_DifferentialAgainstClickHouse(t *testing.T) {
 }
 
 // numericColumnSpec builds the policy.ColumnSpec for a numeric ClickHouse type
-// exactly the way stream.Hub's columnSpecs does, from the same classifier.
+// through the very mapping production uses (stream.NumericSpecOf, the same
+// classifier and spec builder as stream.Hub's columnSpecs), so this oracle can
+// never validate a mapping the Hub no longer applies.
 func numericColumnSpec(t *testing.T, chType string) policy.ColumnSpec {
 	t.Helper()
 	st, ok := discovery.NumericStorageOf(chType)
 	require.True(t, ok, "corpus types must classify: %s", chType)
-	spec := policy.ColumnSpec{Kind: policy.ColumnNumeric}
-	switch {
-	case st.Integer:
-		spec.Numeric = policy.NumericSpec{Family: policy.NumericInteger, Bits: st.IntBits, Unsigned: st.Unsigned}
-	case st.FloatBits != 0:
-		spec.Numeric = policy.NumericSpec{Family: policy.NumericFloat, Bits: st.FloatBits}
-	default:
-		spec.Numeric = policy.NumericSpec{Family: policy.NumericDecimal, Precision: st.Precision, Scale: st.Scale}
-	}
-	return spec
+	return policy.ColumnSpec{Kind: policy.ColumnNumeric, Numeric: stream.NumericSpecOf(st)}
 }
 
 // streamVerdict resolves a one-operator literal filter through the full

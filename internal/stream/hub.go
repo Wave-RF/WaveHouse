@@ -151,11 +151,8 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 		if !perms.HasRowFilter() {
 			// No row-level security for this role: one projection serves the whole
 			// bucket, regardless of per-subscriber claims (the #294/#353 fast path).
-			for _, sub := range rb.bucket.Snapshot() {
-				if !sub.Send(frame) {
-					h.metric.FrameDropped(KindEvent)
-				}
-			}
+			// Push is fire-and-forget; Send itself counts any queue-full drop.
+			rb.bucket.Push(frame)
 			continue
 		}
 
@@ -168,16 +165,24 @@ func (h *Hub) Broadcast(topic string, raw []byte) {
 			specsResolved = true
 		}
 		for _, sub := range rb.bucket.Snapshot() {
-			subPerms := policy.Evaluate(p, rb.role, evt.TableName, "select", sub.claims)
-			if !subPerms.RowVisible(evt.Data, colSpecs) {
-				h.metric.RowWithheld(evt.TableName, rb.role)
-				continue // this row is filtered out for this subscriber
-			}
-			if !sub.Send(frame) {
-				h.metric.FrameDropped(KindEvent)
+			if h.rowAdmitted(p, rb.role, &evt, sub.claims, colSpecs) {
+				sub.Send(frame)
 			}
 		}
 	}
+}
+
+// rowAdmitted reports whether claims admit this event's row under the role's
+// row-filter, counting a withheld row when they don't. It is the one admission
+// step shared by the live fan-out (per subscriber) and replay (per connection),
+// so the two delivery paths can't drift on how row-level security is evaluated.
+func (h *Hub) rowAdmitted(p *policy.Policy, role string, evt *ingest.EventMessage, claims map[string]any, colSpecs map[string]policy.ColumnSpec) bool {
+	perms := policy.Evaluate(p, role, evt.TableName, "select", claims)
+	if !perms.RowVisible(evt.Data, colSpecs) {
+		h.metric.RowWithheld(evt.TableName, role)
+		return false
+	}
+	return true
 }
 
 // columnSpecs classifies each of the table's columns for the row-filter evaluator:
@@ -213,14 +218,7 @@ func (h *Hub) columnSpecs(table string) map[string]policy.ColumnSpec {
 			// never a comparison under guessed semantics.
 			spec := policy.ColumnSpec{Kind: policy.ColumnNumeric}
 			if st, ok := discovery.NumericStorageOf(c.Type); ok {
-				switch {
-				case st.Integer:
-					spec.Numeric = policy.NumericSpec{Family: policy.NumericInteger, Bits: st.IntBits, Unsigned: st.Unsigned}
-				case st.FloatBits != 0:
-					spec.Numeric = policy.NumericSpec{Family: policy.NumericFloat, Bits: st.FloatBits}
-				default:
-					spec.Numeric = policy.NumericSpec{Family: policy.NumericDecimal, Precision: st.Precision, Scale: st.Scale}
-				}
+				spec.Numeric = NumericSpecOf(st)
 			}
 			m[c.Name] = spec
 		case discovery.IsStringType(c.Type):
@@ -228,6 +226,21 @@ func (h *Hub) columnSpecs(table string) map[string]policy.ColumnSpec {
 		}
 	}
 	return m
+}
+
+// NumericSpecOf renders discovery's storage classification as the policy
+// evaluator's storage model. Exported so the tests/integration differential
+// oracle builds specs through the very mapping production uses — one source,
+// so the oracle can't keep validating a mapping the Hub no longer applies.
+func NumericSpecOf(st discovery.NumericStorage) policy.NumericSpec {
+	switch {
+	case st.Integer:
+		return policy.NumericSpec{Family: policy.NumericInteger, Bits: st.IntBits, Unsigned: st.Unsigned}
+	case st.FloatBits != 0:
+		return policy.NumericSpec{Family: policy.NumericFloat, Bits: st.FloatBits}
+	default:
+		return policy.NumericSpec{Family: policy.NumericDecimal, Precision: st.Precision, Scale: st.Scale}
+	}
 }
 
 // decodeEvent parses raw as a published EventMessage, reporting whether it is one
@@ -271,18 +284,20 @@ func (h *Hub) snapshotPolicy() (p *policy.Policy, filter bool) {
 // replay shares the Hub's policy store and schema registry with the live fan-out —
 // the handler can't accidentally project replay against a different (or nil)
 // policy. Replay is already per-connection, so row-level security evaluates against
-// this connection's claims directly; the returned closure caches the per-table
-// column-kind lookup across the replay loop (the same hoist Broadcast does per
-// event), so a large Last-Event-ID gap-fill doesn't pay one registry lookup and map
-// build per event. The closure is for a single goroutine — each connection makes
-// its own. The live path uses Broadcast.
+// this connection's claims directly; the returned closure holds one policy snapshot
+// for the whole gap-fill (matching Broadcast's one-snapshot-per-event — a reload
+// landing mid-replay applies from the first live event) and caches the per-table
+// column-kind lookup across the replay loop, so a large Last-Event-ID gap-fill
+// doesn't pay a store read-lock plus a registry lookup and map build per event.
+// The closure is for a single goroutine — each connection makes its own. The live
+// path uses Broadcast.
 func (h *Hub) ReplayProjector(role string, claims map[string]any) func(raw []byte) (Frame, bool) {
+	p, filter := h.snapshotPolicy()
 	var colSpecs map[string]policy.ColumnSpec
 	specsFor := "" // table name colSpecs was resolved for ("" ⇒ not yet resolved)
 	return func(raw []byte) (Frame, bool) {
 		var evt ingest.EventMessage
 		decoded := decodeEvent(raw, &evt)
-		p, filter := h.snapshotPolicy()
 		wire, perms, ok := projectColumns(p, filter, role, &evt, raw, decoded)
 		if !ok {
 			return Frame{}, false
@@ -294,9 +309,7 @@ func (h *Hub) ReplayProjector(role string, claims map[string]any) func(raw []byt
 				colSpecs = h.columnSpecs(evt.TableName)
 				specsFor = evt.TableName
 			}
-			subPerms := policy.Evaluate(p, role, evt.TableName, "select", claims)
-			if !subPerms.RowVisible(evt.Data, colSpecs) {
-				h.metric.RowWithheld(evt.TableName, role)
+			if !h.rowAdmitted(p, role, &evt, claims, colSpecs) {
 				return Frame{}, false // this row is filtered out for these claims
 			}
 		}

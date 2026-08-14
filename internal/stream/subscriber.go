@@ -42,13 +42,19 @@ type Subscriber struct {
 	// here and consumed by the handler; the policy that *closes* it (consecutive-drop
 	// threshold) lands with the slow-consumer follow-up (#294 / #94).
 	evict chan struct{}
+
+	// metric counts queue-full drops inside Send itself (by frame kind), so every
+	// producer — the event fan-out, replay, the keepalive wheel — is covered without
+	// each call site remembering to count. Nil-safe (nil in tests).
+	metric *Metrics
 }
 
 // NewSubscriber returns a Subscriber ready to register with a Heartbeater and the
 // event Hub, carrying the connection's JWT claims (nil for a tokenless caller),
-// deep-copied — see the claims field for the snapshot rationale.
-func NewSubscriber(claims map[string]any) *Subscriber {
-	s := newSubscriber(defaultSubscriberQueue)
+// deep-copied — see the claims field for the snapshot rationale — and the shared
+// stream metrics (nil-safe) that Send counts drops on.
+func NewSubscriber(claims map[string]any, m *Metrics) *Subscriber {
+	s := newSubscriber(defaultSubscriberQueue, m)
 	s.claims = cloneClaimsMap(claims)
 	return s
 }
@@ -83,9 +89,11 @@ func cloneClaimValue(v any) any {
 }
 
 // newSubscriber builds a Subscriber with an explicit queue size — the seam tests
-// use to exercise the full-queue/drop path without enqueuing 64 frames.
-func newSubscriber(size int) *Subscriber {
-	return &Subscriber{out: make(chan Frame, size), evict: make(chan struct{})}
+// use to exercise the full-queue/drop path without enqueuing 64 frames. It is
+// the one place the drop-counting metric is wired, so the production
+// constructor and the drop tests share it.
+func newSubscriber(size int, m *Metrics) *Subscriber {
+	return &Subscriber{out: make(chan Frame, size), evict: make(chan struct{}), metric: m}
 }
 
 // Frames is the queue of ready-to-write frames; the handler writes whatever
@@ -95,14 +103,15 @@ func (s *Subscriber) Frames() <-chan Frame {
 }
 
 // Send enqueues one frame without blocking, returning false if the queue is full
-// (a slow consumer). Keepalive callers ignore the result — a full queue already
-// has a frame pending that keeps the stream alive. The event fan-out uses the
-// result to count drops.
+// (a slow consumer). The drop is counted here, labeled by the frame's kind, so no
+// producer can forget to; callers may ignore the result (a keepalive that drops
+// coalesces harmlessly — the full queue keeps the stream alive anyway).
 func (s *Subscriber) Send(f Frame) bool {
 	select {
 	case s.out <- f:
 		return true
 	default:
+		s.metric.FrameDropped(f.Kind)
 		return false
 	}
 }

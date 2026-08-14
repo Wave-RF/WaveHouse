@@ -3,9 +3,10 @@ package stream
 import "sync"
 
 // Bucket is a concurrency-safe set of subscribers. Push fans one Frame out to
-// every member fire-and-forget (the keepalive wheel's primitive); Snapshot exposes
-// the members so the event Hub can fan out while inspecting each Send result (to
-// count drops and, later, evict).
+// every member fire-and-forget (the keepalive wheel and the Hub's no-row-filter
+// fast path; Send itself counts any queue-full drop); Snapshot exposes the
+// members so the event Hub can evaluate row visibility per subscriber before
+// sending (and, later, evict).
 type Bucket interface {
 	Add(sub *Subscriber)
 	Remove(sub *Subscriber)

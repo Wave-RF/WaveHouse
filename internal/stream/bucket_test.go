@@ -12,8 +12,8 @@ func TestSubscriberSet_AddRemoveLen(t *testing.T) {
 	s := newSubscriberSet()
 	assert.Equal(t, 0, s.Len())
 
-	s1 := NewSubscriber(nil)
-	s2 := NewSubscriber(nil)
+	s1 := NewSubscriber(nil, nil)
+	s2 := NewSubscriber(nil, nil)
 	s.Add(s1)
 	s.Add(s2)
 	assert.Equal(t, 2, s.Len())
@@ -31,7 +31,7 @@ func TestSubscriberSet_AddRemoveLen(t *testing.T) {
 func TestSubscriberSet_PushIsNonBlockingAndDropsWhenFull(t *testing.T) {
 	t.Parallel()
 	s := newSubscriberSet()
-	sub := newSubscriber(1) // cap-1 so the second push has nowhere to go
+	sub := newSubscriber(1, nil) // cap-1 so the second push has nowhere to go
 	s.Add(sub)
 	payload := Frame{Kind: KindEvent, Data: []byte("payload")}
 
@@ -50,7 +50,7 @@ func TestSubscriberSet_PushIsNonBlockingAndDropsWhenFull(t *testing.T) {
 func TestSubscriberSet_PushAfterRemove_NoPanicNoBlock(t *testing.T) {
 	t.Parallel()
 	s := newSubscriberSet()
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 	s.Add(sub)
 	s.Remove(sub)
 	frame := Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}
@@ -80,8 +80,8 @@ func TestSubscriberSet_PushToStoppedReader_DropsAndDoesNotStallWheel(t *testing.
 	t.Parallel()
 	s := newSubscriberSet()
 	// stuck never drains, so its cap-1 buffer fills and stays full; live keeps room.
-	stuck := newSubscriber(1)
-	live := newSubscriber(4)
+	stuck := newSubscriber(1, nil)
+	live := newSubscriber(4, nil)
 	s.Add(stuck)
 	s.Add(live)
 	frame := Frame{Kind: KindKeepalive, Data: []byte(":\n\n")}

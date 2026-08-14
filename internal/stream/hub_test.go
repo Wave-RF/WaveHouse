@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -97,7 +98,7 @@ func TestHub_ProjectsOncePerRole_FanOutToAllSubscribers(t *testing.T) {
 	hub := NewHub(nil, nil, nil) // nil store ⇒ passthrough, no filtering
 	const topic = "ingest.clicks"
 
-	a, b := NewSubscriber(nil), NewSubscriber(nil)
+	a, b := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add(topic, "public", a)
 	hub.Add(topic, "public", b)
 
@@ -129,8 +130,8 @@ func TestHub_ProjectsPerRole_ColumnFilterAndDenial(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
 	const topic = "ingest.clicks"
 
-	viewer := NewSubscriber(nil)
-	blocked := NewSubscriber(nil)
+	viewer := NewSubscriber(nil, nil)
+	blocked := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", viewer)
 	hub.Add(topic, "blocked", blocked)
 
@@ -193,7 +194,7 @@ func TestHub_ProjectsPerRole_DistinctRolesGetDistinctFrames(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), nil, nil)
 	const topic = "ingest.clicks"
 
-	viewer, editor := NewSubscriber(nil), NewSubscriber(nil)
+	viewer, editor := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", viewer)
 	hub.Add(topic, "editor", editor)
 
@@ -247,9 +248,9 @@ func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}))
-	globex := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "globex"}))
-	noTenant := NewSubscriber(jwtClaims(t, map[string]any{"role": "viewer"})) // valid token, no tenant claim
+	acme := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "acme"}), nil)
+	globex := NewSubscriber(jwtClaims(t, map[string]any{"tenant": "globex"}), nil)
+	noTenant := NewSubscriber(jwtClaims(t, map[string]any{"role": "viewer"}), nil) // valid token, no tenant claim
 	hub.Add(topic, "viewer", acme)
 	hub.Add(topic, "viewer", globex)
 	hub.Add(topic, "viewer", noTenant)
@@ -276,8 +277,9 @@ func TestHub_RowFilter_PerSubscriberIsolation(t *testing.T) {
 // TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation: NewSubscriber deep-copies
 // the claims, so a caller that keeps the source map (the middleware-owned
 // jwt.MapClaims outlives Hub.Add) can neither widen row visibility after
-// registration nor race Broadcast's claims read. The mutation targets a NESTED
-// value to prove the copy is deep, not a top-level shallow copy.
+// registration nor race Broadcast's claims read. The mutations target a NESTED
+// map value and an ARRAY element to prove the copy is deep on both structured
+// arms (cloneClaimValue), not a top-level shallow copy.
 func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 	t.Parallel()
 	p := &policy.Policy{
@@ -292,7 +294,7 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 
 	org := map[string]any{"tenant": "globex"}
 	claims := map[string]any{"org": org}
-	sub := NewSubscriber(claims)
+	sub := NewSubscriber(claims, nil)
 	hub.Add(topic, "viewer", sub)
 
 	org["tenant"] = "acme" // the caller mutates its retained map after registration
@@ -303,6 +305,30 @@ func TestHub_RowFilter_ClaimsSnapshotImmuneToCallerMutation(t *testing.T) {
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "globex", "page": "/g"}))
 	assert.Equal(t, "/g", frameData(t, recvFrame(t, sub))["data"].(map[string]any)["page"],
 		"the snapshot keeps admitting the tenant the connection authenticated as")
+
+	// The []any arm is just as authorization-relevant: an _in-shaped filter reads
+	// array elements, so mutating a retained slice element must not move the
+	// subscriber's row entitlement either.
+	inPolicy := &policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {Select: map[string]policy.RolePermissions{
+				"viewer": {Filter: map[string]policy.Filter{"tenant_id": {In: new("{{ jwt.tenants }}")}}},
+			}},
+		},
+	}
+	inHub := NewHub(policy.NewMemoryStore(inPolicy), nil, nil)
+	tenants := []any{"globex"}
+	inSub := NewSubscriber(map[string]any{"tenants": tenants}, nil)
+	inHub.Add(topic, "viewer", inSub)
+
+	tenants[0] = "acme" // the caller mutates its retained slice after registration
+
+	inHub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "acme", "page": "/a2"}))
+	assertNoFrame(t, inSub) // membership follows the snapshot ("globex"), not the mutation
+
+	inHub.Broadcast(topic, rawEvent(t, "clicks", "t", map[string]any{"tenant_id": "globex", "page": "/g2"}))
+	assert.Equal(t, "/g2", frameData(t, recvFrame(t, inSub))["data"].(map[string]any)["page"],
+		"the array snapshot keeps admitting the tenant list the connection authenticated with")
 }
 
 // TestHub_RowFilter_MissingColumn_FailsClosed: an event that lacks the filtered
@@ -312,7 +338,7 @@ func TestHub_RowFilter_MissingColumn_FailsClosed(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	acme := NewSubscriber(map[string]any{"tenant": "acme"})
+	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	hub.Add(topic, "viewer", acme)
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "2026-06-26T00:00:00Z",
@@ -329,8 +355,8 @@ func TestHub_RowFilter_SharedProjectionAcrossSameClaims(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, nil)
 	const topic = "ingest.clicks"
 
-	a := NewSubscriber(map[string]any{"tenant": "acme"})
-	b := NewSubscriber(map[string]any{"tenant": "acme"})
+	a := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
+	b := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
 	hub.Add(topic, "viewer", a)
 	hub.Add(topic, "viewer", b)
 
@@ -368,7 +394,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
 	const topic = "ingest.clicks"
 
-	sub := NewSubscriber(nil) // constant filter value ⇒ no claims needed
+	sub := NewSubscriber(nil, nil) // constant filter value ⇒ no claims needed
 	hub.Add(topic, "viewer", sub)
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
@@ -381,7 +407,7 @@ func TestHub_RowFilter_NumericOrdering_SchemaInformed(t *testing.T) {
 	// way, so both rows are withheld — including the one the schema-informed path
 	// delivers above.
 	noSchema := NewHub(policy.NewMemoryStore(p), nil, nil)
-	blind := NewSubscriber(nil)
+	blind := NewSubscriber(nil, nil)
 	noSchema.Add(topic, "viewer", blind)
 	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"amount": float64(9), "page": "/a"}))
 	noSchema.Broadcast(topic, rawEvent(t, "clicks", "t2", map[string]any{"amount": float64(250), "page": "/b"}))
@@ -408,7 +434,7 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 	}
 	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
 	const topic = "ingest.clicks"
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
 	hub.Broadcast(topic, rawEvent(t, "clicks", "t1", map[string]any{"score": json.Number("16777217")}))
@@ -421,7 +447,7 @@ func TestHub_RowFilter_FloatNarrowing_SchemaInformed(t *testing.T) {
 func TestHub_TopicIsolation(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
-	clicks, views := NewSubscriber(nil), NewSubscriber(nil)
+	clicks, views := NewSubscriber(nil, nil), NewSubscriber(nil, nil)
 	hub.Add("ingest.clicks", "public", clicks)
 	hub.Add("ingest.views", "public", views)
 
@@ -471,7 +497,7 @@ func TestHub_PassthroughAndFailClosed(t *testing.T) {
 			t.Parallel()
 			hub := NewHub(tt.store, nil, nil)
 			const topic = "ingest.custom"
-			sub := NewSubscriber(nil)
+			sub := NewSubscriber(nil, nil)
 			hub.Add(topic, "public", sub)
 			hub.Broadcast(topic, []byte(tt.payload))
 
@@ -492,7 +518,7 @@ func TestHub_AddRemoveGCsBucketsAndTopics(t *testing.T) {
 	t.Parallel()
 	hub := NewHub(nil, nil, nil)
 	const topic = "ingest.clicks"
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 
 	hub.Add(topic, "public", sub)
 	assert.Equal(t, 1, hub.Len(topic))
@@ -528,18 +554,26 @@ func TestHub_SlowConsumerDropIncrementsMetric(t *testing.T) {
 		otel.SetMeterProvider(savedMP)
 	})
 
-	hub := NewHub(nil, nil, NewMetrics())
+	m := NewMetrics()
+	hub := NewHub(nil, nil, m)
 	const topic = "ingest.clicks"
-	sub := newSubscriber(1) // cap-1: the second undrained broadcast drops
+	sub := newSubscriber(1, m) // cap-1: the second undrained broadcast drops; the shared seam NewSubscriber wires metrics through
 	hub.Add(topic, "public", sub)
 
 	raw := rawEvent(t, "clicks", "t", map[string]any{"a": float64(1)})
 	hub.Broadcast(topic, raw) // fills the queue
-	hub.Broadcast(topic, raw) // dropped
+	hub.Broadcast(topic, raw) // dropped by Send, kind=event
+
+	// The keepalive path drops through the same Send: a Push into the full
+	// queue counts under the frame's own kind, with no counting at the call site.
+	b := newSubscriberSet()
+	b.Add(sub)
+	b.Push(Frame{Kind: KindKeepalive, Data: []byte(": keepalive\n\n")})
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
-	assert.Equal(t, int64(1), sumByName(rm, "wavehouse_sse_dropped_frames_total"))
+	assert.Equal(t, int64(1), sumByNameKind(rm, "wavehouse_sse_dropped_frames_total", KindEvent))
+	assert.Equal(t, int64(1), sumByNameKind(rm, "wavehouse_sse_dropped_frames_total", KindKeepalive))
 }
 
 func TestHub_ReplayProjector(t *testing.T) {
@@ -630,7 +664,7 @@ func TestHub_ConcurrentAddRemoveBroadcast_Race(t *testing.T) {
 		go func(role string) {
 			defer wg.Done()
 			for range 50 {
-				sub := NewSubscriber(nil)
+				sub := NewSubscriber(nil, nil)
 				hub.Add(topic, role, sub)
 				hub.Broadcast(topic, raw)
 				hub.Remove(topic, role, sub)
@@ -670,7 +704,7 @@ func TestHub_ConcurrentRowFilteredBroadcast_Race(t *testing.T) {
 		go func(tenant string) {
 			defer wg.Done()
 			for range 50 {
-				sub := NewSubscriber(map[string]any{"tenant": tenant})
+				sub := NewSubscriber(map[string]any{"tenant": tenant}, nil)
 				hub.Add(topic, "viewer", sub)
 				hub.Remove(topic, "viewer", sub)
 			}
@@ -709,8 +743,8 @@ func TestHub_RowFilter_BigIntegerExact(t *testing.T) {
 	// bare JSON-number tenant claim reaches the filter exactly as production
 	// decodes it (json.Number since WithJSONNumber; before that fix, float64 —
 	// which collapsed these neighbors and delivered the cross-tenant row).
-	neighbor := NewSubscriber(jwtClaims(t, map[string]any{"tenant": json.Number("10000000000000000")}))
-	exact := NewSubscriber(jwtClaims(t, map[string]any{"tenant": json.Number("10000000000000001")}))
+	neighbor := NewSubscriber(jwtClaims(t, map[string]any{"tenant": json.Number("10000000000000000")}), nil)
+	exact := NewSubscriber(jwtClaims(t, map[string]any{"tenant": json.Number("10000000000000001")}), nil)
 	hub.Add(topic, "viewer", neighbor)
 	hub.Add(topic, "viewer", exact)
 
@@ -749,7 +783,7 @@ func TestHub_RowFilter_TimestampInstantMatch(t *testing.T) {
 	hub := NewHub(policy.NewMemoryStore(p), reg, nil)
 	const topic = "ingest.clicks"
 
-	sub := NewSubscriber(nil)
+	sub := NewSubscriber(nil, nil)
 	hub.Add(topic, "viewer", sub)
 
 	// The canonical wire spelling ingest publishes: same instant, different bytes.
@@ -781,8 +815,8 @@ func TestHub_RowFilterWithheldIncrementsMetric(t *testing.T) {
 
 	hub := NewHub(policy.NewMemoryStore(rowFilterPolicy()), nil, NewMetrics())
 	const topic = "ingest.clicks"
-	acme := NewSubscriber(map[string]any{"tenant": "acme"})
-	globex := NewSubscriber(map[string]any{"tenant": "globex"})
+	acme := NewSubscriber(map[string]any{"tenant": "acme"}, nil)
+	globex := NewSubscriber(map[string]any{"tenant": "globex"}, nil)
 	hub.Add(topic, "viewer", acme)
 	hub.Add(topic, "viewer", globex)
 
@@ -820,7 +854,7 @@ func BenchmarkBroadcast_RowFilteredFanout(b *testing.B) {
 				if i%2 == 1 {
 					tenant = "globex"
 				}
-				subs[i] = NewSubscriber(map[string]any{"tenant": tenant})
+				subs[i] = NewSubscriber(map[string]any{"tenant": tenant}, nil)
 				hub.Add(topic, "viewer", subs[i])
 			}
 			b.ReportAllocs()
@@ -890,6 +924,31 @@ func TestWireFrame(t *testing.T) {
 			assert.Equal(t, tt.want, string(wireFrame(tt.id, []byte(tt.payload))))
 		})
 	}
+}
+
+// sumByNameKind totals the named Int64 sum instrument's datapoints carrying
+// the given kind attribute — pins that a drop is labeled with the dropped
+// frame's own kind, which sumByName's across-kinds total can't see.
+func sumByNameKind(rm metricdata.ResourceMetrics, name, kind string) int64 {
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			if md.Name != name {
+				continue
+			}
+			sum, ok := md.Data.(metricdata.Sum[int64])
+			if !ok {
+				return 0
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				if v, ok := dp.Attributes.Value(attribute.Key("kind")); ok && v.AsString() == kind {
+					total += dp.Value
+				}
+			}
+			return total
+		}
+	}
+	return 0
 }
 
 // sumByName totals all datapoints of an Int64 sum instrument across kinds.
