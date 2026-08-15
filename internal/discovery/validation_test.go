@@ -224,3 +224,104 @@ func TestIsNumericType(t *testing.T) {
 		})
 	}
 }
+
+// TestIsNumericType_Exported checks the exported wrapper the stream row-filter uses:
+// it must unwrap Nullable/LowCardinality (in any nesting) before classifying, so a
+// Nullable(UInt64) column still compares numerically.
+func TestIsNumericType_Exported(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		chType string
+		want   bool
+	}{
+		{"UInt64", true},
+		{"Nullable(UInt64)", true},
+		{"LowCardinality(Int32)", true},
+		{"LowCardinality(Nullable(Float64))", true},
+		{"Decimal(10,2)", true},
+		{"String", false},
+		{"Nullable(String)", false},
+		{"LowCardinality(String)", false},
+		{"DateTime", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.chType, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsNumericType(tt.chType))
+		})
+	}
+}
+
+// TestIsStringType: only String (under any Nullable/LowCardinality wrapping)
+// qualifies — byte comparison is ClickHouse comparison for it. FixedString is
+// excluded on purpose (zero-padded storage), as is everything whose text form is
+// not canonical (UUID, Enum, DateTime, Bool).
+func TestIsStringType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		chType string
+		want   bool
+	}{
+		{"String", true},
+		{"Nullable(String)", true},
+		{"LowCardinality(String)", true},
+		{"LowCardinality(Nullable(String))", true},
+		{"FixedString(16)", false},
+		{"UUID", false},
+		{"Enum8('a' = 1)", false},
+		{"DateTime", false},
+		{"Bool", false},
+		{"UInt64", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.chType, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsStringType(tt.chType))
+		})
+	}
+}
+
+// TestNumericStorageOf pins the storage classification the stream row-filter
+// narrows comparisons with: integer family exact at any width, float bit
+// widths, Decimal scale extraction across every declaration form, wrappers
+// unwrapped, and ok=false for non-numerics and for a Decimal whose scale can't
+// be parsed — the caller must refuse comparison rather than guess a model.
+func TestNumericStorageOf(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		chType string
+		want   NumericStorage
+		ok     bool
+	}{
+		{"UInt64", NumericStorage{Integer: true, IntBits: 64, Unsigned: true}, true},
+		{"Int256", NumericStorage{Integer: true, IntBits: 256}, true},
+		{"Nullable(UInt32)", NumericStorage{Integer: true, IntBits: 32, Unsigned: true}, true},
+		{"Float32", NumericStorage{FloatBits: 32}, true},
+		{"LowCardinality(Nullable(Float64))", NumericStorage{FloatBits: 64}, true},
+		{"Decimal(10, 2)", NumericStorage{Precision: 10, Scale: 2}, true},
+		{"Decimal(10,2)", NumericStorage{Precision: 10, Scale: 2}, true},
+		{"Decimal(2, 2)", NumericStorage{Precision: 2, Scale: 2}, true},
+		{"Decimal32(4)", NumericStorage{Precision: 9, Scale: 4}, true},
+		{"Decimal64(0)", NumericStorage{Precision: 18, Scale: 0}, true},
+		{"Decimal256(76)", NumericStorage{Precision: 76, Scale: 76}, true},
+		{"Decimal", NumericStorage{}, false},
+		{"Decimal(10)", NumericStorage{}, false},
+		{"Decimal(10, -1)", NumericStorage{}, false},
+		{"Decimal(10, 77)", NumericStorage{}, false},
+		{"String", NumericStorage{}, false},
+		{"DateTime", NumericStorage{}, false},
+		{"Bool", NumericStorage{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.chType, func(t *testing.T) {
+			t.Parallel()
+			got, ok := NumericStorageOf(tt.chType)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

@@ -553,6 +553,15 @@ func TestCanonicalScalar(t *testing.T) {
 		{"null has no canonical form", nil, "", false},
 		{"object has no canonical form", map[string]any{"id": 1}, "", false},
 		{"array has no canonical form", []any{"a"}, "", false},
+		// float64 is what a plain json.Unmarshal hands a hand-built claims map
+		// (production claims are json.Number via jwt.WithJSONNumber). At/past
+		// 2^53 the decode already collapsed neighboring integers, so any digits
+		// rendered could be another principal's ID — refuse; below it, render
+		// positionally, never fmt.Sprint's "1e+06" exponent spelling.
+		{"float64 below 2^53 renders positionally", float64(1_000_000), "1000000", true},
+		{"float64 fraction", float64(1.5), "1.5", true},
+		{"float64 at 2^53 refused — digits lost at decode", float64(1 << 53), "", false},
+		{"float64 past 2^53 refused", float64(10000000000000001), "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1126,6 +1135,66 @@ func TestResolveFilters_InNumericElements_BindCanonically(t *testing.T) {
 	require.Len(t, clauses, 1)
 	assert.Equal(t, "`tenant_id` IN (?,?,?)", clauses[0])
 	assert.Equal(t, []any{"1", "12345678901234567890", "b"}, params)
+}
+
+// TestResolveFilters_NumericClaimBinding pins the SQL surface of numeric claim
+// rendering for a hand-built claims map: a json.Number claim binds its canonical
+// exact digits; a float64 below 2^53 binds positionally (never the "1e+06"
+// spelling ClickHouse integer columns reject); a float64 at or past 2^53 lost
+// its digits at decode, so the predicate renders `1 = 0` — matching no rows, the
+// same verdict RowVisible reaches in memory — alone or as one _in element.
+func TestResolveFilters_NumericClaimBinding(t *testing.T) {
+	t.Parallel()
+	tmpl := "{{ jwt.tenant }}"
+	eq := map[string]Filter{"tenant_id": {Eq: &tmpl}}
+
+	clauses, params := resolveFilters(eq, map[string]any{"tenant": json.Number("10000000000000001")})
+	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
+	assert.Equal(t, []any{"10000000000000001"}, params, "json.Number binds exact digits")
+
+	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(1_000_000)})
+	require.Equal(t, []string{"`tenant_id` = ?"}, clauses)
+	assert.Equal(t, []any{"1000000"}, params, "small float binds positionally, not 1e+06")
+
+	clauses, params = resolveFilters(eq, map[string]any{"tenant": float64(10000000000000001)})
+	assert.Equal(t, []string{"1 = 0"}, clauses, "lossy float64 claim matches no rows")
+	assert.Empty(t, params)
+
+	in := "{{ jwt.tenants }}"
+	clauses, params = resolveFilters(map[string]Filter{"tenant_id": {In: &in}},
+		map[string]any{"tenants": []any{"a", float64(1 << 60)}})
+	assert.Equal(t, []string{"1 = 0"}, clauses, "one poisoned element resolves the whole set empty")
+	assert.Empty(t, params)
+}
+
+// TestCompareCanonicalDecimals pins the digit-string ordering over canonical
+// forms — the comparison twin of canonicalDecimal, exact at any width, never a
+// float round-trip. Each pair is asserted in both directions.
+func TestCompareCanonicalDecimals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"0", "0", 0},
+		{"1", "2", -1},
+		{"9", "100", -1},
+		{"-1", "1", -1},
+		{"-2", "-1", -1},
+		{"-100", "-9", -1},
+		{"1.5", "1.5", 0},
+		{"1.05", "1.5", -1},
+		{"0.5", "0.55", -1},
+		{"2", "2.5", -1},
+		{"-1.5", "-1", -1},
+		{"0.0025", "0.003", -1},
+		{"12345678901234567890", "12345678901234567891", -1},
+		{"9007199254740992", "9007199254740993", -1},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, compareCanonicalDecimals(tt.a, tt.b), "%s vs %s", tt.a, tt.b)
+		assert.Equal(t, -tt.want, compareCanonicalDecimals(tt.b, tt.a), "%s vs %s reversed", tt.b, tt.a)
+	}
 }
 
 // TestResolveFilters_InEmptyClaim_FailsClosed: an empty set makes the predicate

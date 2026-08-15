@@ -108,9 +108,13 @@ string is read as UTC, an ECMAScript quirk
 The SDK warns when more than 5 concurrent SSE connections are open (browser limit per domain).
 :::
 
+### Server-Side Policy Filtering
+
+Access-control policy applies on the server before anything reaches the client: tables the connection's role can't `select` are skipped, denied columns are stripped from each event, and the role's row-level `filter` is evaluated per subscriber against the connection's JWT claims. A stream on a row-policied table therefore delivers only the rows the policy admits for that connection — and, where the server's in-memory comparison can't prove a match, fewer; see [Access control — where each rule is enforced](/access-control#where-each-rule-is-enforced). Claims are captured when the connection opens: a policy change applies from the next live event (an in-flight gap-fill replay finishes under the policy snapshot taken at connect), while token expiry or claim changes take effect on reconnect.
+
 ### Client-Side Stream Filtering
 
-When a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:
+On top of that, when a `QueryBuilder` with `.where()` filters or `.select()` columns calls `.stream()`, the returned stream applies those filters client-side:
 
 ```ts
 const stream = wh.from('clicks')

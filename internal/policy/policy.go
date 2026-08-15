@@ -1,11 +1,8 @@
 package policy
 
 import (
-	"encoding/json"
 	"fmt"
-	"math/big"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
@@ -65,11 +62,16 @@ type Filter struct {
 
 // ResolvedPermissions is the result of evaluating a policy against JWT claims.
 type ResolvedPermissions struct {
-	Allowed             bool
-	AllowColumns        []string
-	DenyColumns         []string
-	WhereClause         string
-	WhereParams         []any
+	Allowed      bool
+	AllowColumns []string
+	DenyColumns  []string
+	WhereClause  string
+	WhereParams  []any
+	// rowFilter is the same row-level-security predicate as WhereClause/WhereParams,
+	// kept in resolved form so the stream path can evaluate it in memory (RowVisible)
+	// while the query path renders it to SQL. Both derive from one resolvePredicates
+	// call in Evaluate, so the two read surfaces can't drift. See rowfilter.go.
+	rowFilter           []resolvedPredicate
 	CheckClauses        map[string]any // column → required value (for inserts)
 	AllowedAggregations []string
 	DeniedAggregations  []string
@@ -192,7 +194,13 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 				return &ResolvedPermissions{Allowed: false}
 			}
 		}
-		clauses, params := resolveFilters(perms.Filter, claims)
+		// Resolve the row-filter once into predicates, then render both read surfaces
+		// from that single source so they can't drift: the query path binds them into
+		// a SQL WHERE here; the stream path evaluates the same predicates in memory
+		// (ResolvedPermissions.RowVisible).
+		preds := resolvePredicates(perms.Filter, claims)
+		resolved.rowFilter = preds
+		clauses, params := predicatesToSQL(preds)
 		if len(clauses) > 0 {
 			resolved.WhereClause = strings.Join(clauses, " AND ")
 			resolved.WhereParams = params
@@ -227,49 +235,112 @@ func Evaluate(p *Policy, role, table, operation string, claims map[string]any) *
 	return resolved
 }
 
-// resolveFilters converts filter definitions with claim templates into SQL WHERE clauses.
-func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
+// resolvedPredicate is one row-filter comparison with its claim templates already
+// resolved to concrete string values — the shared, render-agnostic form the query
+// path turns into SQL (predicatesToSQL) and the stream path evaluates in memory
+// (RowVisible). Op is one of "=", "!=", ">", "<", "in". Values holds one element
+// for the scalar operators and zero-or-more for "in"; an EMPTY Values matches no
+// rows on either surface — an empty/unresolvable "in" set, or a scalar whose
+// constant was unresolvable (an absent/null claim, a structured value, or one with
+// no canonical form — see resolveTemplate/CanonicalScalar).
+type resolvedPredicate struct {
+	Column string
+	Op     string
+	Values []string
+}
+
+// resolvePredicates resolves each filter's claim templates once into predicates.
+// Both read surfaces derive from this single result so they can't drift; the
+// operator order within a column (=, !=, >, <, in) mirrors the former inline SQL.
+func resolvePredicates(filters map[string]Filter, claims map[string]any) []resolvedPredicate {
+	var preds []resolvedPredicate
+	// An unresolvable constant (ok=false from resolveTemplate) yields a predicate
+	// with NO values, which matches no rows on either surface (#385) — never a
+	// synthesized stand-in that could match some other principal's rows.
+	scalar := func(col, op, tmpl string) resolvedPredicate {
+		v, ok := resolveTemplate(tmpl, claims)
+		if !ok {
+			return resolvedPredicate{Column: col, Op: op}
+		}
+		return resolvedPredicate{Column: col, Op: op, Values: []string{v}}
+	}
+	for col, f := range filters {
+		if f.Eq != nil {
+			preds = append(preds, scalar(col, "=", *f.Eq))
+		}
+		if f.Neq != nil {
+			preds = append(preds, scalar(col, "!=", *f.Neq))
+		}
+		if f.Gt != nil {
+			preds = append(preds, scalar(col, ">", *f.Gt))
+		}
+		if f.Lt != nil {
+			preds = append(preds, scalar(col, "<", *f.Lt))
+		}
+		if f.In != nil {
+			preds = append(preds, resolvedPredicate{col, "in", toStrings(resolveInValues(*f.In, claims))})
+		}
+	}
+	return preds
+}
+
+// predicatesToSQL renders resolved predicates into WHERE clauses and bound params.
+func predicatesToSQL(preds []resolvedPredicate) ([]string, []any) {
 	var clauses []string
 	var params []any
-	for col, f := range filters {
+	for _, p := range preds {
 		// Quote the policy-authored column the same way the query builder quotes
 		// caller columns, so a row-filter on a weird-but-legal column name (dots,
 		// spaces, keywords) is emitted safely.
-		qcol := chsql.QuoteIdent(col)
-		for _, c := range []struct {
-			op  string
-			val *string
-		}{{"=", f.Eq}, {"!=", f.Neq}, {">", f.Gt}, {"<", f.Lt}} {
-			if c.val == nil {
-				continue
-			}
-			if val, ok := resolveTemplate(*c.val, claims); ok {
-				clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, c.op))
-				params = append(params, val)
-			} else {
-				// An unresolvable claim fails closed: binding the '' it renders to
-				// would emit a real predicate against the empty string — `col != ''`
-				// or `col > ''` matches essentially every row, erasing the
-				// restriction (#385). Matching the _in branch below, a filter scoped
-				// to a claim the token doesn't carry matches no rows.
-				clauses = append(clauses, "1 = 0")
-			}
-		}
-		if f.In != nil {
-			vals := resolveInValues(*f.In, claims)
-			if len(vals) == 0 {
+		qcol := chsql.QuoteIdent(p.Column)
+		switch p.Op {
+		case "in":
+			if len(p.Values) == 0 {
 				// An empty/unresolvable set fails closed: a row filter scoped to no
 				// values matches no rows, never widening to all of them (the #224
 				// fail-open). `IN ()` is not valid SQL, so emit a constant false.
 				clauses = append(clauses, "1 = 0")
 			} else {
-				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
+				placeholders := strings.TrimSuffix(strings.Repeat("?,", len(p.Values)), ",")
 				clauses = append(clauses, fmt.Sprintf("%s IN (%s)", qcol, placeholders))
-				params = append(params, vals...)
+				for _, v := range p.Values {
+					params = append(params, v)
+				}
 			}
+		default:
+			if len(p.Values) == 0 {
+				// An unresolvable claim fails closed: binding the '' it renders to
+				// would emit a real predicate against the empty string — `col != ''`
+				// or `col > ''` matches essentially every row, erasing the
+				// restriction (#385). Matching the _in branch above, a filter scoped
+				// to a claim the token doesn't carry matches no rows.
+				clauses = append(clauses, "1 = 0")
+				continue
+			}
+			clauses = append(clauses, fmt.Sprintf("%s %s ?", qcol, p.Op))
+			params = append(params, p.Values[0])
 		}
 	}
 	return clauses, params
+}
+
+// resolveFilters converts filter definitions with claim templates into SQL WHERE
+// clauses. Retained as the predicates→SQL composition the query-path tests target.
+func resolveFilters(filters map[string]Filter, claims map[string]any) ([]string, []any) {
+	return predicatesToSQL(resolvePredicates(filters, claims))
+}
+
+// toStrings normalizes resolveInValues' []any (already canonical strings) to the
+// []string a resolvedPredicate carries.
+func toStrings(vals []any) []string {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = fmt.Sprint(v)
+	}
+	return out
 }
 
 // resolveTemplate resolves {{ jwt.claim.path }} templates against JWT claims.
@@ -344,162 +415,6 @@ func resolveInValues(tmpl string, claims map[string]any) []any {
 	// nil (not a one-element set containing the partial literal), so it fails
 	// closed like the bare-claim case above (#385).
 	return nil
-}
-
-// maxCanonicalDigits bounds both a numeric literal's digit count and its
-// exact decimal expansion. Big-integer parsing is superlinear in digit count
-// and the ingest check path hands CanonicalScalar client-controlled literals
-// (CWE-400), and a short exponent literal can hide a wide expansion ("1e-150"
-// is six characters with a 152-character exact form). 100 digits is far past
-// any real id — uint256 is 78.
-const maxCanonicalDigits = 100
-
-// CanonicalScalar renders a decoded JSON value as the canonical string the
-// policy layer binds and compares, reporting ok=false for values with no such
-// form: null, objects, and arrays. A structured value is never a sensible
-// scalar comparison value — it usually means a dropped path segment
-// ({{ jwt.app_metadata }} for {{ jwt.app_metadata.tenant_id }}), and binding
-// fmt.Sprint's "map[…]"/"[…]" rendering would let _neq/_lt match essentially
-// every row; the one legitimate structured shape, a bare-claim _in array, is
-// unpacked by resolveInValues before its elements reach here. A json.Number
-// (jwt.WithJSONNumber on claims, UseNumber on ingest payloads) binds in
-// canonical decimal form, not the token's spelling: "1", "1.0", and "1e3" are
-// one JSON value, and a numeric ClickHouse column rejects '1.0'/'1e3' as a
-// per-query TYPE_MISMATCH error. The canonical form is exact at every width
-// and precision — integer literals via big.Int, fractions and exponents via
-// canonicalDecimal, never a float64 round-trip that could bind a value the
-// token doesn't carry ("1e-400" fails closed rather than collapsing to "0").
-// A literal, or an exact form, past maxCanonicalDigits likewise has no
-// canonical form and fails closed (1e400, 1e-400). Claim resolution and the
-// insert-check comparison's two sides (internal/api) all route through this
-// one function, so what a read filter binds and what a write check accepts
-// can't drift.
-func CanonicalScalar(v any) (string, bool) {
-	switch val := v.(type) {
-	case nil, map[string]any, []any:
-		return "", false
-	case json.Number:
-		// The digit bound guards the superlinear big.Int parse on the
-		// client-controlled ingest path. It counts digits, not bytes — a sign,
-		// point, or exponent marker doesn't feed the big parse — so "-1e99"
-		// binds exactly like its written-out form, matching the "one JSON
-		// value" contract below (only at the bound's very edge can the exact-form
-		// gate's slack separate two spellings). canonicalDecimal re-checks its
-		// own exact-form length, where a short literal can hide a wide expansion.
-		digits := 0
-		for i := 0; i < len(val); i++ {
-			if val[i] >= '0' && val[i] <= '9' {
-				digits++
-			}
-		}
-		if digits > maxCanonicalDigits {
-			return "", false
-		}
-		if i, ok := new(big.Int).SetString(val.String(), 10); ok {
-			return i.String(), true
-		}
-		return canonicalDecimal(val.String())
-	default:
-		return fmt.Sprint(val), true
-	}
-}
-
-// LiteralValue marks an insert-check required value the policy author wrote
-// as a placeholder-free literal (Evaluate). A literal carries no JSON type —
-// "1.0" means the number 1 to a numeric column and the three-character text
-// to a String column — so the check comparison (internal/api) accepts its
-// numeric reading as well as its spelling. The type is the gate: a
-// claim-derived value is never wrapped, so a string-typed claim keeps strict
-// canonical equality and can't gain a numeric reading it didn't have. Only
-// CheckClauses carries this type; read filters bind plain strings.
-type LiteralValue string
-
-// CanonicalNumericLiteral renders a policy-authored literal that spells a
-// JSON number in canonical decimal form ("1.0" → "1"), reporting ok=false for
-// everything else. The json.Valid gate keeps this to spellings JSON itself
-// can produce: big.Int would also take "+5" or "007", readings no decoded
-// claim or payload value ever has. It canonicalizes nothing at resolve time —
-// the literal still binds and auto-injects exactly as written; only the check
-// comparison consults this second reading.
-func CanonicalNumericLiteral(s string) (string, bool) {
-	if !json.Valid([]byte(s)) {
-		return "", false
-	}
-	return CanonicalScalar(json.Number(s))
-}
-
-// canonicalDecimal renders a non-integer JSON number literal (one carrying a
-// fraction or exponent) as its exact canonical decimal string: "1.0" → "1",
-// "2.50" → "2.5", "1e3" → "1000", "25e-4" → "0.0025", every digit preserved
-// at any precision. ok=false for anything that is not a JSON number and for
-// any literal whose exact decimal form would exceed maxCanonicalDigits.
-// Exactness is the point: rounding through float64 would collapse "1e-400"
-// to "0" and land wide decimals on their neighbors, either way binding a
-// value the token doesn't carry.
-func canonicalDecimal(lit string) (string, bool) {
-	mant, expStr, hasExp := strings.Cut(lit, "e")
-	if !hasExp {
-		mant, expStr, hasExp = strings.Cut(lit, "E")
-	}
-	exp := 0
-	if hasExp {
-		var err error
-		// Atoi rejects an empty or non-numeric exponent. The magnitude bound is
-		// the allocation guard, not a redundancy: the exact-form length check at
-		// the bottom runs only after strings.Repeat has already built the
-		// string, so without this bound a 12-byte "1e1000000000" would allocate
-		// a ~1 GiB expansion before being rejected.
-		if exp, err = strconv.Atoi(expStr); err != nil || exp > 2*maxCanonicalDigits || exp < -2*maxCanonicalDigits {
-			return "", false
-		}
-	}
-	sign := ""
-	if strings.HasPrefix(mant, "-") {
-		sign, mant = "-", mant[1:]
-	}
-	intPart, fracPart, _ := strings.Cut(mant, ".")
-	digits := intPart + fracPart
-	if digits == "" {
-		return "", false
-	}
-	for i := 0; i < len(digits); i++ {
-		if digits[i] < '0' || digits[i] > '9' {
-			return "", false
-		}
-	}
-	// point is where the decimal point sits in digits once the exponent is
-	// applied: digits[:point] to its left, digits[point:] to its right.
-	point := len(intPart) + exp
-	for len(digits) > 0 && digits[0] == '0' {
-		digits = digits[1:]
-		point--
-	}
-	for len(digits) > 0 && len(digits) > point && digits[len(digits)-1] == '0' {
-		digits = digits[:len(digits)-1]
-	}
-	if digits == "" {
-		// Every spelling of zero ("0.0", "-0e9") is the one value 0 —
-		// signless, since a numeric column can't parse "-0".
-		return "0", true
-	}
-	var out string
-	switch {
-	case point <= 0:
-		out = "0." + strings.Repeat("0", -point) + digits
-	case point >= len(digits):
-		out = digits + strings.Repeat("0", point-len(digits))
-	default:
-		out = digits[:point] + "." + digits[point:]
-	}
-	// The exact form is what must stay small: "1e-150" is a six-character
-	// literal with a 152-character expansion. The +2 slack exists for a "0."
-	// prefix, though any form may spend it (a 102-digit integer expansion
-	// passes). This runs after the Repeat above, so it bounds what callers
-	// see — the exponent bound is what keeps the allocation itself small.
-	if len(out) > maxCanonicalDigits+2 {
-		return "", false
-	}
-	return sign + out, true
 }
 
 // navigateClaims traverses nested claim maps using dot-separated path parts.

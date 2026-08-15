@@ -42,10 +42,13 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve stream permissions for this request. The raw role from context is the
-	// bucket key: the Hub projects/serializes once per (topic, role), and column
-	// visibility derives only from the role+table policy entry — never from claims
-	// (see stream.Hub). Evaluate maps an empty role to the policy default_role.
+	// bucket key: the Hub serializes the column projection once per (topic, role),
+	// since column visibility derives only from the role+table policy entry. Claims
+	// are separate — they drive the row-level-security filter, which the Hub evaluates
+	// per subscriber (see stream.Hub), so they ride on the Subscriber rather than the
+	// bucket key. Evaluate maps an empty role to the policy default_role.
 	role := auth.RoleFromContext(r.Context())
+	claims, _ := auth.ClaimsFromContext(r.Context())
 
 	// TODO: impl scope
 	scope := ""
@@ -78,7 +81,7 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Register for live events before gap-fill so events arriving during replay
 	// buffer in the subscriber queue instead of being missed (an overlap with
 	// replay yields duplicates, deduped client-side by id: — at-least-once).
-	sub := stream.NewSubscriber()
+	sub := stream.NewSubscriber(claims, h.Metrics)
 	h.Hub.Add(topic, role, sub)
 	defer h.Hub.Remove(topic, role, sub)
 
@@ -95,8 +98,9 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		// low-volume and one-time, unlike the per-role live fan-out), write, and count
 		// the replayed frame. A write error means the client is gone, so stop the
 		// gap-fill and let the deferred cleanup unwind.
+		project := h.Hub.ReplayProjector(role, claims)
 		sendReplay := func(data []byte) bool {
-			f, ok := h.Hub.ReplayFrame(role, data)
+			f, ok := project(data)
 			if !ok {
 				return true // filtered for this role — skip
 			}
