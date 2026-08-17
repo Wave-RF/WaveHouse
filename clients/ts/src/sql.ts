@@ -5,8 +5,8 @@ import type { HttpContext, Result } from "./types.js";
 /**
  * Execute a raw SQL query against ClickHouse.
  *
- * Backed by `POST /v1/admin/query`, which requires the admin role — the same
- * gate as the rest of `/v1/admin/*`. Callers must hold a JWT whose role is the
+ * Backed by `POST /v1/ops/query`, which requires the admin role — the same
+ * gate as the rest of `/v1/ops/*`. Callers must hold a JWT whose role is the
  * configured `admin_role` (`"admin"` by default); there is no separate
  * `service` role. The JWT middleware always runs, so a request with no token
  * or an invalid one is denied, never granted. Non-admin use cases should use
@@ -23,7 +23,7 @@ import type { HttpContext, Result } from "./types.js";
  * compatible with `sql()` — the proxy passes the upstream Content-Type
  * through, and the SDK's JSON decoder throws on a non-JSON body, which the
  * retry layer surfaces as a `NETWORK_ERROR` result (not a structured
- * format-mismatch error). For CSV/TSV exports, hit `/v1/admin/query`
+ * format-mismatch error). For CSV/TSV exports, hit `/v1/ops/query`
  * directly with `fetch()` and read the body as text.
  *
  * **No parameter binding.** Positional `?` substitution is not supported.
@@ -41,7 +41,7 @@ export async function sql<Row = Record<string, unknown>>(
 ): Promise<Result<Row[]>> {
   const { data, error } = await request<Row[]>(ctx, {
     method: "POST",
-    path: "/v1/admin/query",
+    path: "/v1/ops/query",
     body: { sql: query },
     signal: opts?.signal,
   });

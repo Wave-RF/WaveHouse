@@ -6,6 +6,10 @@ description: "Schema introspection, access-control policy, DLQ stats, and health
 Operational surfaces of `@wavehouse/sdk`. Everything here except
 `wh.sys.health()` requires the admin role (`policy.admin_role`) — see
 [Access Control](/access-control) for how roles resolve.
+Server-side, these endpoints moved from `/v1/admin/*` and the top-level
+`/v1/schema`/`/v1/dlq/stats` to `/v1/ops/*` with no aliases — upgrade
+`@wavehouse/sdk` alongside the server, or every call on this page returns
+`404` against a renamed server.
 Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
 
@@ -24,7 +28,7 @@ await wh.schema.refresh();
 
 Individual table schema is also available via `wh.from('clicks').schema()`.
 
-> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/schema*`, which are **admin-only** endpoints. Against any non-dev policy (anything but `default_role: admin`), construct the client with an admin-role token or these calls return `403`.
+> `wh.schema.list()`, `wh.schema.refresh()`, and `wh.from(t).schema()` hit `/v1/ops/schema*`, which are **admin-only** endpoints. Against any non-dev policy (anything but `default_role: admin`), construct the client with an admin-role token or these calls return `403`.
 
 ---
 

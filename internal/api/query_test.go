@@ -35,7 +35,7 @@ func newProxyHandler(t *testing.T, fakeCH http.Handler) *QueryHandler {
 
 func postQuery(h *QueryHandler, body []byte) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ops/query", bytes.NewReader(body))
 	h.Handle(w, r)
 	return w
 }
@@ -55,7 +55,7 @@ func assertSecurityHeaders(t *testing.T, w *httptest.ResponseRecorder) {
 }
 
 // TestQueryHandler_RejectsMalformedRequests pins every contract-rejection
-// path on /v1/admin/query: the handler must surface a 400 with a JSON
+// path on /v1/ops/query: the handler must surface a 400 with a JSON
 // error envelope, the standard security headers, AND a specific error
 // message that lets clients tell the failure modes apart. None of these
 // cases involve an upstream call — the handler should reject before the
@@ -84,7 +84,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 			wantErr: "invalid json",
 		},
 		{
-			// The pre-proxy /v1/admin/query handler accepted a `params` array
+			// The pre-proxy /v1/ops/query handler accepted a `params` array
 			// bound to positional `?` placeholders. The new HTTP proxy
 			// dropped that and DisallowUnknownFields rejects it loudly
 			// — silently ignoring the field would let old clients run
@@ -109,7 +109,7 @@ func TestQueryHandler_RejectsMalformedRequests(t *testing.T) {
 			t.Parallel()
 			h := NewQueryHandler("http://unused.invalid", "", "", "", time.Second*time.Duration(30))
 			w := httptest.NewRecorder()
-			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/admin/query", bytes.NewReader([]byte(tt.body)))
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/ops/query", bytes.NewReader([]byte(tt.body)))
 			h.Handle(w, r)
 
 			testutil.AssertJSONContains(t, w, http.StatusBadRequest, map[string]any{"error": tt.wantErr})
@@ -476,7 +476,7 @@ func TestQueryHandler_ContextCancelPropagates(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/admin/query", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/ops/query", bytes.NewReader(body))
 
 	done := make(chan struct{})
 	go func() {

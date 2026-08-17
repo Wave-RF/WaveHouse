@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// QueryHandler handles POST /v1/admin/query.
+// QueryHandler handles POST /v1/ops/query.
 //
-// Authorization is enforced at the router (the /v1/admin/* RequireAdmin gate
+// Authorization is enforced at the router (the /v1/ops/* RequireAdmin gate
 // in NewRouter). The handler trusts any caller that reaches it. See
 // internal/api/router.go for the role-gate rationale.
 //
@@ -159,8 +159,8 @@ func (h *QueryHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Reject unknown top-level fields so clients still sending the
 	// dropped `params` array (or any other deprecated/typo'd field)
 	// get a clear 400 instead of silently having the field ignored.
-	// The pre-proxy /v1/admin/query handler accepted positional `?` params
-	// via a `params` array; the new /v1/admin/query HTTP proxy doesn't
+	// The pre-proxy /v1/ops/query handler accepted positional `?` params
+	// via a `params` array; the new /v1/ops/query HTTP proxy doesn't
 	// forward query-string params at all, so a request that still ships
 	// `params` is broken at the contract level — fail loudly.
 	dec.DisallowUnknownFields()

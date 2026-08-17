@@ -22,7 +22,7 @@ func TestSchema_List(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/schema", nil)
 	h.List(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -43,7 +43,7 @@ func TestSchema_Get_Exists(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema?table=clicks", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/schema?table=clicks", nil)
 
 	h.Get(w, r)
 
@@ -61,7 +61,7 @@ func TestSchema_Get_NotFound(t *testing.T) {
 	h := NewSchemaHandler(reg)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/schema?table=nonexistent", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/schema?table=nonexistent", nil)
 
 	h.Get(w, r)
 

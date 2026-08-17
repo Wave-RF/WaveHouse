@@ -20,7 +20,7 @@ import (
 //
 // Used by the structured-query and pipes handlers — those are the cached
 // read paths that need explicit Query/Exec dispatch and per-row scanning.
-// The raw-SQL endpoint (/v1/admin/query) proxies straight to ClickHouse
+// The raw-SQL endpoint (/v1/ops/query) proxies straight to ClickHouse
 // over HTTP and never calls this; see internal/api/query.go.
 func executeCHQuery(ctx context.Context, conn driver.Conn, sql string, params []any) ([]map[string]any, error) {
 	if isMutation(sql) {

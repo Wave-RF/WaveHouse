@@ -137,10 +137,6 @@ func NewRouter(deps Dependencies) http.Handler {
 		r.Post("/ingest", deps.Ingest.Handle)
 		r.Get("/stream", deps.SSE.Handle)
 
-		// Schema discovery — admin-only (no policy gate of its own).
-		r.With(requireAdmin).Get("/schema", deps.Schema.Get)
-		r.With(requireAdmin).Post("/schema/refresh", deps.Schema.Refresh)
-
 		// Structured query endpoint.
 		if deps.StructuredQuery != nil {
 			r.Post("/query", deps.StructuredQuery.Handle)
@@ -152,21 +148,26 @@ func NewRouter(deps Dependencies) http.Handler {
 			r.Post("/pipes/{name}", deps.Pipes.Execute)
 		}
 
-		// DLQ stats — admin-only (no policy gate of its own).
-		if deps.DLQ != nil {
-			r.With(requireAdmin).Get("/dlq/stats", deps.DLQ.Stats)
-		}
-
-		// Admin routes. The requireAdmin gate covers the whole tree; every
-		// surface below — including raw-SQL passthrough — shares the same admin
-		// principal set (policy.AdminRole).
-		r.Route("/admin", func(r chi.Router) {
+		// Ops routes — every admin-gated surface lives under /v1/ops. The
+		// requireAdmin gate covers the whole tree; every surface below —
+		// including raw-SQL passthrough — shares the same admin principal
+		// set (policy.AdminRole).
+		r.Route("/ops", func(r chi.Router) {
 			r.Use(requireAdmin)
+
+			// Schema discovery.
+			r.Get("/schema", deps.Schema.Get)
+			r.Post("/schema/refresh", deps.Schema.Refresh)
+
+			// DLQ stats.
+			if deps.DLQ != nil {
+				r.Get("/dlq/stats", deps.DLQ.Stats)
+			}
 
 			// Raw-SQL passthrough. The only sanctioned surface for
 			// non-insert mutations (DELETE/UPDATE/TRUNCATE/DROP/ALTER/…)
 			// and for ad-hoc SELECTs that don't fit the structured
-			// query AST. Authorization is the /v1/admin/* gate above:
+			// query AST. Authorization is the /v1/ops/* gate above:
 			// raw SQL has no per-statement scope check (we can't
 			// authorize predicates without a full SQL parser), so the
 			// role gate is the entire authorization story. Non-admin

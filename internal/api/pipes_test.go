@@ -45,7 +45,7 @@ func TestPipesHandler_List(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/pipes", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/ops/pipes", nil)
 	h.List(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -62,7 +62,7 @@ func TestPipesHandler_Get_Found(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodGet, "/v1/pipes/top_pages", "top_pages", nil)
+	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/top_pages", "top_pages", nil)
 	h.Get(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -77,7 +77,7 @@ func TestPipesHandler_Get_NotFound(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodGet, "/v1/pipes/nope", "nope", nil)
+	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes/nope", "nope", nil)
 	h.Get(w, r)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
@@ -91,7 +91,7 @@ func TestPipesHandler_List_Empty(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodGet, "/v1/pipes", "", nil)
+	r := pipesRequest(t, http.MethodGet, "/v1/ops/pipes", "", nil)
 	h.List(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -297,7 +297,7 @@ func TestPipesHandler_Put_InvalidJSON(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/pipes/test", bytes.NewReader([]byte(`{bad}`)))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/ops/pipes/test", bytes.NewReader([]byte(`{bad}`)))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("name", "test")
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
@@ -318,7 +318,7 @@ func TestPipesHandler_Put_RequestBodyCap(t *testing.T) {
 	h.maxRequestBytes = 64
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPut, "/v1/pipes/big", "big", map[string]any{
+	r := pipesRequest(t, http.MethodPut, "/v1/ops/pipes/big", "big", map[string]any{
 		"sql": "SELECT " + strings.Repeat("a", 200),
 	})
 	h.Put(w, r)
@@ -334,7 +334,7 @@ func TestPipesHandler_Put_Success(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPut, "/v1/pipes/new_pipe", "new_pipe", map[string]any{
+	r := pipesRequest(t, http.MethodPut, "/v1/ops/pipes/new_pipe", "new_pipe", map[string]any{
 		"sql":         "SELECT count(*) FROM clicks",
 		"description": "counts",
 	})
@@ -353,7 +353,7 @@ func TestPipesHandler_Put_MissingSQL(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodPut, "/v1/pipes/bad", "bad", map[string]any{
+	r := pipesRequest(t, http.MethodPut, "/v1/ops/pipes/bad", "bad", map[string]any{
 		"description": "no sql",
 	})
 	h.Put(w, r)
@@ -370,7 +370,7 @@ func TestPipesHandler_Delete_Success(t *testing.T) {
 	h := NewPipesHandler(store, nil, nil, nil, 0, testutil.NopLogger())
 
 	w := httptest.NewRecorder()
-	r := pipesRequest(t, http.MethodDelete, "/v1/pipes/to_delete", "to_delete", nil)
+	r := pipesRequest(t, http.MethodDelete, "/v1/ops/pipes/to_delete", "to_delete", nil)
 	h.Delete(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)

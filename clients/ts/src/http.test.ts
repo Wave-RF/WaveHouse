@@ -76,7 +76,7 @@ describe("request", () => {
 
     await request(makeCtx({ auth: async () => "my-token" }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/v1/ops/schema",
     });
 
     const [, init] = fetchSpy.mock.calls[0];
@@ -88,7 +88,7 @@ describe("request", () => {
 
     await request(makeCtx({ auth: async () => "" }), {
       method: "GET",
-      path: "/v1/schema",
+      path: "/v1/ops/schema",
     });
 
     const [, init] = fetchSpy.mock.calls[0];
@@ -100,7 +100,7 @@ describe("request", () => {
       new Response(JSON.stringify({ error: "unknown table: foo" }), { status: 404 }),
     );
 
-    const result = await request(makeCtx(), { method: "GET", path: "/v1/schema?table=foo" });
+    const result = await request(makeCtx(), { method: "GET", path: "/v1/ops/schema?table=foo" });
 
     expect(result.data).toBeNull();
     expect(result.error?.status).toBe(404);
@@ -172,7 +172,7 @@ describe("request", () => {
 
     await request(makeCtx(), {
       method: "GET",
-      path: "/v1/dlq/stats",
+      path: "/v1/ops/dlq/stats",
       params: { table: "clicks" },
     });
 
@@ -197,12 +197,12 @@ describe("request", () => {
 
     await request(makeCtx({ baseURL: "https://app.example.com/api/warehouse/" }), {
       method: "GET",
-      path: "/v1/dlq/stats",
+      path: "/v1/ops/dlq/stats",
       params: { table: "clicks" },
     });
 
     const [url] = fetchSpy.mock.calls[0];
-    expect(url).toBe("https://app.example.com/api/warehouse/v1/dlq/stats?table=clicks");
+    expect(url).toBe("https://app.example.com/api/warehouse/v1/ops/dlq/stats?table=clicks");
   });
 
   it("handles empty response body", async () => {
@@ -210,7 +210,7 @@ describe("request", () => {
 
     const result = await request(makeCtx(), {
       method: "POST",
-      path: "/v1/schema/refresh",
+      path: "/v1/ops/schema/refresh",
     });
 
     expect(result.data).toBeUndefined();

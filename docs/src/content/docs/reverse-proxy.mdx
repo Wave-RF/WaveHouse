@@ -18,7 +18,7 @@ WaveHouse and your proxy are layers of one system, not substitutes. The proxy ow
 | TLS termination / certificates | ✗ (plain HTTP on `:8080`) | ✓ |
 | Per-IP rate limiting, connection caps | ✗ | ✓ |
 | Slow-loris / slow-body mitigation | ✗ | ✓ |
-| Request-body size limit | Fixed internal backstop (1 MiB control / 16 MiB ingest) | Tunable outer limit |
+| Request-body size limit | Fixed internal backstop (1 MiB parameter/AST bodies, 16 MiB bulk payload bodies) | Tunable outer limit |
 | Authentication (JWT) | ✓ (validates / resolves role) | Pass through |
 | CORS | ✓ (`server.cors_allowed_origins`) | Pass through (don't double it) |
 | Health probes | ✓ (serves `/livez`, `/readyz`, `/v1/health`) | Route / expose appropriately |
@@ -92,10 +92,10 @@ WaveHouse caps the inbound request body it will decode, as a memory-safety backs
 
 | Endpoints | Cap | Over-cap response |
 | --- | --- | --- |
-| `POST /v1/query`, `GET/POST /v1/pipes/{name}` (control plane) | **1 MiB** | `413 {"error":"request body exceeded 1048576 bytes"}` |
-| `POST /v1/ingest`, `POST /v1/admin/query` (data plane) | **16 MiB** | `413 {"error":"request body exceeded 16777216 bytes"}` |
+| `POST /v1/query`, `GET/POST /v1/pipes/{name}`, `PUT /v1/ops/policy`, `POST /v1/ops/policy/validate`, `PUT /v1/ops/pipes/{name}` (parameter / AST / definition bodies) | **1 MiB** | `413 {"error":"request body exceeded 1048576 bytes"}` |
+| `POST /v1/ingest`, `POST /v1/ops/query` (bulk payload bodies) | **16 MiB** | `413 {"error":"request body exceeded 16777216 bytes"}` |
 
-These caps are **fixed and not configurable** — they aren't a tuning knob, they're an invariant. A JSON request body amplifies roughly an order of magnitude when decoded into memory (a large array of small values explodes into Go's in-memory representation), so an *uncapped* decoder on a public endpoint is a single-request out-of-memory vector. A query or pipe-parameter body is bounded by nature — a real one is far under 1 MiB even with a large `in`-list — so the control-plane cap is generous headroom that never binds legitimate use.
+These caps are **fixed and not configurable** — they aren't a tuning knob, they're an invariant. A JSON request body amplifies roughly an order of magnitude when decoded into memory (a large array of small values explodes into Go's in-memory representation), so an *uncapped* decoder on a public endpoint is a single-request out-of-memory vector. A query or pipe-parameter body is bounded by nature — a real one is far under 1 MiB even with a large `in`-list — so the 1 MiB cap is generous headroom that never binds legitimate use.
 
 Set your own **outer** limit at the proxy, sized to your real needs:
 
@@ -197,6 +197,10 @@ WaveHouse does **not** derive a client IP from forwarded headers — it does no 
 
 - **CORS** — WaveHouse applies its own CORS from `server.cors_allowed_origins`. Let one layer own CORS: either pass it through the proxy untouched (recommended), or strip it from WaveHouse and do it at the proxy — not both, or browsers see duplicate `Access-Control-Allow-Origin` headers and reject the response.
 
+## Fencing the admin surface
+
+Every admin-gated endpoint — raw SQL, policy CRUD, pipe CRUD, schema discovery, DLQ stats — lives under the single `/v1/ops/` prefix, so one proxy rule covers the entire management surface: an nginx `location /v1/ops/ { deny all; }` on the public vhost (serving it only on an internal listener), or an IP allowlist on that prefix. Under a [path prefix](#path-prefixes), fence `<prefix>/v1/ops/` instead. This is belt-and-braces, not a requirement — the server's `RequireAdmin` gate remains the authorization boundary and denies non-admin callers on its own — but keeping the management surface off the public vhost removes it from unauthenticated reach entirely.
+
 ## Health probes
 
 WaveHouse serves Kubernetes-convention probes on `:8080` (full behavior in [Deployment → Health Checks](/deployment#health-checks)):
@@ -264,7 +268,7 @@ server {
 wavehouse.example.com {
     # TLS is automatic.
 
-    # Outer body limit (WaveHouse backstop is 1 MiB control / 16 MiB ingest).
+    # Outer body limit (WaveHouse backstop: 1 MiB parameter/AST, 16 MiB bulk payload).
     request_body {
         max_size 16MB
     }

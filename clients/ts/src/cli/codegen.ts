@@ -3,7 +3,7 @@
 /**
  * WaveHouse Codegen CLI
  *
- * Introspects a WaveHouse server's /v1/schema endpoint and generates
+ * Introspects a WaveHouse server's /v1/ops/schema endpoint and generates
  * a TypeScript Database interface for use with createClient<DB>().
  *
  * Usage:
@@ -165,7 +165,7 @@ async function fetchSchemas(url: string, auth?: string): Promise<Schemas> {
   const headers: Record<string, string> = {};
   if (auth) headers.Authorization = `Bearer ${auth}`;
 
-  const res = await fetch(resolveURL(url, "/v1/schema").toString(), { headers });
+  const res = await fetch(resolveURL(url, "/v1/ops/schema").toString(), { headers });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Schema fetch failed (${res.status}): ${text}`);
