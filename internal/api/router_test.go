@@ -283,7 +283,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 		{Name: "events", Columns: []discovery.Column{{Name: "id", Type: "String"}}},
 	})
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
 		Ingest:  NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -339,7 +339,7 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 func TestNewRouter_CORSOnStream(t *testing.T) {
 	t.Parallel()
 
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	router := NewRouter(Dependencies{
 		SSE:         NewStreamHandler(hub, nil),
 		Health:      &HealthHandler{},
@@ -411,7 +411,7 @@ func TestNewRouter_RawSQLAdminGate(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -472,7 +472,7 @@ func TestNewRouter_OptionalDepsNil(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	deps := Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),
@@ -523,7 +523,7 @@ func TestNewRouter_NotFoundEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -548,7 +548,7 @@ func TestNewRouter_MethodNotAllowedEmitsJSON(t *testing.T) {
 
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 	deps := Dependencies{
 		Ingest: NewIngestHandler(reg, pub, testutil.NopLogger()),
 		Query:  &QueryHandler{},
@@ -645,7 +645,7 @@ func TestNewRouter_SchemaAdminOnly(t *testing.T) {
 	t.Parallel()
 	reg := testutil.NewTestSchemaRegistry(t, nil)
 	pub := &testutil.MockPublisher{}
-	hub := stream.NewHub(nil, nil)
+	hub := stream.NewHub(nil, nil, nil)
 
 	router := NewRouter(Dependencies{
 		Ingest:      NewIngestHandler(reg, pub, testutil.NopLogger()),

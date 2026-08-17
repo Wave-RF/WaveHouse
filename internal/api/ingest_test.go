@@ -348,6 +348,178 @@ func TestIngest_Policy_CheckClause_Match(t *testing.T) {
 	assert.NotNil(t, pub.LastMessage(), "should have published")
 }
 
+// TestIngest_Policy_CheckClause_NumericSpellingMatch: the check comparison is
+// canonical on both sides (policy.CanonicalScalar), so a numeric claim and a
+// numeric insert value match by value even when their JSON spellings differ —
+// a claim spelled 1.0 accepts an inserted 1. The former string-form comparison
+// ("1.0" != "1") rejected exactly this insert.
+func TestIngest_Policy_CheckClause_NumericSpellingMatch(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	countTemplate := "{{ jwt.max_count }}"
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {
+						Check: map[string]policy.Filter{
+							"count": {Eq: &countTemplate},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": 1})
+	claims := jwt.MapClaims{"max_count": json.Number("1.0")}
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, claims)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, pub.LastMessage(), "should have published")
+}
+
+// TestIngest_Policy_CheckClause_StaticNumericSpelling: a check value with no
+// placeholder carries no JSON type, so the comparison accepts either reading
+// of it — a static `_eq: "1.0"` accepts an inserted number 1 (its canonical
+// numeric reading) and an inserted string "1.0" (its spelling, the pre-PR
+// behavior) alike. Without the numeric reading, the payload side is canonical
+// ("1") while the static side keeps its raw spelling ("1.0") and the check
+// rejects every numeric insert it was written to allow.
+func TestIngest_Policy_CheckClause_StaticNumericSpelling(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		body any
+	}{
+		{"numeric reading", 1},
+		{"literal spelling", "1.0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			staticCount := "1.0"
+			h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+				Tables: map[string]policy.TablePolicy{
+					"clicks": {
+						Insert: map[string]policy.RolePermissions{
+							"user": {
+								Check: map[string]policy.Filter{
+									"count": {Eq: &staticCount},
+								},
+							},
+						},
+					},
+				},
+			})
+
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "count": tt.body})
+			ctx := auth.WithRole(req.Context(), "user")
+			ctx = auth.WithClaims(ctx, jwt.MapClaims{})
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.NotNil(t, pub.LastMessage(), "should have published")
+		})
+	}
+}
+
+// TestIngest_Policy_CheckClause_StringClaimStrictEquality: the numeric
+// reading is reserved for placeholder-free literals (policy.LiteralValue). A
+// claim-derived required value keeps strict canonical equality, so a writer
+// whose claim is the STRING "1e3" cannot insert the number 1000 — its id is
+// the three-character text, and accepting the numeric reading would let it
+// store a row under the tenant whose String id is "1000".
+func TestIngest_Policy_CheckClause_StringClaimStrictEquality(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		body any
+		want int
+	}{
+		{"numeric reading rejected", 1000, http.StatusForbidden},
+		{"exact spelling accepted", "1e3", http.StatusOK},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &testutil.MockPublisher{}
+			h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+			orgTemplate := "{{ jwt.org_id }}"
+			h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+				Tables: map[string]policy.TablePolicy{
+					"clicks": {
+						Insert: map[string]policy.RolePermissions{
+							"user": {
+								Check: map[string]policy.Filter{
+									"org_id": {Eq: &orgTemplate},
+								},
+							},
+						},
+					},
+				},
+			})
+
+			req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": tt.body})
+			ctx := auth.WithRole(req.Context(), "user")
+			ctx = auth.WithClaims(ctx, jwt.MapClaims{"org_id": "1e3"})
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.Handle(w, req)
+
+			assert.Equal(t, tt.want, w.Code)
+		})
+	}
+}
+
+// TestIngest_Policy_CheckClause_NullValue_FailsClosed: the _eq twin of the
+// _in null test. With the claim absent the required value is "", and
+// CanonicalScalar(nil) also renders "" — only the hasForm guard separates
+// them, so without it an explicit null in the payload would satisfy the check
+// (pre-canonicalization, fmt.Sprint(nil) gave "<nil>" and this was impossible).
+func TestIngest_Policy_CheckClause_NullValue_FailsClosed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	orgTemplate := "{{ jwt.org_id }}"
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"clicks": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {
+						Check: map[string]policy.Filter{
+							"org_id": {Eq: &orgTemplate},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	assert.Nil(t, pub.LastMessage(), "a null payload value must not satisfy an unresolvable check")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
 func TestIngest_Policy_CheckClause_AutoInject(t *testing.T) {
 	t.Parallel()
 	pub := &testutil.MockPublisher{}
@@ -429,6 +601,30 @@ func TestIngest_Policy_CheckIn_NotInSet(t *testing.T) {
 	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": "org-z"})
 	ctx := auth.WithRole(req.Context(), "user")
 	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", "org-b"}})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "check failed")
+	testutil.AssertJSONErrorResponse(t, w)
+}
+
+// TestIngest_Policy_CheckIn_NullValue_FailsClosed: an explicit null passes
+// schema validation for a defaulted column, but it has no canonical scalar
+// form — so it is a member of NO set, even one carrying the empty string ""
+// (the regression shape: an unguarded canonicalization would render null as
+// "" and match an empty-string member).
+func TestIngest_Policy_CheckIn_NullValue_FailsClosed(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(testRegistry(t), pub, testutil.NopLogger())
+	h.PolicyStore = checkInStore()
+
+	req := ingestRequest(t, "clicks", map[string]any{"page": "/home", "org_id": nil})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{"orgs": []any{"org-a", ""}})
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -1429,6 +1625,48 @@ func TestIngest_TimestampsCanonicalized(t *testing.T) {
 	assert.Equal(t, "2026-06-21T04:00:00Z", data["ts"])
 	assert.Equal(t, "2026-06-21T04:00:00.5Z", data["ts_ms"])
 	assert.Equal(t, "e", data["name"], "non-timestamp columns untouched")
+}
+
+// TestIngest_AutoInjectedLiteralTimestampCanonicalized pins the LiteralValue
+// unwrap on the auto-inject path: a placeholder-free _eq check value is typed
+// policy.LiteralValue for the comparison, but must enter the published data as
+// a plain string — timestamp canonicalization switches on `case string`, so a
+// leaked named type would silently skip the rewrite and publish the
+// non-canonical spelling (the #372 fail-open that #381's row filter relies
+// on). json.Marshal renders both identically, so only this assertion on the
+// canonical form catches the leak.
+func TestIngest_AutoInjectedLiteralTimestampCanonicalized(t *testing.T) {
+	t.Parallel()
+	pub := &testutil.MockPublisher{}
+	h := NewIngestHandler(tsRegistry(t), pub, testutil.NopLogger())
+	staticTS := "2026-06-21 04:00:00"
+	h.PolicyStore = policy.NewMemoryStore(&policy.Policy{
+		Tables: map[string]policy.TablePolicy{
+			"events": {
+				Insert: map[string]policy.RolePermissions{
+					"user": {
+						Check: map[string]policy.Filter{
+							"ts": {Eq: &staticTS},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// ts omitted from the body — the static literal is auto-injected, then
+	// canonicalized like any producer-supplied spelling.
+	req := ingestRequest(t, "events", map[string]any{"name": "e"})
+	ctx := auth.WithRole(req.Context(), "user")
+	ctx = auth.WithClaims(ctx, jwt.MapClaims{})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.Handle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "2026-06-21T04:00:00Z", publishedData(t, pub)["ts"],
+		"auto-injected literal must be canonicalized, not published in its policy spelling")
 }
 
 // TestIngest_TimestampGarbage_PassesThrough: fail-open — an unparseable value

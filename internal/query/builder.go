@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wave-RF/WaveHouse/internal/chsql"
 	"github.com/Wave-RF/WaveHouse/internal/discovery"
@@ -34,7 +35,10 @@ type BuildResult struct {
 // means "no policy" — every column is allowed (used by callers that gate access
 // elsewhere, and by tests). Centralizing the authorization here, at the one
 // place that already enumerates every column reference, is what keeps a denied
-// column from slipping through any single clause (#223).
+// column from slipping through any single clause (#223). perms also carries the
+// role's row-level-security predicate and max_rows cap, which Build emits as
+// part of the WHERE and LIMIT clauses it assembles — never spliced into the
+// rendered SQL afterward (#322).
 //
 // Every identifier that reaches the SQL — columns, the table, aggregation
 // aliases — is backtick-quoted via chsql.QuoteIdent, so the builder accepts any
@@ -91,10 +95,19 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 
 	sql := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectParts, ", "), chsql.QuoteIdent(table))
 
-	// WHERE clause.
+	// WHERE clause: the role's row-level-security predicate first (in both the
+	// SQL and the positional params), then the caller's own filters — ANDed, so a
+	// caller can narrow its row visibility but never widen past the policy. The
+	// predicate is emitted structurally, in the same assembly as every other
+	// clause; policy SQL is never spliced into rendered text afterward, which is
+	// what let a crafted identifier swallow the predicate (#322).
 	whereParts, whereParams, err := buildWhere(q.Filters, q.TimeRange, bucketSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("building WHERE clause: %w", err)
+	}
+	if perms != nil && perms.WhereClause != "" {
+		whereParts = append([]string{"(" + perms.WhereClause + ")"}, whereParts...)
+		params = append(params, perms.WhereParams...)
 	}
 	params = append(params, whereParams...)
 	if len(whereParts) > 0 {
@@ -124,12 +137,16 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	}
 
 	// LIMIT — apply the caller's explicit limit, capped at the configured
-	// default maximum (query.default_max_rows). A misconfigured
-	// non-positive default falls back to the DefaultMaxRows constant so a read
-	// can never be left unbounded or clamped to LIMIT 0.
+	// default maximum (query.default_max_rows) and at the role's max_rows policy
+	// cap, whichever is smaller. A misconfigured non-positive default falls back
+	// to the DefaultMaxRows constant so a read can never be left unbounded or
+	// clamped to LIMIT 0.
 	maxRows := defaultMaxRows
 	if maxRows <= 0 {
 		maxRows = DefaultMaxRows
+	}
+	if perms != nil && perms.MaxRows > 0 && perms.MaxRows < maxRows {
+		maxRows = perms.MaxRows
 	}
 	if q.Limit > 0 && q.Limit <= maxRows {
 		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
@@ -138,39 +155,6 @@ func Build(table string, q *StructuredQuery, schema *discovery.TableSchema, perm
 	}
 
 	return &BuildResult{SQL: sql, Params: params}, nil
-}
-
-// InjectPermissionFilters adds policy-derived WHERE clauses to an existing BuildResult.
-func InjectPermissionFilters(result *BuildResult, whereClause string, whereParams []any) {
-	if whereClause == "" {
-		return
-	}
-	if strings.Contains(result.SQL, " WHERE ") {
-		result.SQL = strings.Replace(result.SQL, " WHERE ", " WHERE ("+whereClause+") AND ", 1)
-	} else {
-		// Insert WHERE before GROUP BY, ORDER BY, or LIMIT.
-		insertPoint := findInsertPoint(result.SQL)
-		result.SQL = result.SQL[:insertPoint] + " WHERE " + whereClause + result.SQL[insertPoint:]
-	}
-	result.Params = append(whereParams, result.Params...)
-}
-
-// ApplyMaxRows enforces a maximum row limit.
-func ApplyMaxRows(result *BuildResult, maxRows int) {
-	if maxRows <= 0 {
-		return
-	}
-	// Check if LIMIT already exists.
-	upper := strings.ToUpper(result.SQL)
-	if idx := strings.LastIndex(upper, " LIMIT "); idx >= 0 {
-		// Parse existing limit.
-		after := strings.TrimSpace(result.SQL[idx+7:])
-		if existing, err := strconv.Atoi(after); err == nil && existing > maxRows {
-			result.SQL = result.SQL[:idx] + fmt.Sprintf(" LIMIT %d", maxRows)
-		}
-	} else {
-		result.SQL += fmt.Sprintf(" LIMIT %d", maxRows)
-	}
 }
 
 // aggregationExpr renders a single aggregation as a SELECT expression, e.g.
@@ -235,7 +219,8 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 			return &ForbiddenAggregationError{Fn: a.Fn}
 		}
 		// The alias is backtick-quoted by aggregationExpr, so any legal ClickHouse
-		// name is safe. Only a '?' is refused — it would break value binding.
+		// name is safe against injection. The lone refusal is a '?', which would
+		// break clickhouse-go's positional value binding.
 		if chsql.BindUnsafe(a.Alias) {
 			return fmt.Errorf("unsupported aggregation alias (contains '?'): %s", a.Alias)
 		}
@@ -255,7 +240,8 @@ func validateAndAuthorizeColumns(q *StructuredQuery, colSet map[string]bool, per
 			// Not a schema column — allow it as an aggregation-alias reference
 			// (ORDER BY an aggregation's AS name). Aliases carry no column policy;
 			// the aggregation that defines them was authorized above. The name is
-			// backtick-quoted when emitted, so any content is safe except a '?'.
+			// backtick-quoted when emitted, so any content is safe except a '?'
+			// (would break value binding, as for aliases).
 			if chsql.BindUnsafe(o.Column) {
 				return fmt.Errorf("unsupported order column (contains '?'): %s", o.Column)
 			}
@@ -492,6 +478,15 @@ func validateColumn(col string, validCols map[string]bool) error {
 }
 
 func isValidAggFn(fn string) bool {
+	// ASCII-only before folding: strings.ToLower's Unicode fold maps İ (U+0130)
+	// to 'i', so "mİn" would pass the allowlist yet reach ClickHouse verbatim as
+	// an unknown function — a 500 where a 400 belongs. Every allowlisted name is
+	// ASCII, so any non-ASCII byte disqualifies outright.
+	for i := 0; i < len(fn); i++ {
+		if fn[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
 	switch strings.ToLower(fn) {
 	case "count", "sum", "avg", "min", "max",
 		"countdistinct", "uniq", "uniqexact",
@@ -504,14 +499,4 @@ func isValidAggFn(fn string) bool {
 		return true
 	}
 	return false
-}
-
-func findInsertPoint(sql string) int {
-	upper := strings.ToUpper(sql)
-	for _, kw := range []string{" GROUP BY ", " ORDER BY ", " LIMIT "} {
-		if idx := strings.Index(upper, kw); idx >= 0 {
-			return idx
-		}
-	}
-	return len(sql)
 }

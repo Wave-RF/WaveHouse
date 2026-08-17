@@ -102,6 +102,74 @@ func TestCanonicalizeTimestamps(t *testing.T) {
 	}
 }
 
+// TestColumnTimeParser: the stream row-filter's per-column parser (#381) is the
+// canonicalization grammar exactly — same spellings, zone rule, and Unix forms —
+// truncated to the column's precision and bounded by the rewrite range, so a
+// filter constant and a canonicalized payload always meet on the instant
+// ClickHouse stores.
+func TestColumnTimeParser(t *testing.T) {
+	t.Parallel()
+	utc4 := time.Date(2026, 6, 21, 4, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		colType string
+		value   any
+		want    time.Time
+		ok      bool
+	}{
+		{"canonical RFC 3339", "DateTime('UTC')", "2026-06-21T04:00:00Z", utc4, true},
+		{"zone-less read in column zone", "DateTime('UTC')", "2026-06-21 04:00:00", utc4, true},
+		{"explicit offset, same instant", "DateTime('UTC')", "2026-06-21T06:00:00+02:00", utc4, true},
+		{"unix seconds string", "DateTime('UTC')", "1782014400", utc4, true},
+		{"unix seconds number", "DateTime('UTC')", json.Number("1782014400"), utc4, true},
+		{"fraction truncated to column precision", "DateTime64(1, 'UTC')", "2026-06-21T04:00:00.19Z", utc4.Add(100 * time.Millisecond), true},
+		{"junk refused", "DateTime('UTC')", "not a timestamp", time.Time{}, false},
+		{"out of range refused (insert-time saturation would move it)", "DateTime('UTC')", "2400-01-01T00:00:00Z", time.Time{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			schema := tsSchema(tt.colType)
+			resolveTimestampSpecs(schema, nil, discardLogger())
+			parse := schema.Columns[0].TimeParser()
+			require.NotNil(t, parse)
+			got, ok := parse(tt.value)
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.True(t, got.Equal(tt.want), "got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestColumnTimeParser_NilOrZoneLimited: only DateTime/DateTime64 columns with a
+// resolved spec carry a parser — String/Date columns and hand-built literals
+// return nil (byte-equality semantics on the stream). A timestamp column whose
+// zone is unknown still parses zone-explicit forms but refuses zone-less strings:
+// the zone would be a guess, and a guessed instant could move a row across a
+// filter boundary.
+func TestColumnTimeParser_NilOrZoneLimited(t *testing.T) {
+	t.Parallel()
+	schema := &TableSchema{Name: "t", Columns: []Column{
+		{Name: "s", Type: "String"},
+		{Name: "d", Type: "Date"},
+		{Name: "ts", Type: "DateTime"},
+	}}
+	resolveTimestampSpecs(schema, nil, discardLogger())
+	assert.Nil(t, schema.Columns[0].TimeParser(), "String column: no parser")
+	assert.Nil(t, schema.Columns[1].TimeParser(), "Date column: excluded from timestamp handling")
+	assert.Nil(t, tsSchema("DateTime").Columns[0].TimeParser(), "hand-built literal without spec resolution: no parser")
+
+	unknownZone := schema.Columns[2].TimeParser()
+	require.NotNil(t, unknownZone, "zone-less DateTime with unknown server zone still has a (zone-explicit-only) parser")
+	_, ok := unknownZone("2026-06-21 04:00:00")
+	assert.False(t, ok, "zone-less string with unknown column zone: refused, never guessed")
+	got, ok := unknownZone("2026-06-21T04:00:00Z")
+	assert.True(t, ok)
+	assert.True(t, got.Equal(time.Date(2026, 6, 21, 4, 0, 0, 0, time.UTC)))
+}
+
 // TestCanonicalizeTimestamps_NoPrecomputedSpec: a schema that skipped spec
 // resolution (hand-built literals) passes through untouched.
 func TestCanonicalizeTimestamps_NoPrecomputedSpec(t *testing.T) {
