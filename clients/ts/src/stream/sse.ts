@@ -409,12 +409,11 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       //              canonicalization, geo/LB indirection, and an http→https
       //              upgrade all just work. The test is deliberately that
       //              concrete pair and not "is this authenticated": cookies do
-      //              not appear in it. A cookie is re-attached per
-      //              destination rather than stripped, so a same-origin
-      //              redirect keeps the stream authed; the gap is a hop that
-      //              leaves the request's origin, after which the default
-      //              credentials mode attaches nothing regardless of the
-      //              cookie's Domain. See #478.
+      //              not appear in it. A cookie is re-derived per
+      //              destination rather than carried, so it survives a redirect
+      //              only while the hop stays inside both the request's origin
+      //              and the cookie's Path; outside either the stream is
+      //              silently unauthed. See #478 and sdk/index.mdx.
       //              `manual` over `error` for the credentialed case so the
       //              outcome stays inspectable: `error` rejects with a bare
       //              TypeError indistinguishable from a connection failure, which

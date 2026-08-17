@@ -510,13 +510,17 @@ forwarding your other headers to wherever the redirect points. Without either,
 redirects are followed normally, so CDN canonicalization, geo/LB indirection,
 and an http→https upgrade all work. The test is that concrete pair rather than
 "is this request authenticated", and **cookies are not part of it**. A cookie
-isn't stripped the way `Authorization` is — it is re-attached per destination,
-so a same-origin redirect keeps the stream authenticated. The gap is a hop that
-leaves the request's *origin*: under the default `same-origin` credentials mode
-the browser attaches nothing once a redirect goes cross-origin, whatever the
-cookie's `Domain`. So `app.example.com` → `api.example.com` sharing a
-`Domain=example.com` session cookie, or an http→https upgrade, arrives with no
-cookie, and this endpoint answers that with a reduced view rather than an error
+isn't stripped the way `Authorization` is — it is re-derived from the cookie
+store at each hop, so a redirect carries it only while the hop stays inside
+**both** the request's origin and the cookie's own `Path`. Leaving either loses
+it. The origin half is the one no cookie attribute can override: under the
+default `same-origin` credentials mode the browser attaches nothing once a
+redirect goes cross-origin, whatever the `Domain` — so `app.example.com` →
+`api.example.com` on a shared `Domain=example.com` session cookie loses it, and
+so does an http→https upgrade, which is cross-origin by scheme and port. A
+same-origin rewrite from `/v1/stream` to `/stream` under a `Path=/v1` cookie
+loses it the other way. This endpoint answers a cookieless request with a
+reduced view rather than an error
 ([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). Going cross-origin
 with `credentials: "include"` fails earlier and louder instead — WaveHouse never
 sends `Access-Control-Allow-Credentials`, so the browser blocks the response. If

@@ -190,13 +190,11 @@ export interface ClientOptions {
    * redirects (`SSE_REDIRECT`); without either it follows them, so CDN
    * canonicalization and an http→https upgrade still work. Note the test is
    * that concrete pair, not "is this authenticated" — **cookies are invisible
-   * to it**. Unlike `Authorization` a cookie is not stripped — it is
-   * re-attached per destination, which is why a same-origin redirect keeps the
-   * stream authenticated. The gap is a hop that leaves the request's *origin*:
-   * under the default `same-origin` credentials mode nothing is attached once
-   * a redirect goes cross-origin, whatever the cookie's `Domain`, so a
-   * subdomain hop or an http→https upgrade arrives with no cookie and gets a
-   * `default_role` view rather than an error. See #478. `credentials` itself is honored in
+   * to it**. A cookie is re-derived from the cookie store at each hop rather
+   * than carried, so a redirect keeps the stream authenticated only while the
+   * hop stays inside both the request's origin and the cookie's `Path`. A hop
+   * outside either arrives with no cookie and gets a `default_role` view rather
+   * than an error. Spelled out under Redirects in the SDK guide; see #478. `credentials` itself is honored in
    * browsers and dropped elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;
