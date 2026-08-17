@@ -263,8 +263,11 @@ dev-ts: pnpm-install ## Watch-build SDK (tsup --watch)
 # production while you edit, and the browser refreshes itself per build.
 # Slower per change than Astro HMR; the raw dev server remains available as
 # `pnpm --filter wavehouse-docs run start` when fidelity doesn't matter.
+# Serves :4321, walking upward if that's taken (ports are machine-wide, so a
+# dev server in another worktree or repo will claim it) — the script prints the
+# port it settled on. DOCS_PORT=… moves the starting point.
 .PHONY: dev-docs
-dev-docs: install-playwright-docs build-ts ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321
+dev-docs: install-playwright-docs build-ts ## Prod-faithful docs dev loop: rebuild-on-save + wrangler dev on :4321 (next free port if busy)
 	@$(PNPM) --filter $(DOCS_FILTER) run dev
 
 # preview-docs serves the production build through wrangler (Cloudflare Workers

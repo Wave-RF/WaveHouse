@@ -1,6 +1,8 @@
 ---
 title: "Architecture"
 description: "System design, data flows, internal packages, and technology stack."
+cloudCta:
+  body: "Every box in these diagrams is something somebody has to run, watch, and upgrade. On WaveHouse Cloud that somebody is us — the architecture is identical, which is why your queries and SDK code do not change when you move."
 sidebar:
   order: 4
 ---

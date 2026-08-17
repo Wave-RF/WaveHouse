@@ -1,6 +1,8 @@
 ---
 title: "Ingest Pipeline"
 description: "How the internal/ingest worker batches events per table into ClickHouse — goroutines, channels, timers, contexts, shutdown, the sweeper, and the path to multi-instance scale."
+cloudCta:
+  body: "Moving from a PoC to a production deployment with multi-instance scale-out is real work. WaveHouse Cloud can do it for you, with the same open-source binary and SDKs."
 ---
 
 This page is the deep-dive on `internal/ingest` — the worker that turns the

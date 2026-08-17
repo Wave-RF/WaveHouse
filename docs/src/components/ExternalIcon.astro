@@ -1,0 +1,50 @@
+---
+// The ↗ "this link leaves the site" glyph.
+//
+// One definition, because it had drifted into three: an inline SVG in
+// Hero.astro (for Starlight's `icon: external`), a second copy in
+// CloudCta.astro, and a bare "↗" character in LiveDemo.astro — which is worse
+// than a duplicate, since a screen reader reads that character aloud as "north
+// east arrow" in the middle of the link text.
+//
+// Sized in em rather than px so it tracks whatever it sits beside; 0.8125em is
+// the 13px the hero used, expressed against that button's 16px label.
+// aria-hidden throughout: the link's own text carries the meaning.
+interface Props {
+  class?: string;
+  /**
+   * Stroke weight. 2.5 matches the hero/button labels it was drawn for; drop it
+   * for large or light text, where 2.5 reads as a blob.
+   */
+  weight?: number;
+}
+const { class: className, weight = 2.5 } = Astro.props;
+---
+
+<svg
+  class:list={["wh-exticon", className]}
+  viewBox="0 0 24 24"
+  fill="none"
+  aria-hidden="true"
+>
+  <path
+    d="M7 17 17 7m0 0H8m9 0v9"
+    stroke="currentColor"
+    stroke-width={weight}
+    stroke-linecap="round"
+    stroke-linejoin="round"></path>
+</svg>
+
+<style>
+  .wh-exticon {
+    /* 0.8667em = the 13px both button call sites drew, against their 0.9375rem
+       labels — so this stays pixel-identical there while scaling anywhere else. */
+    width: 0.8667em;
+    height: 0.8667em;
+    /* Never let the glyph absorb the flex shrink meant for the label text. */
+    flex: none;
+    /* Only bites in an inline context (LiveDemo's link); in the flex buttons
+       align-items handles it and vertical-align is ignored. */
+    vertical-align: -0.05em;
+  }
+</style>

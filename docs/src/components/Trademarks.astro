@@ -1,0 +1,55 @@
+---
+// Per-page trademark attributions for the footer.
+//
+// Page-scoped on purpose: a blanket notice listing every mark the site mentions
+// would be legal wallpaper nobody reads, and would attribute marks that don't
+// appear on the page you're looking at. This lists only what THIS page names,
+// in the order it names them — so the ClickHouse notice leads on the pages
+// about ClickHouse, and /sdk/pipes (which names nothing) renders no block at
+// all beyond the copyright line.
+//
+// The marks and their owners live in src/config/trademarks.ts, shared with
+// src/plugins/rehype-trademarks.ts — the pass that puts the matching ® / ™ on
+// the first mention in the prose above. One registry, so the footer can't
+// promise a notice the prose didn't mark, or vice versa.
+import { findTrademarks, trademarkNotices } from "../config/trademarks";
+
+interface Props {
+  /**
+   * Everything the page renders as words — body plus frontmatter, since hero
+   * taglines, descriptions and the Cloud CTA copy are all frontmatter-driven
+   * here and all end up on the page.
+   */
+  source: string;
+}
+
+const { source } = Astro.props;
+const notices = trademarkNotices(findTrademarks(source));
+---
+
+{
+  notices.length > 0 && (
+    <p class="wh-legal">
+      {notices.join(" ")} All other product names, logos, and brands are the property of their
+      respective owners. WaveHouse is an independent open-source project and is not affiliated
+      with, endorsed by, or sponsored by the trademark holders named above.
+    </p>
+  )
+}
+
+<style>
+  .wh-legal {
+    /* Small print, but not unreadably so: 12px at the site's subtle ink still
+       clears AA (see the --wh-ink-subtle note in global.css). */
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--wh-ink-subtle);
+    /* Full footer width, no measure cap. The usual reason to cap a measure is
+       readability over many lines, but that trades width for HEIGHT — and this
+       block is a notice nobody reads line by line, sitting at the very bottom
+       of every page. Wide and short is the right shape for it; a 62ch column
+       here just made the footer taller for no gain. */
+    margin: 0;
+    text-wrap: pretty;
+  }
+</style>
