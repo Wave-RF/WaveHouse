@@ -169,11 +169,16 @@ messages are simply gone.
 :::
 
 A `4xx` is terminal and surfaces through `error` with the real status code
-rather than an opaque connection failure. It won't be an *authentication*
-rejection from WaveHouse, which leaves `/v1/stream` ungated and answers an
-expired token with a filtered view rather than a `401`; the only 4xx it raises
-itself is `400` for a missing or empty table name. Anything else means something
-in front of it (an auth gateway, a proxy) turned the request away — and note the
+rather than an opaque connection failure — in a browser going cross-origin, only
+when the rejection passes CORS and the gateway answered the `Authorization`
+preflight; otherwise it arrives as a retryable network error instead, the way
+`EventSource` reported everything. It won't be an *authentication* rejection
+from WaveHouse, which leaves `/v1/stream` ungated and answers an expired token
+with a filtered view rather than a `401`; the only 4xx it raises itself is `400`
+for a missing or empty table name, and only on the stream route — a `404` or
+`405` means the request never reached it, usually a `baseURL` path prefix the
+proxy didn't strip. Anything else means something in front of it (an auth
+gateway, a proxy) turned the request away — and note the
 exception to "retrying wouldn't help": a `429` or `408` from a rate limiter *is*
 transient, but the stream still ends, so catch it and open a new one after a
 delay ([#469](https://github.com/Wave-RF/WaveHouse/issues/469)). See

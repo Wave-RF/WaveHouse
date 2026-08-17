@@ -295,14 +295,17 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
     if (!res.ok) {
       const error = await parseErrorResponse(res);
       this._emitError(error);
-      // 4xx is terminal: whatever rejected this won't be talked round by
-      // repeating the request, and native EventSource likewise stops on
-      // non-200. Note WaveHouse doesn't reject here *for authentication* — the
-      // endpoint is ungated and answers a bad token with a reduced view, which
-      // is why `auth` is re-read per attempt (#239 tracks enforcing expiry).
-      // The one 4xx it raises itself is a 400 for a missing or empty `table`
-      // (internal/api/stream.go); any other comes from something in front — a
-      // gateway, or a proxy.
+      // 4xx is terminal: whatever rejected this usually won't be talked round
+      // by repeating the request, and native EventSource likewise stops on
+      // non-200. The exception is a 429/408 from a fronting rate limiter, which
+      // is transient even though the stream still ends (#469). Note WaveHouse
+      // doesn't reject here *for authentication* — the endpoint is ungated and
+      // answers a bad token with a reduced view, which is why `auth` is re-read
+      // per attempt (#239 tracks enforcing expiry). The one 4xx it raises itself
+      // is a 400 on this route for a missing or empty `table`
+      // (internal/api/stream.go); a 404/405 means the request missed the route
+      // entirely (router.go's chi handlers), and anything else comes from
+      // something in front — a gateway, or a proxy.
       return { liveMs: 0, terminal: !error.retryable };
     }
 
