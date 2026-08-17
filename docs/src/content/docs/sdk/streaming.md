@@ -170,9 +170,10 @@ messages are simply gone.
 
 A `4xx` is terminal and surfaces through `error` with the real status code
 rather than an opaque connection failure — in a browser going cross-origin, only
-when the rejection passes CORS and the gateway answered the `Authorization`
-preflight; otherwise it arrives as a retryable network error instead, the way
-`EventSource` reported everything. It won't be an *authentication* rejection
+when the rejection passes CORS and the gateway answered whatever preflight the
+request triggers (`Authorization`, configured `headers`, or `Last-Event-ID` once
+the stream resumes); otherwise it arrives as a retryable network error instead —
+indistinguishable from a drop, and retried. It won't be an *authentication* rejection
 from WaveHouse, which leaves `/v1/stream` ungated and answers an expired token
 with a filtered view rather than a `401`; the only 4xx it raises itself is `400`
 for a missing or empty table name, and only on the stream route — a `404` or
