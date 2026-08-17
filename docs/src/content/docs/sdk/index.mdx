@@ -522,8 +522,11 @@ same-origin rewrite from `/v1/stream` to `/stream` under a `Path=/v1` cookie
 loses it the other way. This endpoint answers a cookieless request with a
 reduced view rather than an error
 ([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). Going cross-origin
-with `credentials: "include"` fails earlier and louder instead — WaveHouse never
-sends `Access-Control-Allow-Credentials`, so the browser blocks the response. If
+with `credentials: "include"` usually fails earlier and louder instead: WaveHouse
+never sends `Access-Control-Allow-Credentials`, so against it the browser blocks
+the response outright. Behind a proxy that owns CORS and does allow credentials,
+the hop succeeds and carries the cookie — the one configuration in which the
+origin rule above doesn't bite. If
 you need to follow a credentialed redirect anyway, supply an `options.fetch`
 that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too
 (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead

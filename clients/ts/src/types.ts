@@ -12,8 +12,9 @@ export type Database = Record<string, Record<string, unknown>>;
 /**
  * Discriminated union for all async SDK operations. Never throws for anything
  * the server returns — caller and environment errors (a non-absolute `baseURL`,
- * no global `fetch` and no `options.fetch`, a rejecting `auth` callback) do
- * throw.
+ * a rejecting `auth` callback) do throw. A runtime with no global `fetch` and no
+ * `options.fetch` throws only from `.stream()`/`.liveQuery()`, which return no
+ * `Result`; on a REST call it surfaces as a retried `NETWORK_ERROR` result.
  *
  * Discriminated on `ok`: `if (result.ok)` narrows to the success arm (and tells
  * the compiler `data` is present), while `error` is always available for
@@ -191,10 +192,12 @@ export interface ClientOptions {
    * canonicalization and an http→https upgrade still work. Note the test is
    * that concrete pair, not "is this authenticated" — **cookies are invisible
    * to it**. A cookie is re-derived from the cookie store at each hop rather
-   * than carried, so a redirect keeps the stream authenticated only while the
-   * hop stays inside both the request's origin and the cookie's `Path`. A hop
-   * outside either arrives with no cookie and gets a `default_role` view rather
-   * than an error. Spelled out under Redirects in the SDK guide; see #478. `credentials` itself is honored in
+   * than carried, so under the default `same-origin` credentials mode a
+   * redirect keeps the stream authenticated only while the hop stays inside
+   * both the request's origin and the cookie's `Path`; a hop outside either
+   * arrives with no cookie and gets a `default_role` view rather than an error.
+   * With `credentials: "include"` the origin half doesn't apply — the cookie
+   * crosses any hop CORS allows. Spelled out under "Supplying your own `fetch`" in the SDK guide; see #478. `credentials` itself is honored in
    * browsers and dropped elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;

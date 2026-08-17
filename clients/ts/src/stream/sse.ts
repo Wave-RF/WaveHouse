@@ -275,8 +275,9 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         status: res.status,
         code: "SSE_REDIRECT",
         message:
-          "The stream endpoint redirected. Because this request carries a credential, the " +
-          "redirect is refused rather than followed: a cross-origin hop strips the " +
+          "The stream endpoint redirected, and was refused rather than followed because the " +
+          "request carries a credential (an `auth` token or configured `headers`): a " +
+          "cross-origin hop strips the " +
           "Authorization header — and this endpoint answers an unauthenticated caller with a " +
           "reduced view instead of an error — while forwarding any configured headers to " +
           "wherever the redirect points. Set `baseURL` to the final URL; most often this is " +
@@ -293,10 +294,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       this._emitError(error);
       // 4xx is terminal: whatever rejected this won't be talked round by
       // repeating the request, and native EventSource likewise stops on
-      // non-200. Note WaveHouse itself doesn't reject here — the endpoint is
-      // ungated and answers a bad token with a reduced view, which is why
-      // `auth` is re-read per attempt (#239 tracks enforcing expiry). A 4xx on
-      // this path comes from something in front: a gateway, or a proxy.
+      // non-200. Note WaveHouse doesn't reject here *for authentication* — the
+      // endpoint is ungated and answers a bad token with a reduced view, which
+      // is why `auth` is re-read per attempt (#239 tracks enforcing expiry).
+      // The one 4xx it raises itself is a 400 for a missing or empty `table`
+      // (internal/api/stream.go); any other comes from something in front — a
+      // gateway, or a proxy.
       return { liveMs: 0, terminal: !error.retryable };
     }
 
@@ -410,10 +413,12 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
       //              upgrade all just work. The test is deliberately that
       //              concrete pair and not "is this authenticated": cookies do
       //              not appear in it. A cookie is re-derived per
-      //              destination rather than carried, so it survives a redirect
-      //              only while the hop stays inside both the request's origin
-      //              and the cookie's Path; outside either the stream is
-      //              silently unauthed. See #478 and sdk/index.mdx.
+      //              destination rather than carried, so under the default
+      //              same-origin credentials mode it survives a redirect only
+      //              while the hop stays inside both the request's origin and
+      //              the cookie's Path; outside either the stream is
+      //              silently unauthed. See #478 and the SDK guide under
+      //              "Supplying your own fetch".
       //              `manual` over `error` for the credentialed case so the
       //              outcome stays inspectable: `error` rejects with a bare
       //              TypeError indistinguishable from a connection failure, which

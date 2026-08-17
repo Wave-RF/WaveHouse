@@ -274,14 +274,17 @@ reference to — `opts.signal` is the only way to stop it. Throwing on any later
 `status` transition is isolated and logged like `next`. See
 [Error Handling](/sdk/reference#error-handling).
 
-**What to do about it.** Check `result.error` inside `initial()`, keep the flush
-handlers total, and — if a missing backfill matters — treat `initial()` never
-firing as its own failure. In the silent case nothing else will tell you, and
-where the other rows *do* raise an error it names `auth` or the URL, never the
-backfill. Re-run the fetch then; you never have to work out which row you hit.
-Leave it a moment first: events reach a stream from the message queue before the
-ingest batch lands them in ClickHouse (500 rows or 5s, whichever comes first), so
-an immediate re-fetch can miss the newest rows.
+**What to do about it.** This covers the seven rows where you got a handle back;
+the eighth is fixed by not throwing, and survivable meanwhile only if you passed
+`opts.signal`. Check `result.error` inside `initial()`, keep the flush handlers
+total, and — if a missing backfill matters — treat `initial()` never firing as its
+own failure. In the silent row nothing else will tell you, and where the others
+*do* raise an error it names `auth` or the URL, never the backfill. Re-run the
+fetch then; you never have to work out which of the seven you hit. Leave it a
+moment first: events reach a stream from the message queue before the ingest
+batch reaches ClickHouse, which flushes on size or a deadline and then still has
+to complete the insert (see [Ingest pipeline](/ingest-pipeline)), so an immediate
+re-fetch can miss the newest rows.
 
 **Why `auth` splits the way it does.** The backfill makes the *first* `auth()`
 call and gets exactly one shot — the token is minted above the REST retry loop,
@@ -292,12 +295,17 @@ normally with no snapshot behind it, and why nothing announces it: `error` never
 fires, and the only trace is that `initial()` didn't. That is the case worth
 guarding against, because it is the one that looks like success.
 
-**What the live stream can lose.** Nothing, except in one window: events that
-arrive after the stream goes `live` but before the backfill fails are buffered,
-and the failure discards the buffer. On the `auth` rows that window opens only if
-the rejection arrives *after* the connection does — the backfill fails as soon as
-its own `auth()` call rejects, while the stream needs a second `auth()` call
-resolved **and** a connection opened. Which way that goes depends on your token
-provider, and you don't need to know: the recovery above covers both.
+**What the live stream can lose.** Across the seven rows where the backfill runs:
+nothing, except in one window — events arriving after the stream goes `live` but
+before the backfill fails are buffered, and the failure discards the buffer. On
+the `auth` rows that window opens only if the rejection arrives *after* the
+connection does: the backfill fails as soon as its own `auth()` call rejects,
+while the stream needs a second `auth()` call resolved **and** a connection
+opened. Which way that goes depends on your token provider, and you don't need to
+know — the recovery above covers both.
+
+The eighth row differs in kind. The backfill never fails because it never starts,
+so nothing ever flushes the buffer or discards it: every event accumulates there
+indefinitely and `next()` is never called at all.
 
 Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
