@@ -260,7 +260,7 @@ step 4 would otherwise have flushed.
 |---|---|---|---|---|
 | Backfill returns an error `Result` | fires, `result.error` set | delivered | — | none delivered |
 | Your `initial()` throws | fires, then throws | delivered | — | none delivered — the flush never starts |
-| Your `next()` throws during the flush | fires normally | delivered, after the flush stops | — | the rest of the buffer |
+| Your `next()` throws during the flush | fires normally | delivered, after the flush stops | — | none after the throw — the rest is discarded |
 | `auth` rejects, the stream connects anyway | never fires | delivered | — | usually none (see below) |
 | `auth` rejects for a few attempts, then recovers | never fires | delivered once it recovers | `SSE_AUTH_ERROR` per failed attempt | usually none (see below) |
 | `auth` keeps rejecting | never fires | none — never reaches `live` | `SSE_AUTH_ERROR` per attempt | none — nothing was buffered |
@@ -270,29 +270,34 @@ Three things the table can't carry.
 
 **Why the `auth` rows usually lose nothing.** The buffer can only lose what
 arrives in the window between the stream going `live` and the backfill failing,
-and on the `auth` path the backfill usually fails first — a rejection settles in
-the same microtask, so buffering is already off before the connection opens and
-every live event goes straight to `next()`. Only a token provider slow enough to
-reject *after* the stream is live drops anything, and then only what landed in
-between. What you lose on these rows is the snapshot, not the live events.
+and on the `auth` path the backfill almost always fails first — not because
+rejection is fast, but because it needs less to happen. The backfill fails as
+soon as its own `auth()` call rejects; the stream has to get a *second* `auth()`
+call resolved **and** a connection open, and it only issues that call a microtask
+later. So unless your provider rejects markedly slower than it succeeds, buffering
+is already off before the connection opens and every live event goes straight to
+`next()`. When it doesn't, what you lose is only what landed between the stream
+going `live` and the rejection arriving. Outside that window what you lose is the
+snapshot, not the live events.
 
 **Why `auth` splits the way it does.** The backfill makes the *first* `auth()`
 call, and it gets exactly one shot — the token is minted above the REST retry
 loop, so a rejection there is never retried and the whole backfill is gone. The
 stream then calls `auth()` again on every connection attempt and treats the same
 rejection as transient. That asymmetry is the entire reason a live query can end
-up running normally with no snapshot behind it. In the first `auth` row nothing
-reports the failure at all: your `status` and `next` handlers fire exactly as
-they would on a healthy stream, `error` never fires, and the only trace is that
-`initial()` didn't. That is the case worth guarding against, because it is the
-one that looks like success.
+up running normally with no snapshot behind it. In the first `auth` row, when the
+rejection beats the connection, nothing reports the failure at all: your `status`
+and `next` handlers fire exactly as they would on a healthy stream, `error` never
+fires, and the only trace is that `initial()` didn't. That is the case worth
+guarding against, because it is the one that looks like success.
 
 **What to do about it.** Check `result.error` inside `initial()`, keep the flush
 handlers total, and — if a missing backfill matters — treat `initial()` never
 firing as its own failure. In the silent case nothing else will tell you, and
 where the other rows *do* raise an error it names `auth` or the URL, never the
-backfill. Tracked in
-[#473](https://github.com/Wave-RF/WaveHouse/issues/473).
+backfill. You don't need to work out which side of the race you landed on: re-run
+the fetch when `initial()` never fires, and it covers the dropped window too.
+Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).
 
 A `status` handler that throws *on the first, synchronous call* is a separate
 and worse case — it escapes `liveQuery()` before you get a handle back. Throwing
