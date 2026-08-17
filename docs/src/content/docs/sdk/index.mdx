@@ -5,7 +5,7 @@ description: "Client SDK — query builder, real-time streaming, codegen."
 
 import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components";
 
-`@wavehouse/sdk` — TypeScript client for WaveHouse. One runtime dependency: `eventsource-parser` (~2 KB, itself dependency-free), which frames the SSE stream.
+`@wavehouse/sdk` — TypeScript client for WaveHouse. One runtime dependency: `eventsource-parser` (~1.4 KB gzipped, itself dependency-free), which frames the SSE stream.
 
 ## Installation
 
@@ -524,9 +524,11 @@ reduced view rather than an error
 ([#478](https://github.com/Wave-RF/WaveHouse/issues/478)). Going cross-origin
 with `credentials: "include"` usually fails earlier and louder instead: WaveHouse
 never sends `Access-Control-Allow-Credentials`, so against it the browser blocks
-the response outright. Behind a proxy that owns CORS and does allow credentials,
-the hop succeeds and carries the cookie — the one configuration in which the
-origin rule above doesn't bite. If
+the response outright. Behind a proxy that owns CORS and does allow credentials
+the hop succeeds — and then ordinary cookie scoping decides. `include` *replaces*
+the origin rule rather than lifting it: the cookie crosses only if its own
+`Domain` covers the target, so a host-only cookie — what you get with no `Domain`
+attribute — still stops at its host. If
 you need to follow a credentialed redirect anyway, supply an `options.fetch`
 that overrides `redirect`. A `200` that isn't `text/event-stream` is refused too
 (`SSE_BAD_CONTENT_TYPE`), so an auth gateway's login page fails loudly instead
@@ -599,7 +601,7 @@ not your `lib` includes DOM); and the return cast handles the `Response`
 mismatch. The URL needs no cast — `FetchLike` declares it as `string`, which
 undici's `RequestInfo` accepts. They're safe because of the narrow runtime
 contract above — a string URL and a plain `RequestInit` in, and only the
-response members enumerated above read back. `undici` is a dependency you add on top of the SDK's single ~2 KB one.
+response members enumerated above read back. `undici` is a dependency you add on top of the SDK's single ~1.4 KB one.
 
 If you're genuinely pinned to an affected undici, the same snippet fixes it —
 your pinned version, with a dispatcher that never reuses a keep-alive socket:

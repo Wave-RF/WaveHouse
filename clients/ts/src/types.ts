@@ -10,11 +10,15 @@ export type Database = Record<string, Record<string, unknown>>;
 // --- Result types ---
 
 /**
- * Discriminated union for all async SDK operations. Never throws for anything
- * the server returns — caller and environment errors (a non-absolute `baseURL`,
- * a rejecting `auth` callback) do throw. A runtime with no global `fetch` and no
- * `options.fetch` throws only from `.stream()`/`.liveQuery()`, which return no
- * `Result`; on a REST call it surfaces as a retried `NETWORK_ERROR` result.
+ * Discriminated union for the async SDK calls that return one. Never throws for
+ * anything the server returns; a non-absolute `baseURL` and a rejecting `auth`
+ * callback do throw, while a runtime with no `fetch` at all surfaces instead as
+ * a retried `NETWORK_ERROR` result.
+ *
+ * `.stream()` and `.liveQuery()` return no `Result` and report the same three
+ * differently: a non-absolute `baseURL` reaches the subscriber's `error`
+ * callback as a terminal `SSE_CONNECT_ERROR`, a rejecting `auth` as a retryable
+ * `SSE_AUTH_ERROR`, and only a missing `fetch` throws from the call itself.
  *
  * Discriminated on `ok`: `if (result.ok)` narrows to the success arm (and tells
  * the compiler `data` is present), while `error` is always available for
@@ -196,8 +200,10 @@ export interface ClientOptions {
    * redirect keeps the stream authenticated only while the hop stays inside
    * both the request's origin and the cookie's `Path`; a hop outside either
    * arrives with no cookie and gets a `default_role` view rather than an error.
-   * With `credentials: "include"` the origin half doesn't apply — the cookie
-   * crosses any hop CORS allows. Spelled out under "Supplying your own `fetch`" in the SDK guide; see #478. `credentials` itself is honored in
+   * With `credentials: "include"` the origin half is replaced rather than
+   * lifted: ordinary cookie scoping decides, so the cookie crosses a
+   * CORS-allowed cross-origin hop only if its own `Domain` covers the target —
+   * a host-only cookie, the default, still stops at its host. Spelled out under "Supplying your own `fetch`" in the SDK guide; see #478. `credentials` itself is honored in
    * browsers and dropped elsewhere, since some runtimes throw if it is set.
    */
   fetchOptions?: RequestInit;

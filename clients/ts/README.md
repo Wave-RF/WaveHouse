@@ -1,6 +1,6 @@
 # @wavehouse/sdk
 
-TypeScript client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — schema-aware real-time API gateway for ClickHouse. One runtime dependency (`eventsource-parser`, ~2 KB, itself dependency-free).
+TypeScript client for [WaveHouse](https://github.com/Wave-RF/WaveHouse) — schema-aware real-time API gateway for ClickHouse. One runtime dependency (`eventsource-parser`, ~1.4 KB gzipped, itself dependency-free).
 
 ## Installation
 

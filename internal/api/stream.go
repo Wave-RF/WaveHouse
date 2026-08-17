@@ -77,9 +77,12 @@ func (h *StreamHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Register for live events before gap-fill so events arriving during replay
 	// buffer in the subscriber queue instead of being missed (an overlap with
-	// replay yields duplicates — at-least-once. The TS SDK does *not* dedupe live
-	// frames; liveQuery makes one pass at the backfill seam only, so a consumer
-	// that cares keys on timestamp plus its own row identity).
+	// replay yields duplicates — at-least-once). The TS SDK does *not* dedupe live
+	// frames, and liveQuery's single seam pass does not help here: it compares
+	// live frames against the REST backfill's rows, not against each other, so a
+	// replayed frame and its live twin share a received_timestamp and are kept or
+	// dropped together. A consumer that cares keys on timestamp plus its own row
+	// identity.
 	sub := stream.NewSubscriber()
 	h.Hub.Add(topic, role, sub)
 	defer h.Hub.Remove(topic, role, sub)

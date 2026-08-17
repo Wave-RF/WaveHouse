@@ -54,7 +54,7 @@ handler that threw — your *later* subscribers, and any concurrent `for await`,
 do not get it. The first `status` call, the synchronous one `.subscribe()` makes
 before returning, isn't caught at all and throws back out at you. Wrap your
 handler bodies in your own `try`/`catch`; see
-[Error Handling](/sdk/reference#error-handling) for all four carve-outs.
+[Error Handling](/sdk/reference#error-handling) for the carve-outs.
 
 ### Async Iterator
 
@@ -252,9 +252,10 @@ missed. It holds only when the backfill completes cleanly.
 
 #### When the backfill doesn't complete
 
-Eight ways it doesn't, and what each looks like from your subscriber. "Buffered
-events" means the ones that arrived during the fetch window, which step 4 would
-otherwise have flushed; the column reports how many of them reach you.
+Here is how it doesn't, and what each case looks like from your subscriber.
+"Buffered events" means the ones that arrived during the fetch window, which
+step 4 would otherwise have flushed; the column reports how many of them reach
+you.
 
 | What happened | `initial()` | Live events | `error` | Buffered events |
 |---|---|---|---|---|
@@ -267,23 +268,25 @@ otherwise have flushed; the column reports how many of them reach you.
 | Relative `baseURL` | never fires | none — the stream is terminated too | terminal `SSE_CONNECT_ERROR` | none delivered |
 | Your `status` handler throws on the first, synchronous call | never fires | none — buffered where you can't reach them | — | none delivered |
 
-The last row is the odd one out: the backfill never *starts*, because the throw
-escapes `liveQuery()` before it is reached. You get no handle back, so nothing
-can `.close()` the stream, and it keeps buffering into an object you have no
-reference to — `opts.signal` is the only way to stop it. Throwing on any later
-`status` transition is isolated and logged like `next`. See
+**The `status`-throw row is the odd one out**, and everything below is written
+for the others. It is the one case where the backfill never *starts*: the throw
+escapes `liveQuery()` before the constructor reaches it, so you get no handle
+back, nothing can `.close()` the stream, and — because the buffering phase never
+ends — every event accumulates in an object you have no reference to,
+indefinitely. `next()` is never called at all. Passing `opts.signal` is the only
+way to stop it; not throwing is the fix. Throwing on any *later* `status`
+transition is isolated and logged like `next`. See
 [Error Handling](/sdk/reference#error-handling).
 
-**What to do about it.** This covers the seven rows where you got a handle back;
-the eighth is fixed by not throwing, and survivable meanwhile only if you passed
-`opts.signal`. Check `result.error` inside `initial()`, keep the flush handlers
-total, and — if a missing backfill matters — treat `initial()` never firing as its
-own failure. In the silent row nothing else will tell you, and where the others
-*do* raise an error it names `auth` or the URL, never the backfill. Re-run the
-fetch then; you never have to work out which of the seven you hit. Leave it a
-moment first: events reach a stream from the message queue before the ingest
-batch reaches ClickHouse, which flushes on size or a deadline and then still has
-to complete the insert (see [Ingest pipeline](/ingest-pipeline)), so an immediate
+**What to do about the rest.** Check `result.error` inside `initial()`, keep the
+flush handlers total, and — if a missing backfill matters — treat `initial()`
+never firing as its own failure. Where `auth` rejects and the stream connects
+anyway nothing else will tell you, and where the other rows *do* raise an error
+it names `auth` or the URL, never the backfill. Re-run the fetch then; you never
+have to work out which row you hit. Leave it a moment first: events reach a
+stream from the message queue before the ingest worker lands them in ClickHouse,
+and its per-table batcher flushes on size or a deadline with the insert still to
+complete after that (see [Ingest pipeline](/ingest-pipeline)), so an immediate
 re-fetch can miss the newest rows.
 
 **Why `auth` splits the way it does.** The backfill makes the *first* `auth()`
@@ -295,7 +298,7 @@ normally with no snapshot behind it, and why nothing announces it: `error` never
 fires, and the only trace is that `initial()` didn't. That is the case worth
 guarding against, because it is the one that looks like success.
 
-**What the live stream can lose.** Across the seven rows where the backfill runs:
+**What the live stream can lose.** In every row where the backfill runs at all:
 nothing, except in one window — events arriving after the stream goes `live` but
 before the backfill fails are buffered, and the failure discards the buffer. On
 the `auth` rows that window opens only if the rejection arrives *after* the
@@ -303,9 +306,5 @@ connection does: the backfill fails as soon as its own `auth()` call rejects,
 while the stream needs a second `auth()` call resolved **and** a connection
 opened. Which way that goes depends on your token provider, and you don't need to
 know — the recovery above covers both.
-
-The eighth row differs in kind. The backfill never fails because it never starts,
-so nothing ever flushes the buffer or discards it: every event accumulates there
-indefinitely and `next()` is never called at all.
 
 Tracked in [#473](https://github.com/Wave-RF/WaveHouse/issues/473).

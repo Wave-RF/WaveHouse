@@ -275,14 +275,17 @@ export class SSETransport<T = Record<string, unknown>> implements StreamTranspor
         status: res.status,
         code: "SSE_REDIRECT",
         message:
-          "The stream endpoint redirected, and was refused rather than followed because the " +
-          "request carries a credential (an `auth` token or configured `headers`): a " +
-          "cross-origin hop strips the " +
-          "Authorization header — and this endpoint answers an unauthenticated caller with a " +
-          "reduced view instead of an error — while forwarding any configured headers to " +
-          "wherever the redirect points. Set `baseURL` to the final URL; most often this is " +
-          "an http→https upgrade or a canonical-host redirect at a proxy. To follow it " +
-          "anyway, supply an `options.fetch` that overrides `redirect`.",
+          "The stream endpoint redirected and the SDK did not follow it. Redirects are " +
+          "refused when the request carries a credential — an `auth` token or configured " +
+          "`headers` — because a cross-origin hop strips the Authorization header, and this " +
+          "endpoint answers an unauthenticated caller with a reduced view instead of an " +
+          "error, while forwarding any configured headers to wherever the redirect points. " +
+          "If this request carries neither, `fetch` was left to follow the redirect itself, " +
+          "so arriving here means a response it will not follow (a 304, or a 3xx with no " +
+          "Location header) or an `options.fetch` that returned the redirect verbatim. " +
+          "Either way, set `baseURL` to the final URL; most often this is an http→https " +
+          "upgrade or a canonical-host redirect at a proxy. To follow a credentialed " +
+          "redirect anyway, supply an `options.fetch` that overrides `redirect`.",
         retryable: false,
       });
       releaseBody(res);
