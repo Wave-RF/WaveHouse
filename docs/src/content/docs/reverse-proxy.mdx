@@ -201,6 +201,10 @@ WaveHouse does **not** derive a client IP from forwarded headers — it does no 
 
 Every admin-gated endpoint — raw SQL, policy CRUD, pipe CRUD, schema discovery, DLQ stats — lives under the single `/v1/ops/` prefix, so one proxy rule covers the entire management surface: an nginx `location /v1/ops/ { deny all; }` on the public vhost (serving it only on an internal listener), or an IP allowlist on that prefix. If you deny the prefix outright, keep an internal listener that still serves it — `PUT /v1/ops/policy` with the [operator key](/access-control#operator-key) is the one HTTP path that can restore a wiped policy, and a blanket fence with no internal route removes that break-glass too. Under a [path prefix](#path-prefixes), fence `<prefix>/v1/ops/` instead. This is belt-and-braces, not a requirement — the server's `RequireAdmin` gate remains the authorization boundary and denies non-admin callers on its own — but keeping the management surface off the public vhost removes it from unauthenticated reach entirely.
 
+:::caution[Upgrading: fences written against the old paths]
+This surface used to be split across `/v1/admin/` plus the top-level `/v1/schema`, `/v1/schema/refresh`, and `/v1/dlq/stats`. No aliases were kept, so a proxy rule written against any of those paths — e.g. `location /v1/admin/ { deny all; }` — now matches nothing, and the surface it fenced is back within unauthenticated reach on the public vhost (the server-side `RequireAdmin` gate still denies non-admin callers). Re-point the rule at `/v1/ops/`.
+:::
+
 ## Health probes
 
 WaveHouse serves Kubernetes-convention probes on `:8080` (full behavior in [Deployment → Health Checks](/deployment#health-checks)):

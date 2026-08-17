@@ -103,7 +103,7 @@ npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 pnpm codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. The published CLI targeting `/v1/ops` is unreleased — see the [Installation note](/sdk#installation) for the `@dev`-tag build.
+Codegen reads `/v1/ops/schema`, which is **admin-only**. Against a non-dev server, pass an admin-role token with `--auth <jwt>` or the request is denied with `403`. The published CLI targeting `/v1/ops` is unreleased — see the [Installation note](/sdk#installation) for the `@dev`-tag build. Codegen currently emits non-compiling types against a live server — it parses the schema response as a map while the endpoint returns an array ([#388](https://github.com/Wave-RF/WaveHouse/issues/388)).
 
 **Options:**
 

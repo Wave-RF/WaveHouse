@@ -78,7 +78,7 @@ Full breakdown, failure modes, and the engineering rationale → **[wavehouse.de
 
 ## 🛠️ Quick Start
 
-Pick whichever fits — each ends with WaveHouse listening on `http://localhost:8080`.
+Pick whichever fits — A gets you a running stack on `http://localhost:8080`; B and C get you the artifact to deploy yourself.
 
 ### A. Docker Compose (recommended first run)
 
@@ -92,15 +92,17 @@ The stack ships a permissive dev policy, so you can ingest without a token. Crea
 ### B. Prebuilt container image
 
 ```bash
-docker pull ghcr.io/wave-rf/wavehouse:latest    # tagged release
-docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build
+docker pull ghcr.io/wave-rf/wavehouse:dev       # rolling main-branch build (the only rolling tag today)
+# docker pull ghcr.io/wave-rf/wavehouse:latest  # tagged release — appears with the first v* tag
 ```
 
-Both tags carry a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify before you deploy:
+Every pushed tag carries a signed [Sigstore](https://www.sigstore.dev/) build-provenance attestation — verify before you deploy:
 
 ```bash
-gh attestation verify oci://ghcr.io/wave-rf/wavehouse:latest --repo Wave-RF/WaveHouse
+gh attestation verify oci://ghcr.io/wave-rf/wavehouse:dev --repo Wave-RF/WaveHouse
 ```
+
+To run it you'll need ClickHouse reachable and a host-backed data volume — see [Deployment](https://wavehouse.dev/deployment) for the run configuration and the persistent-volume requirement.
 
 ### C. `go install` (binary, no Docker)
 

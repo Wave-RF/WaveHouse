@@ -152,7 +152,7 @@ Generate TypeScript types from your live WaveHouse schema. The package ships a `
 npx wavehouse-codegen --url http://localhost:8080 --out ./src/db.d.ts
 ```
 
-This introspects `/v1/ops/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/ops/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy. The `/v1/ops/*` paths are unreleased on both sides: until the next release, the published `latest` build (a pre-rename `0.0.0-dev.*` snapshot) targets the old `/v1/admin`-era paths and gets `404` from a renamed server — use the `@dev` build (`npm i @wavehouse/sdk@dev`) alongside a server built from `main`.
+This introspects `/v1/ops/schema`, maps ClickHouse column types to TypeScript, and outputs a `Database` interface you can pass to `createClient<Database>()`. `/v1/ops/schema` is **admin-only** — pass an admin-role token with `--auth <jwt>` (or `-a`) against any non-dev policy. The `/v1/ops/*` paths are unreleased on both sides: until the next release, the published `latest` build (a pre-rename `0.0.0-dev.*` snapshot) targets the old `/v1/admin`-era paths and gets `404` from a renamed server — use the `@dev` build (`npm i @wavehouse/sdk@dev`) alongside a server built from `main`. Codegen currently emits non-compiling types against a live server — it parses the schema response as a map while the endpoint returns an array ([#388](https://github.com/Wave-RF/WaveHouse/issues/388)).
 
 ## Development & Testing
 

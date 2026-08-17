@@ -309,41 +309,48 @@ func TestNewRouter_RoutesRegistered(t *testing.T) {
 	tests := []struct {
 		method string
 		path   string
-		expect int // expected status (not 404/405)
+		role   string // "" = roleless request (proves the row needs no gate)
+		expect int
 	}{
-		// Canonical K8s-convention probes.
-		{http.MethodGet, "/livez", http.StatusOK},
-		{http.MethodGet, "/readyz", http.StatusOK},
+		// Canonical K8s-convention probes. Roleless: a 200 proves ungated.
+		{http.MethodGet, "/livez", "", http.StatusOK},
+		{http.MethodGet, "/readyz", "", http.StatusOK},
 		// Deprecated aliases (kept for v0.1.x, removed in v0.2.0).
-		{http.MethodGet, "/healthz", http.StatusOK},
-		{http.MethodGet, "/health", http.StatusOK},
-		{http.MethodGet, "/ready", http.StatusOK},
-		{http.MethodGet, "/version", http.StatusOK},
+		{http.MethodGet, "/healthz", "", http.StatusOK},
+		{http.MethodGet, "/health", "", http.StatusOK},
+		{http.MethodGet, "/ready", "", http.StatusOK},
+		{http.MethodGet, "/version", "", http.StatusOK},
 		// Public content-free liveness ping for the SDK (under /v1, no auth gate).
-		{http.MethodGet, "/v1/health", http.StatusOK},
+		{http.MethodGet, "/v1/health", "", http.StatusOK},
 		// Admin-gated /v1/ops routes. The tree-level gate denies before
 		// sub-route matching, so a 403 would NOT prove registration (every
 		// /v1/ops/<anything> 403s rolelessly) — these rows therefore run as
 		// admin and require the handler's 200 (denial is pinned separately by
 		// TestNewRouter_SchemaAdminOnly and TestNewRouter_RawSQLAdminGate).
-		{http.MethodGet, "/v1/ops/schema", http.StatusOK},
-		{http.MethodGet, "/v1/ops/schema?table=events", http.StatusOK},
-		{http.MethodPost, "/v1/ops/schema/refresh", http.StatusOK},
-		{http.MethodGet, "/v1/ops/dlq/stats", http.StatusOK},
+		{http.MethodGet, "/v1/ops/schema", "admin", http.StatusOK},
+		{http.MethodGet, "/v1/ops/schema?table=events", "admin", http.StatusOK},
+		{http.MethodPost, "/v1/ops/schema/refresh", "admin", http.StatusOK},
+		{http.MethodGet, "/v1/ops/dlq/stats", "admin", http.StatusOK},
+		// Pre-/v1/ops paths, removed with no aliases: they must stay 404.
+		// Roleless, so re-registering an alias fails this row whether the
+		// alias is gated (403) or — the real hazard — ungated (200).
+		{http.MethodGet, "/v1/schema", "", http.StatusNotFound},
+		{http.MethodPost, "/v1/schema/refresh", "", http.StatusNotFound},
+		{http.MethodGet, "/v1/dlq/stats", "", http.StatusNotFound},
+		{http.MethodPost, "/v1/admin/query", "", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			t.Parallel()
-			// The admin role is inert on the public rows (no gate reads it)
-			// and lets the /v1/ops rows through to their handlers.
-			ctx := auth.WithRole(context.Background(), "admin")
+			ctx := context.Background()
+			if tt.role != "" {
+				ctx = auth.WithRole(ctx, tt.role)
+			}
 			req := httptest.NewRequestWithContext(ctx, tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			assert.Equal(t, tt.expect, rec.Code, "unexpected route status")
-			assert.NotEqual(t, http.StatusNotFound, rec.Code, "route should exist")
-			assert.NotEqual(t, http.StatusMethodNotAllowed, rec.Code, "method should be allowed")
 		})
 	}
 }
