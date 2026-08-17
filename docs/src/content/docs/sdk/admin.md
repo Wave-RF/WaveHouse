@@ -6,12 +6,17 @@ description: "Schema introspection, access-control policy, DLQ stats, and health
 Operational surfaces of `@wavehouse/sdk`. Everything here except
 `wh.sys.health()` requires the admin role (`policy.admin_role`) — see
 [Access Control](/access-control) for how roles resolve.
-Server-side, these endpoints moved from `/v1/admin/*` and the top-level
-`/v1/schema`/`/v1/dlq/stats` to `/v1/ops/*` with no aliases — upgrade
-`@wavehouse/sdk` alongside the server, or every call on this page returns
-`404` against a renamed server.
 Examples import from `@wavehouse/sdk`; using the CDN instead, import from
 `https://esm.sh/@wavehouse/sdk` (see [Imports & Runtimes](/sdk#imports--runtimes)).
+
+:::caution[Admin paths moved to `/v1/ops/*`]
+Server-side, these endpoints moved from `/v1/admin/*` and the top-level
+`/v1/schema`/`/v1/dlq/stats` to `/v1/ops/*` with no aliases — upgrade
+`@wavehouse/sdk` alongside the server, or every admin call on this page
+returns `404` against a renamed server. The ops-path client is unreleased —
+see the [Installation note](/sdk#installation) for the `@dev`-tag build
+(`npm i @wavehouse/sdk@dev`) that targets the new paths.
+:::
 
 ## Schema — `wh.schema`
 

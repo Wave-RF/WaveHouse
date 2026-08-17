@@ -49,18 +49,33 @@ import { Tabs, TabItem, LinkCard, CardGrid } from "@astrojs/starlight/components
     </script>
     ```
 
-    Pin a version for production (`https://esm.sh/@wavehouse/sdk@0.1.0`);
+    Pin a version for production (`https://esm.sh/@wavehouse/sdk@<version>`,
+    once the first tagged release exists — see
+    [Releasing the SDK](/development#releasing-the-sdk));
     jsDelivr (`.../+esm`) and unpkg (`?module`) serve the same module. For
     pages that can't use ES modules, the bundled IIFE build at
     `https://cdn.jsdelivr.net/npm/@wavehouse/sdk` exposes a `WaveHouse` global
     (`WaveHouse.createClient({ … })`) for a classic `<script src>` tag.
     Streaming uses the browser's native `EventSource`, so it needs no polyfill
-    either way. A bare CDN URL tracks the latest published release; use a
-    range (`@0`, `@0.1`) to float within a major or minor, or the `@dev` tag
-    for unreleased builds from `main` (see
-    [Releasing the SDK](/development#releasing-the-sdk)).
+    either way. A bare CDN URL tracks the `latest` dist-tag — today a
+    `0.0.0-dev.*` snapshot, a tagged release once one exists; after that
+    first release, use a range (`@0`, `@0.1`) to float within a major or
+    minor, or use the `@dev` tag for unreleased builds from `main`.
   </TabItem>
 </Tabs>
+
+:::note[Admin surfaces need the `@dev` build until the next release]
+The server's admin surface moved from `/v1/admin/*` (and the top-level
+`/v1/schema`/`/v1/dlq/stats`) to `/v1/ops/*` with **no aliases**, and the SDK
+build targeting the new paths is unreleased: against a renamed server, the
+currently published build (the `latest` dist-tag — today a pre-rename
+`0.0.0-dev.*` snapshot; see
+[Releasing the SDK](/development#releasing-the-sdk)) returns `404` on every
+admin surface — `wh.sql()`, `wh.schema`, `wh.from(t).schema()`, `wh.policy`,
+`wh.dlq`, the `wh.pipes` admin methods, and `npx wavehouse-codegen`. Until
+the next release, install from the `@dev` tag (`npm i @wavehouse/sdk@dev`)
+alongside a server built from `main`.
+:::
 
 The package works in any bundler-based framework — React, Vue, Svelte,
 Angular, Astro, SolidJS, or plain Vite — via
@@ -108,7 +123,9 @@ each runtime.
     import { createClient } from 'https://esm.sh/@wavehouse/sdk';
     ```
 
-    Pin a version for production: `https://esm.sh/@wavehouse/sdk@0.1.0`.
+    Pin a version for production once the first tagged release exists
+    (`https://esm.sh/@wavehouse/sdk@<version>` — see
+    [Releasing the SDK](/development#releasing-the-sdk)).
     jsDelivr (`https://cdn.jsdelivr.net/npm/@wavehouse/sdk/+esm`) and unpkg
     (`https://unpkg.com/@wavehouse/sdk?module`) serve the same ES module.
   </TabItem>

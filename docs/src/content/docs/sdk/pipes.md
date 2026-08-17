@@ -48,6 +48,9 @@ Open a live stream. See [Streaming](/sdk/streaming).
 ## Pipes Admin — `wh.pipes`
 
 Manage named query pipes. Requires the admin role (`policy.admin_role`).
+These methods hit `/v1/ops/pipes*`; the client build targeting `/v1/ops` is
+unreleased — see the [Installation note](/sdk#installation) for the
+`@dev`-tag build.
 
 ```ts
 // List all pipes

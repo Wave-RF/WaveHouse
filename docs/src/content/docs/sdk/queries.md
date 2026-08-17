@@ -69,7 +69,9 @@ await clicks.insertNDJSON(await openAsBlob('events.ndjson'));
 
 ### `.schema(opts?)`
 
-Fetch the table's column definitions from ClickHouse.
+Fetch the table's column definitions from ClickHouse. `.schema()` hits
+`/v1/ops/schema`, an **admin-only** endpoint: against any non-dev policy,
+construct the client with an admin-role token or this returns `403`.
 
 ```ts
 const { data } = await clicks.schema();
@@ -255,7 +257,7 @@ while (result.hasMore && result.next) {
 
 ## Raw SQL — `wh.sql(query, opts?)`
 
-Execute a raw SQL query. `/v1/ops/query` is admin-only: the caller's JWT must resolve to the policy admin role (`admin_role`, `"admin"` by default). A request with no token, or an invalid/expired one, falls back to the `default_role` and is rejected.
+Execute a raw SQL query. `/v1/ops/query` is admin-only: the caller's JWT must resolve to the policy admin role (`admin_role`, `"admin"` by default). A request with no token, or an invalid/expired one, falls back to the `default_role` and is rejected. The client build targeting `/v1/ops` is unreleased — see the [Installation note](/sdk#installation) for the `@dev`-tag build.
 
 ```ts
 const { data, error } = await wh.sql('SELECT page, count() FROM clicks GROUP BY page LIMIT 10');
